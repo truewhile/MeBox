@@ -25,6 +25,8 @@ import (
 	"github.com/truewhile/MeBox/internal/service/cloud115"
 )
 
+var errFallbackToWalkRemote = errors.New("fallback to walk remote")
+
 // remoteMetaItem 记录远端存在的单个元数据文件副本信息（大小、文件ID、内容SHA1、修改时间）。
 type remoteMetaItem struct {
 	ID    string
@@ -352,8 +354,17 @@ func (st *strmSyncState) run() error {
 
 	if st.provider != nil {
 		if open115, ok := st.provider.(cloud.OpenAPI115Provider); ok && st.p.Provider == model.StrmProvider115 {
-			if err := st.walk115Flat(open115.OpenClient()); err != nil {
-				return err
+			err := st.walk115Flat(open115.OpenClient())
+			if err != nil {
+				if errors.Is(err, errFallbackToWalkRemote) {
+					st.s.log.Warn("115: 扁平列表文件数超限，自动降级为传统并发递归同步",
+						zap.String("path_id", st.p.ID))
+					if errWalk := st.walkRemote(); errWalk != nil {
+						return errWalk
+					}
+				} else {
+					return err
+				}
 			}
 		} else {
 			if err := st.walkRemote(); err != nil {
@@ -673,6 +684,13 @@ func (st *strmSyncState) walk115Flat(open115 *cloud115.OpenClient) error {
 	firstBatch, totalCount, err := open115.GetFsListFlat(ctx, rootCID, 0, pageSize)
 	if err != nil {
 		return fmt.Errorf("115: 获取文件列表失败：%w", err)
+	}
+
+	// 115 的扁平化列表（搜索底层）对 offset + limit 有 10000 的最大深度限制。
+	// 当扁平模式下的总文件数 >= 9500 时，强行拒绝继续扁平拉取，而是抛出降级错误，
+	// 让外层回退到使用普通的按目录并发递归（walkRemote），以免截断导致后排文件被误删/重传。
+	if totalCount >= 9500 {
+		return errFallbackToWalkRemote
 	}
 
 	st.updateSyncMessage(fmt.Sprintf("正在拉取远端文件列表 (共 %d 个文件)...", totalCount))
