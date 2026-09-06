@@ -24,6 +24,7 @@ type PlayerVideoStageProps = {
   danmakuArea: number
   danmakuSearch: string | null
   danmakuEpisodeId: number | string | null
+  danmakuSearchTrigger?: number
   danmakuOpen: boolean
   onToggleDanmaku: () => void
   onDanmakuLoaded: (info: DanmakuLoadedInfo | null) => void
@@ -58,6 +59,7 @@ export function PlayerVideoStage({
   danmakuArea,
   danmakuSearch,
   danmakuEpisodeId,
+  danmakuSearchTrigger = 0,
   danmakuOpen,
   onToggleDanmaku,
   onDanmakuLoaded,
@@ -280,6 +282,7 @@ export function PlayerVideoStage({
               area={danmakuArea}
               search={danmakuSearch}
               episodeId={danmakuEpisodeId}
+              searchTrigger={danmakuSearchTrigger}
               onLoaded={onDanmakuLoaded}
               onCandidates={onDanmakuCandidates}
             />

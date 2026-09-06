@@ -74,6 +74,7 @@ export function PlayerPage() {
   const [danmakuOpen, setDanmakuOpen] = useState(false)
   const [danmakuEnabled, setDanmakuEnabled] = useState(true)
   const [danmakuSearch, setDanmakuSearch] = useState<string | null>(null)
+  const [danmakuSearchTrigger, setDanmakuSearchTrigger] = useState(0)
   const [danmakuSearching, setDanmakuSearching] = useState(false)
   // 用户从候选列表选定的弹幕库；null = 自动匹配。
   const [danmakuEpisodeId, setDanmakuEpisodeId] = useState<number | string | null>(null)
@@ -141,6 +142,7 @@ export function PlayerPage() {
     setDanmakuEpisodeId(null)
     setDanmakuInfo(null)
     setDanmakuSearch(kw || null)
+    setDanmakuSearchTrigger((prev) => prev + 1)
   }, [])
 
   const danmakuLoaded = useCallback((info: DanmakuLoadedInfo | null) => {
@@ -164,6 +166,7 @@ export function PlayerPage() {
     setDanmakuSearching(true)
     // 展示当前所选来源（面板标题处可见）。
     setDanmakuSelectedSource(episodeTitle ? `${animeTitle}・${episodeTitle}` : animeTitle)
+    setDanmakuSearchTrigger((prev) => prev + 1)
   }, [])
 
   // 回到自动匹配（清除用户手动选择）。
@@ -174,6 +177,7 @@ export function PlayerPage() {
     setDanmakuSearch(null)
     setDanmakuSelectedSource('')
     setDanmakuInfo(null)
+    setDanmakuSearchTrigger((prev) => prev + 1)
   }, [])
 
   // 切换视频时重置媒体与弹幕状态，确保新视频自动重新识别并加载弹幕
@@ -549,6 +553,12 @@ export function PlayerPage() {
     toast.error('视频播放失败，请检查文件是否存在')
   }, [directOnly, hlsUnavailable, media, mode, params, setParams])
 
+  const danmakuAutoTitle =
+    danmakuInfo?.animeTitle ||
+    media?.original_name?.trim() ||
+    media?.title?.trim() ||
+    ''
+
   return (
     <div className="relative flex h-full w-full flex-1 flex-col overflow-hidden bg-black">
       <PlayerTopBar
@@ -580,6 +590,7 @@ export function PlayerPage() {
         danmakuArea={danmakuArea}
         danmakuSearch={danmakuSearch}
         danmakuEpisodeId={danmakuEpisodeId}
+        danmakuSearchTrigger={danmakuSearchTrigger}
         danmakuOpen={danmakuOpen}
         onToggleDanmaku={toggleDanmakuOpen}
         onDanmakuLoaded={danmakuLoaded}
@@ -619,6 +630,7 @@ export function PlayerPage() {
             onFontSizeChange={setDanmakuFontSize}
             candidates={danmakuCandidates}
             selectedSource={danmakuSelectedSource}
+            autoMatchTitle={danmakuAutoTitle}
             danmakuInfo={danmakuInfo}
             onSelectEpisode={danmakuSelectEpisode}
             onResetAuto={danmakuResetAuto}

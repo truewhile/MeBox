@@ -25,6 +25,8 @@ type PlayerDanmakuPanelProps = {
   candidates: DanmakuAnime[]
   /** Human-readable label of the currently selected library. */
   selectedSource?: string
+  /** Title used by auto-matching (e.g. anime title, media title or filename). */
+  autoMatchTitle?: string
   /** Loaded danmaku metadata (title, episode, count, match mode). */
   danmakuInfo?: DanmakuLoadedInfo | null
   onSelectEpisode: (episodeId: number, animeTitle: string, episodeTitle: string) => void
@@ -47,6 +49,7 @@ export function PlayerDanmakuPanel({
   onFontSizeChange,
   candidates,
   selectedSource,
+  autoMatchTitle,
   danmakuInfo,
   onSelectEpisode,
   onResetAuto,
@@ -203,7 +206,19 @@ export function PlayerDanmakuPanel({
 
       {/* 搜索弹幕 */}
       <div className="mb-4">
-        <div className="mb-1 text-xs text-white/60">搜索弹幕（留空 = 按视频名自动匹配）</div>
+        <div className="mb-1 flex items-center justify-between text-xs text-white/60">
+          <span>搜索弹幕（留空 = 按视频名自动匹配）</span>
+          {autoMatchTitle && (
+            <button
+              type="button"
+              onClick={() => setDraft(autoMatchTitle)}
+              className="text-[11px] text-rose-300 transition hover:text-rose-200"
+              title="填入当前识别到的视频名"
+            >
+              填入当前名
+            </button>
+          )}
+        </div>
         <div className="flex items-center gap-1.5">
           <input
             value={draft}
@@ -211,8 +226,8 @@ export function PlayerDanmakuPanel({
             onKeyDown={(e) => {
               if (e.key === 'Enter') onSearch(draft.trim())
             }}
-            placeholder="输入番剧或电影名…"
-            className="min-w-0 flex-1 rounded-lg border border-white/15 bg-white/5 px-2.5 py-1.5 text-xs outline-none placeholder:text-white/35 focus:border-rose-400/60"
+            placeholder={autoMatchTitle ? `自动匹配：${autoMatchTitle}` : '输入番剧或电影名…'}
+            className="min-w-0 flex-1 rounded-lg border border-white/15 bg-white/5 px-2.5 py-1.5 text-xs outline-none placeholder:text-white/40 focus:border-rose-400/60"
           />
           <button
             onClick={() => onSearch(draft.trim())}

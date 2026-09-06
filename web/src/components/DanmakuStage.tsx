@@ -28,6 +28,8 @@ type DanmakuStageProps = {
   search?: string | null
   /** Explicit danmaku library chosen by the user; null = auto-resolve. */
   episodeId?: number | string | null
+  /** Counter or token changed to trigger refetch even when search stays identical. */
+  searchTrigger?: number
   /** Called after each fetch attempt (success or error) finishes with metadata. */
   onLoaded?: (info: DanmakuLoadedInfo | null) => void
   /** Called when multiple anime matched and the user must pick one. */
@@ -50,6 +52,7 @@ export function DanmakuStage({
   area = 1,
   search = null,
   episodeId = null,
+  searchTrigger = 0,
   onLoaded,
   onCandidates,
 }: DanmakuStageProps) {
@@ -252,8 +255,8 @@ export function DanmakuStage({
       manager.unmount()
       managerRef.current = null
     }
-    // search / episodeId 变化时重新拉取弹幕（含媒体/开关切换）。
-  }, [media, videoRef, enabled, search, episodeId, onLoaded, onCandidates])
+    // search / episodeId / searchTrigger 变化时重新拉取弹幕（含媒体/开关切换）。
+  }, [media, videoRef, enabled, search, episodeId, searchTrigger, onLoaded, onCandidates])
 
   // Live renderer knobs: opacity / area / font size without recreating the
   // engine. font size additionally rescales currently visible comments.
