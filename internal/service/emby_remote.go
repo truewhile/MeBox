@@ -139,6 +139,37 @@ func (r *EmbyRemoteService) ListAccounts(ctx context.Context) ([]model.StrmAccou
 	return out, nil
 }
 
+// ConfiguredRemoteHosts 返回所有已配置的远程 Emby 线路的主机名/IP（去重、不含端口）。
+func (r *EmbyRemoteService) ConfiguredRemoteHosts(ctx context.Context) []string {
+	if r == nil || r.repo == nil || r.repo.StrmAccount == nil {
+		return nil
+	}
+	accounts, err := r.ListAccounts(ctx)
+	if err != nil || len(accounts) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var hosts []string
+	for _, acct := range accounts {
+		lines, _, err := r.LinesOf(&acct)
+		if err != nil {
+			continue
+		}
+		for _, line := range lines {
+			u, err := url.Parse(line.URL)
+			if err != nil || u.Hostname() == "" {
+				continue
+			}
+			h := strings.ToLower(u.Hostname())
+			if !seen[h] {
+				seen[h] = true
+				hosts = append(hosts, h)
+			}
+		}
+	}
+	return hosts
+}
+
 // AccountByID 按 ID 查找远程 Emby 挂载账号（不存在或类型不符返回 nil）。
 func (r *EmbyRemoteService) AccountByID(ctx context.Context, id string) *model.StrmAccount {
 	if strings.TrimSpace(id) == "" {

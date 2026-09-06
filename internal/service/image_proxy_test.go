@@ -117,9 +117,32 @@ func TestIsPrivateHost(t *testing.T) {
 	// Hostnames must NOT be blocked even though GFW DNS poisoning may resolve
 	// them to private/loopback IPs — blocking them broke legitimate posters.
 	allowed := []string{"image.tmdb.org", "lain.bgm.tv", "example.com", "8.8.8.8"}
-	for _, h := range allowed {
-		if isPrivateHost(h) {
-			t.Errorf("isPrivateHost(%q) = true, want false", h)
+		for _, h := range allowed {
+			if isPrivateHost(h) {
+				t.Errorf("isPrivateHost(%q) = true, want false", h)
+			}
 		}
+	}
+
+func TestImageProxyAllowedRemoteHostBypassesPrivateCheck(t *testing.T) {
+	proxy := NewImageProxy(&config.Config{Cache: config.CacheConfig{CacheDir: filepath.Join(t.TempDir(), "cache")}}, zap.NewNop())
+
+	rawURL := "http://192.168.1.100:8096/emby/Items/123/Images/Primary"
+	// Before setting allowed remote hosts, private host is rejected by validateURL
+	if _, err := proxy.validateURL(rawURL); err == nil {
+		t.Fatal("expected validateURL to reject private IP before whitelist")
+	}
+
+	// After configuring whitelist with the Emby host
+	proxy.SetAllowedRemoteHostsProvider(func() []string {
+		return []string{"192.168.1.100:8096"}
+	})
+
+	u, err := proxy.validateURL(rawURL)
+	if err != nil {
+		t.Fatalf("expected validateURL to allow whitelisted host, got: %v", err)
+	}
+	if u.Hostname() != "192.168.1.100" {
+		t.Fatalf("hostname = %s, want 192.168.1.100", u.Hostname())
 	}
 }

@@ -177,6 +177,11 @@ func (b *serviceContainerBuilder) initIdentityServices() {
 func (b *serviceContainerBuilder) initImageProxy() {
 	b.c.ImageProxy = NewImageProxy(b.cfg, b.log)
 	b.c.ImageProxy.SetLibraryRootsProvider(b.libraryRoots)
+	if b.c.EmbyRemote != nil {
+		b.c.ImageProxy.SetAllowedRemoteHostsProvider(func() []string {
+			return b.c.EmbyRemote.ConfiguredRemoteHosts(context.Background())
+		})
+	}
 	b.c.Scan.SetImageProxy(b.c.ImageProxy)
 	b.c.Scraper.SetImageProxy(b.c.ImageProxy)
 }

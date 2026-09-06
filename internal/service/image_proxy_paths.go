@@ -22,7 +22,7 @@ func (p *ImageProxy) validateURL(raw string) (*url.URL, error) {
 	if scheme != "http" && scheme != "https" {
 		return nil, errors.New("unsupported scheme")
 	}
-	if isPrivateHost(u.Hostname()) {
+	if !p.isAllowedRemoteHost(u.Hostname()) && isPrivateHost(u.Hostname()) {
 		return nil, errors.New("requests to private/internal hosts are not allowed")
 	}
 	return u, nil

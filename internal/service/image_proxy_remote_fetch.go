@@ -51,7 +51,7 @@ func (p *ImageProxy) fetchRemoteImageOnce(ctx context.Context, raw, host string,
 		p.log.Warn("imageproxy: build request failed", zap.String("url", raw), zap.Error(err))
 		return nil, "", "", errImageProxyRequestSetup
 	}
-	applyRemoteImageHeaders(req, host)
+	applyRemoteImageHeaders(req, host, raw)
 
 	resp, err := candidate.client.Do(req)
 	if err != nil {
@@ -79,7 +79,7 @@ func (p *ImageProxy) fetchRemoteImageOnce(ctx context.Context, raw, host string,
 	return data, ctype, resp.Header.Get("Content-Length"), nil
 }
 
-func applyRemoteImageHeaders(req *http.Request, host string) {
+func applyRemoteImageHeaders(req *http.Request, host, raw string) {
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36")
 	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,ja;q=0.8,en;q=0.7")
@@ -88,7 +88,7 @@ func applyRemoteImageHeaders(req *http.Request, host string) {
 	if cookie := remoteImageCookie(host); cookie != "" {
 		req.Header.Set("Cookie", cookie)
 	}
-	if referer := remoteImageReferer(host); referer != "" {
+	if referer := remoteImageReferer(host, raw); referer != "" {
 		req.Header.Set("Referer", referer)
 	}
 }
@@ -105,7 +105,7 @@ func remoteImageCookie(host string) string {
 	}
 }
 
-func remoteImageReferer(host string) string {
+func remoteImageReferer(host, raw string) string {
 	h := strings.ToLower(strings.TrimSpace(host))
 	switch {
 	case strings.Contains(h, "doubanio.com"):
@@ -125,7 +125,11 @@ func remoteImageReferer(host string) string {
 	case strings.Contains(h, "fc2.com"):
 		return "https://adult.contents.fc2.com/"
 	case h != "":
-		return "https://" + h + "/"
+		scheme := "https"
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(raw)), "http://") {
+			scheme = "http"
+		}
+		return scheme + "://" + h + "/"
 	default:
 		return ""
 	}
@@ -158,9 +162,9 @@ func fetchRemoteImageWithCurl(ctx context.Context, raw, host string) ([]byte, st
 		"--header", "Cache-Control: no-cache",
 		"--header", "Pragma: no-cache",
 	}
-	if referer := remoteImageReferer(host); referer != "" {
-		args = append(args, "--referer", referer)
-	}
+		if referer := remoteImageReferer(host, raw); referer != "" {
+			args = append(args, "--referer", referer)
+		}
 	if cookie := remoteImageCookie(host); cookie != "" {
 		args = append(args, "--cookie", cookie)
 	}

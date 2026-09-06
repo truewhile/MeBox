@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type DragEvent, type MouseEvent, type Reac
 import { createPortal } from 'react-dom'
 import { Folder, GripVertical, Image, MoreVertical, Plus, Power, PowerOff, RefreshCw, Save, Trash2 } from 'lucide-react'
 
+import { imageURL } from '../api/client'
 import { LocalDirBrowserDialog } from '../components/LocalDirBrowserDialog'
 import type { Library, LibraryRoot } from '../types'
 import type { RootDraft } from './adminLibraryPanelModel'
@@ -169,7 +170,19 @@ function LibraryTableRow({ library, dragging, dragOver, onDragStart, onDragOver,
       </td>
       <td className="py-2 pr-3 font-medium text-ink-600">
         <div className="flex items-center gap-2">
-          {library.cover_url && <img src={library.cover_url} alt="" loading="lazy" decoding="async" className="h-10 w-8 rounded object-cover" />}
+          {library.cover_url && (
+            <img
+              src={imageURL(library.cover_url, library.updated_at)}
+              alt=""
+              loading="lazy"
+              decoding="async"
+              referrerPolicy="no-referrer"
+              className="h-10 w-8 rounded object-cover"
+              onError={(e) => {
+                e.currentTarget.style.visibility = 'hidden'
+              }}
+            />
+          )}
           <span>{library.name}</span>
         </div>
       </td>

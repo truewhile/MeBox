@@ -317,9 +317,14 @@ func TestRemoteImageRefererForAdultHosts(t *testing.T) {
 		{"example.com", "https://example.com/"},
 		{"", ""},
 	}
-	for _, tt := range tests {
-		if got := remoteImageReferer(tt.host); got != tt.want {
-			t.Errorf("remoteImageReferer(%q) = %q, want %q", tt.host, got, tt.want)
+		for _, tt := range tests {
+			if got := remoteImageReferer(tt.host, "https://"+tt.host+"/img.jpg"); got != tt.want {
+				t.Errorf("remoteImageReferer(%q) = %q, want %q", tt.host, got, tt.want)
+			}
+		}
+
+		// Also verify HTTP protocol preservation for generic hosts
+		if got := remoteImageReferer("192.168.1.100", "http://192.168.1.100:8096/image"); got != "http://192.168.1.100/" {
+			t.Errorf("remoteImageReferer for HTTP host = %q, want http://192.168.1.100/", got)
 		}
 	}
-}

@@ -660,14 +660,25 @@ func streamHandler(svc *service.Container) gin.HandlerFunc {
 				}
 				return
 			}
-			target, err := svc.EmbyRemote.WebStreamURL(ctx, acct, remoteID)
-			if err != nil {
-				c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+				target, err := svc.EmbyRemote.WebStreamURL(ctx, acct, remoteID)
+				if err != nil {
+					c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+					return
+				}
+				// 现代浏览器在 HTTPS 页面中请求不安全源（HTTP 视频流）会直接报 Mixed Content 拦截导致播放失败。
+				// 仅当当前前端请求为 HTTPS 且远程直连目标为 HTTP 时，自动降级通过本机反向代理传输流，避免播放被浏览器阻断；
+				// 其它场景（HTTP 页面访问 HTTP/HTTPS，或 HTTPS 访问 HTTPS）继续 302 直连，最大化节省服务器带宽与流量。
+				if requestIsHTTPS(c) && strings.HasPrefix(strings.ToLower(target), "http://") {
+					if err := svc.Emby.ProxyRemoteVideoStream(ctx, c.Writer, c.Request, mountID, remoteID); err != nil {
+						if !c.Writer.Written() {
+							c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+						}
+					}
+					return
+				}
+				setRedirectNoStoreHeaders(c)
+				c.Redirect(http.StatusFound, target)
 				return
-			}
-			setRedirectNoStoreHeaders(c)
-			c.Redirect(http.StatusFound, target)
-			return
 		}
 		m, err := svc.Media.GetMedia(ctx, id)
 		if err != nil || m == nil || !mediaVisibleForRequest(c, svc, m) {

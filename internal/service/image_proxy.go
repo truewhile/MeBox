@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -42,6 +43,13 @@ type ImageProxy struct {
 	libRootsMu     sync.Mutex
 	libRootsCache  []string
 	libRootsAt     time.Time
+
+	// allowedRemoteHostsFn returns hostnames or IPs of explicitly configured
+	// upstream services (e.g. remote Emby mounts) that should bypass SSRF private IP checks.
+	allowedRemoteHostsFn func() []string
+	allowedHostsMu       sync.Mutex
+	allowedHostsCache    map[string]bool
+	allowedHostsAt       time.Time
 }
 
 const (
@@ -51,6 +59,12 @@ const (
 
 // NewImageProxy is the constructor.
 func NewImageProxy(cfg *config.Config, log *zap.Logger) *ImageProxy {
+	proxy := &ImageProxy{
+		cfg:      cfg,
+		log:      log,
+		cacheDir: filepath.Join(cfg.Cache.CacheDir, "images"),
+	}
+
 	// Honor HTTP(S)_PROXY env vars so deployments behind GFW can pull
 	// from image.tmdb.org via their HTTP proxy without extra config. On
 	// Windows we also honor the current user's system proxy settings.
@@ -63,12 +77,16 @@ func NewImageProxy(cfg *config.Config, log *zap.Logger) *ImageProxy {
 		// 仅 URL 解析层的 isPrivateHost 可被十进制/十六进制 IP、解析到
 		// 私网的域名与 DNS rebinding 绕过；在拨号层对最终连接 IP 做二次
 		// 校验（含重定向后的每条连接）堵住该旁路。
+		// 用户明确配置的远程挂载源（如内网 Emby）豁免该私网限制。
 		dialer := &net.Dialer{
 			Timeout: 15 * time.Second,
 			Control: func(_, address string, _ syscall.RawConn) error {
 				host, _, err := net.SplitHostPort(address)
 				if err != nil {
 					return err
+				}
+				if proxy.isAllowedRemoteHost(host) {
+					return nil
 				}
 				ip := net.ParseIP(host)
 				if ip == nil {
@@ -82,12 +100,9 @@ func NewImageProxy(cfg *config.Config, log *zap.Logger) *ImageProxy {
 		}
 		transport.DialContext = dialer.DialContext
 	}
-	return &ImageProxy{
-		cfg:      cfg,
-		log:      log,
-		cacheDir: filepath.Join(cfg.Cache.CacheDir, "images"),
-		client:   &http.Client{Timeout: 30 * time.Second, Transport: transport},
-	}
+
+	proxy.client = &http.Client{Timeout: 30 * time.Second, Transport: transport}
+	return proxy
 }
 
 // proxyConfiguredForImageFetch 探测环境变量或系统代理是否会影响图片抓取。
@@ -123,6 +138,47 @@ func (p *ImageProxy) libraryRoots() []string {
 	p.libRootsCache = p.libraryRootsFn()
 	p.libRootsAt = time.Now()
 	return p.libRootsCache
+}
+
+// SetAllowedRemoteHostsProvider injects a callback that returns hostnames or IPs
+// of explicitly configured remote services (e.g. remote Emby mounts). Requests to
+// these hosts bypass SSRF private-IP restrictions.
+func (p *ImageProxy) SetAllowedRemoteHostsProvider(fn func() []string) {
+	p.allowedRemoteHostsFn = fn
+}
+
+func (p *ImageProxy) isAllowedRemoteHost(host string) bool {
+	if p == nil || p.allowedRemoteHostsFn == nil {
+		return false
+	}
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return false
+	}
+	// Strip port if present
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = strings.ToLower(strings.TrimSpace(h))
+	}
+
+	p.allowedHostsMu.Lock()
+	defer p.allowedHostsMu.Unlock()
+	if p.allowedHostsCache == nil || time.Since(p.allowedHostsAt) >= 30*time.Second {
+		rawList := p.allowedRemoteHostsFn()
+		cache := make(map[string]bool, len(rawList))
+		for _, item := range rawList {
+			item = strings.ToLower(strings.TrimSpace(item))
+			if item == "" {
+				continue
+			}
+			if h, _, err := net.SplitHostPort(item); err == nil {
+				item = strings.ToLower(strings.TrimSpace(h))
+			}
+			cache[item] = true
+		}
+		p.allowedHostsCache = cache
+		p.allowedHostsAt = time.Now()
+	}
+	return p.allowedHostsCache[host]
 }
 
 // Prune removes oldest cached images until disk usage is within the configured limit.
