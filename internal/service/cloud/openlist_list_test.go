@@ -61,9 +61,10 @@ func TestOpenListWebDAVListAndResolve(t *testing.T) {
 	if len(entries) != 1 || entries[0].ID != "/Cloud/Movie.mkv" || entries[0].Size != 1024 {
 		t.Fatalf("entries = %#v", entries)
 	}
+	// Video file: API fails → error (no WebDAV fallback for video)
 	_, err = p.Resolve(context.Background(), entries[0].ID)
-	if err == nil || !strings.Contains(err.Error(), "pure 302 playback requires OpenList raw_url") {
-		t.Fatalf("openlist video resolve should require raw_url instead of WebDAV proxy fallback, err=%v", err)
+	if err == nil || !strings.Contains(err.Error(), "resolve download URL") || !strings.Contains(err.Error(), "via API failed") {
+		t.Fatalf("openlist video resolve should error on API failure, err=%v", err)
 	}
 }
 
