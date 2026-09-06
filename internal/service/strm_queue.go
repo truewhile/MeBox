@@ -366,9 +366,11 @@ func (s *StrmService) processUpload115(ctx context.Context, task *model.StrmUplo
 		finish(model.StrmTaskFailed, "该网盘不支持元数据上传")
 		return
 	}
-	// 以本地为准：网盘端已有同名但内容不同的旧元数据时，先批量删除所有旧副本再上传。
-	// 115 的上传接口不保证同名覆盖，直接上传可能产生同名重复文件；删除失败则
-	// 任务重试（旧文件 ID 失效的场景会在下次同步后自动修复）。
+	// 以本地为准：网盘端已有同名但内容不同的旧元数据时，先尝试批量删除所有旧副本再上传。
+	// 115 的上传接口不保证同名覆盖，直接上传可能产生同名重复文件。
+	// 删除失败时不中止任务——继续上传新文件，旧副本交由下次同步的 cleanupBatchRedundantFiles
+	// 按目录批量清理（下次同步会看到新旧两个版本，命中新版本后把旧版本 cid 收入 pendingDeletes
+	// 异步删除）。这样避免了「删旧失败 → 任务重试 → 再次删旧失败 → 永远无法上传」的死循环。
 	if task.RemoteRef != "" {
 		open115, ok := provider.(cloud.OpenAPI115Provider)
 		if !ok {
@@ -377,8 +379,11 @@ func (s *StrmService) processUpload115(ctx context.Context, task *model.StrmUplo
 		}
 		refs := strings.Split(task.RemoteRef, ",")
 		if err := open115.OpenClient().DeleteFiles(ctx, task.RemotePath, refs...); err != nil {
-			s.uploadTaskFailWithRetry(task, "删除网盘旧元数据失败："+err.Error())
-			return
+			s.log.Warn("删除网盘旧元数据失败，跳过删除继续上传新文件",
+				zap.String("task_id", task.ID),
+				zap.String("local_path", task.LocalPath),
+				zap.Error(err))
+			// 不 return：继续上传新文件，旧副本由下次同步清理
 		}
 	}
 	f, err := os.Open(task.LocalPath)
