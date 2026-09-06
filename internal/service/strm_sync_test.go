@@ -1320,6 +1320,30 @@ func TestScanLocalMetaForUploadMultipleCopiesAllStale(t *testing.T) {
 	}
 }
 
+// TestRecordRemoteMetaDeduplication 验证当 download_meta 与 upload_meta 同时开启时，
+// 同一远端元数据被多次入账不会在 remoteMeta 中生成重复副本，杜绝误判自杀式删除。
+func TestRecordRemoteMetaDeduplication(t *testing.T) {
+	st := &strmSyncState{
+		seenMeta:   map[string]bool{},
+		remoteMeta: map[string][]remoteMetaItem{},
+	}
+	entry := cloud.FileEntry{
+		ID:    "unique-fid-1",
+		Name:  "test.nfo",
+		Size:  100,
+		Sha1:  "AAAABBBBCCCC",
+		MTime: 12345,
+	}
+	// 连续记录两次同一文件
+	st.recordRemoteMeta(entry, "dir/test.nfo")
+	st.recordRemoteMeta(entry, "dir/test.nfo")
+
+	items := st.remoteMeta["m:dir/test.nfo"]
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item after duplicate record, got %d", len(items))
+	}
+}
+
 // TestWalk115AdaptiveHierarchicalFlatScan 验证自适应分治扁平化扫描：
 // 当根目录探测总数 >= 9500 时，系统自动分治展开单层直接子项，对各子目录分别执行扁平拉取，
 // 正确合并根目录直属文件与各子目录深层文件，突破 115 开放平台 10000 深度限制。

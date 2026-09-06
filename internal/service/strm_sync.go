@@ -1341,6 +1341,7 @@ func (st *strmSyncState) localSha1Matches(path, remoteSha1 string) bool {
 }
 
 // recordRemoteMeta 记录远端存在的元数据索引、文件大小、文件引用及内容 SHA1（多副本聚合追加）。
+// 对同一文件 ID 严格去重，避免当 download_meta 与 upload_meta 同时开启时因重复记录引发误判与自杀式删除。
 func (st *strmSyncState) recordRemoteMeta(entry cloud.FileEntry, rel string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -1349,6 +1350,13 @@ func (st *strmSyncState) recordRemoteMeta(entry cloud.FileEntry, rel string) {
 	}
 	key := "m:" + rel
 	st.seenMeta[key] = true
+	if entry.ID != "" {
+		for _, existing := range st.remoteMeta[key] {
+			if existing.ID == entry.ID {
+				return
+			}
+		}
+	}
 	st.remoteMeta[key] = append(st.remoteMeta[key], remoteMetaItem{
 		ID:    entry.ID,
 		Size:  entry.Size,
@@ -1624,21 +1632,23 @@ func (st *strmSyncState) scanLocalMetaForUpload() error {
 					}
 				}
 			}
-			if matchedIdx >= 0 {
-				// 远端已存在完全一致的副本，跳过上传！
-				// 若远端还存在其他同名脏副本（副本总数 > 1），在 115 下收集待删除 ID，稍后按目录批量删除
-				if len(entries) > 1 && st.p.Provider == model.StrmProvider115 {
-					parentCID := st.uploadRemoteTarget(rel)
-					if parentCID != "" {
-						for i, it := range entries {
-							if i != matchedIdx && it.ID != "" {
-								pendingDeletes[parentCID] = append(pendingDeletes[parentCID], it.ID)
+				if matchedIdx >= 0 {
+					// 远端已存在完全一致的副本，跳过上传！
+					// 若远端还存在其他同名脏副本（副本总数 > 1），在 115 下收集待删除 ID，稍后按目录批量删除。
+					// 严禁将已命中的最新副本 ID (matchedID) 放入待删列表，杜绝误杀唯一有效副本。
+					if len(entries) > 1 && st.p.Provider == model.StrmProvider115 {
+						parentCID := st.uploadRemoteTarget(rel)
+						if parentCID != "" {
+							matchedID := entries[matchedIdx].ID
+							for i, it := range entries {
+								if i != matchedIdx && it.ID != "" && it.ID != matchedID {
+									pendingDeletes[parentCID] = append(pendingDeletes[parentCID], it.ID)
+								}
 							}
 						}
 					}
+					return nil
 				}
-				return nil
-			}
 		}
 
 		remoteTarget := st.uploadRemoteTarget(rel)
