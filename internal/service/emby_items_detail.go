@@ -2,7 +2,11 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -455,6 +459,13 @@ func (e *EmbyService) itemPayload(ctx context.Context, m *model.Media, fav bool,
 
 	runTimeTicks := int64(m.DurationSec) * 10_000_000
 	durationMs := int64(m.DurationSec) * 1000
+	if durationMs <= 0 && posMs > 0 {
+		durationMs = posMs * 2
+		if durationMs < 30*60*1000 {
+			durationMs = 30 * 60 * 1000
+		}
+		runTimeTicks = durationMs * 10_000
+	}
 	played := posMs > 0 && durationMs > 0 && posMs >= durationMs*9/10
 	pct := 0.0
 	if durationMs > 0 {
@@ -488,6 +499,7 @@ func (e *EmbyService) itemPayload(ctx context.Context, m *model.Media, fav bool,
 		"ImageTags":         imageTags,
 		"BackdropImageTags": backdropTags,
 		"Genres":            splitCSV(m.Genres),
+		"People":            e.resolveMediaPeople(ctx, m),
 		"ProviderIds": map[string]string{
 			"Tmdb":    intToStr(m.TMDbID),
 			"Bangumi": intToStr(m.BangumiID),
@@ -501,8 +513,92 @@ func (e *EmbyService) itemPayload(ctx context.Context, m *model.Media, fav bool,
 		},
 		"MediaSources": e.mediaSourcesForItem(ctx, m, true, false),
 	}
+	if primaryArtwork != "" {
+		item["PrimaryImageTag"] = m.ID
+	}
+	if seriesID != "" {
+		if sEntry, ok, _ := e.payloadSeriesEntry(ctx, seriesID); ok {
+			if sEntry.posterURL != "" {
+				item["SeriesPrimaryImageTag"] = seriesID
+			}
+			if len(backdropTags) == 0 && sEntry.backdropURL != "" {
+				item["ParentBackdropItemId"] = seriesID
+				item["ParentBackdropImageTags"] = []string{seriesID + "-bd"}
+			}
+		}
+	}
 	if premiered, ok := embyPremiereDate(m.ReleaseDate); ok {
 		item["PremiereDate"] = premiered
 	}
 	return item
+}
+
+func (e *EmbyService) resolveMediaPeople(ctx context.Context, m *model.Media) []map[string]any {
+	if m == nil || strings.TrimSpace(m.Path) == "" {
+		return []map[string]any{}
+	}
+	dir := filepath.Dir(m.Path)
+	ext := filepath.Ext(m.Path)
+	base := strings.TrimSuffix(m.Path, ext)
+	candidates := []string{
+		base + ".nfo",
+		filepath.Join(dir, "movie.nfo"),
+		filepath.Join(dir, "tvshow.nfo"),
+	}
+
+	people := make([]map[string]any, 0)
+	seen := make(map[string]bool)
+
+	for _, p := range candidates {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			doc, ok, err := decodeNFOFile(p)
+			if err == nil && ok && doc != nil {
+				for _, d := range doc.Directors {
+					name := strings.TrimSpace(d)
+					if name == "" {
+						continue
+					}
+					personID := embyPersonID(name, "Director")
+					if seen[personID] {
+						continue
+					}
+					seen[personID] = true
+					people = append(people, map[string]any{
+						"Id":   personID,
+						"Name": name,
+						"Type": "Director",
+						"Role": "Director",
+					})
+				}
+				for _, a := range doc.Actors {
+					name := strings.TrimSpace(a.Name)
+					if name == "" {
+						continue
+					}
+					personID := embyPersonID(name, "Actor")
+					if seen[personID] {
+						continue
+					}
+					seen[personID] = true
+					role := strings.TrimSpace(a.Role)
+					if role == "" {
+						role = "Actor"
+					}
+					people = append(people, map[string]any{
+						"Id":   personID,
+						"Name": name,
+						"Type": "Actor",
+						"Role": role,
+					})
+				}
+				break
+			}
+		}
+	}
+	return people
+}
+
+func embyPersonID(name, roleType string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(name)) + ":" + strings.ToLower(strings.TrimSpace(roleType))))
+	return "person-" + hex.EncodeToString(sum[:8])
 }

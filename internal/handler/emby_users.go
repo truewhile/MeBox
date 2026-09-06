@@ -34,11 +34,18 @@ func embyAuthByNameHandler(svc *service.Container) gin.HandlerFunc {
 			embyError(c, http.StatusBadRequest, "missing username or password")
 			return
 		}
-		resp, err := svc.Auth.Login(c.Request.Context(), req.Username, password)
-		if err != nil {
-			embyError(c, http.StatusUnauthorized, err.Error())
-			return
-		}
+			resp, err := svc.Auth.Login(c.Request.Context(), req.Username, password)
+			if err != nil {
+				// 支持电视端/客户端一次性 6 位临时密码登录 (OTP)
+				if tempResp, tempErr := svc.Auth.LoginWithTemporaryPassword(c.Request.Context(), req.Username, password); tempErr == nil {
+					resp = tempResp
+					err = nil
+				}
+			}
+			if err != nil {
+				embyError(c, http.StatusUnauthorized, err.Error())
+				return
+			}
 		// 记录登录设备会话并执行防共享检测（登录客户端数 / 设备指纹）。
 		clientInfo := embyClientInfoFromRequest(c)
 		if svc.Sessions != nil {

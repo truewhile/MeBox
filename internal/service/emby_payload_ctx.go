@@ -23,10 +23,17 @@ type embyLibraryTypeEntry struct {
 	found bool // 库不存在时 found=false，调用方可退回计数启发式
 }
 
+type embyPayloadSeriesEntry struct {
+	title       string
+	posterURL   string
+	backdropURL string
+	found       bool
+}
+
 type embyPayloadCache struct {
 	mu       sync.Mutex
 	libTypes map[string]embyLibraryTypeEntry
-	series   map[string]string // series_id -> title（"" 表示不存在/无标题）
+	series   map[string]embyPayloadSeriesEntry
 }
 
 func (c *embyPayloadCache) libraryType(id string) (embyLibraryTypeEntry, bool) {
@@ -45,14 +52,33 @@ func (c *embyPayloadCache) setLibraryType(id string, entry embyLibraryTypeEntry)
 func (c *embyPayloadCache) seriesTitle(id string) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	title, ok := c.series[id]
-	return title, ok
+	entry, ok := c.series[id]
+	if !ok {
+		return "", false
+	}
+	return entry.title, true
+}
+
+func (c *embyPayloadCache) seriesEntry(id string) (embyPayloadSeriesEntry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.series[id]
+	return entry, ok
+}
+
+func (c *embyPayloadCache) setSeriesEntry(id string, entry embyPayloadSeriesEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.series[id] = entry
 }
 
 func (c *embyPayloadCache) setSeriesTitle(id, title string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.series[id] = title
+	entry := c.series[id]
+	entry.title = title
+	entry.found = true
+	c.series[id] = entry
 }
 
 // withPayloadCache attaches a fresh request-scoped cache if none exists yet.
@@ -65,7 +91,7 @@ func (e *EmbyService) withPayloadCache(ctx context.Context) context.Context {
 	}
 	return context.WithValue(ctx, embyPayloadCacheKey{}, &embyPayloadCache{
 		libTypes: map[string]embyLibraryTypeEntry{},
-		series:   map[string]string{},
+		series:   map[string]embyPayloadSeriesEntry{},
 	})
 }
 
@@ -113,17 +139,22 @@ func (e *EmbyService) prefetchPayloadCache(ctx context.Context, rows []model.Med
 			}
 		}
 	}
-	if len(seriesIDs) > 0 {
-		var series []model.Series
-		if err := e.repo.DB.WithContext(ctx).Select("id, title").Where("id IN ?", seriesIDs).Find(&series).Error; err == nil {
-			for _, s := range series {
-				cache.setSeriesTitle(s.ID, s.Title)
+		if len(seriesIDs) > 0 {
+			var series []model.Series
+			if err := e.repo.DB.WithContext(ctx).Select("id, title, poster_url, backdrop_url").Where("id IN ?", seriesIDs).Find(&series).Error; err == nil {
+				for _, s := range series {
+					cache.setSeriesEntry(s.ID, embyPayloadSeriesEntry{
+						title:       s.Title,
+						posterURL:   s.PosterURL,
+						backdropURL: s.BackdropURL,
+						found:       true,
+					})
+				}
 			}
 		}
 	}
-}
 
-// payloadLibraryType resolves a library type through the request cache,
+	// payloadLibraryType resolves a library type through the request cache,
 // falling back to a direct lookup when no cache is attached. found=false
 // means the library row does not exist (soft-deleted or orphaned id).
 func (e *EmbyService) payloadLibraryType(ctx context.Context, libraryID string) (typ string, found bool, err error) {
@@ -152,24 +183,50 @@ func (e *EmbyService) payloadLibraryType(ctx context.Context, libraryID string) 
 // payloadSeriesTitle resolves a series title through the request cache,
 // falling back to a direct lookup when no cache is attached.
 func (e *EmbyService) payloadSeriesTitle(ctx context.Context, seriesID string) (string, bool, error) {
-	if cache, ok := ctx.Value(embyPayloadCacheKey{}).(*embyPayloadCache); ok {
-		if title, hit := cache.seriesTitle(seriesID); hit {
-			return title, true, nil
-		}
-		var s model.Series
-		if err := e.repo.DB.WithContext(ctx).Select("id, title").Where("id = ?", seriesID).First(&s).Error; err != nil {
-			cache.setSeriesTitle(seriesID, "")
-			return "", true, nil
-		}
-		cache.setSeriesTitle(s.ID, s.Title)
-		return s.Title, true, nil
-	}
-	series, err := e.repo.Series.FindByID(ctx, seriesID)
-	if err != nil {
+	entry, ok, err := e.payloadSeriesEntry(ctx, seriesID)
+	if err != nil || !ok {
 		return "", false, err
 	}
-	if series == nil {
-		return "", false, nil
-	}
-	return series.Title, true, nil
+	return entry.title, true, nil
 }
+
+	// payloadSeriesEntry resolves a series entry through the request cache,
+	// falling back to a direct lookup when no cache is attached.
+	func (e *EmbyService) payloadSeriesEntry(ctx context.Context, seriesID string) (embyPayloadSeriesEntry, bool, error) {
+		if cache, ok := ctx.Value(embyPayloadCacheKey{}).(*embyPayloadCache); ok {
+			if entry, hit := cache.seriesEntry(seriesID); hit {
+				return entry, entry.found, nil
+			}
+			if e.repo != nil && e.repo.Series != nil {
+				s, err := e.repo.Series.FindByID(ctx, seriesID)
+				if err != nil || s == nil {
+					cache.setSeriesEntry(seriesID, embyPayloadSeriesEntry{})
+					return embyPayloadSeriesEntry{}, false, err
+				}
+				entry := embyPayloadSeriesEntry{
+					title:       s.Title,
+					posterURL:   s.PosterURL,
+					backdropURL: s.BackdropURL,
+					found:       true,
+				}
+				cache.setSeriesEntry(seriesID, entry)
+				return entry, true, nil
+			}
+		}
+		if e.repo != nil && e.repo.Series != nil {
+			series, err := e.repo.Series.FindByID(ctx, seriesID)
+			if err != nil {
+				return embyPayloadSeriesEntry{}, false, err
+			}
+			if series == nil {
+				return embyPayloadSeriesEntry{}, false, nil
+			}
+			return embyPayloadSeriesEntry{
+				title:       series.Title,
+				posterURL:   series.PosterURL,
+				backdropURL: series.BackdropURL,
+				found:       true,
+			}, true, nil
+		}
+		return embyPayloadSeriesEntry{}, false, nil
+	}

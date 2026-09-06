@@ -3,10 +3,13 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -18,6 +21,12 @@ import (
 	"github.com/truewhile/MeBox/internal/repository"
 )
 
+type temporaryPasswordEntry struct {
+	userID    string
+	username  string
+	expiresAt time.Time
+}
+
 // AuthService handles registration, login, and JWT issuance.
 type AuthService struct {
 	cfg           *config.Config
@@ -25,11 +34,21 @@ type AuthService struct {
 	repo          *repository.Container
 	tokenSvc      *TokenService
 	permissionSvc *PermissionService
+
+	tempPassMu    sync.RWMutex
+	tempPasswords map[string]temporaryPasswordEntry
 }
 
 // NewAuthService is the constructor.
 func NewAuthService(cfg *config.Config, log *zap.Logger, repo *repository.Container, tokenSvc *TokenService, permissionSvc *PermissionService) *AuthService {
-	return &AuthService{cfg: cfg, log: log, repo: repo, tokenSvc: tokenSvc, permissionSvc: permissionSvc}
+	return &AuthService{
+		cfg:           cfg,
+		log:           log,
+		repo:          repo,
+		tokenSvc:      tokenSvc,
+		permissionSvc: permissionSvc,
+		tempPasswords: make(map[string]temporaryPasswordEntry),
+	}
 }
 
 // Common service-level errors.
@@ -253,4 +272,99 @@ func hashPassword(p string) (string, error) {
 		return "", err
 	}
 	return string(h), nil
+}
+
+const temporaryPasswordTTL = 5 * time.Minute
+
+// CreateTemporaryPassword 为指定用户生成一个 6 位数字的临时登录密码（有效期 5 分钟），
+// 供 Emby 电视端/客户端进行无键盘或快速输入登录。
+func (s *AuthService) CreateTemporaryPassword(ctx context.Context, userID string) (string, int, error) {
+	if s == nil || s.repo == nil {
+		return "", 0, errors.New("auth service unavailable")
+	}
+	user, err := s.repo.User.FindByID(ctx, userID)
+	if err != nil || user == nil {
+		return "", 0, ErrInvalidCredentials
+	}
+	if !user.IsActive {
+		return "", 0, ErrUserInactive
+	}
+	if user.ExpiredAt != nil && time.Now().After(*user.ExpiredAt) {
+		return "", 0, ErrUserExpired
+	}
+
+	n, err := rand.Int(rand.Reader, big.NewInt(900000))
+	if err != nil {
+		return "", 0, err
+	}
+	code := fmt.Sprintf("%06d", n.Int64()+100000)
+
+	s.tempPassMu.Lock()
+	defer s.tempPassMu.Unlock()
+	now := time.Now()
+	for k, v := range s.tempPasswords {
+		if now.After(v.expiresAt) {
+			delete(s.tempPasswords, k)
+		}
+	}
+	s.tempPasswords[code] = temporaryPasswordEntry{
+		userID:    user.ID,
+		username:  user.Username,
+		expiresAt: now.Add(temporaryPasswordTTL),
+	}
+
+	return code, int(temporaryPasswordTTL.Seconds()), nil
+}
+
+// VerifyAndConsumeTemporaryPassword 校验并消费临时登录密码（阅后即焚）。
+func (s *AuthService) VerifyAndConsumeTemporaryPassword(ctx context.Context, username, code string) (*model.User, bool) {
+	if s == nil || s.repo == nil {
+		return nil, false
+	}
+	code = strings.TrimSpace(code)
+	if len(code) != 6 {
+		return nil, false
+	}
+	s.tempPassMu.Lock()
+	entry, ok := s.tempPasswords[code]
+	if ok {
+		delete(s.tempPasswords, code)
+	}
+	s.tempPassMu.Unlock()
+
+	if !ok || time.Now().After(entry.expiresAt) {
+		return nil, false
+	}
+
+	if strings.TrimSpace(username) != "" && !strings.EqualFold(strings.TrimSpace(username), entry.username) {
+		return nil, false
+	}
+
+	user, err := s.repo.User.FindByID(ctx, entry.userID)
+	if err != nil || user == nil || !user.IsActive {
+		return nil, false
+	}
+	if user.ExpiredAt != nil && time.Now().After(*user.ExpiredAt) {
+		return nil, false
+	}
+	return user, true
+}
+
+// LoginWithTemporaryPassword 尝试使用 6 位数字临时登录密码 (OTP) 进行登录。
+func (s *AuthService) LoginWithTemporaryPassword(ctx context.Context, username, code string) (*LoginResponse, error) {
+	user, ok := s.VerifyAndConsumeTemporaryPassword(ctx, username, code)
+	if !ok || user == nil {
+		return nil, ErrInvalidCredentials
+	}
+	if s.tokenSvc == nil {
+		return nil, errors.New("token service unavailable")
+	}
+	tokens, err := s.tokenSvc.IssuePair(ctx, user.ID, user.Role, user.Tier)
+	if err != nil {
+		return nil, err
+	}
+	return &LoginResponse{
+		User:   user,
+		Tokens: tokens,
+	}, nil
 }

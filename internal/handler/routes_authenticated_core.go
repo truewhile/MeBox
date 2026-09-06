@@ -14,6 +14,8 @@ func registerAuthedUserAndLicenseRoutes(authed *gin.RouterGroup, svc *service.Co
 	authed.PUT("/me/pinned-libraries", setPinnedLibrariesHandler(svc))
 	authed.POST("/me/password", changePasswordHandler(svc))
 	authed.POST("/me/logout", logoutHandler(svc))
+	authed.GET("/me/temporary-password", temporaryPasswordHandler(svc))
+	authed.POST("/me/temporary-password", temporaryPasswordHandler(svc))
 
 	authed.GET("/auth/permissions", getMyPermissionsHandler(svc))
 }
