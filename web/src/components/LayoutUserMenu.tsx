@@ -2,11 +2,12 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNo
 import { createPortal } from 'react-dom'
 import { Link, useLocation } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
-import { Cast, ChevronDown, Clock, Heart, ListMusic, LogOut, Settings, UserCog } from 'lucide-react'
+import { Cast, ChevronDown, Clock, Heart, ListMusic, LogOut, Settings, Tv, UserCog } from 'lucide-react'
 import clsx from 'clsx'
 
 import type { PlayProfile } from '../types'
 import { LayoutThemeToggle } from './LayoutThemeToggle'
+import { TemporaryPasswordDialog } from './TemporaryPasswordDialog'
 import type { ThemeMode } from './useThemeMode'
 
 type MenuPosition = {
@@ -52,6 +53,7 @@ export function LayoutUserMenu({
   const triggerRef = useRef<HTMLButtonElement>(null)
   const onCloseRef = useRef(onClose)
   const [menuPosition, setMenuPosition] = useState<MenuPosition | null>(null)
+  const [isOtpOpen, setIsOtpOpen] = useState(false)
 
   onCloseRef.current = onClose
 
@@ -121,11 +123,22 @@ export function LayoutUserMenu({
             className="fixed z-[121] w-56 origin-top-right rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel)] p-2 shadow-xl"
             onPointerDown={(event) => event.stopPropagation()}
           >
-            <UserMenuLink to="/profile" icon={<Settings size={16} />} label="设置" onNavigate={onClose} />
-            <UserMenuLink to="/favourites" icon={<Heart size={16} />} label="我的收藏" onNavigate={onClose} />
-            <UserMenuLink to="/playlists" icon={<ListMusic size={16} />} label="播放列表" onNavigate={onClose} />
-            <UserMenuLink to="/history" icon={<Clock size={16} />} label="观看历史" onNavigate={onClose} />
-            <UserMenuLink to="/dlna" icon={<Cast size={16} />} label="DLNA投屏" onNavigate={onClose} />
+	            <UserMenuLink to="/profile" icon={<Settings size={16} />} label="设置" onNavigate={onClose} />
+	            <UserMenuLink to="/favourites" icon={<Heart size={16} />} label="我的收藏" onNavigate={onClose} />
+	            <UserMenuLink to="/playlists" icon={<ListMusic size={16} />} label="播放列表" onNavigate={onClose} />
+	            <UserMenuLink to="/history" icon={<Clock size={16} />} label="观看历史" onNavigate={onClose} />
+	            <UserMenuLink to="/dlna" icon={<Cast size={16} />} label="DLNA投屏" onNavigate={onClose} />
+	            <button
+	              type="button"
+	              onClick={() => {
+	                onClose()
+	                setIsOtpOpen(true)
+	              }}
+	              className="flex w-full items-center gap-3 rounded-xl px-3 py-2 text-sm text-[var(--app-subtle)] transition-colors hover:bg-[var(--app-hover)] hover:text-[var(--app-text)]"
+	            >
+	              <Tv size={16} />
+	              <span>电视端临时登录码</span>
+	            </button>
             {themeMode && onThemeChange ? (
               <div className="px-3 py-2 sm:hidden">
                 <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-[var(--app-muted)]">
@@ -203,6 +216,7 @@ export function LayoutUserMenu({
         <ChevronDown size={14} className="text-[var(--app-muted)]" />
       </button>
       {menuPortal}
+      <TemporaryPasswordDialog isOpen={isOtpOpen} onClose={() => setIsOtpOpen(false)} />
     </div>
   )
 }

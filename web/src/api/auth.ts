@@ -19,4 +19,7 @@ export const authAPI = {
     api
       .post('/me/password', { old_password: oldPassword, new_password: newPassword })
       .then((r) => r.data),
+
+  createTemporaryPassword: () =>
+    api.post<{ code: string; expires_in: number }>('/me/temporary-password').then((r) => r.data),
 }
