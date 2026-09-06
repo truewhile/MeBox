@@ -23,6 +23,14 @@ func registerEmbyRoutes(r *gin.Engine, jwtSecret string, svc *service.Container)
 		auth := grp.Group("", embyAuthRequiredWithSessionFallback(jwtSecret), activeEmbyUserRequired(svc), embyRealtimeSessionActivity(svc))
 		registerEmbyAuthenticatedRoutes(auth, prefix, svc)
 	}
+
+	// 为没有设置 NoRoute 的 Engine 提供 Emby 路径前缀与大小写纠偏（如单测或独立挂载环境）
+	r.NoRoute(func(c *gin.Context) {
+		if TryHandleEmbyNormalizedRoute(c, r) {
+			return
+		}
+		c.Status(404)
+	})
 }
 
 type embyRouteHandlerFactory func(*service.Container) gin.HandlerFunc

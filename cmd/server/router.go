@@ -70,8 +70,11 @@ func serveSPA(r *gin.Engine, root fs.FS) {
 		r.GET(rootFile, serveFSFile(root, name))
 		r.HEAD(rootFile, serveFSFile(root, name))
 	}
-	r.NoRoute(middleware.GzipStatic(), func(c *gin.Context) {
-		path := c.Request.URL.Path
+		r.NoRoute(middleware.GzipStatic(), func(c *gin.Context) {
+			if handler.TryHandleEmbyNormalizedRoute(c, r) {
+				return
+			}
+			path := c.Request.URL.Path
 		if shouldBypassSPAFallback(path) {
 			c.Status(http.StatusNotFound)
 			return

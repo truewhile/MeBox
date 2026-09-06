@@ -137,7 +137,7 @@ export function LayoutWorkspace({ routeKey, showMobileBottomNav = false }: Layou
   }
 
   return (
-    <main id="app-main-scroll" className={clsx('flex-1 overflow-y-auto px-4 py-6 md:px-8 md:py-10', bottomPad)}>
+    <main id="app-main-scroll" className={clsx('flex-1 overflow-y-auto [overflow-anchor:none] px-4 py-6 md:px-8 md:py-10', bottomPad)}>
       <div className="max-w-7xl mx-auto">
         <AnimatePresence mode="wait">
           <motion.div

@@ -11,6 +11,10 @@ import (
 
 // SystemInfo returns the full Emby identity payload.
 func (e *EmbyService) SystemInfo() map[string]any {
+	port := 8096
+	if e != nil && e.cfg != nil {
+		port = e.cfg.App.Port
+	}
 	return map[string]any{
 		"Id":                     embyServerID,
 		"ServerId":               embyServerID,
@@ -27,10 +31,10 @@ func (e *EmbyService) SystemInfo() map[string]any {
 		"SupportsLibraryMonitor": true,
 		"SupportsHttps":          false,
 		"SupportsAutoDiscovery":  true,
-		"HttpServerPortNumber":   e.cfg.App.Port,
+		"HttpServerPortNumber":   port,
 		"HttpsPortNumber":        0,
 		"PublishedServerUrl":     "",
-		"WebSocketPortNumber":    e.cfg.App.Port,
+		"WebSocketPortNumber":    port,
 		"CompletedInstallations": []any{},
 		"CanSelfRestart":         false,
 		"CanLaunchWebBrowser":    false,
@@ -40,6 +44,10 @@ func (e *EmbyService) SystemInfo() map[string]any {
 
 // SystemInfoPublic 是不需要认证的精简版（Emby Web 客户端登陆前会拉）。
 func (e *EmbyService) SystemInfoPublic() map[string]any {
+	port := 8096
+	if e != nil && e.cfg != nil {
+		port = e.cfg.App.Port
+	}
 	return map[string]any{
 		"Id":                     embyServerID,
 		"ServerId":               embyServerID,
@@ -50,7 +58,7 @@ func (e *EmbyService) SystemInfoPublic() map[string]any {
 		"OperatingSystem":        "Windows",
 		"LocalAddress":           "",
 		"WanAddress":             "",
-		"HttpServerPortNumber":   e.cfg.App.Port,
+		"HttpServerPortNumber":   port,
 		"HttpsPortNumber":        0,
 		"SupportsHttps":          false,
 		"SupportsAutoDiscovery":  true,
