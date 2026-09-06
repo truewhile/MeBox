@@ -123,35 +123,41 @@ func (p *openAPI115Provider) ResolveBatch(ctx context.Context, fileRefs []string
 // OpenClient 暴露底层客户端（token 刷新用）。
 func (p *openAPI115Provider) OpenClient() *cloud115.OpenClient { return p.c }
 
+// PutLocalFile 直接上传本地文件，避免通过 io.Reader 复制临时文件产生的磁盘开销与并发重命名碰撞。
+func (p *openAPI115Provider) PutLocalFile(ctx context.Context, parentCID, localPath string) error {
+	_, err := p.c.Upload(ctx, localPath, parentCID, "", "")
+	return err
+}
+
 // PutFileNamed 把本地元数据上传到 115 指定父目录（parentCID 为父目录 cid）。
-// io.Reader 无法携带文件名，因此走独立的 named 上传接口。将内容落为临时文件后
-// 重命名为目标文件名，再交给 115 上传（/open/upload/init 的 file_name 取真实文件名）。
+// 为防止多并发上传线程在同一临时目录下发生同名文件（如 poster.jpg）碰撞覆盖与误删，
+// 为每个上传任务分配专属临时子目录。
 func (p *openAPI115Provider) PutFileNamed(ctx context.Context, parentCID, fileName string, r io.Reader) error {
-	tmp, err := os.CreateTemp("", "mebox-upload-*")
+	tmpDir, err := os.MkdirTemp("", "mebox-upload-*")
+	if err != nil {
+		return fmt.Errorf("115: 创建临时目录失败：%w", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(tmpDir)
+	}()
+
+	safeName := filepath.Base(fileName)
+	if safeName == "" || safeName == "." {
+		safeName = "file"
+	}
+	tmpPath := filepath.Join(tmpDir, safeName)
+	dst, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return fmt.Errorf("115: 创建临时文件失败：%w", err)
 	}
-	tmpPath := tmp.Name()
-	defer func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
-	}()
-	if _, err := io.Copy(tmp, r); err != nil {
+	if _, err := io.Copy(dst, r); err != nil {
+		_ = dst.Close()
 		return fmt.Errorf("115: 写入临时文件失败：%w", err)
 	}
-	if err := tmp.Close(); err != nil {
+	if err := dst.Close(); err != nil {
 		return fmt.Errorf("115: 关闭临时文件失败：%w", err)
 	}
-	// 重命名为目标文件名，保证上传到 115 后保留原始文件名。
-	// 重命名失败必须 fail fast：静默用随机临时名上传会导致 115 上的文件名
-	// 变成 mebox-upload-xxx，破坏元数据文件名契约。
-	if fileName != "" && fileName != filepath.Base(tmpPath) {
-		namedPath := filepath.Join(filepath.Dir(tmpPath), fileName)
-		if err := os.Rename(tmpPath, namedPath); err != nil {
-			return fmt.Errorf("115: 重命名临时文件为 %s 失败：%w", fileName, err)
-		}
-		tmpPath = namedPath
-	}
+
 	_, err = p.c.Upload(ctx, tmpPath, parentCID, "", "")
 	if err != nil {
 		return err

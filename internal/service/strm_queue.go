@@ -378,27 +378,39 @@ func (s *StrmService) processUpload115(ctx context.Context, task *model.StrmUplo
 			return
 		}
 		refs := strings.Split(task.RemoteRef, ",")
-		if err := open115.OpenClient().DeleteFiles(ctx, task.RemotePath, refs...); err != nil {
-			s.log.Warn("删除网盘旧元数据失败，跳过删除继续上传新文件",
-				zap.String("task_id", task.ID),
-				zap.String("local_path", task.LocalPath),
-				zap.Error(err))
-			// 不 return：继续上传新文件，旧副本由下次同步清理
+			if err := open115.OpenClient().DeleteFiles(ctx, task.RemotePath, refs...); err != nil {
+				s.log.Warn("删除网盘旧元数据失败，跳过删除继续上传新文件",
+					zap.String("task_id", task.ID),
+					zap.String("local_path", task.LocalPath),
+					zap.Error(err))
+				// 不 return：继续上传新文件，旧副本由下次同步清理
+			}
 		}
-	}
-	f, err := os.Open(task.LocalPath)
-	if err != nil {
-		s.uploadTaskFailWithRetry(task, "打开本地文件失败："+err.Error())
-		return
-	}
-	if err := named.PutFileNamed(ctx, task.RemotePath, task.FileName, f); err != nil {
+		// 优先使用直接本地文件上传接口，零拷贝且彻底根除并发临时文件同名碰撞
+		if localUploader, ok := provider.(interface {
+			PutLocalFile(ctx context.Context, parentCID, localPath string) error
+		}); ok {
+			if err := localUploader.PutLocalFile(ctx, task.RemotePath, task.LocalPath); err != nil {
+				s.uploadTaskFailWithRetry(task, "上传失败："+err.Error())
+				return
+			}
+			finish(model.StrmTaskDone, "")
+			return
+		}
+
+		f, err := os.Open(task.LocalPath)
+		if err != nil {
+			s.uploadTaskFailWithRetry(task, "打开本地文件失败："+err.Error())
+			return
+		}
+		if err := named.PutFileNamed(ctx, task.RemotePath, task.FileName, f); err != nil {
+			_ = f.Close()
+			s.uploadTaskFailWithRetry(task, "上传失败："+err.Error())
+			return
+		}
 		_ = f.Close()
-		s.uploadTaskFailWithRetry(task, "上传失败："+err.Error())
-		return
+		finish(model.StrmTaskDone, "")
 	}
-	_ = f.Close()
-	finish(model.StrmTaskDone, "")
-}
 
 // downloadTaskFailWithRetry 下载失败任务按退避重试，超过上限标记 failed。
 func (s *StrmService) downloadTaskFailWithRetry(task *model.StrmDownloadTask, message string) {
