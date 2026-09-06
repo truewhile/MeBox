@@ -1319,3 +1319,113 @@ func TestScanLocalMetaForUploadMultipleCopiesAllStale(t *testing.T) {
 		t.Fatalf("expected RemoteRef to be 'old-1,old-2', got %q", tasks[0].RemoteRef)
 	}
 }
+
+// TestWalk115AdaptiveHierarchicalFlatScan 验证自适应分治扁平化扫描：
+// 当根目录探测总数 >= 9500 时，系统自动分治展开单层直接子项，对各子目录分别执行扁平拉取，
+// 正确合并根目录直属文件与各子目录深层文件，突破 115 开放平台 10000 深度限制。
+func TestWalk115AdaptiveHierarchicalFlatScan(t *testing.T) {
+	svc := testStrmService(t)
+	localDir := t.TempDir()
+	acct := &model.StrmAccount{Name: "fake115-adaptive", Provider: "cloud115", Config: "{}", Enabled: true}
+	if err := svc.repo.StrmAccount.Create(context.Background(), acct); err != nil {
+		t.Fatal(err)
+	}
+	p := &model.StrmSyncPath{
+		Base:       model.Base{ID: "adaptive-path"},
+		AccountID:  acct.ID,
+		Provider:   model.StrmProvider115,
+		RemotePath: "0",
+		LocalPath:  localDir,
+	}
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		cid := q.Get("cid")
+		cur := q.Get("cur")
+
+		switch r.URL.Path {
+		case "/open/ufile/files":
+			if cid == "0" && cur == "0" {
+				// 根目录扁平探测：模拟总文件数 12000 超限 (>= 9500)
+				w.Write([]byte(`{"state":true,"count":12000,"data":[]}`))
+				return
+			}
+			if cid == "0" && cur == "1" {
+				// 根目录单层列举：返回 1 个直属视频和 2 个子目录
+				w.Write([]byte(`{"state":true,"count":3,"data":[
+					{"fid":"100","pid":"0","fc":"1","fn":"root.mkv","pc":"pcr","upt":1700000000,"fs":1024},
+					{"fid":"1001","pid":"0","fc":"0","fn":"Heyzo","upt":1700000001,"fs":0},
+					{"fid":"1002","pid":"0","fc":"0","fn":"S1","upt":1700000002,"fs":0}]}`))
+				return
+			}
+			if cid == "1001" {
+				// 子目录 Heyzo 扁平拉取：文件数安全 (< 9500)
+				w.Write([]byte(`{"state":true,"count":2,"data":[
+					{"fid":"201","pid":"1001","fc":"1","fn":"h1.mkv","pc":"pc201","upt":1700000001,"fs":1024},
+					{"fid":"202","pid":"1001","fc":"1","fn":"h2.mkv","pc":"pc202","upt":1700000002,"fs":2048}]}`))
+				return
+			}
+			if cid == "1002" {
+				// 子目录 S1 扁平拉取：文件数安全 (< 9500)
+				w.Write([]byte(`{"state":true,"count":1,"data":[
+					{"fid":"301","pid":"1002","fc":"1","fn":"s1.mkv","pc":"pc301","upt":1700000003,"fs":4096}]}`))
+				return
+			}
+			t.Errorf("unexpected files query: %s", r.URL.RawQuery)
+		case "/open/folder/get_info":
+			fileID := q.Get("file_id")
+			switch fileID {
+			case "1001":
+				w.Write([]byte(`{"state":true,"data":{"file_id":"1001","file_name":"Heyzo","file_category":"0",
+					"paths":[{"file_id":"0","file_name":"根目录"},{"file_id":"1001","file_name":"Heyzo"}]}}`))
+			case "1002":
+				w.Write([]byte(`{"state":true,"data":{"file_id":"1002","file_name":"S1","file_category":"0",
+					"paths":[{"file_id":"0","file_name":"根目录"},{"file_id":"1002","file_name":"S1"}]}}`))
+			default:
+				t.Errorf("unexpected get_info file_id: %s", fileID)
+			}
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer api.Close()
+	oldPro := cloud115.ProAPIBase
+	cloud115.ProAPIBase = api.URL
+	defer func() { cloud115.ProAPIBase = oldPro }()
+
+	oc := cloud115.NewOpenClient("app", "at", "rt")
+	st := &strmSyncState{
+		s:               svc,
+		ctx:             context.Background(),
+		p:               p,
+		provider:        cloud.NewOpenAPI115("app", "at", "rt"),
+		cfg:             &strmPathConfig{VideoExt: []string{"mkv"}, MetaExt: []string{"nfo"}, AddPath: 1},
+		rec:             &model.StrmSyncRecord{},
+		syncType:        model.StrmSyncTypeFull,
+		dirCache:        sync.Map{},
+		seenVideo:       map[string]bool{},
+		seenMeta:        map[string]bool{},
+		remoteMeta:      map[string][]remoteMetaItem{},
+		seenMetaTarget:  map[string]cloud.FileEntry{},
+		seenVideoTarget: map[string]cloud.FileEntry{},
+	}
+	if err := st.walk115Flat(oc); err != nil {
+		t.Fatalf("walk115Flat adaptive failed: %v", err)
+	}
+
+	// 1个根目录视频 + 2个Heyzo视频 + 1个S1视频 = 共4个视频成功生成 .strm
+	if st.rec.NewStrm != 4 {
+		t.Fatalf("expected 4 strm created, got %d", st.rec.NewStrm)
+	}
+	expectedFiles := []string{
+		filepath.Join(localDir, "root.strm"),
+		filepath.Join(localDir, "Heyzo", "h1.strm"),
+		filepath.Join(localDir, "Heyzo", "h2.strm"),
+		filepath.Join(localDir, "S1", "s1.strm"),
+	}
+	for _, f := range expectedFiles {
+		if _, err := os.Stat(f); err != nil {
+			t.Fatalf("expected strm %s to exist, err: %v", f, err)
+		}
+	}
+}
