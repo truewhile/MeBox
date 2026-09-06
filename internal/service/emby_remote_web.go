@@ -180,21 +180,31 @@ func (r *EmbyRemoteService) MapRemoteItemToMedia(ctx context.Context, mount *mod
 	if _, rid, ok := DecodeEmbyRemoteID(seriesID); ok {
 		seriesID = rid
 	}
-	rating := remoteItemFloat(item, "CommunityRating")
-	if rating == 0 {
-		rating = remoteItemFloat(item, "CriticRating")
-	}
-	media := model.Media{
-		Base:         model.Base{ID: EncodeEmbyRemoteID(encodeScope, remoteID)},
-		Title:        remoteItemString(item, "Name"),
-		OriginalName: remoteItemString(item, "OriginalTitle"),
-		Overview:     remoteItemString(item, "Overview"),
-		Year:         remoteItemInt(item, "ProductionYear"),
-		Rating:       float32(rating),
-		Path:         remoteItemString(item, "Path"),
-		Genres:       remoteItemGenres(item),
-		ScrapeStatus: "done",
-	}
+		rating := remoteItemFloat(item, "CommunityRating")
+		if rating == 0 {
+			rating = remoteItemFloat(item, "CriticRating")
+		}
+		year := remoteItemInt(item, "ProductionYear")
+		if year == 0 {
+			year = remoteItemInt(item, "Year")
+		}
+		if year == 0 {
+			year = remoteItemInt(item, "SeriesProductionYear")
+		}
+		if year == 0 {
+			year = remoteItemInt(item, "SeriesYear")
+		}
+		media := model.Media{
+			Base:         model.Base{ID: EncodeEmbyRemoteID(encodeScope, remoteID)},
+			Title:        remoteItemString(item, "Name"),
+			OriginalName: remoteItemString(item, "OriginalTitle"),
+			Overview:     remoteItemString(item, "Overview"),
+			Year:         year,
+			Rating:       float32(rating),
+			Path:         remoteItemString(item, "Path"),
+			Genres:       remoteItemGenres(item),
+			ScrapeStatus: "done",
+		}
 	if date, ok := parseEmbyRemoteDate(remoteItemString(item, "DateCreated")); ok {
 		media.CreatedAt = date
 		media.UpdatedAt = date
@@ -561,6 +571,46 @@ func (r *EmbyRemoteService) RemoteLatestCards(ctx context.Context, mount *model.
 	if r.cache != nil && r.cache.GetJSON(ctx, cacheKey, &cached) {
 		return cached, nil
 	}
+
+	// 剧集类媒体库：直接拉取最新入库/更新的 Series 剧集本身（按上次添加集日期倒序）。
+	// 避免 Emby /Items/Latest 默认返回无年份/无系列海报的单集（Episode）。
+	if mount != nil && (mount.CollectionType == "tvshows" || mount.CollectionType == "tv") {
+		q := url.Values{}
+		q.Set("ParentId", remoteViewID)
+		q.Set("IncludeItemTypes", "Series")
+		q.Set("Recursive", "false")
+		q.Set("SortBy", "DateLastContentAdded")
+		q.Set("SortOrder", "Descending")
+		q.Set("Limit", strconv.Itoa(limit))
+		q.Set("Fields", "Overview,Genres,ProviderIds,Path,RecursiveItemCount,SeriesPrimaryImage,DateCreated,DateLastMediaAdded,PremiereDate,ProductionYear,CommunityRating,CriticRating")
+		var body struct {
+			Items []map[string]any `json:"Items"`
+		}
+		if err := r.doGet(ctx, acct, cfg, "/Users/"+url.PathEscape(r.remoteUserID(cfg))+"/Items", q, &body); err == nil && len(body.Items) > 0 {
+			cards := make([]SeriesCard, 0, len(body.Items))
+			for _, it := range body.Items {
+				RewriteEmbyRemoteIDs(it, mount.ID)
+				m := r.MapRemoteItemToMedia(ctx, mount, acct, cfg, it)
+				count := remoteItemInt(it, "RecursiveItemCount")
+				if count == 0 {
+					count = remoteItemInt(it, "ChildCount")
+				}
+				if count == 0 {
+					count = 1
+				}
+				var lastAdded *time.Time
+				if date, ok := parseEmbyRemoteDate(remoteItemString(it, "DateLastMediaAdded")); ok {
+					lastAdded = &date
+				}
+				cards = append(cards, SeriesCard{Key: m.ID, Rep: m, LinkMedia: m, Count: count, LastAddedAt: lastAdded})
+			}
+			if r.cache != nil {
+				r.cache.SetJSON(ctx, cacheKey, cards, r.remoteMediaCacheTTL())
+			}
+			return cards, nil
+		}
+	}
+
 	items, err := r.RemoteLatest(ctx, mount, acct, remoteViewID, limit)
 	if err != nil {
 		return nil, err
@@ -576,7 +626,11 @@ func (r *EmbyRemoteService) RemoteLatestCards(ctx context.Context, mount *model.
 			t := m.CreatedAt
 			lastAdded = &t
 		}
-		cards = append(cards, SeriesCard{Key: m.ID, Rep: m, LinkMedia: m, Count: 0, LastAddedAt: lastAdded})
+		count := remoteItemInt(it, "RecursiveItemCount")
+		if count == 0 {
+			count = remoteItemInt(it, "ChildCount")
+		}
+		cards = append(cards, SeriesCard{Key: m.ID, Rep: m, LinkMedia: m, Count: count, LastAddedAt: lastAdded})
 	}
 	if r.cache != nil {
 		r.cache.SetJSON(ctx, cacheKey, cards, r.remoteMediaCacheTTL())

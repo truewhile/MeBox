@@ -170,7 +170,13 @@ func listLibrariesHandler(svc *service.Container) gin.HandlerFunc {
 								if acct == nil {
 									return
 								}
-								tmpMount := &model.EmbyMount{Base: model.Base{ID: v.MountID}}
+									tmpMount := &model.EmbyMount{
+										Base:           model.Base{ID: v.MountID},
+										AccountID:      v.AccountID,
+										RemoteViewID:   v.RemoteID,
+										CollectionType: v.CollectionType,
+										Name:           v.Library.Name,
+									}
 								itemTypes := remoteLibraryItemTypes(v.CollectionType)
 								if _, total, err := svc.EmbyRemote.RemoteLibraryMedia(ctx, tmpMount, acct, v.RemoteID, itemTypes, 0, 1); err == nil {
 									remotePayloads[i].Total = total

@@ -400,3 +400,130 @@ func TestRemoteSearchMedia(t *testing.T) {
 		t.Fatalf("expected 0 items due to HiddenLibraryIDs, got %d", len(hiddenFiltered))
 	}
 }
+
+func TestRemoteLatestCardsTvShowsYearAndPoster(t *testing.T) {
+	var requestedFields string
+	var requestedIncludeItemTypes string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedFields = r.URL.Query().Get("Fields")
+		requestedIncludeItemTypes = r.URL.Query().Get("IncludeItemTypes")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"TotalRecordCount": 1,
+			"Items": []map[string]any{
+				{
+					"Id":             "series-100",
+					"Name":           "炒翻天",
+					"Type":           "Series",
+					"ProductionYear": 2024,
+					"ImageTags": map[string]any{
+						"Primary": "tag123",
+					},
+					"RecursiveItemCount": 12,
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	db := newServiceTestDB(t, &model.StrmAccount{}, &model.EmbyMount{})
+	repos := repository.New(db)
+	svc := NewEmbyRemoteService(&config.Config{}, zap.NewNop(), repos, NewCryptoService("", zap.NewNop()))
+
+	rawConfig, _ := json.Marshal(map[string]string{
+		"url":   server.URL,
+		"token": "fake-token",
+	})
+	acct := &model.StrmAccount{
+		Base:     model.Base{ID: "acct-tv"},
+		Name:     "tv-emby",
+		Provider: model.StrmProviderEmbyRemote,
+		Config:   string(rawConfig),
+		Enabled:  true,
+	}
+	_ = repos.StrmAccount.Create(t.Context(), acct)
+	mount := &model.EmbyMount{
+		Base:           model.Base{ID: "mount-tv"},
+		AccountID:      acct.ID,
+		RemoteViewID:   "view-tv",
+		RemoteViewName: "新番连载",
+		CollectionType: "tvshows",
+		Enabled:        true,
+	}
+	_ = repos.EmbyMount.Create(t.Context(), mount)
+
+	cards, err := svc.RemoteLatestCards(t.Context(), mount, acct, "view-tv", 10)
+	if err != nil {
+		t.Fatalf("RemoteLatestCards failed: %v", err)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("expected 1 card, got %d", len(cards))
+	}
+	if cards[0].Rep.Year != 2024 {
+		t.Fatalf("expected Year 2024, got %d", cards[0].Rep.Year)
+	}
+	if cards[0].Count != 12 {
+		t.Fatalf("expected Count 12, got %d", cards[0].Count)
+	}
+	if cards[0].Rep.PosterURL == "" {
+		t.Fatalf("expected PosterURL not empty")
+	}
+	if requestedIncludeItemTypes != "Series" {
+		t.Fatalf("expected IncludeItemTypes=Series, got %q", requestedIncludeItemTypes)
+	}
+	if !strings.Contains(requestedFields, "ProductionYear") {
+		t.Fatalf("expected Fields to contain ProductionYear, got %q", requestedFields)
+	}
+}
+
+func TestRemoteLatestFields(t *testing.T) {
+	var requestedFields string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedFields = r.URL.Query().Get("Fields")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"Id":             "movie-100",
+				"Name":           "测试电影",
+				"Type":           "Movie",
+				"ProductionYear": 2023,
+			},
+		})
+	}))
+	defer server.Close()
+
+	db := newServiceTestDB(t, &model.StrmAccount{}, &model.EmbyMount{})
+	repos := repository.New(db)
+	svc := NewEmbyRemoteService(&config.Config{}, zap.NewNop(), repos, NewCryptoService("", zap.NewNop()))
+
+	rawConfig, _ := json.Marshal(map[string]string{
+		"url":   server.URL,
+		"token": "fake-token",
+	})
+	acct := &model.StrmAccount{
+		Base:     model.Base{ID: "acct-movie"},
+		Name:     "movie-emby",
+		Provider: model.StrmProviderEmbyRemote,
+		Config:   string(rawConfig),
+		Enabled:  true,
+	}
+	_ = repos.StrmAccount.Create(t.Context(), acct)
+	mount := &model.EmbyMount{
+		Base:           model.Base{ID: "mount-movie"},
+		AccountID:      acct.ID,
+		RemoteViewID:   "view-movie",
+		CollectionType: "movies",
+		Enabled:        true,
+	}
+
+	items, err := svc.RemoteLatest(t.Context(), mount, acct, "view-movie", 10)
+	if err != nil {
+		t.Fatalf("RemoteLatest failed: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if !strings.Contains(requestedFields, "ProductionYear") {
+		t.Fatalf("expected Fields to contain ProductionYear, got %q", requestedFields)
+	}
+}

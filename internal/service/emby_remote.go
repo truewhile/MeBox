@@ -820,6 +820,7 @@ func (r *EmbyRemoteService) RemoteLatest(ctx context.Context, mount *model.EmbyM
 	if parentID != "" {
 		q.Set("ParentId", parentID)
 	}
+	q.Set("Fields", "Overview,Genres,ProviderIds,Path,SeriesPrimaryImage,DateCreated,DateLastMediaAdded,PremiereDate,ProductionYear,CommunityRating,CriticRating")
 	path := "/Users/" + url.PathEscape(r.remoteUserID(cfg)) + "/Items/Latest"
 	var out []map[string]any
 	if err := r.doGet(ctx, acct, cfg, path, q, &out); err != nil {
