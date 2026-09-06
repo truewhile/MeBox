@@ -514,28 +514,31 @@ func (st *strmSyncState) walkRemote() error {
 						if task.rel != "" {
 							rel = task.rel + "/" + cleanName
 						}
-						if entry.IsDir {
-							push(dirTask{id: entry.ID, rel: rel})
-						} else {
-							st.processRemoteFile(entry, rel)
+							if entry.IsDir {
+								st.dirCache.Store(entry.ID, rel)
+								st.deferDirCacheSave(entry.ID, rel)
+								push(dirTask{id: entry.ID, rel: rel})
+							} else {
+								st.processRemoteFile(entry, rel)
+							}
 						}
+						walkMu.Lock()
+						pending--
+						if pending == 0 {
+							walkCond.Broadcast()
+						}
+						walkMu.Unlock()
 					}
-					walkMu.Lock()
-					pending--
-					if pending == 0 {
-						walkCond.Broadcast()
-					}
-					walkMu.Unlock()
+				}); err != nil {
+					cancel()
 				}
-			}); err != nil {
-				cancel()
-			}
-		}()
-	}
-	wg.Wait()
-	if firstErr != nil {
-		return firstErr
-	}
+			}()
+		}
+		wg.Wait()
+		st.flushDirCacheSave()
+		if firstErr != nil {
+			return firstErr
+		}
 	return ctx.Err()
 }
 
@@ -674,93 +677,16 @@ func (st *strmSyncState) walk115Flat(open115 *cloud115.OpenClient) error {
 				if pathCounts[item.Path] > 1 {
 					continue
 				}
-				st.dirCache.Store(item.DirID, cleanDirRel(item.Path))
+					st.dirCache.Store(item.DirID, cleanDirRel(item.Path))
+				}
 			}
 		}
-	}
 
-	// 2. 探测文件总数
-	const pageSize = 1150
-	firstBatch, totalCount, err := open115.GetFsListFlat(ctx, rootCID, 0, pageSize)
-	if err != nil {
-		return fmt.Errorf("115: 获取文件列表失败：%w", err)
-	}
-
-	// 115 的扁平化列表（搜索底层）对 offset + limit 有 10000 的最大深度限制。
-	// 当扁平模式下的总文件数 >= 9500 时，强行拒绝继续扁平拉取，而是抛出降级错误，
-	// 让外层回退到使用普通的按目录并发递归（walkRemote），以免截断导致后排文件被误删/重传。
-	if totalCount >= 9500 {
-		return errFallbackToWalkRemote
-	}
-
-	st.updateSyncMessage(fmt.Sprintf("正在拉取远端文件列表 (共 %d 个文件)...", totalCount))
-
-	allFiles := make([]cloud115.RemoteFile, 0, totalCount)
-	allFiles = append(allFiles, firstBatch...)
-
-	// 3. 并发分页拉取剩余文件
-	if totalCount > int64(len(firstBatch)) {
-		totalPages := int((totalCount + pageSize - 1) / pageSize)
-		type pageTask struct {
-			offset int
+		// 2. 自适应分治拉取文件列表（单目录超 9500 时自动对子目录并发分治扁平化）
+		allFiles, err := st.fetch115FilesAdaptive(ctx, open115, rootCID)
+		if err != nil {
+			return err
 		}
-		pageTasks := make([]pageTask, 0, totalPages-1)
-		for page := 1; page < totalPages; page++ {
-			pageTasks = append(pageTasks, pageTask{offset: page * pageSize})
-		}
-
-		var (
-			filesMu  sync.Mutex
-			wg       sync.WaitGroup
-			taskCh   = make(chan pageTask, len(pageTasks))
-			errMu    sync.Mutex
-			fetchErr error
-		)
-
-		for _, t := range pageTasks {
-			taskCh <- t
-		}
-		close(taskCh)
-
-		workers := 8
-		if len(pageTasks) < workers {
-			workers = len(pageTasks)
-		}
-
-		for i := 0; i < workers; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				// 分页拉取 panic 时取消整个同步；正常退出不取消。
-				if err := helper.Recover(st.s.log, "strm.sync.walk115.page", func() error {
-					for t := range taskCh {
-						if ctx.Err() != nil {
-							return nil
-						}
-						files, _, err := open115.GetFsListFlat(ctx, rootCID, t.offset, pageSize)
-						if err != nil {
-							errMu.Lock()
-							if fetchErr == nil {
-								fetchErr = err
-							}
-							errMu.Unlock()
-							return nil
-						}
-						filesMu.Lock()
-						allFiles = append(allFiles, files...)
-						filesMu.Unlock()
-					}
-					return nil
-				}); err != nil {
-					cancel()
-				}
-			}()
-		}
-		wg.Wait()
-		if fetchErr != nil {
-			return fmt.Errorf("115: 分页拉取失败：%w", fetchErr)
-		}
-	}
 
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -974,6 +900,289 @@ feed:
 		return procErr
 	}
 	return ctx.Err()
+}
+
+const (
+	flat115PageSize     = 1150
+	flat115Threshold    = 9500
+	max115AdaptiveDepth = 10
+)
+
+type adaptive115Task struct {
+	cid   string
+	rel   string
+	depth int
+}
+
+// fetch115FlatSubtree 扁平拉取单个文件数在安全阈值内的子树全部文件。
+func fetch115FlatSubtree(ctx context.Context, open115 *cloud115.OpenClient, cid string, firstBatch []cloud115.RemoteFile, totalCount int64, log *zap.Logger) ([]cloud115.RemoteFile, error) {
+	allFiles := make([]cloud115.RemoteFile, 0, totalCount)
+	allFiles = append(allFiles, firstBatch...)
+	if totalCount <= int64(len(firstBatch)) {
+		return allFiles, nil
+	}
+
+	totalPages := int((totalCount + flat115PageSize - 1) / flat115PageSize)
+	type pageTask struct {
+		offset int
+	}
+	pageTasks := make([]pageTask, 0, totalPages-1)
+	for page := 1; page < totalPages; page++ {
+		pageTasks = append(pageTasks, pageTask{offset: page * flat115PageSize})
+	}
+
+	var (
+		filesMu  sync.Mutex
+		wg       sync.WaitGroup
+		taskCh   = make(chan pageTask, len(pageTasks))
+		errMu    sync.Mutex
+		fetchErr error
+	)
+	for _, t := range pageTasks {
+		taskCh <- t
+	}
+	close(taskCh)
+
+	workers := 8
+	if len(pageTasks) < workers {
+		workers = len(pageTasks)
+	}
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := helper.Recover(log, "strm.sync.walk115.page", func() error {
+				for t := range taskCh {
+					if ctx.Err() != nil {
+						return nil
+					}
+					files, _, err := open115.GetFsListFlat(ctx, cid, t.offset, flat115PageSize)
+					if err != nil {
+						errMu.Lock()
+						if fetchErr == nil {
+							fetchErr = err
+						}
+						errMu.Unlock()
+						return nil
+					}
+					filesMu.Lock()
+					allFiles = append(allFiles, files...)
+					filesMu.Unlock()
+				}
+				return nil
+			}); err != nil {
+				errMu.Lock()
+				if fetchErr == nil {
+					fetchErr = err
+				}
+				errMu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if fetchErr != nil {
+		return nil, fmt.Errorf("115: 分页拉取失败：%w", fetchErr)
+	}
+	return allFiles, nil
+}
+
+// list115DirDirect 列出指定目录下的直接子项（单层 cur=1&show_dir=1）。
+func list115DirDirect(ctx context.Context, open115 *cloud115.OpenClient, cid string) ([]cloud115.RemoteFile, error) {
+	var out []cloud115.RemoteFile
+	for offset := 0; ; offset += flat115PageSize {
+		files, _, err := open115.GetFsList(ctx, cid, offset, flat115PageSize)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, files...)
+		if len(files) < flat115PageSize {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+	}
+	return out, nil
+}
+
+// fetch115FilesAdaptive 采用自适应分治策略抓取 115 目录树下的全部文件：
+// 115 开放平台扁平搜索对 offset+limit 有 10000 的最大深度限制。
+// - 若子树文件总数 < 9500，直接使用全速扁平分页批量拉取；
+// - 若子树文件总数 >= 9500（大库或超大分类目录），自动分治：仅单层列出该目录的直属子项（cur=1），
+//   直属纯文件直接收集，直属子目录则派发为独立的子树任务继续递归探测与拉取；
+// - 若超大单目录下无子目录或层级过深（>10层），安全回退到 errFallbackToWalkRemote。
+func (st *strmSyncState) fetch115FilesAdaptive(ctx context.Context, open115 *cloud115.OpenClient, rootCID string) ([]cloud115.RemoteFile, error) {
+	var (
+		allFiles []cloud115.RemoteFile
+		filesMu  sync.Mutex
+
+		walkMu   sync.Mutex
+		walkCond = sync.NewCond(&walkMu)
+		work     []adaptive115Task
+		pending  int
+
+		errMu    sync.Mutex
+		firstErr error
+	)
+
+	push := func(t adaptive115Task) {
+		walkMu.Lock()
+		work = append(work, t)
+		pending++
+		walkCond.Signal()
+		walkMu.Unlock()
+	}
+
+	go func() {
+		<-ctx.Done()
+		walkMu.Lock()
+		walkCond.Broadcast()
+		walkMu.Unlock()
+	}()
+
+	push(adaptive115Task{cid: rootCID, rel: "", depth: 0})
+
+	workers := 8
+	var wg sync.WaitGroup
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := helper.Recover(st.s.log, "strm.sync.walk115.adaptive", func() error {
+				for {
+					walkMu.Lock()
+					for len(work) == 0 {
+						if ctx.Err() != nil || pending == 0 {
+							walkMu.Unlock()
+							return nil
+						}
+						walkCond.Wait()
+					}
+					task := work[0]
+					work = work[1:]
+					walkMu.Unlock()
+
+					if ctx.Err() != nil {
+						walkMu.Lock()
+						pending--
+						walkCond.Broadcast()
+						walkMu.Unlock()
+						return nil
+					}
+
+					firstBatch, totalCount, err := open115.GetFsListFlat(ctx, task.cid, 0, flat115PageSize)
+					if err != nil {
+						errMu.Lock()
+						if firstErr == nil {
+							firstErr = fmt.Errorf("115: 获取文件列表失败（cid=%s）：%w", task.cid, err)
+						}
+						errMu.Unlock()
+						walkMu.Lock()
+						pending--
+						walkCond.Broadcast()
+						walkMu.Unlock()
+						return nil
+					}
+
+					if totalCount < flat115Threshold {
+						// 安全深度内：直接扁平拉取该子树全部文件
+						files, err := fetch115FlatSubtree(ctx, open115, task.cid, firstBatch, totalCount, st.s.log)
+						if err != nil {
+							errMu.Lock()
+							if firstErr == nil {
+								firstErr = err
+							}
+							errMu.Unlock()
+							walkMu.Lock()
+							pending--
+							walkCond.Broadcast()
+							walkMu.Unlock()
+							return nil
+						}
+						filesMu.Lock()
+						allFiles = append(allFiles, files...)
+						currentCount := len(allFiles)
+						filesMu.Unlock()
+						st.updateSyncMessage(fmt.Sprintf("正在拉取远端文件列表 (已获取 %d 个文件)...", currentCount))
+					} else {
+						// 子树过大（>=9500）：分治展开该目录直接子项
+						if task.depth >= max115AdaptiveDepth {
+							// 深度超限兜底：单目录嵌套超 10 层仍超 9500，回退为传统递归
+							errMu.Lock()
+							if firstErr == nil {
+								firstErr = errFallbackToWalkRemote
+							}
+							errMu.Unlock()
+							walkMu.Lock()
+							pending--
+							walkCond.Broadcast()
+							walkMu.Unlock()
+							return nil
+						}
+						st.s.log.Info("115: 目录文件数超限，自动分治展开子目录并发扁平拉取",
+							zap.String("cid", task.cid),
+							zap.String("rel", task.rel),
+							zap.Int64("total_count", totalCount),
+							zap.Int("depth", task.depth))
+
+						directEntries, err := list115DirDirect(ctx, open115, task.cid)
+						if err != nil {
+							errMu.Lock()
+							if firstErr == nil {
+								firstErr = fmt.Errorf("115: 列出单层目录失败（cid=%s）：%w", task.cid, err)
+							}
+							errMu.Unlock()
+							walkMu.Lock()
+							pending--
+							walkCond.Broadcast()
+							walkMu.Unlock()
+							return nil
+						}
+
+						for _, f := range directEntries {
+							if f.Category == cloud115.TypeDir {
+								cleanName := cleanEntryName(f.FileName, true)
+								subRel := cleanName
+								if task.rel != "" {
+									subRel = task.rel + "/" + cleanName
+								}
+								st.dirCache.Store(f.FileId, subRel)
+								st.deferDirCacheSave(f.FileId, subRel)
+								push(adaptive115Task{cid: f.FileId, rel: subRel, depth: task.depth + 1})
+							} else {
+								filesMu.Lock()
+								allFiles = append(allFiles, f)
+								filesMu.Unlock()
+							}
+						}
+					}
+
+					walkMu.Lock()
+					pending--
+					if pending == 0 {
+						walkCond.Broadcast()
+					}
+					walkMu.Unlock()
+				}
+			}); err != nil {
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				errMu.Unlock()
+			}
+		}()
+	}
+
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return allFiles, nil
 }
 
 // handleVideo 生成/更新 .strm 文件。
