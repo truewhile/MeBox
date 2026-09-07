@@ -100,6 +100,7 @@ export function PlayerControls({
   const subtitleMenuOpenRef = useRef(false)
   const danmakuOpenRef = useRef(false)
   const playlistOpenRef = useRef(false)
+  const pendingSeekRef = useRef<number | null>(null)
 
   useEffect(() => {
     controlsHoveredRef.current = controlsHovered
@@ -184,16 +185,28 @@ export function PlayerControls({
       onMove()
     }
     const syncTime = () => {
-      if (!isScrubbingRef.current) {
-        setCurrentTime(streamOffset + el.currentTime)
+      if (isScrubbingRef.current) return
+      if (pendingSeekRef.current !== null) {
+        const curAbs = streamOffset + el.currentTime
+        if (Math.abs(curAbs - pendingSeekRef.current) < 3 && el.currentTime > 0.1) {
+          pendingSeekRef.current = null
+          setCurrentTime(curAbs)
+        } else {
+          setCurrentTime(pendingSeekRef.current)
+        }
+        return
       }
+      setCurrentTime(streamOffset + el.currentTime)
     }
     const syncMeta = () => {
       const streamDur = Number.isFinite(el.duration) ? el.duration : 0
       setDuration(Math.max(knownDuration || 0, streamOffset + streamDur))
-      if (!isScrubbingRef.current) {
-        setCurrentTime(streamOffset + el.currentTime)
+      if (isScrubbingRef.current) return
+      if (pendingSeekRef.current !== null) {
+        setCurrentTime(pendingSeekRef.current)
+        return
       }
+      setCurrentTime(streamOffset + el.currentTime)
     }
     const syncVolume = () => {
       setVolume(el.volume)
@@ -269,6 +282,7 @@ export function PlayerControls({
     const el = video()
     if (!el) return
     if (onSeekAbsolute?.(absolute)) {
+      pendingSeekRef.current = absolute
       setCurrentTime(absolute)
       return
     }

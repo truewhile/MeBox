@@ -259,9 +259,15 @@ export function PlayerPage() {
         if (cancelled || !ref.current) return
         if (HlsCtor.isSupported()) {
           const hls = new HlsCtor({ enableWorker: true, lowLatencyMode: false })
+          try {
+            video.currentTime = 0
+          } catch {
+            // ignore
+          }
           hls.loadSource(url)
           hls.attachMedia(video)
           hls.on(HlsCtor.Events.MANIFEST_PARSED, () => {
+            void video.play().catch(() => undefined)
             // .strm 入库时常缺 duration；转码启动时会补探测，这里刷新一次给进度条总时长。
             if (durationSec > 0) return
             mediaAPI
@@ -287,14 +293,19 @@ export function PlayerPage() {
           }
           hlsRef.current = hls
         } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          try {
+            video.currentTime = 0
+          } catch {
+            // ignore
+          }
           video.src = url
+          void video.play().catch(() => undefined)
         } else {
           setHlsUnavailable(true)
           setPlayerError('当前浏览器不支持 HLS，正在尝试直接播放。')
           toast.error('当前浏览器不支持 HLS，降级到直接播放')
           setMode('direct')
         }
-        void video.play().catch(() => undefined)
       }).catch(() => {
         if (cancelled) return
         setHlsUnavailable(true)
@@ -381,22 +392,33 @@ export function PlayerPage() {
     }
   }, [resumePosition, initialSeekDone, mode, hlsStartSec])
 
+  // 使用 ref 实时同步进度计算所需的状态，避免每次 hlsStartSec 改变都触发 cleanup 并误上报旧进度
+  const hlsStartSecRef = useRef(hlsStartSec)
+  hlsStartSecRef.current = hlsStartSec
+  const modeRef = useRef(mode)
+  modeRef.current = mode
+
   // Persist resume position every 10 seconds while playing, and immediately upon pause/unmount.
   useEffect(() => {
-    if (!media || !ref.current) return
+    if (!id || !ref.current) return
     const video = ref.current
-    const absolutePositionMs = () =>
-      Math.floor(((mode === 'hls' ? hlsStartSec : 0) + video.currentTime) * 1000)
-    const absoluteDurationMs = () =>
-      Math.floor(Math.max(media.duration_sec || 0, (mode === 'hls' ? hlsStartSec : 0) + (video.duration || 0)) * 1000)
+    const absolutePositionMs = () => {
+      const currentStartSec = modeRef.current === 'hls' ? hlsStartSecRef.current : 0
+      return Math.floor((currentStartSec + (video.currentTime || 0)) * 1000)
+    }
+    const absoluteDurationMs = () => {
+      const currentStartSec = modeRef.current === 'hls' ? hlsStartSecRef.current : 0
+      const mediaDur = mediaRef.current?.duration_sec || 0
+      return Math.floor(Math.max(mediaDur, currentStartSec + (video.duration || 0)) * 1000)
+    }
     const handler = () => {
       const now = Date.now()
       if (now - lastSentRef.current < 10_000) return
       lastSentRef.current = now
       const positionMs = absolutePositionMs()
       const durationMs = absoluteDurationMs()
-      if (positionMs > 0) {
-        playbackAPI.recordProgress(media.id, positionMs, durationMs).catch(() => undefined)
+      if (positionMs > 0 && mediaRef.current) {
+        playbackAPI.recordProgress(mediaRef.current.id, positionMs, durationMs).catch(() => undefined)
       }
     }
     video.addEventListener('timeupdate', handler)
@@ -406,11 +428,11 @@ export function PlayerPage() {
       video.removeEventListener('pause', handler)
       const positionMs = absolutePositionMs()
       const durationMs = absoluteDurationMs()
-      if (positionMs > 0 && media) {
-        playbackAPI.recordProgress(media.id, positionMs, durationMs).catch(() => undefined)
+      if (positionMs > 0 && mediaRef.current) {
+        playbackAPI.recordProgress(mediaRef.current.id, positionMs, durationMs).catch(() => undefined)
       }
     }
-  }, [media, mode, hlsStartSec])
+  }, [id])
 
   // 加载剧集/播放列表
   useEffect(() => {
