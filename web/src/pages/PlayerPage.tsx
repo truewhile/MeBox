@@ -4,7 +4,7 @@ import type Hls from 'hls.js'
 import toast from 'react-hot-toast'
 
 import { mediaAPI, libraryAPI } from '../api/library'
-import { api, hlsURL, streamURL } from '../api/client'
+import { hlsURL, stopHLSJob, streamURL } from '../api/client'
 import { danmakuAPI, type DanmakuAnime, type DanmakuLoadedInfo } from '../api/danmaku'
 import { playbackAPI } from '../api/playback'
 import { subtitlesAPI, type SubtitleTrack } from '../api/subtitles'
@@ -97,13 +97,10 @@ export function PlayerPage() {
   const [playlistEpisodes, setPlaylistEpisodes] = useState<Media[]>([])
   const [playlistOpen, setPlaylistOpen] = useState(false)
 
-  const teardownHls = useCallback((mediaId?: string, stopServer = false) => {
+  const teardownHls = useCallback(() => {
     if (hlsRef.current) {
       hlsRef.current.destroy()
       hlsRef.current = null
-    }
-    if (stopServer && mediaId) {
-      api.delete(`/hls/${encodeURIComponent(mediaId)}`).catch(() => undefined)
     }
   }, [])
 
@@ -251,6 +248,7 @@ export function PlayerPage() {
     if (!mediaId || !ref.current) return
     const currentMedia = mediaRef.current
     if (!currentMedia) return
+    let cancelled = false
     teardownHls()
 
     const video = ref.current
@@ -258,6 +256,7 @@ export function PlayerPage() {
     if (mode === 'hls') {
       const url = hlsURL(mediaId, hlsStartSec)
       void import('hls.js').then(({ default: HlsCtor }) => {
+        if (cancelled || !ref.current) return
         if (HlsCtor.isSupported()) {
           const hls = new HlsCtor({ enableWorker: true, lowLatencyMode: false })
           hls.loadSource(url)
@@ -282,6 +281,10 @@ export function PlayerPage() {
               setParams(params, { replace: true })
             }
           })
+          if (cancelled) {
+            hls.destroy()
+            return
+          }
           hlsRef.current = hls
         } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
           video.src = url
@@ -293,6 +296,7 @@ export function PlayerPage() {
         }
         void video.play().catch(() => undefined)
       }).catch(() => {
+        if (cancelled) return
         setHlsUnavailable(true)
         setPlayerError('HLS 播放组件加载失败，正在尝试直接播放。')
         setMode('direct')
@@ -304,15 +308,28 @@ export function PlayerPage() {
       }
       void video.play().catch(() => undefined)
     }
-    return () => teardownHls()
+    return () => {
+      cancelled = true
+      teardownHls()
+    }
   }, [hlsUnavailable, hlsStartSec, mediaId, mode, params, setParams, teardownHls])
 
-  // Stop the host ffmpeg job only when leaving HLS for this media (not on mid-file seek restarts).
+  // Stop host ffmpeg when leaving this HLS player. The keepalive request also
+  // survives route navigation while the component is being torn down.
   useEffect(() => {
     if (!mediaId || mode !== 'hls') return
     return () => {
-      api.delete(`/hls/${encodeURIComponent(mediaId)}`).catch(() => undefined)
+      stopHLSJob(mediaId)
     }
+  }, [mediaId, mode])
+
+  // React cleanup is not guaranteed when a tab/window closes. pagehide fires
+  // while the document can still dispatch a keepalive request.
+  useEffect(() => {
+    if (!mediaId || mode !== 'hls') return
+    const stopOnPageExit = () => stopHLSJob(mediaId)
+    window.addEventListener('pagehide', stopOnPageExit)
+    return () => window.removeEventListener('pagehide', stopOnPageExit)
   }, [mediaId, mode])
 
   // 自动拉取已有的播放进度并恢复播放位置

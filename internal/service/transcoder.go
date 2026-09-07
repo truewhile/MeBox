@@ -68,6 +68,9 @@ type hlsJob struct {
 	// startSec is the source seek offset fed to ffmpeg (-ss). The HLS
 	// playlist itself always starts at t=0 for that session.
 	startSec float64
+	// seekGen is the client `_seek` token for this job. Newer gens win;
+	// older/missing gens must not cancel a mid-file restart.
+	seekGen int64
 	// done is closed when the ffmpeg goroutine fully exits (after process death).
 	done chan struct{}
 }
@@ -104,7 +107,7 @@ func (t *TranscoderService) PlaylistPath(mediaID string) string {
 // EnsureJob makes sure a transcode is running for mediaID from the start of
 // the source. Prefer EnsureJobFrom when the player seeks into the middle.
 func (t *TranscoderService) EnsureJob(ctx context.Context, mediaID string) (string, error) {
-	return t.EnsureJobFrom(ctx, mediaID, 0)
+	return t.EnsureJobFrom(ctx, mediaID, 0, 0)
 }
 
 // EnsureJobFrom starts (or reuses) an HLS job that seeks the source to
@@ -112,7 +115,12 @@ func (t *TranscoderService) EnsureJob(ctx context.Context, mediaID string) (stri
 // matches that offset; otherwise the previous job is cancelled and the HLS
 // cache dir is wiped so the player can jump without waiting for a full
 // head-to-tail transcode.
-func (t *TranscoderService) EnsureJobFrom(ctx context.Context, mediaID string, startSec float64) (string, error) {
+//
+// seekGen is the client `_seek` query (unix ms). A newer gen replaces an older
+// job; an older or missing gen must not clobber a mid-file restart — hls.js
+// in-flight playlist refreshes from a destroyed player commonly arrive as
+// start=0 right after a scrub and would otherwise reset playback to the head.
+func (t *TranscoderService) EnsureJobFrom(ctx context.Context, mediaID string, startSec float64, seekGen int64) (string, error) {
 	if !t.cfg.Transcoder.Enabled {
 		return "", ErrTranscodeDisabled
 	}
@@ -134,6 +142,11 @@ func (t *TranscoderService) EnsureJobFrom(ctx context.Context, mediaID string, s
 	t.mu.Lock()
 	if existing, ok := t.jobs[mediaID]; ok {
 		if sameHLSStart(existing.startSec, startSec) {
+			t.touchJobLocked(mediaID)
+			t.mu.Unlock()
+			return t.PlaylistPath(mediaID), nil
+		}
+		if !shouldReplaceHLSJob(existing, startSec, seekGen) {
 			t.touchJobLocked(mediaID)
 			t.mu.Unlock()
 			return t.PlaylistPath(mediaID), nil
@@ -164,9 +177,12 @@ func (t *TranscoderService) EnsureJobFrom(ctx context.Context, mediaID string, s
 
 	t.mu.Lock()
 	if existing, ok := t.jobs[mediaID]; ok {
-		// Another path (StopJob then a peer Ensure) should be rare under the gate;
-		// still reuse or replace safely.
 		if sameHLSStart(existing.startSec, startSec) {
+			t.touchJobLocked(mediaID)
+			t.mu.Unlock()
+			return t.PlaylistPath(mediaID), nil
+		}
+		if !shouldReplaceHLSJob(existing, startSec, seekGen) {
 			t.touchJobLocked(mediaID)
 			t.mu.Unlock()
 			return t.PlaylistPath(mediaID), nil
@@ -190,6 +206,7 @@ func (t *TranscoderService) EnsureJobFrom(ctx context.Context, mediaID string, s
 		lastAccess: time.Now(),
 		encoder:    t.effectiveEncoder(),
 		startSec:   startSec,
+		seekGen:    seekGen,
 		done:       make(chan struct{}),
 	}
 	t.jobs[mediaID] = job
@@ -201,6 +218,25 @@ func (t *TranscoderService) EnsureJobFrom(ctx context.Context, mediaID string, s
 		t.runFFmpeg(jobCtx, job, input)
 	})
 	return t.PlaylistPath(mediaID), nil
+}
+
+// shouldReplaceHLSJob reports whether an incoming playlist request may cancel
+// the running job. Stale hls.js refreshes (older/missing `_seek`) must not win.
+func shouldReplaceHLSJob(existing *hlsJob, startSec float64, seekGen int64) bool {
+	if existing == nil {
+		return true
+	}
+	if sameHLSStart(existing.startSec, startSec) {
+		return false
+	}
+	if seekGen > 0 && existing.seekGen > 0 && seekGen < existing.seekGen {
+		return false
+	}
+	// Untagged request while a seek-tagged job is active: treat as stale.
+	if seekGen == 0 && existing.seekGen > 0 {
+		return false
+	}
+	return true
 }
 
 func (t *TranscoderService) mediaStartGate(mediaID string) *sync.Mutex {

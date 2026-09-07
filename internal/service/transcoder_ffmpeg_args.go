@@ -133,16 +133,13 @@ func appendInputAndVideoArgs(args []string, input transcodeInput, settings ffmpe
 	if input.StartSec > 0.05 {
 		ss = strconv.FormatFloat(input.StartSec, 'f', 3, 64)
 	}
-	// Local files: input -ss (byte/keyframe seek). HTTP/STRM: output -ss after
-	// -i — several cloud/WMV demuxers ignore input seeks and would otherwise
-	// restart from t=0. Realtime (-re) is already disabled for StartSec > 0.
-	if ss != "" && !isHTTPSource(input.Source) {
+	// Always use input -ss (before -i). Output -ss on HTTP/WMV decodes from
+	// byte 0 up to the offset and cannot meet playlist WaitReady for deep
+	// scrubbing; CDNs with Range support jump via demuxer seek instead.
+	if ss != "" {
 		args = append(args, "-ss", ss)
 	}
 	args = append(args, "-i", input.Source)
-	if ss != "" && isHTTPSource(input.Source) {
-		args = append(args, "-ss", ss)
-	}
 	args = append(args, "-map", "0:v:0?", "-map", "0:a:0?", "-vf", video.filter, "-c:v", video.codec)
 	if settings.threads > 0 && video.codec == "libx264" {
 		args = append(args, "-threads", strconv.Itoa(settings.threads))

@@ -232,17 +232,23 @@ func TestBuildFFmpegArgsHTTPSeekAfterDashI(t *testing.T) {
 	if strings.Contains(joined, " -re ") {
 		t.Fatalf("seek restart must disable -re, got: %s", joined)
 	}
-	idxSS, idxI := -1, -1
+	idxSS, idxI, ssCount := -1, -1, 0
 	for i, arg := range args {
 		if arg == "-ss" {
-			idxSS = i
+			ssCount++
+			if idxSS < 0 {
+				idxSS = i
+			}
 		}
 		if arg == "-i" && idxI < 0 {
 			idxI = i
 		}
 	}
-	if idxSS < 0 || idxI < 0 || idxSS < idxI {
-		t.Fatalf("expected http -ss after -i, args=%v", args)
+	if idxSS < 0 || idxI < 0 || idxSS > idxI {
+		t.Fatalf("expected http -ss before -i, args=%v", args)
+	}
+	if ssCount != 1 {
+		t.Fatalf("expected a single -ss, got %d in %v", ssCount, args)
 	}
 	if args[idxSS+1] != "90.000" {
 		t.Fatalf("start = %q", args[idxSS+1])
@@ -255,6 +261,25 @@ func TestSameHLSStart(t *testing.T) {
 	}
 	if sameHLSStart(10, 12) {
 		t.Fatal("expected distant starts to differ")
+	}
+}
+
+func TestShouldReplaceHLSJob(t *testing.T) {
+	existing := &hlsJob{startSec: 120, seekGen: 1000}
+	if shouldReplaceHLSJob(existing, 0, 0) {
+		t.Fatal("untagged start=0 must not clobber seek-tagged job")
+	}
+	if shouldReplaceHLSJob(existing, 0, 900) {
+		t.Fatal("older _seek must not clobber newer job")
+	}
+	if !shouldReplaceHLSJob(existing, 200, 1001) {
+		t.Fatal("newer _seek should replace")
+	}
+	if !shouldReplaceHLSJob(&hlsJob{startSec: 0, seekGen: 0}, 120, 1000) {
+		t.Fatal("seek should replace untagged head job")
+	}
+	if shouldReplaceHLSJob(existing, 120.2, 1001) {
+		t.Fatal("same start should not replace")
 	}
 }
 

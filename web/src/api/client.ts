@@ -148,11 +148,26 @@ export function streamURL(mediaId: string): string {
 // hlsURL returns the m3u8 playlist URL fed into hls.js.
 // startSec > 0 asks the server to (re)start ffmpeg from that source offset.
 export function hlsURL(mediaId: string, startSec = 0): string {
-  const start =
-    startSec > 0.05 ? `&start=${encodeURIComponent(String(Math.round(startSec * 1000) / 1000))}` : ''
-  // Cache-bust so a seek restart cannot reuse a stale start=0 playlist from disk/browser.
-  const bust = startSec > 0.05 ? `&_seek=${Date.now()}` : ''
+  const safeStart = Math.max(0, Math.round(startSec * 1000) / 1000)
+  // Always send start= (including 0) so the server can tell an intentional
+  // restart-from-head apart from a missing query on a stale refresh.
+  const start = `&start=${encodeURIComponent(String(safeStart))}`
+  // Monotonic-ish client generation: newer seeks win; older in-flight playlist
+  // requests must not cancel the active ffmpeg job back to t=0.
+  const bust = `&_seek=${Date.now()}`
   return `/api/hls/${encodeURIComponent(mediaId)}/index.m3u8?${tokenQuery()}${profileQuery()}${start}${bust}`
+}
+
+// Stop an on-demand HLS job. keepalive makes the request survive page
+// navigation/tab close, where an axios promise can be discarded by browsers.
+export function stopHLSJob(mediaId: string): void {
+  const url = `/api/hls/${encodeURIComponent(mediaId)}?${tokenQuery()}${profileQuery()}`
+  void fetch(url, {
+    method: 'DELETE',
+    credentials: 'same-origin',
+    keepalive: true,
+    cache: 'no-store',
+  }).catch(() => undefined)
 }
 
 // imageURL converts a remote poster URL into a same-origin proxy URL so it

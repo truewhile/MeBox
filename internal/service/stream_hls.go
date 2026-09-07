@@ -24,11 +24,17 @@ func (s *StreamService) ServeHLSPlaylist(w http.ResponseWriter, r *http.Request,
 		return ErrTranscodeDisabled
 	}
 	startSec := parseHLSStartSec(r)
-	if _, err := s.transcoder.EnsureJobFrom(r.Context(), mediaID, startSec); err != nil {
+	seekGen := parseHLSSeekGen(r)
+	if _, err := s.transcoder.EnsureJobFrom(r.Context(), mediaID, startSec, seekGen); err != nil {
 		return err
 	}
 	s.transcoder.TouchJob(mediaID)
-	if !s.transcoder.WaitReady(r.Context(), mediaID, 30*time.Second) {
+	readyTimeout := 45 * time.Second
+	if startSec > 0.05 {
+		// Mid-file HTTP seeks (esp. WMV) need longer before the first segment appears.
+		readyTimeout = 120 * time.Second
+	}
+	if !s.transcoder.WaitReady(r.Context(), mediaID, readyTimeout) {
 		return errors.New("hls playlist not ready")
 	}
 	playlist := s.transcoder.PlaylistPath(mediaID)
@@ -63,6 +69,21 @@ func parseHLSStartSec(r *http.Request) float64 {
 		return 0
 	}
 	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || v < 0 {
+		return 0
+	}
+	return v
+}
+
+func parseHLSSeekGen(r *http.Request) int64 {
+	if r == nil {
+		return 0
+	}
+	raw := strings.TrimSpace(r.URL.Query().Get("_seek"))
+	if raw == "" {
+		return 0
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || v < 0 {
 		return 0
 	}
