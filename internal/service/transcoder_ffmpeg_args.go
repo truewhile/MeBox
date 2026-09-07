@@ -11,8 +11,9 @@ import (
 )
 
 type transcodeInput struct {
-	Source  string
-	Headers map[string]string
+	Source   string
+	Headers  map[string]string
+	StartSec float64
 }
 
 type ffmpegArgSettings struct {
@@ -125,6 +126,11 @@ func baseFFmpegArgs(preInput string, realtime bool) []string {
 
 func appendInputAndVideoArgs(args []string, input transcodeInput, settings ffmpegArgSettings, video ffmpegVideoPlan) []string {
 	args = append(args, ffmpegHTTPInputArgs(input)...)
+	// Input seek (-ss before -i) lets mid-file HLS restarts jump without
+	// decoding everything before the click position.
+	if input.StartSec > 0.05 {
+		args = append(args, "-ss", strconv.FormatFloat(input.StartSec, 'f', 3, 64))
+	}
 	args = append(args, "-i", input.Source, "-map", "0:v:0?", "-map", "0:a:0?", "-vf", video.filter, "-c:v", video.codec)
 	if settings.threads > 0 && video.codec == "libx264" {
 		args = append(args, "-threads", strconv.Itoa(settings.threads))

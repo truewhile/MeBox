@@ -193,3 +193,47 @@ func TestBuildFFmpegArgsHTTPInputReconnect(t *testing.T) {
 		t.Fatalf("http flags must come before -i, args=%v", args)
 	}
 }
+
+func TestBuildFFmpegArgsInputSeekBeforeDashI(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Transcoder.MaxHeight = 720
+	cfg.Transcoder.SegmentSeconds = 4
+	args := buildFFmpegArgsForInput(cfg, transcodeInput{
+		Source:   "/x.mkv",
+		StartSec: 125.5,
+	}, "/o/x.m3u8", "/o/seg_%05d.ts")
+	idxSS, idxI := -1, -1
+	for i, arg := range args {
+		if arg == "-ss" {
+			idxSS = i
+		}
+		if arg == "-i" && idxI < 0 {
+			idxI = i
+		}
+	}
+	if idxSS < 0 || idxI < 0 || idxSS > idxI {
+		t.Fatalf("expected -ss before -i, args=%v", args)
+	}
+	if args[idxSS+1] != "125.500" {
+		t.Fatalf("start = %q", args[idxSS+1])
+	}
+}
+
+func TestSameHLSStart(t *testing.T) {
+	if !sameHLSStart(10, 10.2) {
+		t.Fatal("expected close starts to match")
+	}
+	if sameHLSStart(10, 12) {
+		t.Fatal("expected distant starts to differ")
+	}
+}
+
+func TestFilterHLSSegmentQueryDropsStart(t *testing.T) {
+	got := filterHLSSegmentQuery("token=abc&start=120.5&profile_id=1")
+	if strings.Contains(got, "start=") {
+		t.Fatalf("start should be stripped, got %q", got)
+	}
+	if !strings.Contains(got, "token=abc") || !strings.Contains(got, "profile_id=1") {
+		t.Fatalf("auth/profile query should remain, got %q", got)
+	}
+}

@@ -146,8 +146,10 @@ export function streamURL(mediaId: string): string {
 }
 
 // hlsURL returns the m3u8 playlist URL fed into hls.js.
-export function hlsURL(mediaId: string): string {
-  return `/api/hls/${encodeURIComponent(mediaId)}/index.m3u8?${tokenQuery()}${profileQuery()}`
+// startSec > 0 asks the server to (re)start ffmpeg from that source offset.
+export function hlsURL(mediaId: string, startSec = 0): string {
+  const start = startSec > 0.05 ? `&start=${encodeURIComponent(String(Math.floor(startSec * 1000) / 1000))}` : ''
+  return `/api/hls/${encodeURIComponent(mediaId)}/index.m3u8?${tokenQuery()}${profileQuery()}${start}`
 }
 
 // imageURL converts a remote poster URL into a same-origin proxy URL so it

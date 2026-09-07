@@ -6,19 +6,25 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
 
 // ServeHLSPlaylist makes sure a transcode is running and writes the m3u8.
 // We block (with a 30s timeout) until the playlist file shows up.
+//
+// Optional query `start` (seconds) restarts ffmpeg from that source offset so
+// the web player can scrub the full timeline without waiting for a full
+// head-to-tail transcode.
 func (s *StreamService) ServeHLSPlaylist(w http.ResponseWriter, r *http.Request, mediaID string) error {
 	// 「客户端直连解码」模式下宿主机不提供转码，HLS 一律拒绝，
 	// 迫使播放器走 direct play 本地解码。
 	if s.directPlayOnly(r.Context()) {
 		return ErrTranscodeDisabled
 	}
-	if _, err := s.transcoder.EnsureJob(r.Context(), mediaID); err != nil {
+	startSec := parseHLSStartSec(r)
+	if _, err := s.transcoder.EnsureJobFrom(r.Context(), mediaID, startSec); err != nil {
 		return err
 	}
 	s.transcoder.TouchJob(mediaID)
@@ -48,8 +54,29 @@ func (s *StreamService) ServeHLSPlaylist(w http.ResponseWriter, r *http.Request,
 	return nil
 }
 
+func parseHLSStartSec(r *http.Request) float64 {
+	if r == nil {
+		return 0
+	}
+	raw := strings.TrimSpace(r.URL.Query().Get("start"))
+	if raw == "" {
+		return 0
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || v < 0 {
+		return 0
+	}
+	return v
+}
+
 func appendQueryToHLSSegments(playlist, rawQuery string) string {
 	if strings.TrimSpace(rawQuery) == "" {
+		return playlist
+	}
+	// Segment fetches only need auth/profile tokens; drop start= so a seek
+	// restart does not keep forcing EnsureJobFrom on every .ts hit.
+	q := filterHLSSegmentQuery(rawQuery)
+	if q == "" {
 		return playlist
 	}
 	lines := strings.SplitAfter(playlist, "\n")
@@ -65,10 +92,29 @@ func appendQueryToHLSSegments(playlist, rawQuery string) string {
 			} else if strings.HasSuffix(line, "\n") {
 				lineEnding = "\n"
 			}
-			lines[i] = strings.TrimRight(line, "\r\n") + "?" + rawQuery + lineEnding
+			lines[i] = strings.TrimRight(line, "\r\n") + "?" + q + lineEnding
 		}
 	}
 	return strings.Join(lines, "")
+}
+
+func filterHLSSegmentQuery(rawQuery string) string {
+	parts := strings.Split(rawQuery, "&")
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		key := part
+		if i := strings.IndexByte(part, '='); i >= 0 {
+			key = part[:i]
+		}
+		if strings.EqualFold(key, "start") {
+			continue
+		}
+		kept = append(kept, part)
+	}
+	return strings.Join(kept, "&")
 }
 
 // ServeHLSSegment writes a single .ts segment from the on-disk cache.

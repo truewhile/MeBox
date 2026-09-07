@@ -40,6 +40,7 @@ func (t *TranscoderService) runFFmpeg(ctx context.Context, job *hlsJob, input tr
 		zap.String("media_id", job.mediaID),
 		zap.String("encoder", job.encoder),
 		zap.String("source", input.Source),
+		zap.Float64("start_sec", input.StartSec),
 	)
 	t.hub.Publish("transcode", map[string]any{
 		"media_id": job.mediaID,

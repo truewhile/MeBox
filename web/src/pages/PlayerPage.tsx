@@ -72,6 +72,8 @@ export function PlayerPage() {
   const [directOnly, setDirectOnly] = useState(false)
   const [resumePosition, setResumePosition] = useState(0)
   const [initialSeekDone, setInitialSeekDone] = useState(false)
+  // HLS session source offset: playlist t=0 maps to this absolute second.
+  const [hlsStartSec, setHlsStartSec] = useState(0)
 
   // 弹幕控制：状态来自 /api/danmaku/config 初始值，用户在面板里实时调整。
   const [danmakuOpen, setDanmakuOpen] = useState(false)
@@ -187,6 +189,7 @@ export function PlayerPage() {
   useEffect(() => {
     setMedia(null)
     setLoadError('')
+    setHlsStartSec(0)
     setDanmakuEpisodeId(null)
     setDanmakuCandidates([])
     setDanmakuSearch(null)
@@ -245,12 +248,22 @@ export function PlayerPage() {
 
     const video = ref.current
     if (mode === 'hls') {
-      const url = hlsURL(media.id)
+      const url = hlsURL(media.id, hlsStartSec)
       void import('hls.js').then(({ default: HlsCtor }) => {
         if (HlsCtor.isSupported()) {
           const hls = new HlsCtor({ enableWorker: true, lowLatencyMode: false })
           hls.loadSource(url)
           hls.attachMedia(video)
+          hls.on(HlsCtor.Events.MANIFEST_PARSED, () => {
+            // .strm 入库时常缺 duration；转码启动时会补探测，这里刷新一次给进度条总时长。
+            if ((media.duration_sec || 0) > 0) return
+            mediaAPI
+              .get(media.id)
+              .then((fresh) => {
+                if ((fresh.duration_sec || 0) > 0) setMedia(fresh)
+              })
+              .catch(() => undefined)
+          })
           hls.on(HlsCtor.Events.ERROR, (_, data) => {
             if (data.fatal) {
               setHlsUnavailable(true)
@@ -283,8 +296,17 @@ export function PlayerPage() {
       }
       void video.play().catch(() => undefined)
     }
-    return () => teardownHls(media.id, mode === 'hls')
-  }, [hlsUnavailable, media, mode, params, setParams, teardownHls])
+    return () => teardownHls()
+  }, [hlsUnavailable, hlsStartSec, media, mode, params, setParams, teardownHls])
+
+  // Stop the host ffmpeg job only when leaving HLS for this media (not on mid-file seek restarts).
+  useEffect(() => {
+    if (!media || mode !== 'hls') return
+    const mediaId = media.id
+    return () => {
+      api.delete(`/hls/${encodeURIComponent(mediaId)}`).catch(() => undefined)
+    }
+  }, [media, mode])
 
   // 自动拉取已有的播放进度并恢复播放位置
   useEffect(() => {
@@ -302,8 +324,21 @@ export function PlayerPage() {
   }, [id])
 
   useEffect(() => {
+    if (!resumePosition || initialSeekDone) return
+    if (mode === 'hls') {
+      // Restart transcode near the resume point instead of seeking a short partial playlist.
+      if (Math.abs(hlsStartSec - resumePosition) > 2) {
+        setHlsStartSec(resumePosition)
+      }
+      setInitialSeekDone(true)
+      const m = Math.floor(resumePosition / 60)
+      const s = Math.floor(resumePosition % 60)
+      const timeStr = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
+      toast.success(`已恢复上次播放进度至 ${timeStr}`, { duration: 2500 })
+      return
+    }
     const video = ref.current
-    if (!video || !resumePosition || initialSeekDone) return
+    if (!video) return
     const applyResume = () => {
       if (resumePosition > 0 && Math.abs(video.currentTime - resumePosition) > 2) {
         video.currentTime = resumePosition
@@ -320,18 +355,22 @@ export function PlayerPage() {
       video.addEventListener('loadedmetadata', applyResume, { once: true })
       return () => video.removeEventListener('loadedmetadata', applyResume)
     }
-  }, [resumePosition, initialSeekDone])
+  }, [resumePosition, initialSeekDone, mode, hlsStartSec])
 
   // Persist resume position every 10 seconds while playing, and immediately upon pause/unmount.
   useEffect(() => {
     if (!media || !ref.current) return
     const video = ref.current
+    const absolutePositionMs = () =>
+      Math.floor(((mode === 'hls' ? hlsStartSec : 0) + video.currentTime) * 1000)
+    const absoluteDurationMs = () =>
+      Math.floor(Math.max(media.duration_sec || 0, (mode === 'hls' ? hlsStartSec : 0) + (video.duration || 0)) * 1000)
     const handler = () => {
       const now = Date.now()
       if (now - lastSentRef.current < 10_000) return
       lastSentRef.current = now
-      const positionMs = Math.floor(video.currentTime * 1000)
-      const durationMs = Math.floor((video.duration || 0) * 1000)
+      const positionMs = absolutePositionMs()
+      const durationMs = absoluteDurationMs()
       if (positionMs > 0) {
         playbackAPI.recordProgress(media.id, positionMs, durationMs).catch(() => undefined)
       }
@@ -341,13 +380,13 @@ export function PlayerPage() {
     return () => {
       video.removeEventListener('timeupdate', handler)
       video.removeEventListener('pause', handler)
-      const positionMs = Math.floor(video.currentTime * 1000)
-      const durationMs = Math.floor((video.duration || 0) * 1000)
+      const positionMs = absolutePositionMs()
+      const durationMs = absoluteDurationMs()
       if (positionMs > 0 && media) {
         playbackAPI.recordProgress(media.id, positionMs, durationMs).catch(() => undefined)
       }
     }
-  }, [media])
+  }, [media, mode, hlsStartSec])
 
   // 加载剧集/播放列表
   useEffect(() => {
@@ -521,10 +560,34 @@ export function PlayerPage() {
       return
     }
     const next = mode === 'hls' ? 'direct' : 'hls'
+    if (next === 'hls') {
+      setHlsStartSec(0)
+    }
     setMode(next)
     params.set('mode', next)
     setParams(params, { replace: true })
   }, [isDirectStream, mode, params, setParams])
+
+  const handleSeekAbsolute = useCallback(
+    (absoluteSec: number) => {
+      if (mode !== 'hls') return false
+      const video = ref.current
+      if (!video) return false
+      const target = Math.max(0, absoluteSec)
+      const local = target - hlsStartSec
+      const available = Number.isFinite(video.duration) ? video.duration : 0
+      // Stay inside the already-transcoded window of this HLS session.
+      if (local >= 0 && local <= Math.max(0, available - 0.5)) {
+        video.currentTime = local
+        return true
+      }
+      setPlayerError('')
+      toast('正在从该位置重新转码…', { duration: 2000 })
+      setHlsStartSec(target)
+      return true
+    },
+    [hlsStartSec, mode],
+  )
 
   // 用户切换字幕轨道：-1=关闭；记忆偏好，下次播放默认沿用。
   const selectSubtitle = useCallback((index: number) => {
@@ -614,6 +677,9 @@ export function PlayerPage() {
         playlistOpen={playlistOpen}
         hasPlaylist={playlistEpisodes.length > 0}
         onTogglePlaylist={togglePlaylistOpen}
+        knownDuration={media?.duration_sec || 0}
+        streamOffset={mode === 'hls' ? hlsStartSec : 0}
+        onSeekAbsolute={mode === 'hls' ? handleSeekAbsolute : undefined}
         playlistPanel={
           <PlayerPlaylistPanel
             open={playlistOpen}

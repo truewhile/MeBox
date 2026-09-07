@@ -46,6 +46,12 @@ type PlayerControlsProps = {
   playlistOpen?: boolean
   hasPlaylist?: boolean
   onTogglePlaylist?: () => void
+  /** Media metadata duration (seconds). Used when HLS only knows transcoded length. */
+  knownDuration?: number
+  /** Absolute source offset of the current HLS session (seconds). */
+  streamOffset?: number
+  /** Absolute seek on the full timeline; return true when handled (e.g. HLS restart). */
+  onSeekAbsolute?: (seconds: number) => boolean
 }
 
 export function PlayerControls({
@@ -65,6 +71,9 @@ export function PlayerControls({
   playlistOpen = false,
   hasPlaylist = false,
   onTogglePlaylist,
+  knownDuration = 0,
+  streamOffset = 0,
+  onSeekAbsolute,
 }: PlayerControlsProps) {
   const video = () => videoRef.current
   const container = () =>
@@ -176,13 +185,14 @@ export function PlayerControls({
     }
     const syncTime = () => {
       if (!isScrubbingRef.current) {
-        setCurrentTime(el.currentTime)
+        setCurrentTime(streamOffset + el.currentTime)
       }
     }
     const syncMeta = () => {
-      setDuration(el.duration || 0)
+      const streamDur = Number.isFinite(el.duration) ? el.duration : 0
+      setDuration(Math.max(knownDuration || 0, streamOffset + streamDur))
       if (!isScrubbingRef.current) {
-        setCurrentTime(el.currentTime)
+        setCurrentTime(streamOffset + el.currentTime)
       }
     }
     const syncVolume = () => {
@@ -225,7 +235,14 @@ export function PlayerControls({
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoRef])
+  }, [videoRef, knownDuration, streamOffset])
+
+  // Keep the scrubber max in sync when metadata duration arrives after mount.
+  useEffect(() => {
+    const el = video()
+    const streamDur = el && Number.isFinite(el.duration) ? el.duration : 0
+    setDuration(Math.max(knownDuration || 0, streamOffset + streamDur))
+  }, [knownDuration, streamOffset])
 
   // 当悬停或菜单状态改变时，更新控制栏计时器
   useEffect(() => {
@@ -248,12 +265,23 @@ export function PlayerControls({
     else el.pause()
   }
 
+  const applyAbsoluteSeek = (absolute: number) => {
+    const el = video()
+    if (!el) return
+    if (onSeekAbsolute?.(absolute)) {
+      setCurrentTime(absolute)
+      return
+    }
+    const local = Math.max(0, absolute - streamOffset)
+    el.currentTime = local
+    setCurrentTime(streamOffset + local)
+  }
+
   const handleSeekChange = (v: number) => {
     setScrubValue(v)
     setCurrentTime(v)
-    const el = video()
-    if (el && !isScrubbing) {
-      el.currentTime = v
+    if (!isScrubbing) {
+      applyAbsoluteSeek(v)
     }
   }
 
@@ -264,11 +292,7 @@ export function PlayerControls({
   }
 
   const handleSeekEnd = (v: number) => {
-    const el = video()
-    if (el) {
-      el.currentTime = v
-      setCurrentTime(v)
-    }
+    applyAbsoluteSeek(v)
     setIsScrubbing(false)
     setScrubValue(null)
   }

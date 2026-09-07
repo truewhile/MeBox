@@ -42,6 +42,9 @@ type PlayerVideoStageProps = {
   playlistOpen?: boolean
   hasPlaylist?: boolean
   onTogglePlaylist?: () => void
+  knownDuration?: number
+  streamOffset?: number
+  onSeekAbsolute?: (seconds: number) => boolean
 }
 
 export function PlayerVideoStage({
@@ -75,6 +78,9 @@ export function PlayerVideoStage({
   playlistOpen,
   hasPlaylist,
   onTogglePlaylist,
+  knownDuration,
+  streamOffset,
+  onSeekAbsolute,
 }: PlayerVideoStageProps) {
   const stageRef = useRef<HTMLDivElement>(null)
   const [videoRatio, setVideoRatio] = useState<number | null>(null)
@@ -319,6 +325,9 @@ export function PlayerVideoStage({
             playlistOpen={playlistOpen}
             hasPlaylist={hasPlaylist}
             onTogglePlaylist={onTogglePlaylist}
+            knownDuration={knownDuration}
+            streamOffset={streamOffset}
+            onSeekAbsolute={onSeekAbsolute}
           />
           {danmakuPanel}
           {playlistPanel}
