@@ -1,10 +1,13 @@
 package service
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/truewhile/MeBox/internal/config"
+	"github.com/truewhile/MeBox/internal/model"
+	"github.com/truewhile/MeBox/internal/service/cloud"
 )
 
 func TestBuildFFmpegArgs(t *testing.T) {
@@ -105,5 +108,88 @@ func TestHasFFmpegListEntry(t *testing.T) {
 	}
 	if hasFFmpegListEntry(out, "x264") {
 		t.Fatal("must match whole ffmpeg list entries only")
+	}
+}
+
+func TestResolveTranscodeInputHTTPSTRM(t *testing.T) {
+	svc := &TranscoderService{}
+	got, err := svc.resolveTranscodeInput(context.Background(), &model.Media{
+		Container: "strm",
+		STRMURL:   "https://cdn.example.com/a.wmv",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != "https://cdn.example.com/a.wmv" {
+		t.Fatalf("source = %q", got.Source)
+	}
+}
+
+func TestResolveTranscodeInputUsesResolver(t *testing.T) {
+	svc := &TranscoderService{}
+	svc.SetStrmPlayTargetResolver(func(_ context.Context, raw string) (*StrmPlayResult, error) {
+		if raw != "/api/strm/play/cloud115/a.wmv?acct=1&pickcode=x" {
+			t.Fatalf("raw = %q", raw)
+		}
+		return &StrmPlayResult{
+			RedirectURL: "https://cdn.example.com/a.wmv",
+			Link: &cloud.DirectLink{
+				URL:     "https://cdn.example.com/a.wmv",
+				Headers: map[string]string{"User-Agent": "Mozilla/5.0"},
+			},
+		}, nil
+	})
+	got, err := svc.resolveTranscodeInput(context.Background(), &model.Media{
+		Container: "strm",
+		STRMURL:   "/api/strm/play/cloud115/a.wmv?acct=1&pickcode=x",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != "https://cdn.example.com/a.wmv" {
+		t.Fatalf("source = %q", got.Source)
+	}
+	if got.Headers["User-Agent"] != "Mozilla/5.0" {
+		t.Fatalf("headers = %#v", got.Headers)
+	}
+}
+
+func TestResolveTranscodeInputRejectsUnresolvedRelativeSTRM(t *testing.T) {
+	svc := &TranscoderService{}
+	_, err := svc.resolveTranscodeInput(context.Background(), &model.Media{
+		Container: "strm",
+		STRMURL:   "/api/strm/play/cloud115/a.wmv?acct=1&pickcode=x",
+	})
+	if err == nil {
+		t.Fatal("expected unresolved relative strm to fail")
+	}
+}
+
+func TestBuildFFmpegArgsHTTPInputReconnect(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Transcoder.MaxHeight = 720
+	cfg.Transcoder.SegmentSeconds = 4
+	args := buildFFmpegArgsForInput(cfg, transcodeInput{
+		Source:  "https://cdn.example.com/a.wmv",
+		Headers: map[string]string{"User-Agent": "MeBox", "Referer": "https://cdn.example.com/"},
+	}, "/o/x.m3u8", "/o/seg_%05d.ts")
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-reconnect") || !strings.Contains(joined, "-headers") {
+		t.Fatalf("expected http reconnect/headers, got: %s", joined)
+	}
+	if !strings.Contains(joined, "User-Agent: MeBox") || !strings.Contains(joined, "Referer: https://cdn.example.com/") {
+		t.Fatalf("expected request headers, got: %s", joined)
+	}
+	idxI, idxH := -1, -1
+	for i, arg := range args {
+		if arg == "-i" && idxI < 0 {
+			idxI = i
+		}
+		if arg == "-headers" {
+			idxH = i
+		}
+	}
+	if idxI < 0 || idxH < 0 || idxH > idxI {
+		t.Fatalf("http flags must come before -i, args=%v", args)
 	}
 }

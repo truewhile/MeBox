@@ -28,7 +28,8 @@ import { mediaVersionsOf } from '../utils/mediaVersion'
 //
 // We pick a sensible default based on the source codec: H.264 + AAC in
 // MP4 / WebM containers play directly; everything else (HEVC, MKV, AV1,
-// AC3 audio, …) gets routed through ffmpeg → HLS.
+// AC3 audio, …) gets routed through ffmpeg → HLS. STRM / 云盘直链默认直连，
+// 浏览器播不了时再切 HLS。远程 Emby 挂载只能直连。
 //
 // External subtitles next to the source file are auto-discovered and
 // attached as <track> elements.
@@ -208,7 +209,7 @@ export function PlayerPage() {
         setMedia(m)
         const isDirect = isDirectStreamMedia(m)
         const auto = pickPlayerMode(m)
-        // 直连解码模式以及 STRM / Emby 挂载等直连媒体，忽略 ?mode=hls，始终 direct play。
+        // 直连解码模式以及远程 Emby 挂载忽略 ?mode=hls。STRM 默认直连，但允许手动/失败后切 HLS。
         setMode(directOnly || isDirect ? 'direct' : (modeParam ?? auto))
         setPlayerError('')
         setLoadError('')
@@ -539,11 +540,8 @@ export function PlayerPage() {
     // 浏览器对 <video src> 的错误描述非常有限，把详细原因
     // 转给开发者控制台 + 一条 toast；常见原因是 codec 不支持。
     if (mode === 'direct') {
-      if (isRemoteEmbyID(media?.id)) {
+      if (isRemoteEmbyID(media?.id) || isDirectStreamMedia(media)) {
         setPlayerError('直接播放失败。该媒体为远程 Emby 挂载直连播放（不进行转码）；当前浏览器可能不支持该视频编码或音频格式，建议使用外部播放器（如 PotPlayer / VLC / IINA）播放。')
-        toast.error('直接播放失败，建议使用外部播放器')
-      } else if (isDirectStreamMedia(media)) {
-        setPlayerError('直接播放失败。该媒体为 STRM 远程直连播放（不进行转码）；当前浏览器可能不支持该视频编码或音频格式，建议使用外部播放器播放。')
         toast.error('直接播放失败，建议使用外部播放器')
       } else if (directOnly) {
         setPlayerError('直接播放失败。当前为「客户端直连解码」模式，宿主机不转码；请使用支持该编码/封装的播放器（如 Infuse / VLC / Emby 客户端）播放，或关闭直连解码模式。')
@@ -575,13 +573,7 @@ export function PlayerPage() {
       <PlayerTopBar
         directOnly={directOnly}
         isDirectStream={isDirectStream}
-        directStreamLabel={
-          isRemoteEmbyID(media?.id)
-            ? 'Emby 直连播放'
-            : isDirectStream
-            ? 'STRM 直连播放'
-            : undefined
-        }
+        directStreamLabel={isRemoteEmbyID(media?.id) ? 'Emby 直连播放' : undefined}
         mode={mode}
         onBack={goBack}
         onToggleMode={toggleMode}

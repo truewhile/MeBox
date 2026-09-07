@@ -25,8 +25,10 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +36,7 @@ import (
 
 	"github.com/truewhile/MeBox/internal/config"
 	"github.com/truewhile/MeBox/internal/helper"
+	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/repository"
 )
 
@@ -44,8 +47,9 @@ type TranscoderService struct {
 	repo *repository.Container
 	hub  *Hub
 
-	mu   sync.Mutex
-	jobs map[string]*hlsJob
+	mu          sync.Mutex
+	jobs        map[string]*hlsJob
+	strmResolve func(ctx context.Context, raw string) (*StrmPlayResult, error)
 }
 
 // hlsJob holds the live state of one ffmpeg run.
@@ -102,14 +106,17 @@ func (t *TranscoderService) EnsureJob(ctx context.Context, mediaID string) (stri
 	if m == nil {
 		return "", ErrMediaNotFound
 	}
-	// .strm 媒体（STRMURL 或 container=strm / *.strm 路径）的内容是远程
-	// 直链文本，ffmpeg 无法读取，转码必然失败且白白消耗资源。直接拒绝
-	// 转码，迫使播放器走 /api/stream 302 直连播放。
-	if isStrmMediaRow(m) {
-		return "", ErrTranscodeDisabled
+	t.mu.Lock()
+	if _, ok := t.jobs[mediaID]; ok {
+		t.touchJobLocked(mediaID)
+		t.mu.Unlock()
+		return t.PlaylistPath(mediaID), nil
 	}
-	if _, err := os.Stat(m.Path); err != nil {
-		return "", ErrMediaNotFound
+	t.mu.Unlock()
+
+	input, err := t.resolveTranscodeInput(ctx, m)
+	if err != nil {
+		return "", err
 	}
 	if _, err := t.resolveFFmpegPath(); err != nil {
 		return "", err
@@ -145,6 +152,72 @@ func (t *TranscoderService) EnsureJob(ctx context.Context, mediaID string) (stri
 	t.mu.Unlock()
 
 	helper.Go(t.log, "transcoder.monitorIdle", func() { t.monitorIdle(jobCtx, job) })
-	helper.Go(t.log, "transcoder.ffmpeg", func() { t.runFFmpeg(jobCtx, job, m.Path) })
+	helper.Go(t.log, "transcoder.ffmpeg", func() { t.runFFmpeg(jobCtx, job, input) })
 	return t.PlaylistPath(mediaID), nil
+}
+
+// SetStrmPlayTargetResolver wires STRM URL resolution so ffmpeg can transcode
+// remote .strm media (HTTP 直链 or local source path) after direct play fails.
+func (t *TranscoderService) SetStrmPlayTargetResolver(resolve func(ctx context.Context, raw string) (*StrmPlayResult, error)) {
+	if t == nil {
+		return
+	}
+	t.strmResolve = resolve
+}
+
+func (t *TranscoderService) resolveTranscodeInput(ctx context.Context, m *model.Media) (transcodeInput, error) {
+	if m == nil {
+		return transcodeInput{}, ErrMediaNotFound
+	}
+	if !isStrmMediaRow(m) {
+		if _, err := os.Stat(m.Path); err != nil {
+			return transcodeInput{}, ErrMediaNotFound
+		}
+		return transcodeInput{Source: m.Path}, nil
+	}
+	raw := strings.TrimSpace(m.STRMURL)
+	if raw == "" && strings.HasSuffix(strings.ToLower(strings.TrimSpace(m.Path)), ".strm") {
+		parsed, err := readLocalSTRMTarget(m.Path)
+		if err != nil || strings.TrimSpace(parsed) == "" {
+			return transcodeInput{}, fmt.Errorf("strm play target missing")
+		}
+		raw = parsed
+	}
+	if raw == "" {
+		return transcodeInput{}, fmt.Errorf("strm play target missing")
+	}
+	if t != nil && t.strmResolve != nil {
+		src, err := t.strmResolve(ctx, raw)
+		if err != nil {
+			return transcodeInput{}, err
+		}
+		return transcodeInputFromPlayResult(src)
+	}
+	if isHTTPPlaybackTarget(raw) {
+		return transcodeInput{Source: raw}, nil
+	}
+	return transcodeInput{}, fmt.Errorf("strm transcode source unavailable")
+}
+
+func transcodeInputFromPlayResult(src *StrmPlayResult) (transcodeInput, error) {
+	if src == nil {
+		return transcodeInput{}, fmt.Errorf("strm transcode source unavailable")
+	}
+	if path := strings.TrimSpace(src.LocalPath); path != "" {
+		if _, err := os.Stat(path); err != nil {
+			return transcodeInput{}, ErrMediaNotFound
+		}
+		return transcodeInput{Source: path}, nil
+	}
+	if url := strings.TrimSpace(src.RedirectURL); url != "" {
+		in := transcodeInput{Source: url}
+		if src.Link != nil {
+			in.Headers = src.Link.Headers
+		}
+		return in, nil
+	}
+	if src.Link != nil && strings.TrimSpace(src.Link.URL) != "" {
+		return transcodeInput{Source: src.Link.URL, Headers: src.Link.Headers}, nil
+	}
+	return transcodeInput{}, fmt.Errorf("strm transcode source unavailable")
 }

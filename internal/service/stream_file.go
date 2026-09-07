@@ -87,7 +87,7 @@ func playableSTRMTarget(ctx context.Context, repo *repository.Container, raw str
 }
 
 // IsStrmMediaRow 判断媒体行是否为 .strm（远程直链）媒体：STRMURL 非空、
-// container=strm 或路径以 .strm 结尾。strm 媒体只能直连播放，禁止转码。
+// container=strm 或路径以 .strm 结尾。网页播放默认直连，失败后可转码。
 func IsStrmMediaRow(m *model.Media) bool {
 	if m == nil {
 		return false

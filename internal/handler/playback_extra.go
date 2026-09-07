@@ -45,8 +45,8 @@ func playbackInfoHandler(svc *service.Container) gin.HandlerFunc {
 		token := externalPlaybackToken(c, svc, m.ID, m.DurationSec)
 		profileQuery := externalProfileQuery(c)
 		hlsURL := "/api/hls/" + m.ID + "/index.m3u8?token=" + url.QueryEscape(token) + profileQuery
-		if service.IsEmbyRemoteID(m.ID) || service.IsStrmMediaRow(m) {
-			// Emby 远程挂载与 STRM 媒体一样，默认直连播放，不提供转码地址
+		if service.IsEmbyRemoteID(m.ID) {
+			// 远程 Emby 挂载没有本地文件，不能提供转码地址。STRM 默认直连，直连失败时可走 HLS。
 			hlsURL = ""
 		}
 		c.JSON(http.StatusOK, gin.H{
