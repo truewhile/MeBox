@@ -1453,3 +1453,120 @@ func TestWalk115AdaptiveHierarchicalFlatScan(t *testing.T) {
 		}
 	}
 }
+
+// TestScanLocalMetaForUploadSkipsRecentDoneSameSize 验证近期已成功上传且大小未变时，
+// 即使远端列表尚未反映，也不再入队，缩短「done 但列表滞后」窗口。
+func TestScanLocalMetaForUploadSkipsRecentDoneSameSize(t *testing.T) {
+	svc := testStrmService(t)
+	localDir := t.TempDir()
+	nfoPath := filepath.Join(localDir, "movie.nfo")
+	content := []byte("uploaded-recently")
+	writeFile(t, nfoPath, string(content))
+
+	p := &model.StrmSyncPath{
+		Base:       model.Base{ID: "recent-done-skip"},
+		Provider:   model.StrmProvider115,
+		RemotePath: "root-cid",
+		LocalPath:  localDir,
+		UploadMeta: true,
+	}
+	now := time.Now()
+	doneTask := &model.StrmUploadTask{
+		SyncPathID: p.ID,
+		Provider:   model.StrmProvider115,
+		FileName:   "movie.nfo",
+		LocalPath:  nfoPath,
+		RemotePath: "parent-cid",
+		RemoteRef:  "new-file-id",
+		Size:       int64(len(content)),
+		Status:     model.StrmTaskDone,
+		FinishedAt: &now,
+	}
+	if err := svc.repo.StrmUpload.Create(context.Background(), doneTask); err != nil {
+		t.Fatal(err)
+	}
+
+	st := &strmSyncState{
+		s:                     svc,
+		ctx:                   context.Background(),
+		p:                     p,
+		cfg:                   &strmPathConfig{UploadMeta: true, MetaExt: []string{"nfo"}},
+		rec:                   &model.StrmSyncRecord{},
+		seenMeta:              map[string]bool{},
+		remoteMeta:            map[string][]remoteMetaItem{}, // 远端列表空 = 滞后
+		dirPathToID:           map[string]string{"": "parent-cid"},
+		activeUploadPaths:     map[string]bool{},
+		recentDoneUploadSizes: nil, // 让 scan 自行从 DB 加载
+	}
+	if err := st.scanLocalMetaForUpload(); err != nil {
+		t.Fatalf("scanLocalMetaForUpload failed: %v", err)
+	}
+	if st.rec.Uploaded != 0 {
+		t.Fatalf("recent done same-size should skip enqueue, uploaded=%d", st.rec.Uploaded)
+	}
+	if len(st.pendingUploads) != 0 {
+		t.Fatalf("expected no pending uploads, got %d", len(st.pendingUploads))
+	}
+}
+
+// TestScanLocalMetaForUploadRequeuesWhenRecentDoneSizeChanged 本地大小变化后不应被近期 done 窗口挡住。
+func TestScanLocalMetaForUploadRequeuesWhenRecentDoneSizeChanged(t *testing.T) {
+	svc := testStrmService(t)
+	localDir := t.TempDir()
+	nfoPath := filepath.Join(localDir, "movie.nfo")
+	writeFile(t, nfoPath, "new-longer-content-xxx")
+
+	p := &model.StrmSyncPath{
+		Base:       model.Base{ID: "recent-done-resize"},
+		Provider:   model.StrmProvider115,
+		RemotePath: "root-cid",
+		LocalPath:  localDir,
+		UploadMeta: true,
+	}
+	now := time.Now()
+	doneTask := &model.StrmUploadTask{
+		SyncPathID: p.ID,
+		Provider:   model.StrmProvider115,
+		FileName:   "movie.nfo",
+		LocalPath:  nfoPath,
+		RemotePath: "parent-cid",
+		Size:       3, // 旧大小
+		Status:     model.StrmTaskDone,
+		FinishedAt: &now,
+	}
+	if err := svc.repo.StrmUpload.Create(context.Background(), doneTask); err != nil {
+		t.Fatal(err)
+	}
+
+	st := &strmSyncState{
+		s:                 svc,
+		ctx:               context.Background(),
+		p:                 p,
+		cfg:               &strmPathConfig{UploadMeta: true, MetaExt: []string{"nfo"}},
+		rec:               &model.StrmSyncRecord{},
+		seenMeta:          map[string]bool{},
+		remoteMeta:        map[string][]remoteMetaItem{},
+		dirPathToID:       map[string]string{"": "parent-cid"},
+		activeUploadPaths: map[string]bool{},
+	}
+	if err := st.scanLocalMetaForUpload(); err != nil {
+		t.Fatalf("scanLocalMetaForUpload failed: %v", err)
+	}
+	if st.rec.Uploaded != 1 {
+		t.Fatalf("size changed should re-enqueue, uploaded=%d", st.rec.Uploaded)
+	}
+	tasks, _, err := svc.repo.StrmUpload.List(context.Background(), model.StrmTaskPending, 1, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, task := range tasks {
+		if task.LocalPath == nfoPath && task.Status == model.StrmTaskPending {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected a pending upload task for resized local file")
+	}
+}

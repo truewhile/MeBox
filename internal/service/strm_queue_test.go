@@ -3,10 +3,12 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -174,8 +176,8 @@ func TestRequeueDownloadTask(t *testing.T) {
 }
 
 // TestProcessUpload115DeletesStaleRemoteMetaFirst 验证 115 覆盖上传语义（以本地为准）：
-// 任务携带网盘旧文件 ID 时，必须先调用 /open/ufile/delete 删除旧元数据再上传本地文件，
-// 避免 115 出现同名重复文件；删除请求应携带 file_ids 与父目录 cid。
+// 探活未命中时，任务携带网盘旧文件 ID 必须先 /open/ufile/delete 再上传；
+// 上传成功后 RemoteRef 回写为新 file_id。
 func TestProcessUpload115DeletesStaleRemoteMetaFirst(t *testing.T) {
 	svc := testStrmService(t)
 	localDir := t.TempDir()
@@ -197,6 +199,10 @@ func TestProcessUpload115DeletesStaleRemoteMetaFirst(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		switch r.URL.Path {
+		case "/open/ufile/files":
+			calls = append(calls, "probe")
+			// 探活：目录为空 / 无同内容副本 → 继续删旧上传
+			w.Write([]byte(`{"state":true,"data":[]}`))
 		case "/open/ufile/delete":
 			calls = append(calls, "delete")
 			deleteForm["file_ids"] = r.FormValue("file_ids")
@@ -232,16 +238,110 @@ func TestProcessUpload115DeletesStaleRemoteMetaFirst(t *testing.T) {
 	if task.Status != model.StrmTaskDone {
 		t.Fatalf("upload task should succeed, status = %s, error = %s", task.Status, task.Error)
 	}
+	if task.RemoteRef != "new-1" {
+		t.Fatalf("successful upload should record new file_id in RemoteRef, got %q", task.RemoteRef)
+	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(calls) != 2 || calls[0] != "delete" || calls[1] != "upload" {
-		t.Fatalf("expected delete before upload, got calls = %v", calls)
+	if len(calls) != 3 || calls[0] != "probe" || calls[1] != "delete" || calls[2] != "upload" {
+		t.Fatalf("expected probe→delete→upload, got calls = %v", calls)
 	}
 	if deleteForm["file_ids"] != "old-file-1" {
 		t.Fatalf("delete file_ids = %q, want old-file-1", deleteForm["file_ids"])
 	}
 	if deleteForm["parent_id"] != "777" {
 		t.Fatalf("delete parent_id = %q, want 777", deleteForm["parent_id"])
+	}
+}
+
+// TestProcessUpload115SkipsWhenProbeFindsSameContent 验证上传/重试前探活命中同内容副本时跳过上传，
+// 并清理其它脏副本，RemoteRef 回写为已存在的 file_id。
+func TestProcessUpload115SkipsWhenProbeFindsSameContent(t *testing.T) {
+	svc := testStrmService(t)
+	localDir := t.TempDir()
+	localFile := filepath.Join(localDir, "movie.nfo")
+	content := []byte("already-on-115")
+	if err := os.WriteFile(localFile, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sha, err := cloud115.FileSHA1(localFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	acct := &model.StrmAccount{Name: "fake115", Provider: "cloud115", Config: "{}", Enabled: true}
+	if err := svc.repo.StrmAccount.Create(context.Background(), acct); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var calls []string
+	deleteForm := map[string]string{}
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.URL.Path {
+		case "/open/ufile/files":
+			calls = append(calls, "probe")
+			w.Write([]byte(fmt.Sprintf(
+				`{"state":true,"data":[
+					{"fid":"keep-1","fc":"1","fn":"movie.nfo","fs":%d,"sha1":%q,"fta":"1"},
+					{"fid":"dirty-2","fc":"1","fn":"movie.nfo","fs":9,"sha1":"DEADBEEF","fta":"1"}
+				]}`, len(content), sha)))
+		case "/open/ufile/delete":
+			calls = append(calls, "delete")
+			deleteForm["file_ids"] = r.FormValue("file_ids")
+			w.Write([]byte(`{"state":true,"data":[]}`))
+		case "/open/upload/init":
+			calls = append(calls, "upload")
+			w.Write([]byte(`{"state":true,"data":{"status":2,"file_id":"should-not","pick_code":"x","callback":null}}`))
+		default:
+			t.Errorf("unexpected 115 api path %s", r.URL.Path)
+			w.Write([]byte(`{"state":false,"message":"unexpected path"}`))
+		}
+	}))
+	defer api.Close()
+	oldPro := cloud115.ProAPIBase
+	cloud115.ProAPIBase = api.URL
+	defer func() { cloud115.ProAPIBase = oldPro }()
+
+	task := &model.StrmUploadTask{
+		Base:       model.Base{ID: "up-skip-1"},
+		SyncPathID: "p1",
+		AccountID:  acct.ID,
+		Provider:   model.StrmProvider115,
+		FileName:   "movie.nfo",
+		LocalPath:  localFile,
+		RemotePath: "777",
+		RemoteRef:  "old-ref",
+		Size:       int64(len(content)),
+		Status:     model.StrmTaskRunning,
+	}
+	svc.processUpload115(context.Background(), task)
+
+	if task.Status != model.StrmTaskDone {
+		t.Fatalf("probe hit should finish done, status=%s err=%s", task.Status, task.Error)
+	}
+	if task.RemoteRef != "keep-1" {
+		t.Fatalf("RemoteRef should be matched file_id keep-1, got %q", task.RemoteRef)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 2 || calls[0] != "probe" || calls[1] != "delete" {
+		t.Fatalf("expected probe→delete (no upload), got %v", calls)
+	}
+	// 脏副本 dirty-2 与任务旧 ref 都应被清理，keep-1 不得出现
+	ids := strings.Split(deleteForm["file_ids"], ",")
+	idSet := map[string]bool{}
+	for _, id := range ids {
+		idSet[strings.TrimSpace(id)] = true
+	}
+	if !idSet["dirty-2"] || !idSet["old-ref"] {
+		t.Fatalf("delete should include dirty-2 and old-ref, got %q", deleteForm["file_ids"])
+	}
+	if idSet["keep-1"] {
+		t.Fatalf("must not delete matched keep-1, got %q", deleteForm["file_ids"])
 	}
 }
 

@@ -56,8 +56,10 @@ type strmSyncState struct {
 	seenVideoTarget     map[string]cloud.FileEntry
 	activeDownloadPaths map[string]bool // 本地已在排队/进行的下载任务路径（内存去重）
 	activeUploadPaths   map[string]bool // 本地已在排队/进行的上传任务路径（内存去重）
-	pendingDownloads    []*model.StrmDownloadTask
-	pendingUploads      []*model.StrmUploadTask
+	// recentDoneUploadSizes：近期已成功上传的 local_path → size，缩短「done 但列表未到」窗口内的重复入队
+	recentDoneUploadSizes map[string]int64
+	pendingDownloads      []*model.StrmDownloadTask
+	pendingUploads        []*model.StrmUploadTask
 	dirCache            sync.Map          // dirID (string) -> relativePath (string)
 	dirPathToID         map[string]string // relativePath (string) -> dirID（115 上传父目录寻址用，walk 后构建）
 	dirCacheDirty       map[string]string // 待批量落库的目录缓存（dirID → 相对路径），避免逐目录单条 upsert
@@ -349,6 +351,14 @@ func (st *strmSyncState) run() error {
 			st.activeUploadPaths = active
 		} else {
 			st.activeUploadPaths = map[string]bool{}
+		}
+		since := time.Now().Add(-strmRecentUploadSkipWindow)
+		if recent, err := st.s.repo.StrmUpload.GetRecentDoneUploadSizeMap(st.ctx, st.p.ID, since); err == nil {
+			st.recentDoneUploadSizes = recent
+		} else {
+			st.recentDoneUploadSizes = map[string]int64{}
+			st.s.log.Warn("加载近期已完成上传任务失败，跳过 done 窗口去重",
+				zap.String("path_id", st.p.ID), zap.Error(err))
 		}
 	}
 
@@ -1575,6 +1585,7 @@ func (st *strmSyncState) walkLocalSource() error {
 // scanLocalMetaForUpload 扫描本地元数据，与远端比对后入上传队列。
 // 以本地为准：网盘端不存在、同名不同大小、或同名同大小但 SHA1 不同（115 提供
 // 远端哈希时做内容级比对）均入队覆盖上传；同名同大小同内容视为同一文件跳过。
+// 另：近期已成功上传且大小未变的路径跳过入队，缩短「任务 done 但 115 列表滞后」窗口。
 func (st *strmSyncState) scanLocalMetaForUpload() error {
 	defer st.flushPendingUploads()
 	if st.activeUploadPaths == nil {
@@ -1582,6 +1593,14 @@ func (st *strmSyncState) scanLocalMetaForUpload() error {
 			st.activeUploadPaths = active
 		} else {
 			st.activeUploadPaths = map[string]bool{}
+		}
+	}
+	if st.recentDoneUploadSizes == nil {
+		since := time.Now().Add(-strmRecentUploadSkipWindow)
+		if recent, err := st.s.repo.StrmUpload.GetRecentDoneUploadSizeMap(st.ctx, st.p.ID, since); err == nil {
+			st.recentDoneUploadSizes = recent
+		} else {
+			st.recentDoneUploadSizes = map[string]int64{}
 		}
 	}
 	var pendingDeletes map[string][]string
@@ -1632,23 +1651,28 @@ func (st *strmSyncState) scanLocalMetaForUpload() error {
 					}
 				}
 			}
-				if matchedIdx >= 0 {
-					// 远端已存在完全一致的副本，跳过上传！
-					// 若远端还存在其他同名脏副本（副本总数 > 1），在 115 下收集待删除 ID，稍后按目录批量删除。
-					// 严禁将已命中的最新副本 ID (matchedID) 放入待删列表，杜绝误杀唯一有效副本。
-					if len(entries) > 1 && st.p.Provider == model.StrmProvider115 {
-						parentCID := st.uploadRemoteTarget(rel)
-						if parentCID != "" {
-							matchedID := entries[matchedIdx].ID
-							for i, it := range entries {
-								if i != matchedIdx && it.ID != "" && it.ID != matchedID {
-									pendingDeletes[parentCID] = append(pendingDeletes[parentCID], it.ID)
-								}
+			if matchedIdx >= 0 {
+				// 远端已存在完全一致的副本，跳过上传！
+				// 若远端还存在其他同名脏副本（副本总数 > 1），在 115 下收集待删除 ID，稍后按目录批量删除。
+				// 严禁将已命中的最新副本 ID (matchedID) 放入待删列表，杜绝误杀唯一有效副本。
+				if len(entries) > 1 && st.p.Provider == model.StrmProvider115 {
+					parentCID := st.uploadRemoteTarget(rel)
+					if parentCID != "" {
+						matchedID := entries[matchedIdx].ID
+						for i, it := range entries {
+							if i != matchedIdx && it.ID != "" && it.ID != matchedID {
+								pendingDeletes[parentCID] = append(pendingDeletes[parentCID], it.ID)
 							}
 						}
 					}
-					return nil
 				}
+				return nil
+			}
+		}
+
+		// 近期已成功上传且大小未变：115 列表可能尚未反映，避免重复入队
+		if doneSize, ok := st.recentDoneUploadSizes[path]; ok && doneSize == info.Size() {
+			return nil
 		}
 
 		remoteTarget := st.uploadRemoteTarget(rel)
