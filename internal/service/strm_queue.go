@@ -26,6 +26,8 @@ import (
 
 const (
 	strmMaxTaskRetry = 3
+	// strmRecentUploadSkipWindow：上传已成功但 115 列表尚未反映时，同步扫描跳过同路径同大小再入队的宽限窗口。
+	strmRecentUploadSkipWindow = 30 * time.Minute
 )
 
 // downloadWorker 下载队列 worker：认领 → 解析直链 → 下载 → 落盘。
@@ -332,18 +334,28 @@ func (s *StrmService) processUploadTask(ctx context.Context, task *model.StrmUpl
 }
 
 // processUpload115 115 元数据上传：task.RemotePath 存的是父目录 cid，FileName 为远端文件名。
+//
+// 幂等要点：
+//  1. 上传/重试前按父目录 + 文件名 + SHA1 探活：远端已有同内容副本则跳过上传，仅清理其它脏副本；
+//  2. 真正上传成功后把新 file_id 写回 RemoteRef，供下次同步/重试识别；
+//  3. 115 上传不保证同名覆盖，内容不同时仍先删旧再传。
 func (s *StrmService) processUpload115(ctx context.Context, task *model.StrmUploadTask) {
-	finish := func(status, message string) {
+	finish := func(status, message, remoteRef string) {
 		now := time.Now()
 		task.Status = status
 		task.Error = message
 		task.FinishedAt = &now
-		// 条件化收尾：与下载侧一致，防止覆盖已取消任务。
-		if ok, err := s.repo.StrmUpload.UpdateIfRunning(context.Background(), task.ID, map[string]any{
+		updates := map[string]any{
 			"status":      status,
 			"error":       message,
 			"finished_at": &now,
-		}); err != nil {
+		}
+		if remoteRef != "" {
+			task.RemoteRef = remoteRef
+			updates["remote_ref"] = remoteRef
+		}
+		// 条件化收尾：与下载侧一致，防止覆盖已取消任务。
+		if ok, err := s.repo.StrmUpload.UpdateIfRunning(context.Background(), task.ID, updates); err != nil {
 			s.log.Warn("update strm upload task failed", zap.Error(err))
 		} else if !ok {
 			s.log.Info("strm upload task already closed elsewhere", zap.String("id", task.ID))
@@ -351,7 +363,7 @@ func (s *StrmService) processUpload115(ctx context.Context, task *model.StrmUplo
 	}
 	acct, err := s.repo.StrmAccount.FindByID(ctx, task.AccountID)
 	if err != nil || acct == nil {
-		finish(model.StrmTaskFailed, "网盘账号不存在")
+		finish(model.StrmTaskFailed, "网盘账号不存在", "")
 		return
 	}
 	provider, err := s.providerFor(ctx, acct)
@@ -359,58 +371,98 @@ func (s *StrmService) processUpload115(ctx context.Context, task *model.StrmUplo
 		s.uploadTaskFailWithRetry(task, err.Error())
 		return
 	}
-	named, ok := provider.(interface {
-		PutFileNamed(ctx context.Context, parentCID, fileName string, r io.Reader) error
-	})
+	open115, ok := provider.(cloud.OpenAPI115Provider)
 	if !ok {
-		finish(model.StrmTaskFailed, "该网盘不支持元数据上传")
+		finish(model.StrmTaskFailed, "该网盘不支持元数据上传", "")
 		return
 	}
-	// 以本地为准：网盘端已有同名但内容不同的旧元数据时，先尝试批量删除所有旧副本再上传。
-	// 115 的上传接口不保证同名覆盖，直接上传可能产生同名重复文件。
-	// 删除失败时不中止任务——继续上传新文件，旧副本交由下次同步的 cleanupBatchRedundantFiles
-	// 按目录批量清理（下次同步会看到新旧两个版本，命中新版本后把旧版本 cid 收入 pendingDeletes
-	// 异步删除）。这样避免了「删旧失败 → 任务重试 → 再次删旧失败 → 永远无法上传」的死循环。
-	if task.RemoteRef != "" {
-		open115, ok := provider.(cloud.OpenAPI115Provider)
-		if !ok {
-			finish(model.StrmTaskFailed, "该网盘不支持删除远端旧元数据")
-			return
-		}
-		refs := strings.Split(task.RemoteRef, ",")
-			if err := open115.OpenClient().DeleteFiles(ctx, task.RemotePath, refs...); err != nil {
-				s.log.Warn("删除网盘旧元数据失败，跳过删除继续上传新文件",
-					zap.String("task_id", task.ID),
-					zap.String("local_path", task.LocalPath),
-					zap.Error(err))
-				// 不 return：继续上传新文件，旧副本由下次同步清理
-			}
-		}
-		// 优先使用直接本地文件上传接口，零拷贝且彻底根除并发临时文件同名碰撞
-		if localUploader, ok := provider.(interface {
-			PutLocalFile(ctx context.Context, parentCID, localPath string) error
-		}); ok {
-			if err := localUploader.PutLocalFile(ctx, task.RemotePath, task.LocalPath); err != nil {
-				s.uploadTaskFailWithRetry(task, "上传失败："+err.Error())
-				return
-			}
-			finish(model.StrmTaskDone, "")
-			return
-		}
+	client := open115.OpenClient()
 
-		f, err := os.Open(task.LocalPath)
-		if err != nil {
-			s.uploadTaskFailWithRetry(task, "打开本地文件失败："+err.Error())
-			return
-		}
-		if err := named.PutFileNamed(ctx, task.RemotePath, task.FileName, f); err != nil {
-			_ = f.Close()
-			s.uploadTaskFailWithRetry(task, "上传失败："+err.Error())
-			return
-		}
-		_ = f.Close()
-		finish(model.StrmTaskDone, "")
+	localSHA1, shaErr := cloud115.FileSHA1(task.LocalPath)
+	if shaErr != nil {
+		s.uploadTaskFailWithRetry(task, "计算本地 SHA1 失败："+shaErr.Error())
+		return
 	}
+	info, statErr := os.Stat(task.LocalPath)
+	if statErr != nil {
+		s.uploadTaskFailWithRetry(task, "读取本地文件失败："+statErr.Error())
+		return
+	}
+	localSize := info.Size()
+
+	// ── 探活：父目录下是否已有同名同内容副本（覆盖「上传成功但本地当失败重试」）──
+	matched, sameName, probeErr := client.FindNamedContentInParent(ctx, task.RemotePath, task.FileName, localSHA1, localSize)
+	if probeErr != nil {
+		// 探活失败不阻断上传：按原路径继续，避免列表接口抖动导致任务永久卡住
+		s.log.Warn("115 上传前探活失败，继续上传",
+			zap.String("task_id", task.ID),
+			zap.String("local_path", task.LocalPath),
+			zap.Error(probeErr))
+	} else if matched != nil && matched.FileId != "" {
+		staleIDs := collectStale115FileIDs(task.RemoteRef, sameName, matched.FileId)
+		if len(staleIDs) > 0 {
+			if err := client.DeleteFiles(ctx, task.RemotePath, staleIDs...); err != nil {
+				s.log.Warn("探活命中后清理 115 脏副本失败（已跳过上传）",
+					zap.String("task_id", task.ID),
+					zap.String("matched_id", matched.FileId),
+					zap.Error(err))
+			}
+		}
+		s.log.Info("115 元数据已存在同内容副本，跳过上传",
+			zap.String("task_id", task.ID),
+			zap.String("local_path", task.LocalPath),
+			zap.String("file_id", matched.FileId))
+		finish(model.StrmTaskDone, "", matched.FileId)
+		return
+	}
+
+	// ── 需要上传：先尽量删掉任务携带的旧副本，再真正上传 ──
+	// 删除失败时不中止——继续上传新文件，旧副本交由下次同步 cleanupBatchRedundantFiles。
+	if task.RemoteRef != "" {
+		refs := strings.Split(task.RemoteRef, ",")
+		if err := client.DeleteFiles(ctx, task.RemotePath, refs...); err != nil {
+			s.log.Warn("删除网盘旧元数据失败，跳过删除继续上传新文件",
+				zap.String("task_id", task.ID),
+				zap.String("local_path", task.LocalPath),
+				zap.Error(err))
+		}
+	}
+
+	result, err := client.Upload(ctx, task.LocalPath, task.RemotePath, "", "")
+	if err != nil {
+		s.uploadTaskFailWithRetry(task, "上传失败："+err.Error())
+		return
+	}
+	newID := ""
+	if result != nil {
+		newID = strings.TrimSpace(result.FileId)
+	}
+	finish(model.StrmTaskDone, "", newID)
+}
+
+// collectStale115FileIDs 汇总待删脏副本：任务 RemoteRef + 探活所见同名文件，排除 keepID。
+func collectStale115FileIDs(remoteRef string, sameName []cloud115.RemoteFile, keepID string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" || id == keepID {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	for _, id := range strings.Split(remoteRef, ",") {
+		add(id)
+	}
+	for _, f := range sameName {
+		add(f.FileId)
+	}
+	return out
+}
 
 // downloadTaskFailWithRetry 下载失败任务按退避重试，超过上限标记 failed。
 func (s *StrmService) downloadTaskFailWithRetry(task *model.StrmDownloadTask, message string) {

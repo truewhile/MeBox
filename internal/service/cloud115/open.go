@@ -119,6 +119,60 @@ func (c *OpenClient) GetFsListFlat(ctx context.Context, cid string, offset, limi
 	return files, resp.Count, nil
 }
 
+// FindNamedContentInParent 在父目录下查找与本地内容一致的同名文件。
+// 匹配条件：文件名完全一致、大小一致，且 SHA1 为空或与 expectedSHA1 大小写不敏感相等。
+// 同时返回该目录下全部同名文件（含未匹配的脏副本），便于上传前清理。
+// 目录过大时分页扫描，最多拉取 maxListPages 页（每页 pageSize 条）。
+func (c *OpenClient) FindNamedContentInParent(ctx context.Context, parentCID, fileName, expectedSHA1 string, expectedSize int64) (matched *RemoteFile, sameName []RemoteFile, err error) {
+	fileName = strings.TrimSpace(fileName)
+	if fileName == "" {
+		return nil, nil, nil
+	}
+	const pageSize = 200
+	const maxListPages = 20 // 最多扫描 4000 项，元数据父目录通常远小于此
+	expectedSHA1 = strings.TrimSpace(expectedSHA1)
+	offset := 0
+	for page := 0; page < maxListPages; page++ {
+		files, _, listErr := c.GetFsList(ctx, parentCID, offset, pageSize)
+		if listErr != nil {
+			return nil, sameName, listErr
+		}
+		if len(files) == 0 {
+			break
+		}
+		for i := range files {
+			f := files[i]
+			if f.Category == TypeDir {
+				continue
+			}
+			// fta=0/2 表示未上传完成，不可作为已存在副本
+			if f.Fta == "0" || f.Fta == "2" {
+				continue
+			}
+			if f.FileName != fileName {
+				continue
+			}
+			sameName = append(sameName, f)
+			if matched != nil {
+				continue
+			}
+			if f.FileSize != expectedSize {
+				continue
+			}
+			remoteSha := strings.TrimSpace(f.Sha1)
+			if remoteSha == "" || remoteSha == "-" || strings.EqualFold(remoteSha, expectedSHA1) {
+				cp := f
+				matched = &cp
+			}
+		}
+		if len(files) < pageSize {
+			break
+		}
+		offset += len(files)
+	}
+	return matched, sameName, nil
+}
+
 // GetFsDetailByCid 查询文件（夹）详情。
 func (c *OpenClient) GetFsDetailByCid(ctx context.Context, fileId string) (*RemoteFileDetail, error) {
 	params := map[string]string{"file_id": fileId}

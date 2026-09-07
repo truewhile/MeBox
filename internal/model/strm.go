@@ -128,7 +128,7 @@ type StrmUploadTask struct {
 	FileName   string     `gorm:"size:512" json:"file_name"`
 	LocalPath  string     `gorm:"size:1024" json:"local_path"`  // 本地源文件
 	RemotePath string     `gorm:"size:1024" json:"remote_path"` // 远端目标路径
-	RemoteRef  string     `gorm:"size:1024" json:"remote_ref"`  // 远端同名旧文件引用（115 文件 ID；上传覆盖前先删除旧文件，WebDAV/OpenList 直接覆盖无需删除）
+	RemoteRef  string     `gorm:"size:1024" json:"remote_ref"`  // 上传前：远端同名旧文件 ID（逗号分隔，覆盖前先删）；上传成功后：新文件 ID
 	Size       int64      `json:"size"`
 	Status     string     `gorm:"size:16;index" json:"status"`
 	Error      string     `gorm:"size:1024" json:"error"`

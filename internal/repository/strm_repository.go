@@ -861,6 +861,34 @@ func (r *StrmUploadTaskRepository) GetActiveLocalPathMap(ctx context.Context, sy
 	return out, nil
 }
 
+// GetRecentDoneUploadSizeMap 返回近期已成功上传的 local_path → size。
+// 用于缩短「上传已 done 但 115 列表尚未反映」窗口内的重复入队：同路径且大小未变则跳过。
+// 同一路径存在多条 done 时取最新一条（finished_at 降序）。
+func (r *StrmUploadTaskRepository) GetRecentDoneUploadSizeMap(ctx context.Context, syncPathID string, since time.Time) (map[string]int64, error) {
+	var rows []model.StrmUploadTask
+	err := r.db.WithContext(ctx).Model(&model.StrmUploadTask{}).
+		Select("local_path", "size", "finished_at").
+		Where("sync_path_id = ? AND status = ? AND finished_at IS NOT NULL AND finished_at >= ?",
+			syncPathID, model.StrmTaskDone, since).
+		Order("finished_at DESC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]int64, len(rows))
+	for _, row := range rows {
+		if row.LocalPath == "" {
+			continue
+		}
+		// 已按 finished_at DESC；先写入的是最新，后续同路径跳过
+		if _, exists := out[row.LocalPath]; exists {
+			continue
+		}
+		out[row.LocalPath] = row.Size
+	}
+	return out, nil
+}
+
 func (r *StrmUploadTaskRepository) DeleteFinishedOlderThan(ctx context.Context, before time.Time) error {
 	return withSQLiteBusyRetry(ctx, func() error {
 		return r.db.WithContext(ctx).Unscoped().Where("status IN ? AND finished_at < ?",
