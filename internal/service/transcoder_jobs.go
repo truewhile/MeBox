@@ -9,17 +9,30 @@ import (
 )
 
 // WaitReady blocks (with a deadline) until the playlist file shows up on
-// disk. Returns true on success.
+// disk for the *current* job generation. Stale playlists left behind by a
+// failed RemoveAll / still-exiting ffmpeg must not unblock a mid-file restart.
 func (t *TranscoderService) WaitReady(ctx context.Context, mediaID string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for {
-		if _, err := os.Stat(t.PlaylistPath(mediaID)); err == nil {
-			t.mu.Lock()
-			if j, ok := t.jobs[mediaID]; ok {
-				j.playlistOK = true
+		t.mu.Lock()
+		job, ok := t.jobs[mediaID]
+		var started time.Time
+		if ok {
+			started = job.startedAt
+		}
+		t.mu.Unlock()
+		if ok {
+			if info, err := os.Stat(t.PlaylistPath(mediaID)); err == nil {
+				// Allow a small clock skew; reject anything older than this job.
+				if !info.ModTime().Before(started.Add(-2 * time.Second)) {
+					t.mu.Lock()
+					if j, exists := t.jobs[mediaID]; exists {
+						j.playlistOK = true
+					}
+					t.mu.Unlock()
+					return true
+				}
 			}
-			t.mu.Unlock()
-			return true
 		}
 		if time.Now().After(deadline) || ctx.Err() != nil {
 			return false

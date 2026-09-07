@@ -47,7 +47,10 @@ func buildFFmpegArgsForInput(cfg *config.Config, input transcodeInput, playlist,
 	settings := ffmpegArgSettingsFromConfig(cfg)
 	video := ffmpegVideoPlanForSettings(settings)
 
-	args := baseFFmpegArgs(video.preInput, settings.realtime)
+	// Mid-file restarts must not use -re: output -ss would otherwise crawl to the
+	// seek point at 1x wall-clock before emitting the first HLS segment.
+	realtime := settings.realtime && input.StartSec <= 0.05
+	args := baseFFmpegArgs(video.preInput, realtime)
 	args = appendInputAndVideoArgs(args, input, settings, video)
 	args = appendOutputHLSArgs(args, settings, segments, playlist)
 	return args
@@ -126,12 +129,21 @@ func baseFFmpegArgs(preInput string, realtime bool) []string {
 
 func appendInputAndVideoArgs(args []string, input transcodeInput, settings ffmpegArgSettings, video ffmpegVideoPlan) []string {
 	args = append(args, ffmpegHTTPInputArgs(input)...)
-	// Input seek (-ss before -i) lets mid-file HLS restarts jump without
-	// decoding everything before the click position.
+	ss := ""
 	if input.StartSec > 0.05 {
-		args = append(args, "-ss", strconv.FormatFloat(input.StartSec, 'f', 3, 64))
+		ss = strconv.FormatFloat(input.StartSec, 'f', 3, 64)
 	}
-	args = append(args, "-i", input.Source, "-map", "0:v:0?", "-map", "0:a:0?", "-vf", video.filter, "-c:v", video.codec)
+	// Local files: input -ss (byte/keyframe seek). HTTP/STRM: output -ss after
+	// -i — several cloud/WMV demuxers ignore input seeks and would otherwise
+	// restart from t=0. Realtime (-re) is already disabled for StartSec > 0.
+	if ss != "" && !isHTTPSource(input.Source) {
+		args = append(args, "-ss", ss)
+	}
+	args = append(args, "-i", input.Source)
+	if ss != "" && isHTTPSource(input.Source) {
+		args = append(args, "-ss", ss)
+	}
+	args = append(args, "-map", "0:v:0?", "-map", "0:a:0?", "-vf", video.filter, "-c:v", video.codec)
 	if settings.threads > 0 && video.codec == "libx264" {
 		args = append(args, "-threads", strconv.Itoa(settings.threads))
 	}

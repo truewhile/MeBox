@@ -575,9 +575,20 @@ export function PlayerPage() {
       if (!video) return false
       const target = Math.max(0, absoluteSec)
       const local = target - hlsStartSec
-      const available = Number.isFinite(video.duration) ? video.duration : 0
-      // Stay inside the already-transcoded window of this HLS session.
-      if (local >= 0 && local <= Math.max(0, available - 0.5)) {
+      // Live/EVENT HLS during transcoding often reports duration=Infinity.
+      // Never treat that as "already buffered" or currentTime seeks reset to 0.
+      const finiteDuration = Number.isFinite(video.duration) ? video.duration : 0
+      let seekableEnd = 0
+      if (video.seekable && video.seekable.length > 0) {
+        try {
+          seekableEnd = video.seekable.end(video.seekable.length - 1)
+        } catch {
+          seekableEnd = 0
+        }
+      }
+      if (!Number.isFinite(seekableEnd)) seekableEnd = 0
+      const windowEnd = Math.max(finiteDuration, seekableEnd)
+      if (local >= 0 && windowEnd > 0.5 && local <= windowEnd - 0.5) {
         video.currentTime = local
         return true
       }

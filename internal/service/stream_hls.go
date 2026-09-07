@@ -109,7 +109,8 @@ func filterHLSSegmentQuery(rawQuery string) string {
 		if i := strings.IndexByte(part, '='); i >= 0 {
 			key = part[:i]
 		}
-		if strings.EqualFold(key, "start") {
+		switch strings.ToLower(key) {
+		case "start", "_seek":
 			continue
 		}
 		kept = append(kept, part)

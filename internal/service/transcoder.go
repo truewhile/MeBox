@@ -146,8 +146,7 @@ func (t *TranscoderService) EnsureJobFrom(ctx context.Context, mediaID string, s
 
 	outDir := t.HLSDir(mediaID)
 	// Wipe prior segments so a mid-file restart cannot serve stale early chunks.
-	_ = os.RemoveAll(outDir)
-	if err := os.MkdirAll(outDir, 0o750); err != nil {
+	if err := resetHLSDir(outDir); err != nil {
 		return "", err
 	}
 
@@ -190,6 +189,24 @@ func sameHLSStart(a, b float64) bool {
 		return b-a < tol
 	}
 	return a-b < tol
+}
+
+func resetHLSDir(dir string) error {
+	var lastErr error
+	for i := 0; i < 6; i++ {
+		lastErr = os.RemoveAll(dir)
+		if lastErr == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return err
+	}
+	// Best-effort: if RemoveAll kept failing on Windows locks, at least drop the playlist
+	// so WaitReady cannot treat the stale file as belonging to the new job.
+	_ = os.Remove(filepath.Join(dir, "index.m3u8"))
+	return nil
 }
 
 // SetStrmPlayTargetResolver wires STRM URL resolution so ffmpeg can transcode

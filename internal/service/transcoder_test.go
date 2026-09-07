@@ -212,9 +212,39 @@ func TestBuildFFmpegArgsInputSeekBeforeDashI(t *testing.T) {
 		}
 	}
 	if idxSS < 0 || idxI < 0 || idxSS > idxI {
-		t.Fatalf("expected -ss before -i, args=%v", args)
+		t.Fatalf("expected local -ss before -i, args=%v", args)
 	}
 	if args[idxSS+1] != "125.500" {
+		t.Fatalf("start = %q", args[idxSS+1])
+	}
+}
+
+func TestBuildFFmpegArgsHTTPSeekAfterDashI(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Transcoder.MaxHeight = 720
+	cfg.Transcoder.SegmentSeconds = 4
+	cfg.Transcoder.Realtime = true
+	args := buildFFmpegArgsForInput(cfg, transcodeInput{
+		Source:   "https://cdn.example.com/a.wmv",
+		StartSec: 90,
+	}, "/o/x.m3u8", "/o/seg_%05d.ts")
+	joined := " " + strings.Join(args, " ") + " "
+	if strings.Contains(joined, " -re ") {
+		t.Fatalf("seek restart must disable -re, got: %s", joined)
+	}
+	idxSS, idxI := -1, -1
+	for i, arg := range args {
+		if arg == "-ss" {
+			idxSS = i
+		}
+		if arg == "-i" && idxI < 0 {
+			idxI = i
+		}
+	}
+	if idxSS < 0 || idxI < 0 || idxSS < idxI {
+		t.Fatalf("expected http -ss after -i, args=%v", args)
+	}
+	if args[idxSS+1] != "90.000" {
 		t.Fatalf("start = %q", args[idxSS+1])
 	}
 }
