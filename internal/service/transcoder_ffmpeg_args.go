@@ -2,10 +2,18 @@ package service
 
 import (
 	"fmt"
+	"net/url"
+	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/truewhile/MeBox/internal/config"
 )
+
+type transcodeInput struct {
+	Source  string
+	Headers map[string]string
+}
 
 type ffmpegArgSettings struct {
 	encoder        string
@@ -31,11 +39,15 @@ type ffmpegVideoPlan struct {
 // encoder. The function is package-level so the unit test can pin its
 // behaviour without spawning a real ffmpeg process.
 func buildFFmpegArgs(cfg *config.Config, source, playlist, segments string) []string {
+	return buildFFmpegArgsForInput(cfg, transcodeInput{Source: source}, playlist, segments)
+}
+
+func buildFFmpegArgsForInput(cfg *config.Config, input transcodeInput, playlist, segments string) []string {
 	settings := ffmpegArgSettingsFromConfig(cfg)
 	video := ffmpegVideoPlanForSettings(settings)
 
 	args := baseFFmpegArgs(video.preInput, settings.realtime)
-	args = appendInputAndVideoArgs(args, source, settings, video)
+	args = appendInputAndVideoArgs(args, input, settings, video)
 	args = appendOutputHLSArgs(args, settings, segments, playlist)
 	return args
 }
@@ -111,8 +123,9 @@ func baseFFmpegArgs(preInput string, realtime bool) []string {
 	return args
 }
 
-func appendInputAndVideoArgs(args []string, source string, settings ffmpegArgSettings, video ffmpegVideoPlan) []string {
-	args = append(args, "-i", source, "-map", "0:v:0?", "-map", "0:a:0?", "-vf", video.filter, "-c:v", video.codec)
+func appendInputAndVideoArgs(args []string, input transcodeInput, settings ffmpegArgSettings, video ffmpegVideoPlan) []string {
+	args = append(args, ffmpegHTTPInputArgs(input)...)
+	args = append(args, "-i", input.Source, "-map", "0:v:0?", "-map", "0:a:0?", "-vf", video.filter, "-c:v", video.codec)
 	if settings.threads > 0 && video.codec == "libx264" {
 		args = append(args, "-threads", strconv.Itoa(settings.threads))
 	}
@@ -163,4 +176,44 @@ func splitNonEmptyArgs(s string) []string {
 	}
 	flush()
 	return out
+}
+
+func ffmpegHTTPInputArgs(input transcodeInput) []string {
+	if !isHTTPSource(input.Source) {
+		return nil
+	}
+	args := []string{"-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"}
+	if len(input.Headers) == 0 {
+		return args
+	}
+	keys := make([]string, 0, len(input.Headers))
+	for key := range input.Headers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value := strings.TrimSpace(input.Headers[key])
+		if strings.TrimSpace(key) == "" || value == "" {
+			continue
+		}
+		lines = append(lines, key+": "+value)
+	}
+	if len(lines) == 0 {
+		return args
+	}
+	return append(args, "-headers", strings.Join(lines, "\r\n")+"\r\n")
+}
+
+func isHTTPSource(source string) bool {
+	u, err := url.Parse(strings.TrimSpace(source))
+	if err != nil || u == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(u.Scheme)) {
+	case "http", "https":
+		return true
+	default:
+		return false
+	}
 }

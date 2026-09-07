@@ -13,7 +13,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func (t *TranscoderService) runFFmpeg(ctx context.Context, job *hlsJob, source string) {
+func (t *TranscoderService) runFFmpeg(ctx context.Context, job *hlsJob, input transcodeInput) {
 	bin, err := t.resolveFFmpegPath()
 	if err != nil {
 		t.log.Warn("ffmpeg unavailable", zap.String("media_id", job.mediaID), zap.Error(err))
@@ -31,7 +31,7 @@ func (t *TranscoderService) runFFmpeg(ctx context.Context, job *hlsJob, source s
 	playlist := filepath.Join(job.outputDir, "index.m3u8")
 	segments := filepath.Join(job.outputDir, "seg_%05d.ts")
 
-	args := buildFFmpegArgs(t.cfg, source, playlist, segments)
+	args := buildFFmpegArgsForInput(t.cfg, input, playlist, segments)
 
 	cmd := exec.CommandContext(ctx, bin, args...) // #nosec G204 -- bin is resolved by resolveFFmpegPath and args are passed without a shell.
 	cmd.Stderr = os.Stderr
@@ -39,7 +39,7 @@ func (t *TranscoderService) runFFmpeg(ctx context.Context, job *hlsJob, source s
 	t.log.Info("transcode started",
 		zap.String("media_id", job.mediaID),
 		zap.String("encoder", job.encoder),
-		zap.String("source", source),
+		zap.String("source", input.Source),
 	)
 	t.hub.Publish("transcode", map[string]any{
 		"media_id": job.mediaID,

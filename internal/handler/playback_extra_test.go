@@ -413,7 +413,7 @@ func newPlaybackScopeTestRouter(t *testing.T) (*gin.Engine, *service.Container, 
 	return router, svc, cfg.Secrets.JWTSecret
 }
 
-func TestPlaybackInfoForSTRMMediaDisablesHLS(t *testing.T) {
+func TestPlaybackInfoForSTRMMediaIncludesHLS(t *testing.T) {
 	router, _, secret := newPlaybackScopeTestRouter(t)
 	loginToken := signedTestToken(t, secret)
 
@@ -435,8 +435,8 @@ func TestPlaybackInfoForSTRMMediaDisablesHLS(t *testing.T) {
 	if payload.StreamURL == "" {
 		t.Fatalf("expected non-empty stream_url")
 	}
-	if payload.HlsURL != "" {
-		t.Fatalf("expected empty hls_url for STRM media, got %q", payload.HlsURL)
+	if payload.HlsURL == "" || !strings.Contains(payload.HlsURL, "/api/hls/media-1/") {
+		t.Fatalf("expected strm hls_url, got %q", payload.HlsURL)
 	}
 }
 
