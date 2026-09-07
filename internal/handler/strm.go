@@ -232,6 +232,7 @@ type strmSyncPathReq struct {
 	DownloadMeta      *bool  `json:"download_meta"`
 	UploadMeta        *bool  `json:"upload_meta"`
 	DeleteDir         *bool  `json:"delete_dir"`
+	KeepExt           *bool  `json:"keep_ext"`
 	Cron              string `json:"cron"`
 	EnableCron        *bool  `json:"enable_cron"`
 	SyncMode          string `json:"sync_mode"`
@@ -703,6 +704,7 @@ func strmSyncPathFromReq(req strmSyncPathReq) *model.StrmSyncPath {
 		DownloadMeta:      boolValue(req.DownloadMeta, true),
 		UploadMeta:        boolValue(req.UploadMeta, false),
 		DeleteDir:         boolValue(req.DeleteDir, false),
+		KeepExt:           boolValue(req.KeepExt, false),
 		Cron:              strings.TrimSpace(req.Cron),
 		EnableCron:        boolValue(req.EnableCron, false),
 		SyncMode:          strings.TrimSpace(req.SyncMode),

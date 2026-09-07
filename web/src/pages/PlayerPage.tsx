@@ -18,6 +18,8 @@ import { PlayerTopBar } from './PlayerTopBar'
 import { PlayerVideoStage } from './PlayerVideoStage'
 import { PlayerDanmakuPanel } from '../components/PlayerDanmakuPanel'
 import { PlayerPlaylistPanel } from '../components/PlayerPlaylistPanel'
+import { MediaVersionSwitcher } from '../components/MediaVersionSwitcher'
+import { mediaVersionsOf } from '../utils/mediaVersion'
 
 // Fullscreen, dark-themed video page.
 //
@@ -420,6 +422,15 @@ export function PlayerPage() {
     [navigate, location.search, location.state],
   )
 
+  const versionList = useMemo(() => mediaVersionsOf(media), [media])
+  const switchVersion = useCallback(
+    (version: Media) => {
+      if (!version?.id || version.id === media?.id) return
+      playEpisode(version)
+    },
+    [media?.id, playEpisode],
+  )
+
   const handlePrevEpisode = useCallback(() => {
     if (prevEpisode) {
       playEpisode(prevEpisode)
@@ -575,6 +586,13 @@ export function PlayerPage() {
         onBack={goBack}
         onToggleMode={toggleMode}
       />
+      {versionList.length > 1 && (
+        <div className="pointer-events-none absolute inset-x-0 top-16 z-20 flex justify-center px-4 sm:top-20">
+          <div className="pointer-events-auto max-w-3xl rounded-2xl border border-white/15 bg-black/70 px-3 py-2 shadow-xl backdrop-blur">
+            <MediaVersionSwitcher media={media!} mode="player" onSelect={switchVersion} className="text-white" />
+          </div>
+        </div>
+      )}
       <PlayerVideoStage
         media={media}
         loadError={loadError}

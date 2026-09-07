@@ -115,7 +115,10 @@ func (s *NFOService) ExportLibrary(ctx context.Context, libraryID string) (int, 
 
 func nfoPath(media string) string {
 	dir := filepath.Dir(media)
-	base := strings.TrimSuffix(filepath.Base(media), filepath.Ext(media))
+	base := mediaSidecarBase(media)
+	if base == "" {
+		base = strings.TrimSuffix(filepath.Base(media), filepath.Ext(media))
+	}
 	return filepath.Join(dir, fmt.Sprintf("%s.nfo", base))
 }
 

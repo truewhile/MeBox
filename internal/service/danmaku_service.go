@@ -369,7 +369,10 @@ func (s *DanmakuService) searchTerms(ctx context.Context, mediaID string) (danma
 	} else if name := strings.TrimSpace(m.Title); name != "" {
 		term.name = name
 	} else {
-		term.name = strings.TrimSuffix(filepath.Base(m.Path), filepath.Ext(m.Path))
+		term.name = mediaSidecarBase(m.Path)
+		if term.name == "" {
+			term.name = strings.TrimSuffix(filepath.Base(m.Path), filepath.Ext(m.Path))
+		}
 	}
 	if m.EpisodeNum > 0 {
 		term.episode = strconv.Itoa(m.EpisodeNum)
@@ -527,23 +530,7 @@ func (s *DanmakuService) hashCachePut(stamp, hash string) {
 // ("xxx.mkv.strm") — so a second strip removes a real video extension only
 // (filepath.Ext would misread names like "xxx.第01话" as having an extension).
 func danmakuMatchFileName(path string) string {
-	if path == "" {
-		return ""
-	}
-	clean := strings.ReplaceAll(path, "\\", "/")
-	if idx := strings.LastIndex(clean, "/"); idx >= 0 {
-		clean = clean[idx+1:]
-	}
-	base := filepath.Base(clean)
-	if ext := filepath.Ext(base); ext != "" {
-		base = strings.TrimSuffix(base, ext)
-	}
-	if second := strings.ToLower(filepath.Ext(base)); second != "" {
-		if _, ok := videoExtensions[second]; ok && second != ".strm" {
-			base = strings.TrimSuffix(base, filepath.Ext(base))
-		}
-	}
-	return strings.TrimSpace(base)
+	return mediaSidecarBase(path)
 }
 
 // mediaHash returns the dandanplay match hash (MD5 of the first 16MB of the

@@ -5,6 +5,7 @@ import { PageBackButton } from '../components/PageBackButton'
 
 import { ExternalPlayerButton } from '../components/ExternalPlayerButton'
 import { ManualScrapeDialog } from '../components/ManualScrapeDialog'
+import { MediaVersionSwitcher } from '../components/MediaVersionSwitcher'
 import { MetadataEditDialog } from '../components/MetadataEditDialog'
 import { OrganizeMediaDialog } from '../components/OrganizeMediaDialog'
 import type { Media } from '../types'
@@ -163,6 +164,7 @@ export function MediaDetailMainContent({
             onToggleFavourite={onToggleFavourite}
             playTargetId={playTargetId}
           />
+          <MediaVersionSwitcher media={media} mode="detail" />
           {isAdmin && (
             <MediaDetailAdminPanel
               media={media}

@@ -278,16 +278,21 @@ func randomSuffix() string {
 // moveStagedArtwork renames artwork sidecars staged alongside `stage` into
 // their final names next to `dst`.
 func moveStagedArtwork(stage, dst string) {
-	stageBase := strings.TrimSuffix(filepath.Base(stage), filepath.Ext(stage))
-	dstBase := strings.TrimSuffix(filepath.Base(dst), filepath.Ext(dst))
+	stageBases := mediaSidecarBaseVariants(stage)
+	dstBase := mediaSidecarBase(dst)
+	if dstBase == "" {
+		dstBase = strings.TrimSuffix(filepath.Base(dst), filepath.Ext(dst))
+	}
 	stageDir := filepath.Dir(stage)
-	for _, suffix := range artworkSidecarSuffixes {
-		for _, ext := range artworkSidecarExtensions {
-			srcPath := filepath.Join(stageDir, stageBase+suffix+ext)
-			if _, err := os.Stat(srcPath); err != nil {
-				continue
+	for _, stageBase := range stageBases {
+		for _, suffix := range artworkSidecarSuffixes {
+			for _, ext := range artworkSidecarExtensions {
+				srcPath := filepath.Join(stageDir, stageBase+suffix+ext)
+				if _, err := os.Stat(srcPath); err != nil {
+					continue
+				}
+				_ = os.Rename(srcPath, filepath.Join(stageDir, dstBase+suffix+ext))
 			}
-			_ = os.Rename(srcPath, filepath.Join(stageDir, dstBase+suffix+ext))
 		}
 	}
 }
@@ -306,12 +311,13 @@ func moveSidecarRename(from, to string) {
 // removeStagedArtwork removes artwork sidecars that were staged alongside
 // `stage`, used when a replace fails and its staged outputs must be cleaned up.
 func removeStagedArtwork(stage string) {
-	stageBase := strings.TrimSuffix(filepath.Base(stage), filepath.Ext(stage))
+	stageBases := mediaSidecarBaseVariants(stage)
 	stageDir := filepath.Dir(stage)
-	for _, suffix := range artworkSidecarSuffixes {
-		for _, ext := range artworkSidecarExtensions {
-			path := filepath.Join(stageDir, stageBase+suffix+ext)
-			_ = os.Remove(path)
+	for _, stageBase := range stageBases {
+		for _, suffix := range artworkSidecarSuffixes {
+			for _, ext := range artworkSidecarExtensions {
+				_ = os.Remove(filepath.Join(stageDir, stageBase+suffix+ext))
+			}
 		}
 	}
 }

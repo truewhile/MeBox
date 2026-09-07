@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"sort"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -110,4 +112,64 @@ func (s *MediaService) GetMedia(ctx context.Context, id string) (*model.Media, e
 	s.attachLibraryMetadata(ctx, items)
 	*media = items[0]
 	return media, nil
+}
+
+// GetMediaItem 返回媒体详情，并附带同片多版本列表（用于详情页/播放器切换）。
+func (s *MediaService) GetMediaItem(ctx context.Context, id string) (*MediaItem, error) {
+	media, err := s.GetMedia(ctx, id)
+	if err != nil || media == nil {
+		return nil, err
+	}
+	versions, err := s.listVersionSiblings(ctx, media)
+	if err != nil {
+		return nil, err
+	}
+	item := &MediaItem{Media: *media}
+	if len(versions) > 1 {
+		item.Versions = versions
+	}
+	return item, nil
+}
+
+// listVersionSiblings 查找与当前条目同属一个版本组的全部媒体（含自身）。
+func (s *MediaService) listVersionSiblings(ctx context.Context, media *model.Media) ([]model.Media, error) {
+	if media == nil || strings.TrimSpace(media.ID) == "" {
+		return nil, nil
+	}
+	key := mediaVersionGroupKey(*media)
+	if key == "" {
+		return []model.Media{*media}, nil
+	}
+	libraryIDs, err := MergedLibraryIDsForLibrary(ctx, s.repo, media.LibraryID)
+	if err != nil {
+		return nil, err
+	}
+	if len(libraryIDs) == 0 {
+		libraryIDs = []string{media.LibraryID}
+	}
+	filter := repository.MediaQueryFilter{IncludeNSFW: true}
+	candidates, err := s.repo.Media.ListByLibrariesFilteredNoCount(ctx, libraryIDs, 0, 5000, filter)
+	if err != nil {
+		return nil, err
+	}
+	s.attachLibraryMetadata(ctx, candidates)
+	matched := make([]model.Media, 0, 4)
+	for _, row := range candidates {
+		if mediaVersionGroupKey(row) == key {
+			matched = append(matched, row)
+		}
+	}
+	if len(matched) == 0 {
+		return []model.Media{*media}, nil
+	}
+	sort.SliceStable(matched, func(i, j int) bool {
+		if matched[i].ID == media.ID {
+			return true
+		}
+		if matched[j].ID == media.ID {
+			return false
+		}
+		return betterMediaVersion(matched[i], matched[j])
+	})
+	return matched, nil
 }

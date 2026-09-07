@@ -54,39 +54,59 @@ func mergeArtworkMetadata(meta *LocalMetadata, mediaPath, showBaseDir string) {
 }
 
 func localPosterCandidates(mediaPath string) []string {
-	base := strings.TrimSuffix(filepath.Base(mediaPath), filepath.Ext(mediaPath))
-	names := []string{
-		base + "-poster",
-		base + ".poster",
-		"poster",
-		"folder",
-		"cover",
-		"movie",
-		"show",
-		base + "-cover",
-		base + ".cover",
-		base,
-		base + "-thumb",
-		base + ".thumb",
-		"thumb",
+	names := make([]string, 0, 24)
+	seen := map[string]struct{}{}
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		names = append(names, name)
+	}
+	for _, base := range mediaSidecarBaseVariants(mediaPath) {
+		add(base + "-poster")
+		add(base + ".poster")
+		add(base + "-cover")
+		add(base + ".cover")
+		add(base)
+		add(base + "-thumb")
+		add(base + ".thumb")
+	}
+	for _, name := range []string{"poster", "folder", "cover", "movie", "show", "thumb"} {
+		add(name)
 	}
 	return append(adultArtworkNameCandidates(mediaPath, "poster"), names...)
 }
 
 func localBackdropCandidates(mediaPath string) []string {
-	base := strings.TrimSuffix(filepath.Base(mediaPath), filepath.Ext(mediaPath))
-	names := []string{
-		base + "-fanart",
-		base + ".fanart",
-		base + "-backdrop",
-		base + ".backdrop",
-		base + "-background",
-		"fanart",
-		"backdrop",
-		"background",
-		"landscape",
-		"banner",
-		"clearart",
+	names := make([]string, 0, 24)
+	seen := map[string]struct{}{}
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		names = append(names, name)
+	}
+	for _, base := range mediaSidecarBaseVariants(mediaPath) {
+		add(base + "-fanart")
+		add(base + ".fanart")
+		add(base + "-backdrop")
+		add(base + ".backdrop")
+		add(base + "-background")
+	}
+	for _, name := range []string{"fanart", "backdrop", "background", "landscape", "banner", "clearart"} {
+		add(name)
 	}
 	return append(adultArtworkNameCandidates(mediaPath, "backdrop"), names...)
 }

@@ -138,7 +138,10 @@ type localScanMediaInput struct {
 func (s *ScannerService) buildLocalScanMedia(in localScanMediaInput) *model.Media {
 	title, year := CleanQueryWithRecognition(context.Background(), s.repo, in.path)
 	if title == "" {
-		title = strings.TrimSuffix(filepath.Base(in.path), in.ext)
+		title = mediaSidecarBase(in.path)
+		if title == "" {
+			title = strings.TrimSuffix(filepath.Base(in.path), in.ext)
+		}
 	}
 	title, year = preferISOParentScrapeIdentity(in.path, in.lib.Path, title, year)
 

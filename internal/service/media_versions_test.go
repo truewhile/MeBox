@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -262,5 +263,45 @@ func TestGroupMediaVersionsDoesNotMergeAcrossDifferentLibrariesForMovies(t *test
 	grouped := groupMediaVersions([]model.Media{movieLib1, movieLib2})
 	if len(grouped) != 2 {
 		t.Fatalf("expected 2 separate groups for movies in different libraries, got %d", len(grouped))
+	}
+}
+
+func TestGroupMediaVersionsMergesKeepExtStrmVariants(t *testing.T) {
+	mkv := model.Media{
+		LibraryID: "movies",
+		Title:     "竞女01",
+		Path:      "/strm/竞女01.mkv.strm",
+		SizeBytes: 500,
+		STRMURL:   "/api/strm/play/cloud115/video.mkv?pickcode=a",
+	}
+	mp4 := model.Media{
+		LibraryID: "movies",
+		Title:     "竞女01",
+		Path:      "/strm/竞女01.mp4.strm",
+		SizeBytes: 100,
+		STRMURL:   "/api/strm/play/cloud115/video.mp4?pickcode=b",
+	}
+	grouped := groupMediaVersions([]model.Media{mkv, mp4})
+	if len(grouped) != 1 {
+		t.Fatalf("grouped len = %d, want 1", len(grouped))
+	}
+	if len(grouped[0].Versions) != 2 {
+		t.Fatalf("versions len = %d, want 2", len(grouped[0].Versions))
+	}
+	if grouped[0].Path != mkv.Path {
+		t.Fatalf("primary should be larger mkv, got %q", grouped[0].Path)
+	}
+}
+
+func TestMediaVersionLabelUsesContainerAndSize(t *testing.T) {
+	label := MediaVersionLabel(model.Media{
+		Title:     "竞女01",
+		Path:      "/strm/竞女01.mkv.strm",
+		Height:    1080,
+		SizeBytes: 1024 * 1024 * 1200,
+		STRMURL:   "/api/strm/play/cloud115/video.mkv?pickcode=a",
+	})
+	if !strings.Contains(label, "1080p") || !strings.Contains(strings.ToUpper(label), "MKV") {
+		t.Fatalf("unexpected label %q", label)
 	}
 }

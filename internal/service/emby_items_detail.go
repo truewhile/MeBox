@@ -538,21 +538,35 @@ func (e *EmbyService) resolveMediaPeople(ctx context.Context, m *model.Media) []
 		return []map[string]any{}
 	}
 	dir := filepath.Dir(m.Path)
-	ext := filepath.Ext(m.Path)
-	base := strings.TrimSuffix(m.Path, ext)
-	candidates := []string{
-		base + ".nfo",
-		filepath.Join(dir, "movie.nfo"),
-		filepath.Join(dir, "tvshow.nfo"),
+	candidates := make([]string, 0, 6)
+	seenPath := map[string]struct{}{}
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		key := strings.ToLower(filepath.Clean(path))
+		if _, ok := seenPath[key]; ok {
+			return
+		}
+		seenPath[key] = struct{}{}
+		candidates = append(candidates, path)
 	}
+	// 共享词干优先（竞女01.mkv.strm → 竞女01.nfo），并兼容旧的单层剥扩展命名。
+	add(nfoPath(m.Path))
+	for _, base := range mediaSidecarBaseVariants(m.Path) {
+		add(filepath.Join(dir, base+".nfo"))
+	}
+	add(filepath.Join(dir, "movie.nfo"))
+	add(filepath.Join(dir, "tvshow.nfo"))
 
 	people := make([]map[string]any, 0)
 	seen := make(map[string]bool)
 
 	for _, p := range candidates {
 		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
-			doc, ok, err := decodeNFOFile(p)
-			if err == nil && ok && doc != nil {
+			doc, _, err := decodeNFOFile(p)
+			if err == nil && doc != nil {
 				for _, d := range doc.Directors {
 					name := strings.TrimSpace(d)
 					if name == "" {

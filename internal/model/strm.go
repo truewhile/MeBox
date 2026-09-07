@@ -51,6 +51,9 @@ type StrmSyncPath struct {
 	DownloadMeta    bool       `gorm:"default:true" json:"download_meta"`              // 同步时下载元数据文件（nfo/图片/字幕）
 	UploadMeta      bool       `json:"upload_meta"`                                    // 同步时把本地元数据上传到远端
 	DeleteDir       bool       `json:"delete_dir"`                                     // 清理多余文件时删除空目录
+	// KeepExt=true 时为每个视频生成 name.mkv.strm / name.mp4.strm（保留全部版本）；
+	// false（默认）时同名不同扩展只择优生成一条 name.strm，避免互相覆盖与来回抖动。
+	KeepExt bool `json:"keep_ext"`
 	Cron            string     `gorm:"size:128" json:"cron"`                           // 5 段 cron 表达式（可选）
 	EnableCron      bool       `json:"enable_cron"`                                    // 是否按 Cron 定时同步
 	SyncMode        string     `gorm:"size:32;default:'incremental'" json:"sync_mode"` // 默认同步模式：incremental / full

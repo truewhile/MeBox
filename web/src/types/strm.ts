@@ -70,6 +70,7 @@ export interface StrmSyncPath {
   download_meta: boolean
   upload_meta: boolean
   delete_dir: boolean
+  keep_ext: boolean
   cron: string
   enable_cron: boolean
   sync_mode?: 'incremental' | 'full'
@@ -98,6 +99,7 @@ export interface StrmSyncPathInput {
   download_meta?: boolean
   upload_meta?: boolean
   delete_dir?: boolean
+  keep_ext?: boolean
   cron?: string
   enable_cron?: boolean
   sync_mode?: 'incremental' | 'full'
@@ -167,6 +169,7 @@ export interface StrmSettingsMap {
   'strm.download_meta': string
   'strm.upload_meta': string
   'strm.delete_dir': string
+  'strm.keep_ext': string
   'strm.download_threads': string
   'strm.upload_threads': string
   [key: string]: string

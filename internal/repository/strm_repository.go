@@ -110,6 +110,7 @@ func (r *StrmSyncPathRepository) Update(ctx context.Context, p *model.StrmSyncPa
 			"download_meta":       p.DownloadMeta,
 			"upload_meta":         p.UploadMeta,
 			"delete_dir":          p.DeleteDir,
+			"keep_ext":            p.KeepExt,
 			"cron":                p.Cron,
 			"enable_cron":         p.EnableCron,
 			"sync_mode":           p.SyncMode,

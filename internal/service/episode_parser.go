@@ -41,7 +41,10 @@ var (
 // ParseEpisode tries to extract (season, episode) from an arbitrary filename.
 // Returns (0, 0) when nothing recognisable is found.
 func ParseEpisode(path string) (season, episode int) {
-	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	name := mediaSidecarBase(path)
+	if name == "" {
+		name = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	}
 
 	if m := patSEnE.FindStringSubmatch(name); len(m) == 3 {
 		season = mustAtoi(m[1])
@@ -96,7 +99,10 @@ type episodeRef struct {
 }
 
 func episodeRefsFromTitle(path string) []episodeRef {
-	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	name := mediaSidecarBase(path)
+	if name == "" {
+		name = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	}
 	if refs := parseSEpisodeRange(name); len(refs) > 0 {
 		return refs
 	}

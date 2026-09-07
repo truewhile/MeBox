@@ -51,23 +51,25 @@ var artworkSidecarExtensions = []string{".jpg", ".jpeg", ".png", ".webp", ".gif"
 // behind in the old folder; this keeps artwork with the organized file.
 func transferSidecarArtwork(srcMedia, dstMedia string, mode TransferMode) error {
 	srcDir := filepath.Dir(srcMedia)
-	base := strings.TrimSuffix(filepath.Base(srcMedia), filepath.Ext(srcMedia))
-	if base == "" || base == "." {
+	bases := mediaSidecarBaseVariants(srcMedia)
+	if len(bases) == 0 {
 		return nil
 	}
 	// Find every existing sidecar by probing suffix + extension combinations.
-	sources := make([]string, 0, len(artworkSidecarSuffixes)*len(artworkSidecarExtensions))
+	sources := make([]string, 0, len(artworkSidecarSuffixes)*len(artworkSidecarExtensions)*len(bases))
 	seen := map[string]struct{}{}
-	for _, suffix := range artworkSidecarSuffixes {
-		for _, ext := range artworkSidecarExtensions {
-			path := filepath.Join(srcDir, base+suffix+ext)
-			key := strings.ToLower(filepath.Clean(path))
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			if _, err := os.Stat(path); err == nil {
-				sources = append(sources, path)
+	for _, base := range bases {
+		for _, suffix := range artworkSidecarSuffixes {
+			for _, ext := range artworkSidecarExtensions {
+				path := filepath.Join(srcDir, base+suffix+ext)
+				key := strings.ToLower(filepath.Clean(path))
+				if _, ok := seen[key]; ok {
+					continue
+				}
+				seen[key] = struct{}{}
+				if _, err := os.Stat(path); err == nil {
+					sources = append(sources, path)
+				}
 			}
 		}
 	}
@@ -78,15 +80,36 @@ func transferSidecarArtwork(srcMedia, dstMedia string, mode TransferMode) error 
 	if err := os.MkdirAll(dstDir, 0o755); err != nil { // #nosec G301 -- sidecar media directories must remain readable by NAS/player users.
 		return err
 	}
-	var firstErr error
+	dstBase := mediaSidecarBase(dstMedia)
+	if dstBase == "" {
+		dstBase = strings.TrimSuffix(filepath.Base(dstMedia), filepath.Ext(dstMedia))
+	}
 	for _, src := range sources {
-		dst := filepath.Join(dstDir, filepath.Base(src))
-		if _, err := os.Stat(dst); err == nil {
-			continue // never clobber an existing artwork at the destination
+		name := filepath.Base(src)
+		// Remap any legacy "Title.mkv-poster.jpg" onto the shared destination stem.
+		suffix := ""
+		lowerName := strings.ToLower(name)
+		for _, base := range bases {
+			prefix := strings.ToLower(base)
+			if strings.HasPrefix(lowerName, prefix) {
+				suffix = name[len(base):]
+				break
+			}
 		}
-		if err := transferFile(src, dst, mode); err != nil && firstErr == nil {
-			firstErr = err
+		dstName := name
+		if suffix != "" && dstBase != "" {
+			dstName = dstBase + suffix
+		}
+		dst := filepath.Join(dstDir, dstName)
+		if strings.EqualFold(filepath.Clean(src), filepath.Clean(dst)) {
+			continue
+		}
+		if _, err := os.Stat(dst); err == nil {
+			continue
+		}
+		if err := transferFile(src, dst, mode); err != nil {
+			return err
 		}
 	}
-	return firstErr
+	return nil
 }

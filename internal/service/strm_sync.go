@@ -49,11 +49,13 @@ type strmSyncState struct {
 	mu                  sync.Mutex
 	processed           int                         // 已处理文件计数（用于定期落库进度）
 	lastProgressFlush   time.Time                   // 上次进度落库时间
-	seenVideo           map[string]bool             // "v:"+去掉扩展名的相对路径 → 远端存在该视频
+	seenVideo           map[string]bool             // "v:"+strm 去扩展名相对路径 → 远端存在该视频（供 prune）
 	seenMeta            map[string]bool             // "m:"+相对路径 → 远端存在该元数据
 	remoteMeta          map[string][]remoteMetaItem // "m:"+相对路径 → 远端元数据副本列表（多副本聚合，支持择优比对与冗余清理）
 	seenMetaTarget      map[string]cloud.FileEntry
 	seenVideoTarget     map[string]cloud.FileEntry
+	// remoteVideos：prefer 模式下同名（去扩展名）视频候选列表，walk 结束后择优写盘
+	remoteVideos map[string][]remoteVideoCandidate
 	activeDownloadPaths map[string]bool // 本地已在排队/进行的下载任务路径（内存去重）
 	activeUploadPaths   map[string]bool // 本地已在排队/进行的上传任务路径（内存去重）
 	// recentDoneUploadSizes：近期已成功上传的 local_path → size，缩短「done 但列表未到」窗口内的重复入队
@@ -65,6 +67,13 @@ type strmSyncState struct {
 	dirCacheDirty       map[string]string // 待批量落库的目录缓存（dirID → 相对路径），避免逐目录单条 upsert
 
 	scanIncomplete atomic.Bool // 远端目录树/文件列表本次扫描不完整 → 禁止增量 prune 误删本地文件
+}
+
+// remoteVideoCandidate 记录同名视频的一个远端副本（不同扩展名/体积）。
+type remoteVideoCandidate struct {
+	entry cloud.FileEntry
+	rel   string
+	ext   string
 }
 
 // StartSync 启动一次同步（异步执行，同一目录同时只允许一个任务）。
@@ -276,6 +285,7 @@ func (s *StrmService) runSync(ctx context.Context, p *model.StrmSyncPath, rec *m
 		remoteMeta:      map[string][]remoteMetaItem{},
 		seenMetaTarget:  map[string]cloud.FileEntry{},
 		seenVideoTarget: map[string]cloud.FileEntry{},
+		remoteVideos:    map[string][]remoteVideoCandidate{},
 	}
 	if p.Provider != model.StrmProviderLocal {
 		acct, err := s.repo.StrmAccount.FindByID(ctx, p.AccountID)
@@ -386,6 +396,7 @@ func (st *strmSyncState) run() error {
 			return err
 		}
 	}
+	st.flushPreferredVideos()
 	st.flushPendingDownloads()
 	st.flushProgress()
 	if st.cfg.UploadMeta && st.provider != nil {
@@ -1195,21 +1206,123 @@ func (st *strmSyncState) fetch115FilesAdaptive(ctx context.Context, open115 *clo
 	return allFiles, nil
 }
 
-// handleVideo 生成/更新 .strm 文件。
+// handleVideo 收集/生成 .strm 文件。
+// KeepExt=true：每个视频写 name.ext.strm，保留全部版本。
+// KeepExt=false（默认）：同名候选先入队，walk 结束后按体积→mtime→扩展名优先级择优写一条 name.strm。
 func (st *strmSyncState) handleVideo(entry cloud.FileEntry, rel, ext string) {
 	relSansExt := rel[:len(rel)-len(ext)]
-	st.mu.Lock()
-	if st.seenVideo["v:"+relSansExt] {
-		st.mu.Unlock()
+	if st.cfg.KeepExt {
+		st.writeVideoStrm(entry, rel, ext, rel+".strm", true)
 		return
 	}
-	st.seenVideo["v:"+relSansExt] = true
+	st.mu.Lock()
+	if st.remoteVideos == nil {
+		st.remoteVideos = map[string][]remoteVideoCandidate{}
+	}
+	st.remoteVideos[relSansExt] = append(st.remoteVideos[relSansExt], remoteVideoCandidate{
+		entry: entry,
+		rel:   rel,
+		ext:   ext,
+	})
+	st.mu.Unlock()
+	st.touchProgress()
+}
+
+// flushPreferredVideos 在 prefer 模式下对同名多版本择优写盘，并记录冲突日志。
+func (st *strmSyncState) flushPreferredVideos() {
+	if st.cfg.KeepExt {
+		return
+	}
+	st.mu.Lock()
+	pending := st.remoteVideos
+	st.remoteVideos = map[string][]remoteVideoCandidate{}
+	st.mu.Unlock()
+	for base, cands := range pending {
+		if len(cands) == 0 {
+			continue
+		}
+		winnerIdx := 0
+		for i := 1; i < len(cands); i++ {
+			if betterStrmVideoCandidate(cands[i], cands[winnerIdx], st.cfg.VideoExt) {
+				winnerIdx = i
+			}
+		}
+		winner := cands[winnerIdx]
+		if len(cands) > 1 {
+			skippedRels := make([]string, 0, len(cands)-1)
+			skippedRefs := make([]string, 0, len(cands)-1)
+			for i, c := range cands {
+				if i == winnerIdx {
+					continue
+				}
+				skippedRels = append(skippedRels, c.rel)
+				ref := strings.TrimSpace(c.entry.PickCode)
+				if ref == "" {
+					ref = strings.TrimSpace(c.entry.ID)
+				}
+				if ref != "" {
+					skippedRefs = append(skippedRefs, ref)
+				}
+			}
+			st.s.log.Info("strm multi-version prefer",
+				zap.String("base", base),
+				zap.String("winner", winner.rel),
+				zap.String("winner_ref", firstNonEmpty(winner.entry.PickCode, winner.entry.ID)),
+				zap.Int64("winner_size", winner.entry.Size),
+				zap.Strings("skipped", skippedRels),
+				zap.Strings("skipped_refs", skippedRefs),
+			)
+			st.mu.Lock()
+			st.rec.Skipped += int64(len(cands) - 1)
+			st.mu.Unlock()
+		}
+		// 候选已在 handleVideo 计入 Total，此处不再重复 touchProgress
+		st.writeVideoStrm(winner.entry, winner.rel, winner.ext, base+".strm", false)
+	}
+}
+
+// betterStrmVideoCandidate 决定 prefer 模式下的赢家：体积更大 → mtime 更新 → video_ext 列表更靠前。
+func betterStrmVideoCandidate(candidate, current remoteVideoCandidate, videoExtOrder []string) bool {
+	if candidate.entry.Size != current.entry.Size {
+		return candidate.entry.Size > current.entry.Size
+	}
+	if candidate.entry.MTime != current.entry.MTime {
+		return candidate.entry.MTime > current.entry.MTime
+	}
+	return strmExtPriority(candidate.ext, videoExtOrder) < strmExtPriority(current.ext, videoExtOrder)
+}
+
+func strmExtPriority(ext string, order []string) int {
+	ext = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(ext)), ".")
+	for i, item := range order {
+		if strings.TrimPrefix(strings.ToLower(strings.TrimSpace(item)), ".") == ext {
+			return i
+		}
+	}
+	return len(order) + 1
+}
+
+// writeVideoStrm 把单个视频写成目标 .strm（targetRel 相对本地输出根）。
+// countProgress 控制是否计入 Total（prefer 模式下候选已在收集阶段计数）。
+func (st *strmSyncState) writeVideoStrm(entry cloud.FileEntry, rel, ext, targetRel string, countProgress bool) {
+	seenKey := "v:" + strings.TrimSuffix(targetRel, ".strm")
+	st.mu.Lock()
+	if st.seenVideo[seenKey] {
+		st.mu.Unlock()
+		if countProgress {
+			st.touchProgress()
+		}
+		return
+	}
+	st.seenVideo[seenKey] = true
 	st.mu.Unlock()
 
-	targetRel := relSansExt + ".strm"
 	target, err := joinLocalRel(st.p.LocalPath, targetRel)
 	if err != nil {
 		st.s.log.Warn("strm target path out of root", zap.String("rel", targetRel), zap.Error(err))
+		if countProgress {
+			st.touchProgress()
+		}
 		return
 	}
 
@@ -1219,11 +1332,19 @@ func (st *strmSyncState) handleVideo(entry cloud.FileEntry, rel, ext string) {
 	}
 	if _, exists := st.seenVideoTarget[target]; exists {
 		st.mu.Unlock()
-		st.touchProgress()
+		if countProgress {
+			st.touchProgress()
+		}
 		return
 	}
 	st.seenVideoTarget[target] = entry
 	st.mu.Unlock()
+
+	done := func() {
+		if countProgress {
+			st.touchProgress()
+		}
+	}
 
 	// 增量同步模式快速检查：本地 strm 文件存在、非空且修改时间与远端 mtime 一致，直接跳过无需读磁盘
 	if st.syncType == model.StrmSyncTypeIncremental && entry.MTime > 0 {
@@ -1231,16 +1352,15 @@ func (st *strmSyncState) handleVideo(entry cloud.FileEntry, rel, ext string) {
 			st.mu.Lock()
 			st.rec.Skipped++
 			st.mu.Unlock()
-			st.touchProgress()
+			done()
 			return
 		}
 	}
 
 	content, err := st.strmContent(entry, rel, ext)
 	if err != nil {
-		// 并发 worker 下 rec.Message 无锁写会有数据竞争，这里仅记录日志；
-		// 最终同步结果的 message 由 finishSync 统一填充。
 		st.s.log.Warn("build strm content failed", zap.String("file", rel), zap.Error(err))
+		done()
 		return
 	}
 	existing := ""
@@ -1248,7 +1368,6 @@ func (st *strmSyncState) handleVideo(entry cloud.FileEntry, rel, ext string) {
 		existing = string(data)
 	}
 	if existing == content {
-		// 对齐本地 strm 修改时间为远端 mtime，便于后续秒级比对
 		if entry.MTime > 0 {
 			mTime := time.Unix(entry.MTime, 0)
 			_ = os.Chtimes(target, mTime, mTime)
@@ -1256,21 +1375,24 @@ func (st *strmSyncState) handleVideo(entry cloud.FileEntry, rel, ext string) {
 		st.mu.Lock()
 		st.rec.Skipped++
 		st.mu.Unlock()
-		st.touchProgress()
+		done()
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		st.s.log.Warn("mkdir strm dir failed", zap.String("dir", filepath.Dir(target)), zap.Error(err))
+		done()
 		return
 	}
 	tmp := target + ".tmp"
 	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
 		st.s.log.Warn("write strm tmp failed", zap.String("file", target), zap.Error(err))
+		done()
 		return
 	}
 	if err := os.Rename(tmp, target); err != nil {
 		_ = os.Remove(tmp)
 		st.s.log.Warn("rename strm failed", zap.String("file", target), zap.Error(err))
+		done()
 		return
 	}
 	if entry.MTime > 0 {
@@ -1280,7 +1402,7 @@ func (st *strmSyncState) handleVideo(entry cloud.FileEntry, rel, ext string) {
 	st.mu.Lock()
 	st.rec.NewStrm++
 	st.mu.Unlock()
-	st.touchProgress()
+	done()
 }
 
 // strmContent 构建 strm 文件内容（一行指向本服务播放端点的 URL）。
@@ -1534,50 +1656,8 @@ func (st *strmSyncState) walkLocalSource() error {
 			st.touchProgress()
 			return nil
 		}
-		relSansExt := rel[:len(rel)-len(ext)]
-		st.mu.Lock()
-		st.seenVideo["v:"+relSansExt] = true
-		st.mu.Unlock()
-		content, err := st.strmContent(cloud.FileEntry{Name: filepath.Base(rel), Size: info.Size()}, rel, ext)
-		if err != nil {
-			return nil
-		}
-		target, err := joinLocalRel(st.p.LocalPath, relSansExt+".strm")
-		if err != nil {
-			return nil
-		}
-		mTime := info.ModTime()
-		if st.syncType == model.StrmSyncTypeIncremental {
-			if tInfo, err := os.Stat(target); err == nil && tInfo.Size() > 0 && tInfo.ModTime().Unix() == mTime.Unix() {
-				st.mu.Lock()
-				st.rec.Skipped++
-				st.mu.Unlock()
-				st.touchProgress()
-				return nil
-			}
-		}
-		if data, err := os.ReadFile(target); err == nil && string(data) == content {
-			_ = os.Chtimes(target, mTime, mTime)
-			st.mu.Lock()
-			st.rec.Skipped++
-			st.mu.Unlock()
-			st.touchProgress()
-			return nil
-		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return nil
-		}
-		tmp := target + ".tmp"
-		if err := os.WriteFile(tmp, []byte(content), 0o644); err == nil {
-			_ = os.Rename(tmp, target)
-			_ = os.Chtimes(target, mTime, mTime)
-		} else {
-			_ = os.Remove(tmp)
-		}
-		st.mu.Lock()
-		st.rec.NewStrm++
-		st.mu.Unlock()
-		st.touchProgress()
+		entry := cloud.FileEntry{Name: filepath.Base(rel), Size: info.Size(), MTime: info.ModTime().Unix()}
+		st.handleVideo(entry, rel, ext)
 		return nil
 	})
 }

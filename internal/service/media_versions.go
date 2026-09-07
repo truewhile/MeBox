@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -179,6 +180,7 @@ func mediaVersionGroupKey(m model.Media) string {
 		}
 		return "thetvdb:" + strings.ToLower(strings.TrimSpace(m.TheTVDBID))
 	}
+
 	title := firstNonEmpty(m.OriginalName, m.Title)
 	titleYear := 0
 	if title == "" {
@@ -187,6 +189,10 @@ func mediaVersionGroupKey(m model.Media) string {
 		title, titleYear = mediaVersionTitleKey(title)
 	}
 	if title == "" {
+		// 无标题时退回同目录词干（覆盖 keep_ext 的 name.mkv.strm / name.mp4.strm）
+		if stemKey := mediaVersionStemGroupKey(m, libKey); stemKey != "" {
+			return stemKey
+		}
 		return ""
 	}
 	year := m.Year
@@ -200,6 +206,114 @@ func mediaVersionGroupKey(m model.Media) string {
 		return fmt.Sprintf("movie:%s:%s:%d", libKey, title, year)
 	}
 	return fmt.Sprintf("movie:%s:%d", title, year)
+}
+
+// mediaVersionStemGroupKey 按「库 + 父目录 + 文件词干」折叠多版本
+// （如 竞女01.mkv.strm 与 竞女01.mp4.strm）。
+func mediaVersionStemGroupKey(m model.Media, libKey string) string {
+	path := strings.ReplaceAll(strings.TrimSpace(m.Path), "\\", "/")
+	if path == "" || strings.HasPrefix(strings.ToLower(path), "cloud://") {
+		return ""
+	}
+	dir := ""
+	base := path
+	if idx := strings.LastIndex(path, "/"); idx >= 0 {
+		dir = path[:idx]
+		base = path[idx+1:]
+	}
+	stem := mediaVersionFileStem(base)
+	if stem == "" {
+		return ""
+	}
+	stem = normalizeMediaVersionText(stem)
+	if stem == "" {
+		return ""
+	}
+	if libKey == "" {
+		libKey = "_"
+	}
+	return fmt.Sprintf("stem:%s:%s:%s", libKey, strings.ToLower(dir), stem)
+}
+
+// mediaVersionFileStem 去掉最终扩展名；若为 .strm 且前一层是视频扩展，再剥一层。
+func mediaVersionFileStem(name string) string {
+	return mediaFileStem(name)
+}
+
+// MediaVersionLabel 生成版本切换展示名（分辨率 / 容器 / 编码 / 体积 / 文件名）。
+func MediaVersionLabel(m model.Media) string {
+	parts := make([]string, 0, 4)
+	if m.Height > 0 {
+		parts = append(parts, fmt.Sprintf("%dp", m.Height))
+	} else if m.Width > 0 {
+		parts = append(parts, fmt.Sprintf("%dw", m.Width))
+	}
+	container := strings.Trim(strings.ToLower(strings.TrimSpace(m.Container)), ". ")
+	if container == "" || container == "strm" {
+		container = mediaVersionContainerFromPath(m.Path, m.STRMURL)
+	}
+	if container != "" && container != "strm" {
+		parts = append(parts, strings.ToUpper(container))
+	}
+	if codec := strings.TrimSpace(m.VideoCodec); codec != "" {
+		parts = append(parts, strings.ToUpper(codec))
+	}
+	if m.SizeBytes > 0 {
+		parts = append(parts, formatMediaSize(m.SizeBytes))
+	}
+	if len(parts) > 0 {
+		return strings.Join(parts, " · ")
+	}
+	base := filepath.Base(strings.ReplaceAll(strings.TrimSpace(m.Path), "\\", "/"))
+	if base == "" || base == "." {
+		return firstNonEmpty(m.Title, m.OriginalName, m.ID)
+	}
+	return base
+}
+
+func mediaVersionContainerFromPath(path, strmURL string) string {
+	base := filepath.Base(strings.ReplaceAll(strings.TrimSpace(path), "\\", "/"))
+	ext := strings.ToLower(filepath.Ext(base))
+	name := strings.TrimSuffix(base, ext)
+	if ext == ".strm" {
+		if second := strings.ToLower(filepath.Ext(name)); second != "" {
+			if _, ok := videoExtensions[second]; ok {
+				return strings.TrimPrefix(second, ".")
+			}
+		}
+		// 从 strm 播放 URL 的 /video.mkv 推断
+		u := strings.ToLower(strmURL)
+		if idx := strings.LastIndex(u, "/video."); idx >= 0 {
+			rest := u[idx+len("/video."):]
+			if end := strings.IndexAny(rest, "?#&/"); end >= 0 {
+				rest = rest[:end]
+			}
+			rest = strings.Trim(rest, ".")
+			if rest != "" {
+				return rest
+			}
+		}
+		return "strm"
+	}
+	if ext != "" {
+		if _, ok := videoExtensions[ext]; ok {
+			return strings.TrimPrefix(ext, ".")
+		}
+	}
+	return strings.TrimPrefix(ext, ".")
+}
+
+func formatMediaSize(bytes int64) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	const unit = 1024
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 func mediaVersionTitleKey(value string) (string, int) {
@@ -230,6 +344,10 @@ func normalizeMediaVersionText(value string) string {
 			continue
 		}
 		if _, noise := noiseTokenSet[field]; noise {
+			continue
+		}
+		// 去掉视频容器词干残留（keep_ext / 旧标题「竞女01 mkv」）
+		if _, ok := videoExtensions["."+field]; ok {
 			continue
 		}
 		out = append(out, field)
