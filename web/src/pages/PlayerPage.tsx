@@ -242,13 +242,21 @@ export function PlayerPage() {
   }, [id, modeParam, directOnly])
 
   // Wire up the actual <video> element when we know the mode.
+  // Depend on media.id (not the media object): refreshing duration after
+  // MANIFEST_PARSED must not remount HLS or it storms EnsureJob / DELETE.
+  const mediaId = media?.id
+  const mediaRef = useRef(media)
+  mediaRef.current = media
   useEffect(() => {
-    if (!media || !ref.current) return
+    if (!mediaId || !ref.current) return
+    const currentMedia = mediaRef.current
+    if (!currentMedia) return
     teardownHls()
 
     const video = ref.current
+    const durationSec = currentMedia.duration_sec || 0
     if (mode === 'hls') {
-      const url = hlsURL(media.id, hlsStartSec)
+      const url = hlsURL(mediaId, hlsStartSec)
       void import('hls.js').then(({ default: HlsCtor }) => {
         if (HlsCtor.isSupported()) {
           const hls = new HlsCtor({ enableWorker: true, lowLatencyMode: false })
@@ -256,9 +264,9 @@ export function PlayerPage() {
           hls.attachMedia(video)
           hls.on(HlsCtor.Events.MANIFEST_PARSED, () => {
             // .strm 入库时常缺 duration；转码启动时会补探测，这里刷新一次给进度条总时长。
-            if ((media.duration_sec || 0) > 0) return
+            if (durationSec > 0) return
             mediaAPI
-              .get(media.id)
+              .get(mediaId)
               .then((fresh) => {
                 if ((fresh.duration_sec || 0) > 0) setMedia(fresh)
               })
@@ -290,23 +298,22 @@ export function PlayerPage() {
         setMode('direct')
       })
     } else {
-      video.src = streamURL(media.id)
-      if (hlsUnavailable && needsTranscodeForBrowser(media)) {
+      video.src = streamURL(mediaId)
+      if (hlsUnavailable && needsTranscodeForBrowser(currentMedia)) {
         setPlayerError('当前正在直连播放原始文件；此封装或音轨浏览器兼容性有限，可能只有画面没有声音。请配置本机 ffmpeg 后切回 HLS 转码播放。')
       }
       void video.play().catch(() => undefined)
     }
     return () => teardownHls()
-  }, [hlsUnavailable, hlsStartSec, media, mode, params, setParams, teardownHls])
+  }, [hlsUnavailable, hlsStartSec, mediaId, mode, params, setParams, teardownHls])
 
   // Stop the host ffmpeg job only when leaving HLS for this media (not on mid-file seek restarts).
   useEffect(() => {
-    if (!media || mode !== 'hls') return
-    const mediaId = media.id
+    if (!mediaId || mode !== 'hls') return
     return () => {
       api.delete(`/hls/${encodeURIComponent(mediaId)}`).catch(() => undefined)
     }
-  }, [media, mode])
+  }, [mediaId, mode])
 
   // 自动拉取已有的播放进度并恢复播放位置
   useEffect(() => {

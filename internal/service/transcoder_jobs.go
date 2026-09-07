@@ -45,14 +45,18 @@ func (t *TranscoderService) WaitReady(ctx context.Context, mediaID string, timeo
 	}
 }
 
-// StopJob cancels a running ffmpeg process for mediaID, if any.
+// StopJob cancels a running ffmpeg process for mediaID, if any, and waits
+// briefly for it to exit so a subsequent EnsureJobFrom cannot race-write the
+// same HLS directory.
 func (t *TranscoderService) StopJob(mediaID string) {
+	gate := t.mediaStartGate(mediaID)
+	gate.Lock()
+	defer gate.Unlock()
+
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	if j, ok := t.jobs[mediaID]; ok {
-		j.cancel()
-		delete(t.jobs, mediaID)
-	}
+	prev := t.detachJobLocked(mediaID)
+	t.mu.Unlock()
+	waitJobExit(prev, 12*time.Second)
 }
 
 // TouchJob records client activity for the HLS playlist or segment. The idle
@@ -73,10 +77,13 @@ func (t *TranscoderService) touchJobLocked(mediaID string) {
 // StopAll terminates every running transcode (called on graceful shutdown).
 func (t *TranscoderService) StopAll() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	for id, j := range t.jobs {
-		j.cancel()
-		delete(t.jobs, id)
+	pending := make([]*hlsJob, 0, len(t.jobs))
+	for id := range t.jobs {
+		pending = append(pending, t.detachJobLocked(id))
+	}
+	t.mu.Unlock()
+	for _, j := range pending {
+		waitJobExit(j, 5*time.Second)
 	}
 }
 

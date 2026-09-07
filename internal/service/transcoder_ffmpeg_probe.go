@@ -34,6 +34,7 @@ func (t *TranscoderService) runFFmpeg(ctx context.Context, job *hlsJob, input tr
 	args := buildFFmpegArgsForInput(t.cfg, input, playlist, segments)
 
 	cmd := exec.CommandContext(ctx, bin, args...) // #nosec G204 -- bin is resolved by resolveFFmpegPath and args are passed without a shell.
+	setFFmpegSysProcAttr(cmd)
 	cmd.Stderr = os.Stderr
 
 	t.log.Info("transcode started",
@@ -43,20 +44,25 @@ func (t *TranscoderService) runFFmpeg(ctx context.Context, job *hlsJob, input tr
 		zap.Float64("start_sec", input.StartSec),
 	)
 	t.hub.Publish("transcode", map[string]any{
-		"media_id": job.mediaID,
-		"encoder":  job.encoder,
-		"status":   "started",
+		"media_id":  job.mediaID,
+		"encoder":   job.encoder,
+		"status":    "started",
+		"start_sec": input.StartSec,
 	})
 
 	if err := cmd.Run(); err != nil && !errors.Is(ctx.Err(), context.Canceled) {
 		t.log.Warn("ffmpeg exited",
 			zap.String("media_id", job.mediaID),
+			zap.Float64("start_sec", input.StartSec),
 			zap.Error(err),
 		)
 	}
 
 	t.mu.Lock()
-	delete(t.jobs, job.mediaID)
+	// Only drop the map entry if we are still the registered generation.
+	if cur, ok := t.jobs[job.mediaID]; ok && cur == job {
+		delete(t.jobs, job.mediaID)
+	}
 	t.mu.Unlock()
 
 	t.hub.Publish("transcode", map[string]any{

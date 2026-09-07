@@ -49,6 +49,9 @@ type TranscoderService struct {
 
 	mu          sync.Mutex
 	jobs        map[string]*hlsJob
+	// startGates serializes EnsureJobFrom / StopJob per media so concurrent
+	// playlist hits cannot spawn multiple ffmpeg writers into one HLS dir.
+	startGates  sync.Map // mediaID -> *sync.Mutex
 	strmResolve func(ctx context.Context, raw string) (*StrmPlayResult, error)
 	probe       *FFprobeService
 }
@@ -65,6 +68,8 @@ type hlsJob struct {
 	// startSec is the source seek offset fed to ffmpeg (-ss). The HLS
 	// playlist itself always starts at t=0 for that session.
 	startSec float64
+	// done is closed when the ffmpeg goroutine fully exits (after process death).
+	done chan struct{}
 }
 
 var (
@@ -122,6 +127,10 @@ func (t *TranscoderService) EnsureJobFrom(ctx context.Context, mediaID string, s
 		return "", ErrMediaNotFound
 	}
 
+	gate := t.mediaStartGate(mediaID)
+	gate.Lock()
+	defer gate.Unlock()
+
 	t.mu.Lock()
 	if existing, ok := t.jobs[mediaID]; ok {
 		if sameHLSStart(existing.startSec, startSec) {
@@ -129,10 +138,12 @@ func (t *TranscoderService) EnsureJobFrom(ctx context.Context, mediaID string, s
 			t.mu.Unlock()
 			return t.PlaylistPath(mediaID), nil
 		}
-		existing.cancel()
-		delete(t.jobs, mediaID)
+		prev := t.detachJobLocked(mediaID)
+		t.mu.Unlock()
+		waitJobExit(prev, 12*time.Second)
+	} else {
+		t.mu.Unlock()
 	}
-	t.mu.Unlock()
 
 	input, err := t.resolveTranscodeInput(ctx, m)
 	if err != nil {
@@ -146,19 +157,24 @@ func (t *TranscoderService) EnsureJobFrom(ctx context.Context, mediaID string, s
 
 	outDir := t.HLSDir(mediaID)
 	// Wipe prior segments so a mid-file restart cannot serve stale early chunks.
+	// Only safe after the previous ffmpeg has exited (waited above / via gate).
 	if err := resetHLSDir(outDir); err != nil {
 		return "", err
 	}
 
 	t.mu.Lock()
 	if existing, ok := t.jobs[mediaID]; ok {
+		// Another path (StopJob then a peer Ensure) should be rare under the gate;
+		// still reuse or replace safely.
 		if sameHLSStart(existing.startSec, startSec) {
 			t.touchJobLocked(mediaID)
 			t.mu.Unlock()
 			return t.PlaylistPath(mediaID), nil
 		}
-		existing.cancel()
-		delete(t.jobs, mediaID)
+		prev := t.detachJobLocked(mediaID)
+		t.mu.Unlock()
+		waitJobExit(prev, 12*time.Second)
+		t.mu.Lock()
 	}
 	if max := t.maxConcurrent(); max > 0 && len(t.jobs) >= max {
 		t.mu.Unlock()
@@ -174,13 +190,46 @@ func (t *TranscoderService) EnsureJobFrom(ctx context.Context, mediaID string, s
 		lastAccess: time.Now(),
 		encoder:    t.effectiveEncoder(),
 		startSec:   startSec,
+		done:       make(chan struct{}),
 	}
 	t.jobs[mediaID] = job
 	t.mu.Unlock()
 
 	helper.Go(t.log, "transcoder.monitorIdle", func() { t.monitorIdle(jobCtx, job) })
-	helper.Go(t.log, "transcoder.ffmpeg", func() { t.runFFmpeg(jobCtx, job, input) })
+	helper.Go(t.log, "transcoder.ffmpeg", func() {
+		defer close(job.done)
+		t.runFFmpeg(jobCtx, job, input)
+	})
 	return t.PlaylistPath(mediaID), nil
+}
+
+func (t *TranscoderService) mediaStartGate(mediaID string) *sync.Mutex {
+	v, _ := t.startGates.LoadOrStore(mediaID, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
+// detachJobLocked cancels and removes a job from the map without waiting.
+// Caller must hold t.mu and must waitJobExit afterwards before wiping the HLS dir.
+func (t *TranscoderService) detachJobLocked(mediaID string) *hlsJob {
+	j, ok := t.jobs[mediaID]
+	if !ok {
+		return nil
+	}
+	j.cancel()
+	delete(t.jobs, mediaID)
+	return j
+}
+
+func waitJobExit(job *hlsJob, timeout time.Duration) {
+	if job == nil || job.done == nil {
+		return
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-job.done:
+	case <-timer.C:
+	}
 }
 
 func sameHLSStart(a, b float64) bool {
