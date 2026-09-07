@@ -42,6 +42,7 @@ const (
 	StrmSettingDownloadMeta    = "strm.download_meta"
 	StrmSettingUploadMeta      = "strm.upload_meta"
 	StrmSettingDeleteDir       = "strm.delete_dir"
+	StrmSettingKeepExt         = "strm.keep_ext"
 	StrmSettingDownloadThreads = "strm.download_threads"
 	StrmSettingUploadThreads   = "strm.upload_threads"
 )
@@ -69,6 +70,7 @@ var StrmSettingDefs = map[string]struct {
 	StrmSettingDownloadMeta:    {Default: "true", Label: "下载元数据", Kind: "bool", Help: "同步时把远端 nfo/图片/字幕下载到本地输出目录"},
 	StrmSettingUploadMeta:      {Default: "false", Label: "上传元数据", Kind: "bool", Help: "同步时把本地元数据上传到远端；本地与网盘元数据不同时以本地为准覆盖（需网盘支持写入）"},
 	StrmSettingDeleteDir:       {Default: "false", Label: "清理空目录", Kind: "bool", Help: "清理远端已删除的多余 .strm/元数据后，删除空目录"},
+	StrmSettingKeepExt:         {Default: "false", Label: "保留视频扩展名（多版本）", Kind: "bool", Help: "关闭（默认）：同名不同扩展（如 竞女01.mkv / 竞女01.mp4）按体积→mtime→扩展名优先级择优生成一条 name.strm；开启：分别生成 name.mkv.strm / name.mp4.strm，保留全部版本供播放切换"},
 	Strm115RelayKeySetting:     {Default: "", Label: "115 中继授权共享密钥", Kind: "text", Help: "QMediaSync/MQFamily 中继授权的共享 AES 密钥（OAUTH_RELAY_ENCRYPTION_KEY）；不配置则中继授权不可用"},
 	StrmSettingDownloadThreads: {Default: "6", Label: "下载队列线程数", Kind: "number", Help: "OpenList/CloudDrive2 元数据下载并发数（115 独立限速为 3）"},
 	StrmSettingUploadThreads:   {Default: "2", Label: "上传队列线程数", Kind: "number", Help: "元数据上传并发数"},
@@ -731,6 +733,7 @@ func (s *StrmService) strmEffectiveConfig(ctx context.Context, p *model.StrmSync
 	cfg.DownloadMeta = p.DownloadMeta
 	cfg.UploadMeta = p.UploadMeta
 	cfg.DeleteDir = p.DeleteDir
+	cfg.KeepExt = p.KeepExt
 	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
 	return cfg, nil
 }
@@ -964,6 +967,7 @@ type strmPathConfig struct {
 	DownloadMeta bool
 	UploadMeta   bool
 	DeleteDir    bool
+	KeepExt      bool
 }
 
 // ─── 本地目录浏览（添加同步目录用，兼容 Windows/Linux） ─────────────────────────

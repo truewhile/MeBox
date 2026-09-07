@@ -75,6 +75,13 @@ func CleanQuery(raw string) (title string, year int) {
 		base = strings.TrimSpace(raw)
 	}
 	name := strings.TrimSuffix(base, filepath.Ext(base))
+	// .strm 可能保留视频扩展名（name.mkv.strm），再剥一层真实视频扩展，
+	// 避免「竞女01.mkv」与「竞女01.mp4」被当成不同标题。
+	if second := strings.ToLower(filepath.Ext(name)); second != "" {
+		if _, ok := videoExtensions[second]; ok && second != ".strm" {
+			name = strings.TrimSuffix(name, filepath.Ext(name))
+		}
+	}
 	lower := strings.ToLower(name)
 
 	if m := yearPattern.FindStringSubmatch(lower); len(m) >= 2 {

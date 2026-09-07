@@ -509,6 +509,12 @@ const SETTING_DEFS: SettingDef[] = [
       { value: '3', label: '不带 path' },
     ],
   },
+  {
+    key: 'strm.keep_ext',
+    label: '保留视频扩展名（多版本）',
+    type: 'toggle',
+    hint: '关闭（默认）：同名不同扩展（如 竞女01.mkv / 竞女01.mp4）择优生成一条 name.strm；开启：分别生成 name.mkv.strm / name.mp4.strm，保留全部版本供播放切换',
+  },
   { key: 'strm.115_relay_key', label: '115 中继授权共享密钥', type: 'text', hint: 'QMediaSync/MQFamily 中继授权的共享 AES 密钥；不配置则中继授权不可用' },
   { key: 'strm.download_threads', label: '下载队列线程数', type: 'number', hint: '元数据下载并发数' },
   { key: 'strm.upload_threads', label: '上传队列线程数', type: 'number', hint: '元数据上传并发数' },
@@ -610,6 +616,7 @@ export function StrmSyncPathDialog({
     download_meta: existing?.download_meta ?? true,
     upload_meta: existing?.upload_meta ?? false,
     delete_dir: existing?.delete_dir ?? false,
+    keep_ext: existing?.keep_ext ?? false,
     cron: existing?.cron ?? '',
     enable_cron: existing?.enable_cron ?? false,
     sync_mode: existing?.sync_mode ?? 'incremental',
@@ -627,6 +634,19 @@ export function StrmSyncPathDialog({
   // prevRemoteTailRef 记录当前拼在本地输出目录末尾、由本弹窗管理的尾段。
   // 兼容两类历史数据：新版保存的 local_path 末段是目录名，旧版是目录 ID。
   const prevRemoteTailRef = useRef(existing ? initRemoteTail(existing) : '')
+
+  useEffect(() => {
+    if (existing) return
+    strmAPI
+      .getSettings()
+      .then((settings) => {
+        const keepExt = settings['strm.keep_ext']
+        if (keepExt === 'true' || keepExt === '1') {
+          setForm((f) => ({ ...f, keep_ext: true }))
+        }
+      })
+      .catch(() => undefined)
+  }, [existing])
 
   const set = <K extends keyof StrmSyncPathInput>(key: K, value: StrmSyncPathInput[K]) =>
     setForm((f) => ({ ...f, [key]: value }))
@@ -917,6 +937,11 @@ export function StrmSyncPathDialog({
               <ToggleRow label="下载元数据" checked={form.download_meta ?? true} onChange={(v) => set('download_meta', v)} />
               <ToggleRow label="上传元数据" checked={form.upload_meta ?? false} onChange={(v) => set('upload_meta', v)} />
               <ToggleRow label="清理空目录" checked={form.delete_dir ?? false} onChange={(v) => set('delete_dir', v)} />
+              <ToggleRow
+                label="保留视频扩展名（多版本）"
+                checked={form.keep_ext ?? false}
+                onChange={(v) => set('keep_ext', v)}
+              />
               <ToggleRow label="启用定时同步" checked={form.enable_cron ?? false} onChange={(v) => set('enable_cron', v)} />
               <ToggleRow label="启用该目录" checked={form.enabled ?? true} onChange={(v) => set('enabled', v)} />
             </div>

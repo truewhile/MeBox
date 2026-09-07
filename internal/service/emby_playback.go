@@ -321,7 +321,7 @@ func (e *EmbyService) mediaSource(ctx context.Context, m *model.Media, asEmbedde
 func (e *EmbyService) baseMediaSource(ctx context.Context, m *model.Media, container string, isCloud bool, playURL string, directOnly bool) map[string]any {
 	return map[string]any{
 		"Id":                    m.ID,
-		"Name":                  m.Title,
+		"Name":                  MediaVersionLabel(*m),
 		"Path":                  embyMediaSourcePath(m),
 		"Container":             container,
 		"Size":                  m.SizeBytes,

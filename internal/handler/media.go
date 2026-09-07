@@ -488,7 +488,7 @@ func getMediaHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusOK, m)
 			return
 		}
-		m, err := svc.Media.GetMedia(ctx, id)
+		m, err := svc.Media.GetMediaItem(ctx, id)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -497,7 +497,7 @@ func getMediaHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
 		}
-		if !mediaVisibleForRequest(c, svc, m) {
+		if !mediaVisibleForRequest(c, svc, &m.Media) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
 		}

@@ -1570,3 +1570,84 @@ func TestScanLocalMetaForUploadRequeuesWhenRecentDoneSizeChanged(t *testing.T) {
 		t.Fatal("expected a pending upload task for resized local file")
 	}
 }
+
+func TestHandleVideoPreferPicksLargestAndSkipsOthers(t *testing.T) {
+	svc := testStrmService(t)
+	local := t.TempDir()
+	p := syncPathRecord(t, svc, model.StrmProviderLocal, t.TempDir(), local, true)
+	p.KeepExt = false
+	st := &strmSyncState{
+		s:               svc,
+		ctx:             context.Background(),
+		p:               p,
+		cfg:             &strmPathConfig{BaseURL: "http://test.local:8096", VideoExt: csvSplit(StrmDefaultVideoExt), AddPath: 1, KeepExt: false},
+		rec:             &model.StrmSyncRecord{},
+		syncType:        model.StrmSyncTypeFull,
+		seenVideo:       map[string]bool{},
+		seenVideoTarget: map[string]cloud.FileEntry{},
+		remoteVideos:    map[string][]remoteVideoCandidate{},
+	}
+	st.handleVideo(cloud.FileEntry{ID: "1", Name: "竞女01.mp4", Size: 100, PickCode: "pc-mp4", MTime: 1000}, "竞女01.mp4", ".mp4")
+	st.handleVideo(cloud.FileEntry{ID: "2", Name: "竞女01.mkv", Size: 500, PickCode: "pc-mkv", MTime: 900}, "竞女01.mkv", ".mkv")
+	st.flushPreferredVideos()
+
+	preferPath := filepath.Join(local, "竞女01.strm")
+	if _, err := os.Stat(preferPath); err != nil {
+		t.Fatalf("expected prefer strm at %s: %v", preferPath, err)
+	}
+	data, err := os.ReadFile(preferPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "video.mkv") {
+		t.Fatalf("prefer should pick larger mkv, content=%s", content)
+	}
+	if !strings.Contains(content, "%E7%AB%9E%E5%A5%B301.mkv") && !strings.Contains(content, "竞女01.mkv") {
+		t.Fatalf("prefer strm should point at winner path, content=%s", content)
+	}
+	if _, err := os.Stat(filepath.Join(local, "竞女01.mkv.strm")); !os.IsNotExist(err) {
+		t.Fatal("prefer mode must not write keep_ext names")
+	}
+	if st.rec.NewStrm != 1 {
+		t.Fatalf("NewStrm=%d want 1", st.rec.NewStrm)
+	}
+	if st.rec.Skipped < 1 {
+		t.Fatalf("Skipped=%d want >=1 for loser", st.rec.Skipped)
+	}
+}
+
+func TestHandleVideoKeepExtWritesAllVersions(t *testing.T) {
+	svc := testStrmService(t)
+	local := t.TempDir()
+	p := syncPathRecord(t, svc, model.StrmProviderLocal, t.TempDir(), local, true)
+	p.KeepExt = true
+	st := &strmSyncState{
+		s:               svc,
+		ctx:             context.Background(),
+		p:               p,
+		cfg:             &strmPathConfig{BaseURL: "http://test.local:8096", VideoExt: csvSplit(StrmDefaultVideoExt), AddPath: 1, KeepExt: true},
+		rec:             &model.StrmSyncRecord{},
+		syncType:        model.StrmSyncTypeFull,
+		seenVideo:       map[string]bool{},
+		seenVideoTarget: map[string]cloud.FileEntry{},
+		remoteVideos:    map[string][]remoteVideoCandidate{},
+	}
+	st.handleVideo(cloud.FileEntry{ID: "1", Name: "竞女01.mp4", Size: 100, PickCode: "pc-mp4"}, "竞女01.mp4", ".mp4")
+	st.handleVideo(cloud.FileEntry{ID: "2", Name: "竞女01.mkv", Size: 500, PickCode: "pc-mkv"}, "竞女01.mkv", ".mkv")
+	st.flushPreferredVideos()
+
+	mkvPath := filepath.Join(local, "竞女01.mkv.strm")
+	mp4Path := filepath.Join(local, "竞女01.mp4.strm")
+	for _, path := range []string{mkvPath, mp4Path} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected keep_ext strm %s: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(local, "竞女01.strm")); !os.IsNotExist(err) {
+		t.Fatal("keep_ext mode must not write stripped name.strm")
+	}
+	if st.rec.NewStrm != 2 {
+		t.Fatalf("NewStrm=%d want 2", st.rec.NewStrm)
+	}
+}
