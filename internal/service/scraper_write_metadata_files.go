@@ -38,9 +38,9 @@ func (s *ScraperService) writeMediaArtworkFilesAfterScrape(ctx context.Context, 
 	if dir == "" || dir == "." {
 		return
 	}
-	// Scope sidecar names by the media file's base name (e.g. A.mp4 -> A-poster.jpg)
-	// so that multiple movies sharing one directory (A.mp4 + B.mp4) never clash.
-	base := strings.TrimSuffix(filepath.Base(refreshed.Path), filepath.Ext(refreshed.Path))
+	// Scope sidecar names by the shared media stem (e.g. A.mkv.strm / A.mp4.strm -> A-poster.jpg)
+	// so multi-version files in one folder share artwork and never diverge by container.
+	base := mediaSidecarBase(refreshed.Path)
 	if base == "" || base == "." {
 		return
 	}

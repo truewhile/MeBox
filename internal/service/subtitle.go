@@ -142,7 +142,10 @@ func (s *SubtitleService) discoverUncached(ctx context.Context, mediaID string) 
 		return nil, errors.New("media not found")
 	}
 	dir := filepath.Dir(m.Path)
-	base := strings.TrimSuffix(filepath.Base(m.Path), filepath.Ext(m.Path))
+	bases := mediaSidecarBaseVariants(m.Path)
+	if len(bases) == 0 {
+		bases = []string{strings.TrimSuffix(filepath.Base(m.Path), filepath.Ext(m.Path))}
+	}
 
 	candidates := make([]string, 0, 16)
 	candidates = append(candidates, dir)
@@ -166,13 +169,23 @@ func (s *SubtitleService) discoverUncached(ctx context.Context, mediaID string) 
 				continue
 			}
 			fullName := strings.TrimSuffix(e.Name(), ext)
-			if !strings.HasPrefix(strings.ToLower(fullName), strings.ToLower(base)) &&
-				c == dir {
-				// In the same directory we require a basename match;
-				// inside subs/ subdirs we accept anything.
-				continue
+			matchedBase := ""
+			if c == dir {
+				for _, base := range bases {
+					if strings.HasPrefix(strings.ToLower(fullName), strings.ToLower(base)) {
+						matchedBase = base
+						break
+					}
+				}
+				if matchedBase == "" {
+					// In the same directory we require a basename match;
+					// inside subs/ subdirs we accept anything.
+					continue
+				}
+			} else if len(bases) > 0 {
+				matchedBase = bases[0]
 			}
-			lang := detectLang(fullName, base)
+			lang := detectLang(fullName, matchedBase)
 			tracks = append(tracks, SubtitleTrack{
 				Lang:  lang,
 				Label: lang,

@@ -237,20 +237,7 @@ func mediaVersionStemGroupKey(m model.Media, libKey string) string {
 
 // mediaVersionFileStem 去掉最终扩展名；若为 .strm 且前一层是视频扩展，再剥一层。
 func mediaVersionFileStem(name string) string {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return ""
-	}
-	ext := filepath.Ext(name)
-	stem := strings.TrimSuffix(name, ext)
-	if strings.EqualFold(ext, ".strm") {
-		if second := strings.ToLower(filepath.Ext(stem)); second != "" {
-			if _, ok := videoExtensions[second]; ok && second != ".strm" {
-				stem = strings.TrimSuffix(stem, filepath.Ext(stem))
-			}
-		}
-	}
-	return strings.TrimSpace(stem)
+	return mediaFileStem(name)
 }
 
 // MediaVersionLabel 生成版本切换展示名（分辨率 / 容器 / 编码 / 体积 / 文件名）。
