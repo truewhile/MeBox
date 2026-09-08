@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { libraryAPI } from '../api/library'
 import { toolsAPI } from '../api/tools'
 import { openManageLibrariesDialog } from '../components/manageLibrariesDialog'
+import { useEpisodeArtworkPreference } from '../hooks/useEpisodeArtworkPreference'
 import { usePinnedLibraries } from '../hooks/usePinnedLibraries'
 import {
   LibrariesContent,
@@ -21,7 +22,7 @@ export function LibrariesPage() {
   const { pinnedIds, loading: pinnedLoading, togglePin } = usePinnedLibraries()
   const [loading, setLoading] = useState(true)
   const [repairing, setRepairing] = useState(false)
-  const [repairEpisodeArtwork, setRepairEpisodeArtwork] = useState(false)
+  const [repairEpisodeArtwork, setRepairEpisodeArtwork] = useEpisodeArtworkPreference()
   const [repairMsg, setRepairMsg] = useState('')
 
   const fetchedLibIdsRef = useRef<Set<string>>(new Set())

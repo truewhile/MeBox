@@ -6,6 +6,7 @@ import { api } from '../api/client'
 import { mediaAPI } from '../api/library'
 import { playbackAPI } from '../api/playback'
 import { confirmActionResult } from '../components/confirmAction'
+import { useEpisodeArtworkPreference } from '../hooks/useEpisodeArtworkPreference'
 import type { Media } from '../types'
 import { mediaLibraryBackTarget } from './MediaDetailPageModel'
 
@@ -42,7 +43,7 @@ export function useMediaDetailPageState({ id, navigate }: MediaDetailPageStatePa
   const [manualScrapeOpen, setManualScrapeOpen] = useState(false)
   const [metadataEditOpen, setMetadataEditOpen] = useState(false)
   const [organizeOpen, setOrganizeOpen] = useState(false)
-  const [scrapeEpisodeArtwork, setScrapeEpisodeArtwork] = useState(false)
+  const [scrapeEpisodeArtwork, setScrapeEpisodeArtwork] = useEpisodeArtworkPreference()
 
   const refresh = useMediaDetailRefresh({
     id,

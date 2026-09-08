@@ -6,6 +6,7 @@ import { libraryAPI } from '../api/library'
 import { mediaAPI } from '../api/library'
 import { toolsAPI } from '../api/tools'
 import { confirmAction, confirmActionResult } from '../components/confirmAction'
+import { useEpisodeArtworkPreference } from '../hooks/useEpisodeArtworkPreference'
 import type { Library, Media } from '../types'
 import { seriesTitle, type SeriesCard } from '../utils/groupSeries'
 import { LibraryMovieActions } from './LibraryMovieActions'
@@ -33,7 +34,7 @@ export function useLibraryAdminActions({
   setManualMovie,
 }: UseLibraryAdminActionsOptions) {
   const [scraping, setScraping] = useState(false)
-  const [scrapeEpisodeArtwork, setScrapeEpisodeArtwork] = useState(false)
+  const [scrapeEpisodeArtwork, setScrapeEpisodeArtwork] = useEpisodeArtworkPreference()
   const [repairing, setRepairing] = useState(false)
   const [seriesToolBusy, setSeriesToolBusy] = useState('')
   const [movieToolBusy, setMovieToolBusy] = useState('')
