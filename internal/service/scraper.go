@@ -119,8 +119,22 @@ func (s *ScraperService) applyProviderMatch(ctx context.Context, m *model.Media,
 func (s *ScraperService) applyProviderMatchWithOptions(ctx context.Context, m *model.Media, lib *model.Library, match *Match, options ScrapeOptions) error {
 	posterCandidate := match.PosterURL
 	backdropCandidate := match.BackdropURL
-	posterURL, removePoster := s.prepareScrapedArtworkURL(ctx, m.ID, "poster_url", m.PosterURL, posterCandidate)
-	backdropURL, removeBackdrop := s.prepareScrapedArtworkURL(ctx, m.ID, "backdrop_url", m.BackdropURL, backdropCandidate)
+	currentPoster := m.PosterURL
+	currentBackdrop := m.BackdropURL
+	if options.RebuildIdentity {
+		currentPoster = ""
+		currentBackdrop = ""
+	}
+	posterURL, removePoster := s.prepareScrapedArtworkURL(ctx, m.ID, "poster_url", currentPoster, posterCandidate)
+	backdropURL, removeBackdrop := s.prepareScrapedArtworkURL(ctx, m.ID, "backdrop_url", currentBackdrop, backdropCandidate)
+	if options.RebuildIdentity {
+		if strings.TrimSpace(m.PosterURL) != posterURL {
+			removePoster = m.PosterURL
+		}
+		if strings.TrimSpace(m.BackdropURL) != backdropURL {
+			removeBackdrop = m.BackdropURL
+		}
+	}
 	updates := map[string]any{
 		"title":         match.Title,
 		"overview":      match.Overview,
@@ -141,6 +155,12 @@ func (s *ScraperService) applyProviderMatchWithOptions(ctx context.Context, m *m
 		updates["countries"] = strings.Join(match.Countries, ",")
 		updates["languages"] = strings.Join(match.Languages, ",")
 		updates["nsfw"] = match.NSFW
+	}
+	if options.RebuildIdentity {
+		updates["season_num"] = m.SeasonNum
+		updates["episode_num"] = m.EpisodeNum
+		updates["episode_title"] = ""
+		updates["series_id"] = ""
 	}
 	if match.ReleaseDate != "" {
 		updates["release_date"] = match.ReleaseDate

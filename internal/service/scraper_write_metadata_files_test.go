@@ -33,6 +33,47 @@ func TestWriteArtworkDataToPathWritesJellyfinSidecar(t *testing.T) {
 	}
 }
 
+func TestWriteArtworkDataToPathReplacesExistingSidecar(t *testing.T) {
+	scraper := &ScraperService{log: zap.NewNop()}
+	mediaDir := t.TempDir()
+	dst := filepath.Join(mediaDir, "poster.jpg")
+	if err := os.WriteFile(dst, []byte("old DVD cover"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := scraper.writeArtworkDataToPath(mediaDir, "poster", "image/jpeg", testJPEG); got != dst {
+		t.Fatalf("destination = %q, want %q", got, dst)
+	}
+	data, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != string(testJPEG) {
+		t.Fatal("existing sidecar was not replaced")
+	}
+}
+
+func TestShouldCropAdultPosterWhenTMDbArtworkMatchedCodePath(t *testing.T) {
+	media := &model.Media{
+		Path:      filepath.Join(t.TempDir(), "IPX-235.mp4"),
+		Title:     "TMDb matched title",
+		PosterURL: "https://image.tmdb.org/t/p/w500/poster.jpg",
+	}
+	if !shouldCropAdultPoster(media, &model.Library{Type: "movie"}) {
+		t.Fatal("code-numbered media should retain adult crop handling after a TMDb match")
+	}
+}
+
+func TestShouldCropAdultPosterUsesLibraryType(t *testing.T) {
+	media := &model.Media{
+		Path:      filepath.Join(t.TempDir(), "renamed.mp4"),
+		PosterURL: "https://image.tmdb.org/t/p/w500/poster.jpg",
+	}
+	if !shouldCropAdultPoster(media, &model.Library{Type: "adult"}) {
+		t.Fatal("adult library media should be cropped regardless of provider")
+	}
+}
+
 // TestImageExtForContentType verifies the MIME -> extension mapping used to
 // name Jellyfin sidecar files.
 func TestImageExtForContentType(t *testing.T) {

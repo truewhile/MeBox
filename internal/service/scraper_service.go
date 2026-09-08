@@ -1,6 +1,7 @@
 package service
 
 import (
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -24,6 +25,10 @@ type ScraperService struct {
 	hub     *Hub
 	cache   *RuntimeCacheService
 	images  *ImageProxy
+
+	// Serializes final sidecar replacement. Windows cannot rename over an
+	// existing file, and concurrent scrapes can target the same sidecar.
+	artworkWriteMu sync.Mutex
 }
 
 // NewScraperService is the constructor.

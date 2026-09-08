@@ -7,6 +7,7 @@ type ScrapeOptions struct {
 	EpisodeArtwork      *bool
 	DeferEpisodeDetails bool
 	ForceRematch        bool
+	RebuildIdentity     bool
 }
 
 func (o ScrapeOptions) episodeArtworkEnabled() bool {

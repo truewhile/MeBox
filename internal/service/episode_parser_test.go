@@ -68,3 +68,23 @@ func TestEpisodeRefsFromTitleParsesRanges(t *testing.T) {
 		}
 	}
 }
+
+func TestOnlineEpisodeIdentityFromPathMapsAnimeEpisodeZeroToSpecials(t *testing.T) {
+	cases := []struct {
+		path        string
+		wantSeason  int
+		wantEpisode int
+	}{
+		{`动漫/路人女主/Season 1/S01E00 - 爱与青春的杀必死回.mkv`, 0, 1},
+		{`动漫/路人女主/Season 2/S02E00 - 恋爱与纯情的杀必死回.mkv`, 0, 2},
+		{`动漫/路人女主/Season 2/S02E03 - 初稿与二稿.mkv`, 2, 3},
+		{`动漫/路人女主/Specials/S00E04.mkv`, 0, 4},
+	}
+	for _, tc := range cases {
+		season, episode := onlineEpisodeIdentityFromPath(tc.path)
+		if season != tc.wantSeason || episode != tc.wantEpisode {
+			t.Errorf("onlineEpisodeIdentityFromPath(%q) = (%d, %d), want (%d, %d)",
+				tc.path, season, episode, tc.wantSeason, tc.wantEpisode)
+		}
+	}
+}

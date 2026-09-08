@@ -44,7 +44,7 @@ func (s *ScraperService) writeMediaArtworkFilesAfterScrape(ctx context.Context, 
 	if base == "" || base == "." {
 		return
 	}
-	isAdult := IsAdultMediaPathOrMetadata(refreshed.Path, refreshed.LibraryID, refreshed.NSFW) || IsAdultArtworkURL(refreshed.PosterURL)
+	isAdult := shouldCropAdultPoster(refreshed, lib)
 	if refreshed.PosterURL != "" {
 		s.downloadArtworkToPathWithOptions(ctx, dir, base+"-poster", refreshed.PosterURL, isAdult)
 	}
@@ -58,6 +58,21 @@ func (s *ScraperService) writeMediaArtworkFilesAfterScrape(ctx context.Context, 
 
 func (s *ScraperService) downloadArtworkToPath(ctx context.Context, dir, name, raw string) {
 	s.downloadArtworkToPathWithOptions(ctx, dir, name, raw, false)
+}
+
+// shouldCropAdultPoster keeps adult-cover handling independent of which
+// metadata provider won. A code-numbered title may match TMDb first, so the
+// provider's NSFW flag or artwork host alone is not sufficient.
+func shouldCropAdultPoster(media *model.Media, lib *model.Library) bool {
+	if media == nil {
+		return false
+	}
+	mediaType := ""
+	if lib != nil {
+		mediaType = lib.Type
+	}
+	return IsAdultMediaPathOrMetadata(media.Path, mediaType, media.NSFW) ||
+		IsAdultArtworkURL(media.PosterURL)
 }
 
 // downloadArtworkToPathWithOptions fetches an artwork URL via the image proxy cache and
@@ -110,10 +125,23 @@ func (s *ScraperService) writeArtworkDataToPath(dir, name, ctype string, data []
 		s.log.Warn("scrape artwork write failed", zap.String("dst", dst), zap.Error(err))
 		return ""
 	}
-	_ = tmp.Close()
-	if err := os.Rename(tmp.Name(), dst); err != nil {
+	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmp.Name())
-		s.log.Warn("scrape artwork rename failed", zap.String("dst", dst), zap.Error(err))
+		s.log.Warn("scrape artwork close failed", zap.String("dst", dst), zap.Error(err))
+		return ""
+	}
+
+	// On Windows os.Rename does not replace dst. Serialize remove+rename so two
+	// concurrent scrapes cannot leave the previous uncropped DVD cover behind.
+	s.artworkWriteMu.Lock()
+	err = os.Remove(dst)
+	if err == nil || os.IsNotExist(err) {
+		err = os.Rename(tmp.Name(), dst)
+	}
+	s.artworkWriteMu.Unlock()
+	if err != nil {
+		_ = os.Remove(tmp.Name())
+		s.log.Warn("scrape artwork replace failed", zap.String("dst", dst), zap.Error(err))
 		return ""
 	}
 	s.log.Debug("scrape artwork written", zap.String("dst", dst))

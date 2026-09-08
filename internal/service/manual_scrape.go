@@ -39,10 +39,19 @@ func (r ManualScrapeRequest) EpisodeArtworkOption() *bool {
 }
 
 func (s *ScraperService) ApplyManualMatch(ctx context.Context, mediaID string, req ManualScrapeRequest) (*model.Media, error) {
-	return s.ApplyManualMatchWithOptions(ctx, mediaID, req, ScrapeOptions{EpisodeArtwork: req.EpisodeArtworkOption()})
+	return s.ApplyManualMatchWithOptions(ctx, mediaID, req, ScrapeOptions{
+		EpisodeArtwork:  req.EpisodeArtworkOption(),
+		ForceRematch:    true,
+		RebuildIdentity: true,
+	})
 }
 
 func (s *ScraperService) ApplyManualMatchWithOptions(ctx context.Context, mediaID string, req ManualScrapeRequest, options ScrapeOptions) (*model.Media, error) {
+	// A user-triggered match is authoritative. Do not let metadata written by a
+	// previous scrape influence the new result.
+	options.ForceRematch = true
+	options.RebuildIdentity = true
+
 	media, err := s.repo.Media.FindByID(ctx, mediaID)
 	if err != nil || media == nil {
 		return nil, errors.New("media not found")
@@ -55,10 +64,30 @@ func (s *ScraperService) ApplyManualMatchWithOptions(ctx context.Context, mediaI
 	if strings.TrimSpace(match.Title) == "" {
 		return nil, errors.New("manual match title required")
 	}
+	rebuildManualScrapeIdentity(media, lib, match)
 	if err := s.applyProviderMatchWithOptions(ctx, media, lib, match, options); err != nil {
 		return nil, err
 	}
 	return s.repo.Media.FindByID(ctx, mediaID)
+}
+
+func rebuildManualScrapeIdentity(media *model.Media, lib *model.Library, match *Match) {
+	if media == nil || match == nil {
+		return
+	}
+	mediaType := normalizeOrganizeMediaType(match.MediaType)
+	if mediaType == "" && librarySupportsSeasons(lib) {
+		mediaType = "tv"
+	}
+	switch mediaType {
+	case "tv", "anime", "variety":
+		media.SeasonNum, media.EpisodeNum = onlineEpisodeIdentityFromPath(media.Path)
+		media.EpisodeTitle = ""
+	case "movie", "adult":
+		media.SeasonNum = 0
+		media.EpisodeNum = 0
+		media.EpisodeTitle = ""
+	}
 }
 
 func (s *ScraperService) manualRequestMatch(ctx context.Context, req ManualScrapeRequest) (*Match, error) {

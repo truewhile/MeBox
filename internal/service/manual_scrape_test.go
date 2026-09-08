@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -625,5 +626,92 @@ func TestApplyManualMovieMatchClearsEpisodeMarkers(t *testing.T) {
 	}
 	if got.TMDbID != 0 || got.TheTVDBID != "" {
 		t.Fatalf("stale external IDs were not cleared for manual movie fallback: tmdb=%d thetvdb=%q", got.TMDbID, got.TheTVDBID)
+	}
+}
+
+func TestApplyManualTVMatchRebuildsEpisodeIdentityFromPath(t *testing.T) {
+	var requestedEpisodePath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/tv/69367":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":             69367,
+				"name":           "路人女主的养成方法",
+				"original_name":  "冴えない彼女の育てかた",
+				"overview":       "整剧简介",
+				"poster_path":    "/show.jpg",
+				"backdrop_path":  "/show-backdrop.jpg",
+				"first_air_date": "2015-01-09",
+				"vote_average":   7.0,
+			})
+		case "/tv/69367/season/0/episode/1":
+			requestedEpisodePath = r.URL.Path
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name":         "爱与青春的杀必死回",
+				"overview":     "特别篇简介",
+				"still_path":   "/special.jpg",
+				"air_date":     "2015-01-07",
+				"vote_average": 7.5,
+				"runtime":      24,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.Library{}, &model.Series{}, &model.Media{}); err != nil {
+		t.Fatal(err)
+	}
+	repos := repository.New(db)
+	cfg := &config.Config{}
+	cfg.Secrets.TMDbAPIKey = "test-key"
+	cfg.Secrets.TMDbAPIProxy = upstream.URL
+	log := zap.NewNop()
+	scraper := NewScraperService(cfg, log, repos, NewTMDbProvider(cfg, log, nil), nil, nil, nil, NewHub(log))
+
+	root := t.TempDir()
+	lib := model.Library{Name: "动漫", Path: root, Type: "anime", Enabled: true}
+	if err := repos.DB.Create(&lib).Error; err != nil {
+		t.Fatal(err)
+	}
+	media := model.Media{
+		LibraryID:    lib.ID,
+		Title:        "旧标题",
+		Path:         filepath.Join(root, "路人女主的养成方法 (2015)", "Season 1", "S01E00 - 爱与青春的杀必死回.strm"),
+		SeasonNum:    1,
+		EpisodeNum:   1,
+		EpisodeTitle: "错误百出的序曲",
+		SeriesID:     "stale-series",
+		TMDbID:       111,
+		BangumiID:    222,
+		ScrapeStatus: "matched",
+	}
+	if err := repos.DB.Create(&media).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := scraper.ApplyManualMatch(t.Context(), media.ID, ManualScrapeRequest{
+		Source:    "tmdb",
+		MediaType: "tv",
+		Title:     "路人女主的养成方法",
+		TMDbID:    69367,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestedEpisodePath != "/tv/69367/season/0/episode/1" {
+		t.Fatalf("episode details path = %q, want season-zero special", requestedEpisodePath)
+	}
+	if got.SeasonNum != 0 || got.EpisodeNum != 1 || got.EpisodeTitle != "爱与青春的杀必死回" {
+		t.Fatalf("rebuilt episode identity = S%02dE%02d %q", got.SeasonNum, got.EpisodeNum, got.EpisodeTitle)
+	}
+	if got.SeriesID != "" || got.TMDbID != 69367 || got.BangumiID != 0 {
+		t.Fatalf("stale scrape identity survived manual rematch: %#v", got)
 	}
 }
