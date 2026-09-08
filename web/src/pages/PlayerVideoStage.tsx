@@ -47,6 +47,14 @@ function parseWebVTTCues(body: string): SubtitleCue[] {
   return cues
 }
 
+function uniqueSubtitleTexts(texts: string[]): string[] {
+  const unique = [...new Set(texts.map((text) => text.trim()).filter(Boolean))]
+  // ponytail: WebVTT cannot preserve ASS layers/positions. Keep at most two
+  // simultaneous blocks for bilingual subtitles; use libass if full ASS
+  // typesetting support is added later.
+  return unique.slice(-2)
+}
+
 type PlayerVideoStageProps = {
   media: Media | null
   /** 媒体元数据加载失败提示（非空时替代「加载中」展示）。 */
@@ -255,6 +263,7 @@ export function PlayerVideoStage({
     const selectedTrack = subs[subtitleIndex]
     if (
       !video ||
+      !tracksArmed ||
       subs.length === 0 ||
       subtitleIndex < 0 ||
       !selectedTrack ||
@@ -267,9 +276,11 @@ export function PlayerVideoStage({
     const updateCue = () => {
       const absoluteTime = video.currentTime + (streamOffset ?? 0)
       if (subtitleTimeline?.path === selectedTrack.path) {
-        const texts = subtitleTimeline.cues
-          .filter((cue) => absoluteTime >= cue.startTime && absoluteTime <= cue.endTime)
-          .map((cue) => cue.text)
+        const texts = uniqueSubtitleTexts(
+          subtitleTimeline.cues
+            .filter((cue) => absoluteTime >= cue.startTime && absoluteTime <= cue.endTime)
+            .map((cue) => cue.text),
+        )
         setActiveCueText(texts.join('\n'))
         return
       }
@@ -304,7 +315,7 @@ export function PlayerVideoStage({
           }
         }
       }
-      setActiveCueText(texts.join('\n'))
+      setActiveCueText(uniqueSubtitleTexts(texts).join('\n'))
     }
 
     const apply = () => {
@@ -359,7 +370,7 @@ export function PlayerVideoStage({
         }
       }
     }
-  }, [subtitleIndex, subs, videoRef, media, streamOffset, subtitleTimeline])
+  }, [subtitleIndex, subs, videoRef, media, streamOffset, subtitleTimeline, tracksArmed])
 
   // 根据视频画面宽高比与舞台宽高比，确定视频在哪个轴向撑满 100%
   const isWiderThanStage =
@@ -412,7 +423,6 @@ export function PlayerVideoStage({
                       src={subtitlesAPI.url(media.id, track.path)}
                       srcLang={track.lang}
                       label={track.label || track.lang}
-                      default={subtitleIndex === index}
                     />
                   ),
                 )}

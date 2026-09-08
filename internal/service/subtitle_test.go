@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/glebarez/sqlite"
@@ -81,6 +82,25 @@ func TestNormaliseTimecode(t *testing.T) {
 		if got := normaliseTimecode(in); got != want {
 			t.Errorf("normaliseTimecode(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestAssToVTTDeduplicatesDialogueAndNormalisesLineBreaks(t *testing.T) {
+	body := strings.Join([]string{
+		`Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\an2}第一行\N第二行`,
+		`Dialogue: 1,0:00:01.00,0:00:02.00,Copy,,0,0,0,,{\bord2}第一行\N第二行`,
+		`Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,{\i1}`,
+	}, "\n")
+
+	got := assToVTT(body)
+	if strings.Count(got, "第一行\n第二行") != 1 {
+		t.Fatalf("duplicate ASS dialogue was not collapsed:\n%s", got)
+	}
+	if strings.Contains(got, `\N`) || strings.Contains(got, `\an2`) {
+		t.Fatalf("ASS control sequences leaked into WebVTT:\n%s", got)
+	}
+	if strings.Contains(got, "00:00:03.000 --> 00:00:04.000") {
+		t.Fatalf("empty styled dialogue should be omitted:\n%s", got)
 	}
 }
 
