@@ -11,9 +11,10 @@ import (
 )
 
 type transcodeInput struct {
-	Source   string
-	Headers  map[string]string
-	StartSec float64
+	Source         string
+	Headers        map[string]string
+	StartSec       float64
+	SubtitleStream *int
 }
 
 type ffmpegArgSettings struct {
@@ -46,6 +47,13 @@ func buildFFmpegArgs(cfg *config.Config, source, playlist, segments string) []st
 func buildFFmpegArgsForInput(cfg *config.Config, input transcodeInput, playlist, segments string) []string {
 	settings := ffmpegArgSettingsFromConfig(cfg)
 	video := ffmpegVideoPlanForSettings(settings)
+	if input.SubtitleStream != nil {
+		// Bitmap subtitles must be composited in software. Keeping CUDA/QSV/
+		// VAAPI frames here would require a download/upload filter chain that
+		// differs by driver and is considerably less portable.
+		settings.encoder = ""
+		video = ffmpegVideoPlanForSettings(settings)
+	}
 
 	// Mid-file restarts must not use -re: output -ss would otherwise crawl to the
 	// seek point at 1x wall-clock before emitting the first HLS segment.
@@ -140,7 +148,16 @@ func appendInputAndVideoArgs(args []string, input transcodeInput, settings ffmpe
 		args = append(args, "-ss", ss)
 	}
 	args = append(args, "-i", input.Source)
-	args = append(args, "-map", "0:v:0?", "-map", "0:a:0?", "-vf", video.filter, "-c:v", video.codec)
+	if input.SubtitleStream != nil {
+		filter := fmt.Sprintf(
+			"[0:v:0][0:%d]overlay=0:0:eof_action=pass,scale=-2:min(%d\\,ih)[v]",
+			*input.SubtitleStream,
+			settings.height,
+		)
+		args = append(args, "-filter_complex", filter, "-map", "[v]", "-map", "0:a:0?", "-c:v", video.codec)
+	} else {
+		args = append(args, "-map", "0:v:0?", "-map", "0:a:0?", "-vf", video.filter, "-c:v", video.codec)
+	}
 	if settings.threads > 0 && video.codec == "libx264" {
 		args = append(args, "-threads", strconv.Itoa(settings.threads))
 	}

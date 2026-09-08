@@ -124,6 +124,7 @@ func (b *serviceContainerBuilder) initContentServices() {
 	// STRM 直连失败后的 HLS 转码：把 .strm 解析成 ffmpeg 可读取的本地路径或 HTTP 直链。
 	b.c.Transcoder.SetStrmPlayTargetResolver(b.c.Strm.ResolvePlayTarget)
 	b.c.Transcoder.SetProbe(b.c.FFprobe)
+	b.c.Subtitle.SetStrmPlayTargetResolver(b.c.Strm.ResolvePlayTarget)
 	// 弹幕识别需要把远程 Emby 条目解析为 Media 元数据及可拉取前 16MB 的直链 URL。
 	if b.c.EmbyRemote != nil {
 		b.c.Danmaku.SetRemoteMediaResolver(func(ctx context.Context, encodedID string) (*model.Media, string, error) {

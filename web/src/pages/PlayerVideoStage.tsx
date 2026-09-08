@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ReactNode, RefObject } from 'react'
+import type { PointerEvent, ReactNode, RefObject } from 'react'
 
 import { subtitlesAPI, type SubtitleTrack } from '../api/subtitles'
 import { type DanmakuAnime, type DanmakuLoadedInfo } from '../api/danmaku'
@@ -85,6 +85,8 @@ export function PlayerVideoStage({
   const stageRef = useRef<HTMLDivElement>(null)
   const [videoRatio, setVideoRatio] = useState<number | null>(null)
   const [stageRect, setStageRect] = useState<{ width: number; height: number } | null>(null)
+  const [controlsVisible, setControlsVisible] = useState(true)
+  const revealControlsOnlyRef = useRef(false)
   // 当前展示的字幕文本（由自定义字幕层渲染，100% 透明无黑框）
   const [activeCueText, setActiveCueText] = useState<string>('')
 
@@ -123,12 +125,25 @@ export function PlayerVideoStage({
     }
   }, [videoRef, media])
 
-  // 点击视频切换播放/暂停；双击切换全屏（控制栏事件自行阻止冒泡）。
+  // 桌面端点击直接切换播放；移动端控制栏隐藏时首次轻触只唤出控制栏，
+  // 控制栏已显示时再次轻触才切换播放/暂停。
   const togglePlay = () => {
     const video = videoRef.current
     if (!video) return
     if (video.paused) void video.play()?.catch(() => undefined)
     else video.pause()
+  }
+  const handleStagePointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    revealControlsOnlyRef.current = event.pointerType === 'touch' && !controlsVisible
+  }
+  const handleStageClick = () => {
+    if (revealControlsOnlyRef.current) {
+      revealControlsOnlyRef.current = false
+      setControlsVisible(true)
+      return
+    }
+    revealControlsOnlyRef.current = false
+    togglePlay()
   }
   const toggleFullscreen = () => {
     const stage = stageRef.current
@@ -142,15 +157,22 @@ export function PlayerVideoStage({
   // 由下方的 React 自定义层输出 100% 纯透明背景、高清晰文字阴影的字幕。
   useEffect(() => {
     const video = videoRef.current
-    if (!video || subs.length === 0 || subtitleIndex < 0 || !subs[subtitleIndex]) {
+    const selectedTrack = subs[subtitleIndex]
+    if (
+      !video ||
+      subs.length === 0 ||
+      subtitleIndex < 0 ||
+      !selectedTrack ||
+      selectedTrack.delivery === 'burn'
+    ) {
       setActiveCueText('')
       return
     }
-    const trackIdx = subtitleIndex
 
     const updateCue = () => {
-      const trackEls = Array.from(video.querySelectorAll('track'))
-      const selectedEl = trackEls[trackIdx]
+      const selectedEl = video.querySelector<HTMLTrackElement>(
+        `track[data-subtitle-index="${subtitleIndex}"]`,
+      )
       const tt = selectedEl?.track
       if (!tt) {
         setActiveCueText('')
@@ -160,13 +182,13 @@ export function PlayerVideoStage({
       // 优先从浏览器 activeCues 中取当前文本；若浏览器在 hidden 模式下延迟触发 cuechange，
       // 则从 tt.cues 中根据 video.currentTime 实时匹配当前字幕，确保初次加载无感立即可见。
       const texts: string[] = []
-      if (tt.activeCues && tt.activeCues.length > 0) {
+      if ((!streamOffset || streamOffset <= 0.05) && tt.activeCues && tt.activeCues.length > 0) {
         for (let i = 0; i < tt.activeCues.length; i++) {
           const cue = tt.activeCues[i] as VTTCue
           if (cue && cue.text) texts.push(cue.text)
         }
       } else if (tt.cues && tt.cues.length > 0) {
-        const cur = video.currentTime
+        const cur = video.currentTime + (streamOffset ?? 0)
         for (let i = 0; i < tt.cues.length; i++) {
           const cue = tt.cues[i] as VTTCue
           if (cue && cur >= cue.startTime && cur <= cue.endTime && cue.text) {
@@ -180,15 +202,18 @@ export function PlayerVideoStage({
     const apply = () => {
       const trackEls = Array.from(video.querySelectorAll('track'))
       if (trackEls.length === 0) return
-      trackEls.forEach((el, i) => {
+      trackEls.forEach((el) => {
         const tt = el.track
         if (tt) {
           // 'hidden' 模式：浏览器解析 WebVTT 并触发 cuechange，但隐藏原生黑底 UI
-          tt.mode = i === trackIdx ? 'hidden' : 'disabled'
+          tt.mode =
+            el.dataset.subtitleIndex === String(subtitleIndex) ? 'hidden' : 'disabled'
         }
       })
 
-      const selected = trackEls[trackIdx]
+      const selected = video.querySelector<HTMLTrackElement>(
+        `track[data-subtitle-index="${subtitleIndex}"]`,
+      )
       if (!selected) return
 
       const tt = selected.track
@@ -216,8 +241,9 @@ export function PlayerVideoStage({
       video.removeEventListener('seeking', updateCue)
       video.removeEventListener('seeked', updateCue)
       video.removeEventListener('playing', updateCue)
-      const trackEls = Array.from(video.querySelectorAll('track'))
-      const selected = trackEls[trackIdx]
+      const selected = video.querySelector<HTMLTrackElement>(
+        `track[data-subtitle-index="${subtitleIndex}"]`,
+      )
       if (selected) {
         selected.removeEventListener('load', updateCue)
         if (selected.track) {
@@ -225,7 +251,7 @@ export function PlayerVideoStage({
         }
       }
     }
-  }, [subtitleIndex, subs, videoRef, media])
+  }, [subtitleIndex, subs, videoRef, media, streamOffset])
 
   // 根据视频画面宽高比与舞台宽高比，确定视频在哪个轴向撑满 100%
   const isWiderThanStage =
@@ -251,7 +277,8 @@ export function PlayerVideoStage({
       ref={stageRef}
       data-player-stage
       className="relative flex h-full w-full flex-1 items-center justify-center overflow-hidden bg-black"
-      onClick={togglePlay}
+      onPointerDown={handleStagePointerDown}
+      onClick={handleStageClick}
       onDoubleClick={toggleFullscreen}
     >
       {media ? (
@@ -267,16 +294,19 @@ export function PlayerVideoStage({
               className="h-full w-full object-contain bg-black"
               onError={onVideoError}
             >
-              {subs.map((track, index) => (
+              {subs.map((track, index) =>
+                track.delivery === 'burn' ? null : (
                 <track
                   key={track.path}
+                  data-subtitle-index={index}
                   kind="subtitles"
                   src={subtitlesAPI.url(media.id, track.path)}
                   srcLang={track.lang}
                   label={track.label || track.lang}
                   default={subtitleIndex === index}
                 />
-              ))}
+                ),
+              )}
             </video>
             <DanmakuStage
               key={media.id}
@@ -310,6 +340,8 @@ export function PlayerVideoStage({
           </div>
           <PlayerControls
             videoRef={videoRef}
+            uiVisible={controlsVisible}
+            onUiVisibleChange={setControlsVisible}
             subs={subs}
             subtitleIndex={subtitleIndex}
             onSelectSubtitle={onSelectSubtitle}

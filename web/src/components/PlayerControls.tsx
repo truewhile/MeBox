@@ -30,6 +30,8 @@ function formatTime(s: number): string {
 
 type PlayerControlsProps = {
   videoRef: React.RefObject<HTMLVideoElement>
+  uiVisible: boolean
+  onUiVisibleChange: (visible: boolean) => void
   subs: SubtitleTrack[]
   /** 当前激活字幕轨道：-1=关闭，0..n-1=对应轨道。 */
   subtitleIndex: number
@@ -56,6 +58,8 @@ type PlayerControlsProps = {
 
 export function PlayerControls({
   videoRef,
+  uiVisible,
+  onUiVisibleChange,
   subs,
   subtitleIndex,
   onSelectSubtitle,
@@ -88,7 +92,6 @@ export function PlayerControls({
   const [muted, setMuted] = useState(false)
   const [fullscreen, setFullscreen] = useState(false)
   const [pip, setPip] = useState(false)
-  const [uiVisible, setUiVisible] = useState(true)
   const [controlsHovered, setControlsHovered] = useState(false)
   const [isScrubbing, setIsScrubbing] = useState(false)
   const [scrubValue, setScrubValue] = useState<number | null>(null)
@@ -159,14 +162,14 @@ export function PlayerControls({
             !danmakuOpenRef.current &&
             !playlistOpenRef.current
           ) {
-            setUiVisible(false)
+            onUiVisibleChange(false)
           }
         }, 3000)
       }
     }
 
     const onMove = () => {
-      setUiVisible(true)
+      onUiVisibleChange(true)
       resetTimer()
     }
 
@@ -177,7 +180,7 @@ export function PlayerControls({
       }
       if (el.paused || controlsHoveredRef.current || isScrubbingRef.current || playlistOpenRef.current) return
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
-      setUiVisible(false)
+      onUiVisibleChange(false)
     }
 
     const syncPlay = () => {
@@ -248,7 +251,7 @@ export function PlayerControls({
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoRef, knownDuration, streamOffset])
+  }, [videoRef, knownDuration, streamOffset, onUiVisibleChange])
 
   // Keep the scrubber max in sync when metadata duration arrives after mount.
   useEffect(() => {
@@ -260,16 +263,16 @@ export function PlayerControls({
   // 当悬停或菜单状态改变时，更新控制栏计时器
   useEffect(() => {
     if (controlsHovered || isScrubbing || subtitleMenuOpen || danmakuOpen || playlistOpen) {
-      setUiVisible(true)
+      onUiVisibleChange(true)
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
     } else {
       const el = video()
       if (el && !el.paused) {
         if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
-        hideTimerRef.current = setTimeout(() => setUiVisible(false), 3000)
+        hideTimerRef.current = setTimeout(() => onUiVisibleChange(false), 3000)
       }
     }
-  }, [controlsHovered, isScrubbing, subtitleMenuOpen, danmakuOpen, playlistOpen])
+  }, [controlsHovered, isScrubbing, subtitleMenuOpen, danmakuOpen, playlistOpen, onUiVisibleChange])
 
   const togglePlay = () => {
     const el = video()
@@ -301,7 +304,7 @@ export function PlayerControls({
 
   const handleSeekStart = () => {
     setIsScrubbing(true)
-    setUiVisible(true)
+    onUiVisibleChange(true)
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
   }
 
@@ -361,6 +364,7 @@ export function PlayerControls({
       onMouseEnter={() => setControlsHovered(true)}
       onMouseLeave={() => setControlsHovered(false)}
       onClick={(e) => e.stopPropagation()}
+      onPointerUp={(e) => e.stopPropagation()}
     >
       <div className="flex flex-wrap items-center gap-2 text-white sm:flex-nowrap sm:gap-2.5">
         {/* 上一集 */}

@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -43,6 +44,27 @@ func TestSubtitleDiscoverNoTracksReturnsEmptySlice(t *testing.T) {
 	}
 	if len(tracks) != 0 {
 		t.Fatalf("len(tracks) = %d, want 0", len(tracks))
+	}
+}
+
+func TestEmbeddedSubtitleProbeClassifiesTextAndBitmapTracks(t *testing.T) {
+	var probe embeddedSubtitleProbe
+	raw := []byte(`{"streams":[
+		{"index":2,"codec_name":"ass","tags":{"language":"chi","title":"中文"},"disposition":{"default":1}},
+		{"index":4,"codec_name":"hdmv_pgs_subtitle","tags":{"language":"eng"},"disposition":{"forced":1}}
+	]}`)
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		t.Fatal(err)
+	}
+	tracks := subtitleTracksFromProbe(probe)
+	if len(tracks) != 2 {
+		t.Fatalf("len(tracks) = %d, want 2", len(tracks))
+	}
+	if tracks[0].Delivery != "webvtt" || tracks[0].Path != "embedded:2" {
+		t.Fatalf("text track = %#v", tracks[0])
+	}
+	if tracks[1].Delivery != "burn" || tracks[1].StreamIndex != 4 {
+		t.Fatalf("bitmap track = %#v", tracks[1])
 	}
 }
 

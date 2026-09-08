@@ -255,6 +255,29 @@ func TestBuildFFmpegArgsHTTPSeekAfterDashI(t *testing.T) {
 	}
 }
 
+func TestBuildFFmpegArgsBurnsBitmapSubtitleInSoftware(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Transcoder.HardwareAccel = true
+	cfg.Transcoder.Encoder = "nvenc"
+	cfg.Transcoder.MaxHeight = 720
+	cfg.Transcoder.SegmentSeconds = 4
+	stream := 3
+	args := buildFFmpegArgsForInput(cfg, transcodeInput{
+		Source:         "/x.mkv",
+		SubtitleStream: &stream,
+	}, "/o/x.m3u8", "/o/seg_%05d.ts")
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "[0:v:0][0:3]overlay=0:0:eof_action=pass") {
+		t.Fatalf("bitmap subtitle overlay missing: %s", joined)
+	}
+	if !strings.Contains(joined, "-map [v]") || !strings.Contains(joined, "-c:v libx264") {
+		t.Fatalf("burn-in should use the filtered software video stream: %s", joined)
+	}
+	if strings.Contains(joined, "cuda") || strings.Contains(joined, "h264_nvenc") {
+		t.Fatalf("burn-in must not retain hardware-only frames: %s", joined)
+	}
+}
+
 func TestSameHLSStart(t *testing.T) {
 	if !sameHLSStart(10, 10.2) {
 		t.Fatal("expected close starts to match")
@@ -280,6 +303,19 @@ func TestShouldReplaceHLSJob(t *testing.T) {
 	}
 	if shouldReplaceHLSJob(existing, 120.2, 1001) {
 		t.Fatal("same start should not replace")
+	}
+}
+
+func TestBitmapSubtitleChangeReplacesHLSJob(t *testing.T) {
+	existing := &hlsJob{startSec: 120, seekGen: 1000, subtitleStream: 2}
+	if !shouldReplaceHLSJobConfiguration(existing, 120, 1001, 3) {
+		t.Fatal("changing bitmap subtitle must replace the HLS generation")
+	}
+	if !shouldReplaceHLSJobConfiguration(existing, 120, 1001, -1) {
+		t.Fatal("closing bitmap subtitle must replace the HLS generation")
+	}
+	if shouldReplaceHLSJobConfiguration(existing, 120.2, 1001, 2) {
+		t.Fatal("same subtitle and nearby start should reuse the HLS generation")
 	}
 }
 

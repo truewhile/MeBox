@@ -33,23 +33,6 @@ import { mediaVersionsOf } from '../utils/mediaVersion'
 //
 // External subtitles next to the source file are auto-discovered and
 // attached as <track> elements.
-const SUBTITLE_STORAGE_KEY = 'mebox.subtitle'
-
-// 初始字幕偏好：localStorage 记录上次选择的轨道（-1=关闭）；没有偏好时
-// 默认 0（自动加载第一条字幕）。
-function initialSubtitleIndex(): number {
-  try {
-    const saved = localStorage.getItem(SUBTITLE_STORAGE_KEY)
-    if (saved !== null && saved !== '') {
-      const n = parseInt(saved, 10)
-      if (Number.isFinite(n)) return n
-    }
-  } catch {
-    // ignore
-  }
-  return 0
-}
-
 export function PlayerPage() {
   const { id = '' } = useParams()
   const [params, setParams] = useSearchParams()
@@ -63,13 +46,14 @@ export function PlayerPage() {
   const [media, setMedia] = useState<Media | null>(null)
   const [mode, setMode] = useState<PlayerMode>('direct')
   const [subs, setSubs] = useState<SubtitleTrack[]>([])
-  const [subtitleIndex, setSubtitleIndex] = useState<number>(initialSubtitleIndex)
+  const [subtitleIndex, setSubtitleIndex] = useState<number>(0)
   const [hlsUnavailable, setHlsUnavailable] = useState(false)
   const [playerError, setPlayerError] = useState('')
   // 媒体元数据加载失败（404 / 无权限等）：舞台区直接展示错误而不是永远「加载中」
   const [loadError, setLoadError] = useState('')
   // 「客户端直连解码」模式：宿主机不转码，播放器强制 direct play、隐藏 HLS 切换。
   const [directOnly, setDirectOnly] = useState(false)
+  const [directOnlyKnown, setDirectOnlyKnown] = useState(false)
   const [resumePosition, setResumePosition] = useState(0)
   const [initialSeekDone, setInitialSeekDone] = useState(false)
   // HLS session source offset: playlist t=0 maps to this absolute second.
@@ -121,6 +105,7 @@ export function PlayerPage() {
       .info()
       .then((info) => setDirectOnly(Boolean(info.direct_play_only)))
       .catch(() => setDirectOnly(false))
+      .finally(() => setDirectOnlyKnown(true))
   }, [])
 
   // 读取宿主机已保存的弹幕参数作为面板初始值（无 admin 权限也可读）。
@@ -225,9 +210,8 @@ export function PlayerPage() {
         if (cancelled) return
         const list = tracks ?? []
         setSubs(list)
-        // 记忆的轨道下标可能超出当前媒体的轨道数（不同媒体字幕数量不同），
-        // 越界时回退到第一条；无字幕则关闭。
-        setSubtitleIndex((cur) => (cur >= list.length ? (list.length > 0 ? 0 : -1) : cur))
+        // 服务端始终把外挂字幕排在内嵌字幕前面，因此第一条就是默认优先轨。
+        setSubtitleIndex(list.length > 0 ? 0 : -1)
       })
       .catch(() => {
         if (cancelled) return
@@ -242,6 +226,9 @@ export function PlayerPage() {
   // Depend on media.id (not the media object): refreshing duration after
   // MANIFEST_PARSED must not remount HLS or it storms EnsureJob / DELETE.
   const mediaId = media?.id
+  const selectedSubtitle = subtitleIndex >= 0 ? subs[subtitleIndex] : undefined
+  const burnedSubtitleStream =
+    selectedSubtitle?.delivery === 'burn' ? selectedSubtitle.stream_index : undefined
   const mediaRef = useRef(media)
   mediaRef.current = media
   useEffect(() => {
@@ -254,7 +241,7 @@ export function PlayerPage() {
     const video = ref.current
     const durationSec = currentMedia.duration_sec || 0
     if (mode === 'hls') {
-      const url = hlsURL(mediaId, hlsStartSec)
+      const url = hlsURL(mediaId, hlsStartSec, burnedSubtitleStream)
       void import('hls.js').then(({ default: HlsCtor }) => {
         if (cancelled || !ref.current) return
         if (HlsCtor.isSupported()) {
@@ -323,7 +310,7 @@ export function PlayerPage() {
       cancelled = true
       teardownHls()
     }
-  }, [hlsUnavailable, hlsStartSec, mediaId, mode, params, setParams, teardownHls])
+  }, [burnedSubtitleStream, hlsUnavailable, hlsStartSec, mediaId, mode, params, setParams, teardownHls])
 
   // Stop host ffmpeg when leaving this HLS player. The keepalive request also
   // survives route navigation while the component is being torn down.
@@ -600,6 +587,31 @@ export function PlayerPage() {
 
   const isDirectStream = isDirectStreamMedia(media)
 
+  // 没有外挂字幕且第一条内嵌字幕是图片时，默认轨需要通过 HLS 烧录。
+  useEffect(() => {
+    if (
+      !directOnlyKnown ||
+      directOnly ||
+      isDirectStream ||
+      selectedSubtitle?.delivery !== 'burn' ||
+      mode === 'hls'
+    ) {
+      return
+    }
+    setHlsStartSec(ref.current?.currentTime || 0)
+    setMode('hls')
+    params.set('mode', 'hls')
+    setParams(params, { replace: true })
+  }, [
+    directOnly,
+    directOnlyKnown,
+    isDirectStream,
+    mode,
+    params,
+    selectedSubtitle?.delivery,
+    setParams,
+  ])
+
   const toggleMode = useCallback(() => {
     if (isDirectStream) {
       toast('该媒体为直连播放，无需且不支持转码')
@@ -646,15 +658,27 @@ export function PlayerPage() {
     [hlsStartSec, mode],
   )
 
-  // 用户切换字幕轨道：-1=关闭；记忆偏好，下次播放默认沿用。
+  // 用户切换图片字幕时从当前位置创建新的 HLS 烧录任务；文本字幕只在网页层切换。
   const selectSubtitle = useCallback((index: number) => {
-    setSubtitleIndex(index)
-    try {
-      localStorage.setItem(SUBTITLE_STORAGE_KEY, String(index))
-    } catch {
-      // ignore
+    const oldTrack = subtitleIndex >= 0 ? subs[subtitleIndex] : undefined
+    const nextTrack = index >= 0 ? subs[index] : undefined
+    if (nextTrack?.delivery === 'burn' && (directOnly || isDirectStream)) {
+      toast.error('图片字幕需要开启 HLS 转码后才能显示')
+      return
     }
-  }, [])
+    const burnChanged =
+      oldTrack?.delivery === 'burn' || nextTrack?.delivery === 'burn'
+    if (burnChanged && mode === 'hls' && ref.current) {
+      setHlsStartSec(hlsStartSec + (ref.current.currentTime || 0))
+    }
+    setSubtitleIndex(index)
+    if (nextTrack?.delivery === 'burn' && mode !== 'hls' && !directOnly && !isDirectStream) {
+      setHlsStartSec(ref.current?.currentTime || 0)
+      setMode('hls')
+      params.set('mode', 'hls')
+      setParams(params, { replace: true })
+    }
+  }, [directOnly, hlsStartSec, isDirectStream, mode, params, setParams, subs, subtitleIndex])
 
   const handleVideoError = useCallback(() => {
     // 浏览器对 <video src> 的错误描述非常有限，把详细原因

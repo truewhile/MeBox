@@ -147,7 +147,7 @@ export function streamURL(mediaId: string): string {
 
 // hlsURL returns the m3u8 playlist URL fed into hls.js.
 // startSec > 0 asks the server to (re)start ffmpeg from that source offset.
-export function hlsURL(mediaId: string, startSec = 0): string {
+export function hlsURL(mediaId: string, startSec = 0, subtitleStream?: number): string {
   const safeStart = Math.max(0, Math.round(startSec * 1000) / 1000)
   // Always send start= (including 0) so the server can tell an intentional
   // restart-from-head apart from a missing query on a stale refresh.
@@ -155,7 +155,11 @@ export function hlsURL(mediaId: string, startSec = 0): string {
   // Monotonic-ish client generation: newer seeks win; older in-flight playlist
   // requests must not cancel the active ffmpeg job back to t=0.
   const bust = `&_seek=${Date.now()}`
-  return `/api/hls/${encodeURIComponent(mediaId)}/index.m3u8?${tokenQuery()}${profileQuery()}${start}${bust}`
+  const subtitle =
+    subtitleStream !== undefined && subtitleStream >= 0
+      ? `&subtitle=${encodeURIComponent(String(subtitleStream))}`
+      : ''
+  return `/api/hls/${encodeURIComponent(mediaId)}/index.m3u8?${tokenQuery()}${profileQuery()}${start}${subtitle}${bust}`
 }
 
 // Stop an on-demand HLS job. keepalive makes the request survive page

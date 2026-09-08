@@ -16,12 +16,15 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,14 +32,16 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/truewhile/MeBox/internal/config"
+	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/repository"
 )
 
 // SubtitleService is the discovery + conversion entry point.
 type SubtitleService struct {
-	log  *zap.Logger
-	repo *repository.Container
-	cfg  *config.Config
+	log         *zap.Logger
+	repo        *repository.Container
+	cfg         *config.Config
+	strmResolve func(ctx context.Context, raw string) (*StrmPlayResult, error)
 
 	// 目录发现是 Emby 条目列表的热路径（每个媒体源一次 DB 查询 + 最多 5 次
 	// os.ReadDir），而字幕文件极少变化：按 media_id 做短 TTL 缓存。
@@ -61,11 +66,14 @@ func NewSubtitleService(cfg *config.Config, log *zap.Logger, repo *repository.Co
 
 // SubtitleTrack describes one external subtitle file.
 type SubtitleTrack struct {
-	Lang  string `json:"lang"`
-	Label string `json:"label"`
-	Path  string `json:"path"`
-	URL   string `json:"url"`
-	Codec string `json:"codec"`
+	Lang        string `json:"lang"`
+	Label       string `json:"label"`
+	Path        string `json:"path"`
+	URL         string `json:"url"`
+	Codec       string `json:"codec"`
+	Source      string `json:"source"`
+	Delivery    string `json:"delivery"`
+	StreamIndex int    `json:"stream_index,omitempty"`
 }
 
 // extToCodec maps the file extension to the inner codec name.
@@ -86,7 +94,17 @@ func (s *SubtitleService) Discover(ctx context.Context, mediaID string) ([]Subti
 // DiscoverExternalOnly 只返回媒体旁边的外挂字幕文件，不含容器内嵌字幕轨。
 // Emby 字幕接口（/Videos/:id/Subtitles/...）用。
 func (s *SubtitleService) DiscoverExternalOnly(ctx context.Context, mediaID string) ([]SubtitleTrack, error) {
-	return s.discover(ctx, mediaID)
+	tracks, err := s.discover(ctx, mediaID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SubtitleTrack, 0, len(tracks))
+	for _, track := range tracks {
+		if track.Source != "embedded" {
+			out = append(out, track)
+		}
+	}
+	return out, nil
 }
 
 func (s *SubtitleService) discover(ctx context.Context, mediaID string) ([]SubtitleTrack, error) {
@@ -187,14 +205,151 @@ func (s *SubtitleService) discoverUncached(ctx context.Context, mediaID string) 
 			}
 			lang := detectLang(fullName, matchedBase)
 			tracks = append(tracks, SubtitleTrack{
-				Lang:  lang,
-				Label: lang,
-				Path:  filepath.Join(c, e.Name()),
-				Codec: codec,
+				Lang:     lang,
+				Label:    lang,
+				Path:     filepath.Join(c, e.Name()),
+				Codec:    codec,
+				Source:   "external",
+				Delivery: "webvtt",
 			})
 		}
 	}
+	embedded, err := s.discoverEmbedded(ctx, m)
+	if err != nil {
+		if s.log != nil {
+			s.log.Debug("discover embedded subtitles failed", zap.String("media_id", mediaID), zap.Error(err))
+		}
+	} else {
+		tracks = append(tracks, embedded...)
+	}
 	return tracks, nil
+}
+
+type embeddedSubtitleProbe struct {
+	Streams []struct {
+		Index     int    `json:"index"`
+		CodecName string `json:"codec_name"`
+		Tags      struct {
+			Language string `json:"language"`
+			Title    string `json:"title"`
+		} `json:"tags"`
+		Disposition struct {
+			Default int `json:"default"`
+			Forced  int `json:"forced"`
+		} `json:"disposition"`
+	} `json:"streams"`
+}
+
+var imageSubtitleCodecs = map[string]bool{
+	"hdmv_pgs_subtitle": true,
+	"dvd_subtitle":      true,
+	"dvb_subtitle":      true,
+	"xsub":              true,
+}
+
+func (s *SubtitleService) discoverEmbedded(ctx context.Context, media *model.Media) ([]SubtitleTrack, error) {
+	if s == nil || s.cfg == nil {
+		return nil, errors.New("subtitle probe unavailable")
+	}
+	input, err := s.resolveInput(ctx, media)
+	if err != nil {
+		return nil, err
+	}
+	bin, err := resolveLocalExecutable(s.cfg.App.FFprobePath, "ffprobe")
+	if err != nil {
+		return nil, err
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	args := []string{"-v", "error"}
+	if headers := ffmpegHeaderText(input.Headers); headers != "" {
+		args = append(args, "-headers", headers)
+	}
+	args = append(args,
+		"-select_streams", "s",
+		"-show_entries", "stream=index,codec_name:stream_tags=language,title:stream_disposition=default,forced",
+		"-of", "json", input.Source,
+	)
+	out, err := exec.CommandContext(probeCtx, bin, args...).Output() // #nosec G204 -- executable is resolved locally and arguments do not use a shell.
+	if err != nil {
+		return nil, err
+	}
+	var probe embeddedSubtitleProbe
+	if err := json.Unmarshal(out, &probe); err != nil {
+		return nil, err
+	}
+	return subtitleTracksFromProbe(probe), nil
+}
+
+func subtitleTracksFromProbe(probe embeddedSubtitleProbe) []SubtitleTrack {
+	tracks := make([]SubtitleTrack, 0, len(probe.Streams))
+	for _, stream := range probe.Streams {
+		codec := strings.ToLower(strings.TrimSpace(stream.CodecName))
+		lang := strings.ToLower(strings.TrimSpace(stream.Tags.Language))
+		if lang == "" {
+			lang = "und"
+		}
+		label := strings.TrimSpace(stream.Tags.Title)
+		if label == "" {
+			label = lang
+		}
+		if stream.Disposition.Forced != 0 {
+			label += "（强制）"
+		} else if stream.Disposition.Default != 0 {
+			label += "（默认）"
+		}
+		delivery := "webvtt"
+		if imageSubtitleCodecs[codec] {
+			delivery = "burn"
+		}
+		sourceLabel := "（内嵌）"
+		if delivery == "burn" {
+			sourceLabel = "（内嵌·图片）"
+		}
+		tracks = append(tracks, SubtitleTrack{
+			Lang:        lang,
+			Label:       label + sourceLabel,
+			Path:        "embedded:" + strconv.Itoa(stream.Index),
+			Codec:       codec,
+			Source:      "embedded",
+			Delivery:    delivery,
+			StreamIndex: stream.Index,
+		})
+	}
+	return tracks
+}
+
+func (s *SubtitleService) SetStrmPlayTargetResolver(resolve func(context.Context, string) (*StrmPlayResult, error)) {
+	if s != nil {
+		s.strmResolve = resolve
+	}
+}
+
+func (s *SubtitleService) resolveInput(ctx context.Context, media *model.Media) (transcodeInput, error) {
+	if media == nil {
+		return transcodeInput{}, ErrMediaNotFound
+	}
+	if !isStrmMediaRow(media) {
+		if _, err := os.Stat(media.Path); err != nil {
+			return transcodeInput{}, ErrMediaNotFound
+		}
+		return transcodeInput{Source: media.Path}, nil
+	}
+	raw := strings.TrimSpace(media.STRMURL)
+	if raw == "" && strings.HasSuffix(strings.ToLower(media.Path), ".strm") {
+		raw, _ = readLocalSTRMTarget(media.Path)
+	}
+	if s.strmResolve != nil {
+		resolved, err := s.strmResolve(ctx, raw)
+		if err != nil {
+			return transcodeInput{}, err
+		}
+		return transcodeInputFromPlayResult(resolved)
+	}
+	if isHTTPPlaybackTarget(raw) {
+		return transcodeInput{Source: raw}, nil
+	}
+	return transcodeInput{}, errors.New("subtitle source unavailable")
 }
 
 // langTag matches the .zh / .zh-cn / .chs language sub-extensions.
@@ -219,6 +374,13 @@ func (s *SubtitleService) Serve(ctx context.Context, mediaID, sub string, w io.W
 	m, err := s.repo.Media.FindByID(ctx, mediaID)
 	if err != nil || m == nil {
 		return errors.New("media not found")
+	}
+	if strings.HasPrefix(sub, "embedded:") {
+		index, err := strconv.Atoi(strings.TrimPrefix(sub, "embedded:"))
+		if err != nil || index < 0 {
+			return errors.New("invalid embedded subtitle")
+		}
+		return s.serveEmbedded(ctx, m, index, w)
 	}
 	abs, err := filepath.Abs(sub)
 	if err != nil {
@@ -250,6 +412,28 @@ func (s *SubtitleService) Serve(ctx context.Context, mediaID, sub string, w io.W
 		return errors.New("unsupported subtitle format")
 	}
 	return err
+}
+
+func (s *SubtitleService) serveEmbedded(ctx context.Context, media *model.Media, streamIndex int, w io.Writer) error {
+	input, err := s.resolveInput(ctx, media)
+	if err != nil {
+		return err
+	}
+	bin, err := resolveLocalExecutable(s.cfg.App.FFmpegPath, "ffmpeg")
+	if err != nil {
+		return err
+	}
+	args := []string{"-hide_banner", "-loglevel", "error"}
+	args = append(args, ffmpegHTTPInputArgs(input)...)
+	args = append(args, "-i", input.Source, "-map", "0:"+strconv.Itoa(streamIndex), "-f", "webvtt", "-")
+	cmd := exec.CommandContext(ctx, bin, args...) // #nosec G204 -- executable is resolved locally and arguments do not use a shell.
+	cmd.Stdout = w
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("extract embedded subtitle: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 // ServeRaw writes the subtitle file in its original format without any

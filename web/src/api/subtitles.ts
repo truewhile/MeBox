@@ -7,6 +7,9 @@ export interface SubtitleTrack {
   path: string
   url: string
   codec: string
+  source: 'external' | 'embedded'
+  delivery: 'webvtt' | 'burn'
+  stream_index?: number
 }
 
 export const subtitlesAPI = {
