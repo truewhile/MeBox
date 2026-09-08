@@ -120,6 +120,25 @@ func GroupMediaVersions(items []model.Media) []MediaItem {
 	return groupMediaVersions(items)
 }
 
+// GroupEpisodeVersionsForDisplay folds encoding/container variants into one
+// episode while preserving season/episode ordering for episode-list APIs.
+func GroupEpisodeVersionsForDisplay(items []model.Media) []MediaItem {
+	grouped := groupMediaVersions(items)
+	if grouped == nil {
+		return []MediaItem{}
+	}
+	sort.SliceStable(grouped, func(i, j int) bool {
+		if grouped[i].SeasonNum != grouped[j].SeasonNum {
+			return grouped[i].SeasonNum < grouped[j].SeasonNum
+		}
+		if grouped[i].EpisodeNum != grouped[j].EpisodeNum {
+			return grouped[i].EpisodeNum < grouped[j].EpisodeNum
+		}
+		return grouped[i].CreatedAt.Before(grouped[j].CreatedAt)
+	})
+	return grouped
+}
+
 func mediaVersionGroupKey(m model.Media) string {
 	// 远程 Emby 挂载条目保持独立，不与其它远程条目或本地条目折叠合并。
 	if IsEmbyRemoteID(m.ID) {

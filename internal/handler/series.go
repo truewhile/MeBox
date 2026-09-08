@@ -195,7 +195,8 @@ func listLibrarySeriesEpisodesHandler(svc *service.Container) gin.HandlerFunc {
 			writeInternalOrCanceled(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
+		grouped := service.GroupEpisodeVersionsForDisplay(items)
+		c.JSON(http.StatusOK, gin.H{"items": grouped, "total": len(grouped)})
 	}
 }
 
@@ -235,6 +236,7 @@ func listMediaEpisodesHandler(svc *service.Container) gin.HandlerFunc {
 			writeInternalOrCanceled(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
+		grouped := service.GroupEpisodeVersionsForDisplay(items)
+		c.JSON(http.StatusOK, gin.H{"items": grouped, "total": len(grouped)})
 	}
 }

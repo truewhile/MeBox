@@ -65,6 +65,7 @@ export function LibrarySeriesEpisodes({
         <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
           {visibleEpisodes.map((ep) => {
             const displayTitle = episodeDisplayTitle(ep, visibleEpisodes)
+            const versionCount = ep.versions?.length ?? 1
             return (
               <div
                 key={ep.id}
@@ -102,6 +103,7 @@ export function LibrarySeriesEpisodes({
                       {ep.duration_sec > 0
                         ? `${Math.floor(ep.duration_sec / 60)} 分钟`
                         : formatSize(ep.size_bytes)}
+                      {versionCount > 1 ? ` · ${versionCount} 版本` : ''}
                     </p>
                   </div>
                 </Link>

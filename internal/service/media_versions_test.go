@@ -49,6 +49,28 @@ func TestGroupMediaVersionsMergesEpisodeByExternalIDAcrossLibraries(t *testing.T
 	}
 }
 
+func TestGroupEpisodeVersionsForDisplayMergesAndKeepsEpisodeOrder(t *testing.T) {
+	rows := []model.Media{
+		{Base: model.Base{ID: "ep2"}, LibraryID: "tv", Title: "Show", SeasonNum: 1, EpisodeNum: 2, TMDbID: 99, Path: "/show/s01e02.mkv"},
+		{Base: model.Base{ID: "ep1-small"}, LibraryID: "tv", Title: "Show", SeasonNum: 1, EpisodeNum: 1, TMDbID: 99, Path: "/show/s01e01.mp4", SizeBytes: 100},
+		{Base: model.Base{ID: "ep1-large"}, LibraryID: "tv", Title: "Show", SeasonNum: 1, EpisodeNum: 1, TMDbID: 99, Path: "/show/s01e01.mkv", SizeBytes: 200},
+	}
+
+	grouped := GroupEpisodeVersionsForDisplay(rows)
+	if len(grouped) != 2 {
+		t.Fatalf("grouped len = %d, want 2: %#v", len(grouped), grouped)
+	}
+	if grouped[0].EpisodeNum != 1 || len(grouped[0].Versions) != 2 {
+		t.Fatalf("episode 1 was not merged first: %#v", grouped)
+	}
+	if grouped[0].ID != "ep1-large" {
+		t.Fatalf("primary version = %q, want ep1-large", grouped[0].ID)
+	}
+	if grouped[1].EpisodeNum != 2 {
+		t.Fatalf("second item episode = %d, want 2", grouped[1].EpisodeNum)
+	}
+}
+
 func TestGroupMediaVersionsMergesMovieEncodingVariants(t *testing.T) {
 	hd := model.Media{
 		LibraryID:    "movies",
