@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/metatube-community/metatube-sdk-go/detector"
+	_ "golang.org/x/image/webp" // register WebP decoder for AVE covers
 )
 
 const adultPosterRatio = 2.0 / 3.0

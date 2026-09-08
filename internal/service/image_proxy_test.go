@@ -13,6 +13,12 @@ import (
 	"github.com/truewhile/MeBox/internal/config"
 )
 
+func TestIsLocalImagePathAcceptsLegacyImgSidecar(t *testing.T) {
+	if !isLocalImagePath(filepath.Join(t.TempDir(), "movie-poster.img")) {
+		t.Fatal("legacy .img sidecar should remain displayable")
+	}
+}
+
 var testJPEG = []byte{
 	0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 'J', 'F', 'I', 'F',
 	0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01,
@@ -117,12 +123,12 @@ func TestIsPrivateHost(t *testing.T) {
 	// Hostnames must NOT be blocked even though GFW DNS poisoning may resolve
 	// them to private/loopback IPs — blocking them broke legitimate posters.
 	allowed := []string{"image.tmdb.org", "lain.bgm.tv", "example.com", "8.8.8.8"}
-		for _, h := range allowed {
-			if isPrivateHost(h) {
-				t.Errorf("isPrivateHost(%q) = true, want false", h)
-			}
+	for _, h := range allowed {
+		if isPrivateHost(h) {
+			t.Errorf("isPrivateHost(%q) = true, want false", h)
 		}
 	}
+}
 
 func TestImageProxyAllowedRemoteHostBypassesPrivateCheck(t *testing.T) {
 	proxy := NewImageProxy(&config.Config{Cache: config.CacheConfig{CacheDir: filepath.Join(t.TempDir(), "cache")}}, zap.NewNop())

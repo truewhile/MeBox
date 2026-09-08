@@ -73,7 +73,7 @@ func isLocalImagePath(raw string) bool {
 	}
 	ext := strings.ToLower(filepath.Ext(raw))
 	switch ext {
-	case ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tbn":
+	case ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tbn", ".img":
 		return true
 	default:
 		return false

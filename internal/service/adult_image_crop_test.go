@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"encoding/base64"
 	"image"
 	"image/color"
 	"image/draw"
@@ -55,6 +56,27 @@ func TestCropAdultCoverPosterWideLandscape(t *testing.T) {
 	r, _, b, _ := midPixel.RGBA()
 	if b < r {
 		t.Fatalf("expected right side image content (dominant blue), got r=%d b=%d", r, b)
+	}
+}
+
+func TestCropAdultCoverPosterDecodesWebP(t *testing.T) {
+	wideWebP, err := base64.StdEncoding.DecodeString("UklGRjwAAABXRUJQVlA4IDAAAADQAQCdASoJAAYAAUAmJaACdLoB+AADsAD+8ut//NgVzXPv9//S4P0uD9Lg/9KQAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	croppedBytes, ctype, err := CropAdultCoverPoster(wideWebP)
+	if err != nil {
+		t.Fatalf("crop WebP: %v", err)
+	}
+	if ctype != "image/jpeg" {
+		t.Fatalf("cropped WebP type = %q, want image/jpeg", ctype)
+	}
+	cropped, _, err := image.Decode(bytes.NewReader(croppedBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := float64(cropped.Bounds().Dx()) / float64(cropped.Bounds().Dy()); got < 0.65 || got > 0.68 {
+		t.Fatalf("cropped WebP ratio = %.3f, want 2:3", got)
 	}
 }
 

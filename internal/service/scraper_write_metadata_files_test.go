@@ -88,6 +88,7 @@ func TestShouldCropAdultPosterUsesLibraryType(t *testing.T) {
 func TestImageExtForContentType(t *testing.T) {
 	cases := map[string]string{
 		"image/jpeg":                 ".jpg",
+		"image/jpg":                  ".jpg",
 		"image/pjpeg":                ".jpg",
 		"image/png":                  ".png",
 		"image/webp":                 ".webp",
@@ -100,6 +101,32 @@ func TestImageExtForContentType(t *testing.T) {
 		if got := imageExtForContentType(in); got != want {
 			t.Errorf("imageExtForContentType(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestDownloadArtworkMigratesLocalImgToCanonicalCroppedJPEG(t *testing.T) {
+	scraper := &ScraperService{log: zap.NewNop()}
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "movie-poster.img")
+	wide := createTestImage(900, 600, color.RGBA{R: 255, A: 255}, color.RGBA{B: 255, A: 255})
+	if err := os.WriteFile(legacy, wide, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := scraper.downloadArtworkToPathWithOptions(t.Context(), dir, "movie-poster", legacy, true)
+	if filepath.Base(dst) != "movie-poster.jpg" {
+		t.Fatalf("destination = %q, want canonical JPEG sidecar", dst)
+	}
+	data, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cropped, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := float64(cropped.Bounds().Dx()) / float64(cropped.Bounds().Dy()); got < 0.65 || got > 0.68 {
+		t.Fatalf("migrated poster ratio = %.3f, want 2:3", got)
 	}
 }
 

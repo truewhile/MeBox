@@ -91,10 +91,22 @@ func shouldCropAdultPoster(media *model.Media, lib *model.Library) bool {
 // downloadArtworkToPathWithOptions fetches an artwork URL via the image proxy cache and
 // writes it under dir/<name>.<ext>. For adult posters, it crops the right half of the cover.
 func (s *ScraperService) downloadArtworkToPathWithOptions(ctx context.Context, dir, name, raw string, cropAdultPoster bool) string {
-	if !isHTTPish(raw) {
+	var (
+		data  []byte
+		ctype string
+		err   error
+	)
+	switch {
+	case isHTTPish(raw):
+		data, ctype, err = s.images.Fetch(ctx, raw)
+	case isLocalImagePath(raw):
+		data, err = os.ReadFile(sanitizeLocalPath(resolveMappedDestinationPath(raw)))
+		if err == nil {
+			ctype = detectContentType(data)
+		}
+	default:
 		return ""
 	}
-	data, ctype, err := s.images.Fetch(ctx, raw)
 	if err != nil || len(data) == 0 {
 		s.log.Warn("scrape artwork download failed",
 			zap.String("name", name),
@@ -104,6 +116,12 @@ func (s *ScraperService) downloadArtworkToPathWithOptions(ctx context.Context, d
 	}
 	if !isImageContentType(ctype) || isTransparentPlaceholderData(data) {
 		return ""
+	}
+	// Upstreams sometimes report non-standard values such as image/jpg.
+	// Use the decoded bytes as the source of truth so sidecars receive a
+	// standard extension instead of the legacy .img fallback.
+	if detected := detectContentType(data); isImageContentType(detected) {
+		ctype = detected
 	}
 	if cropAdultPoster {
 		if cropped, croppedType, err := CropAdultCoverPoster(data); err == nil && len(cropped) > 0 {
@@ -166,7 +184,7 @@ func (s *ScraperService) writeArtworkDataToPath(dir, name, ctype string, data []
 // extension that could confuse media players.
 func imageExtForContentType(ctype string) string {
 	switch strings.ToLower(strings.TrimSpace(strings.Split(ctype, ";")[0])) {
-	case "image/jpeg", "image/pjpeg":
+	case "image/jpeg", "image/jpg", "image/pjpeg":
 		return ".jpg"
 	case "image/png", "image/x-png":
 		return ".png"
