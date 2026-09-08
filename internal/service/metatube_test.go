@@ -62,6 +62,9 @@ func TestMetaTubeProviderSearch(t *testing.T) {
 		t.Fatalf("expected 1 match, got %d", len(matches))
 	}
 	m := matches[0]
+	if m.Provider != "metatube" {
+		t.Errorf("expected provider metatube, got %q", m.Provider)
+	}
 	if m.OriginalName != "IPX-235" {
 		t.Errorf("expected original name IPX-235, got %s", m.OriginalName)
 	}

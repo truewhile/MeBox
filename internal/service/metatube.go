@@ -310,6 +310,7 @@ func (p *MetaTubeProvider) convertSearchResultToMatch(cfg MetaTubeConfig, query 
 	}
 
 	return &Match{
+		Provider:     "metatube",
 		MediaType:    "adult",
 		Title:        formattedTitle,
 		OriginalName: code,
@@ -383,6 +384,7 @@ func (p *MetaTubeProvider) convertMovieInfoToMatch(cfg MetaTubeConfig, movie *Me
 	}
 
 	return &Match{
+		Provider:     "metatube",
 		MediaType:    "adult",
 		Title:        formattedTitle,
 		OriginalName: code,

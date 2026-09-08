@@ -115,10 +115,12 @@ func (s *ScraperService) processScrapeTask(ctx context.Context, task *model.Scra
 	}
 
 	epArtwork := task.EpisodeImages
+	usedProvider := ""
 	options := ScrapeOptions{
 		EpisodeArtwork: &epArtwork,
 		IncludeMatched: task.RefreshMatched,
 		RetryNoMatch:   true,
+		resultProvider: &usedProvider,
 	}
 
 	enrichErr := s.EnrichOneWithOptions(ctx, media, options)
@@ -133,16 +135,9 @@ func (s *ScraperService) processScrapeTask(ctx context.Context, task *model.Scra
 		task.MatchedYear = refreshed.Year
 		task.PosterURL = refreshed.PosterURL
 		task.BackdropURL = refreshed.BackdropURL
-		if refreshed.TMDbID > 0 {
-			task.Provider = "tmdb"
-		} else if strings.TrimSpace(refreshed.DoubanID) != "" {
-			task.Provider = "douban"
-		} else if refreshed.BangumiID > 0 {
-			task.Provider = "bangumi"
-		} else if strings.TrimSpace(refreshed.TheTVDBID) != "" {
-			task.Provider = "thetvdb"
-		} else {
-			task.Provider = "metatube"
+		task.Provider = strings.ToLower(strings.TrimSpace(usedProvider))
+		if task.Provider == "" {
+			task.Provider = "unknown"
 		}
 	} else {
 		task.Status = model.ScrapeTaskFailed

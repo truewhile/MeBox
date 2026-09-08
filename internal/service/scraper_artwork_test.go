@@ -3,8 +3,11 @@ package service
 import (
 	"bytes"
 	"errors"
+	"image"
+	"image/color"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,9 +70,13 @@ func TestApplyProviderMatchInvalidatesMediaCache(t *testing.T) {
 	if err := repos.DB.Create(&media).Error; err != nil {
 		t.Fatal(err)
 	}
-	match := &Match{Title: "Matched", PosterURL: "https://image.tmdb.org/t/p/w500/poster.jpg", BackdropURL: "https://image.tmdb.org/t/p/w1280/backdrop.jpg"}
-	if err := scraper.applyProviderMatch(t.Context(), &media, &lib, match); err != nil {
+	match := &Match{Provider: "metatube", Title: "Matched", PosterURL: "https://image.tmdb.org/t/p/w500/poster.jpg", BackdropURL: "https://image.tmdb.org/t/p/w1280/backdrop.jpg"}
+	usedProvider := ""
+	if err := scraper.applyProviderMatchWithOptions(t.Context(), &media, &lib, match, ScrapeOptions{resultProvider: &usedProvider}); err != nil {
 		t.Fatal(err)
+	}
+	if usedProvider != "metatube" {
+		t.Fatalf("recorded provider = %q, want metatube", usedProvider)
 	}
 
 	var stale map[string]string
@@ -142,6 +149,92 @@ func TestApplyProviderMatchKeepsExistingArtworkWhenNewPrefetchFails(t *testing.T
 	}
 	if stored.BackdropURL != oldBackdrop {
 		t.Fatalf("blank match backdrop should not clear existing backdrop: got %q want %q", stored.BackdropURL, oldBackdrop)
+	}
+}
+
+func TestApplyProviderMatchFallsBackToLocalFaceCropWhenMetaTubeImageFails(t *testing.T) {
+	scraper, repos, closeServer := newTestScraper(t)
+	defer closeServer()
+
+	wideCover := createTestImage(
+		900,
+		600,
+		color.RGBA{R: 255, A: 255},
+		color.RGBA{B: 255, A: 255},
+	)
+	sourceURL := "https://images.example.com/wide-cover.jpg"
+	images := NewImageProxy(&config.Config{Cache: config.CacheConfig{CacheDir: filepath.Join(t.TempDir(), "cache")}}, zap.NewNop())
+	images.client = &http.Client{Transport: imageRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host == "metatube.example.com" {
+			return &http.Response{
+				StatusCode: http.StatusGatewayTimeout,
+				Status:     "504 Gateway Timeout",
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("timeout")),
+				Request:    req,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     http.Header{"Content-Type": []string{"image/jpeg"}},
+			Body:       io.NopCloser(bytes.NewReader(wideCover)),
+			Request:    req,
+		}, nil
+	})}
+	scraper.SetImageProxy(images)
+
+	libPath := t.TempDir()
+	lib := model.Library{Name: "Adult", Path: libPath, Type: "adult", Enabled: true}
+	if err := repos.Library.Create(t.Context(), &lib); err != nil {
+		t.Fatal(err)
+	}
+	media := model.Media{
+		LibraryID:    lib.ID,
+		Title:        "Raw",
+		Path:         filepath.Join(libPath, "IPX-235.mp4"),
+		PosterURL:    filepath.Join(libPath, "old-poster.jpg"),
+		NSFW:         true,
+		ScrapeStatus: "matched",
+	}
+	if err := repos.DB.Create(&media).Error; err != nil {
+		t.Fatal(err)
+	}
+	query := url.Values{
+		"auto":    {"true"},
+		"pos":     {"1"},
+		"quality": {"90"},
+		"ratio":   {"-1"},
+		"url":     {sourceURL},
+	}
+	match := &Match{
+		Title:     "IPX-235 Matched",
+		MediaType: "adult",
+		NSFW:      true,
+		PosterURL: "https://metatube.example.com/v1/images/primary/AVE/123?" + query.Encode(),
+	}
+	if err := scraper.applyProviderMatch(t.Context(), &media, &lib, match); err != nil {
+		t.Fatal(err)
+	}
+
+	var stored model.Media
+	if err := repos.DB.First(&stored, "id = ?", media.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(stored.PosterURL) != "IPX-235-poster.jpg" {
+		t.Fatalf("poster = %q, want local face-cropped sidecar", stored.PosterURL)
+	}
+	data, err := os.ReadFile(stored.PosterURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cropped, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ratio := float64(cropped.Bounds().Dx()) / float64(cropped.Bounds().Dy())
+	if ratio < 0.65 || ratio > 0.68 {
+		t.Fatalf("local fallback poster ratio = %.3f", ratio)
 	}
 }
 

@@ -93,7 +93,11 @@ func (s *ScraperService) EnrichOneWithOptions(ctx context.Context, m *model.Medi
 	}
 	if match == nil {
 		if local != nil && !local.PathHint {
-			return s.applyLocalMetadataMatch(ctx, m, local)
+			err := s.applyLocalMetadataMatch(ctx, m, local)
+			if err == nil {
+				options.recordProvider("local")
+			}
+			return err
 		}
 		if err := s.repo.DB.WithContext(ctx).Model(&model.Media{}).Where("id = ?", m.ID).
 			Update("scrape_status", "no_match").Error; err != nil {
@@ -227,6 +231,11 @@ func (s *ScraperService) applyProviderMatchWithOptions(ctx context.Context, m *m
 		"thetvdb_id": match.TheTVDBID,
 		"source":     map[bool]string{true: "adult"}[match.NSFW],
 	})
+	provider := strings.ToLower(strings.TrimSpace(match.Provider))
+	if provider == "" {
+		provider = "unknown"
+	}
+	options.recordProvider(provider)
 	return nil
 }
 

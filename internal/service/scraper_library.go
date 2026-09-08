@@ -27,11 +27,13 @@ func (s *ScraperService) lookup(ctx context.Context, lib *model.Library, media *
 	}
 	if s.tmdb != nil && s.tmdb.Enabled() {
 		if match := s.lookupAutomaticTMDb(ctx, kind, query, year); match != nil {
+			match.Provider = "tmdb"
 			return match
 		}
 	}
 	if s.douban != nil && s.douban.Enabled() {
 		if m, err := s.douban.SearchMatch(ctx, query); err == nil && m != nil && metadataMatchCompatibleWithType(kind, m) {
+			m.Provider = "douban"
 			return m
 		} else if err != nil {
 			s.log.Debug("douban search failed", zap.String("query", query), zap.Error(err))
@@ -39,6 +41,7 @@ func (s *ScraperService) lookup(ctx context.Context, lib *model.Library, media *
 	}
 	if s.bangumi != nil && s.bangumi.Enabled() {
 		if m, err := s.bangumi.Search(ctx, query); err == nil && m != nil && metadataMatchCompatibleWithType(kind, m) {
+			m.Provider = "bangumi"
 			return m
 		} else if err != nil {
 			s.log.Debug("bangumi search failed", zap.String("query", query), zap.Error(err))
@@ -46,6 +49,7 @@ func (s *ScraperService) lookup(ctx context.Context, lib *model.Library, media *
 	}
 	if (kind == "anime" || kind == "tv" || kind == "variety" || kind == "show" || kind == "shows") && s.thetvdb != nil && s.thetvdb.Enabled() {
 		if m, err := s.thetvdb.SearchSeries(ctx, query); err == nil && m != nil && metadataMatchCompatibleWithType(kind, m) {
+			m.Provider = "thetvdb"
 			return m
 		} else if err != nil {
 			s.log.Debug("thetvdb search failed", zap.String("query", query), zap.Error(err))

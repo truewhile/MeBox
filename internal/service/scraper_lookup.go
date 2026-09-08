@@ -23,6 +23,7 @@ func (s *ScraperService) matchFromMediaExternalIDs(ctx context.Context, m *model
 		}
 		if match := s.manualTMDbMatchByID(ctx, m.TMDbID, normalizeMediaType(mediaType, m.Title, "")); match != nil {
 			if s.mediaExternalIDMatchTrusted(m, lib, match, "tmdb") {
+				match.Provider = "tmdb"
 				preferExistingLocalizedEpisodeTitle(m, lib, match)
 				return match
 			}
@@ -31,6 +32,7 @@ func (s *ScraperService) matchFromMediaExternalIDs(ctx context.Context, m *model
 	if strings.TrimSpace(m.DoubanID) != "" && s.douban != nil && s.douban.Enabled() {
 		if match, err := s.douban.GetMatchByID(ctx, strings.TrimSpace(m.DoubanID)); err == nil && match != nil {
 			if s.mediaExternalIDMatchTrusted(m, lib, match, "douban") {
+				match.Provider = "douban"
 				preferExistingLocalizedEpisodeTitle(m, lib, match)
 				return match
 			}
@@ -41,6 +43,7 @@ func (s *ScraperService) matchFromMediaExternalIDs(ctx context.Context, m *model
 	if m.BangumiID > 0 && s.bangumi != nil && s.bangumi.Enabled() {
 		if match, err := s.bangumi.GetSubject(ctx, m.BangumiID); err == nil && match != nil {
 			if s.mediaExternalIDMatchTrusted(m, lib, match, "bangumi") {
+				match.Provider = "bangumi"
 				preferExistingLocalizedEpisodeTitle(m, lib, match)
 				return match
 			}
@@ -51,6 +54,7 @@ func (s *ScraperService) matchFromMediaExternalIDs(ctx context.Context, m *model
 	if strings.TrimSpace(m.TheTVDBID) != "" && s.thetvdb != nil && s.thetvdb.Enabled() {
 		if match, err := s.thetvdb.GetSeriesMatchByID(ctx, strings.TrimSpace(m.TheTVDBID)); err == nil && match != nil {
 			if s.mediaExternalIDMatchTrusted(m, lib, match, "thetvdb") {
+				match.Provider = "thetvdb"
 				preferExistingLocalizedEpisodeTitle(m, lib, match)
 				return match
 			}
