@@ -96,7 +96,7 @@ func TestAdultProviderRouting(t *testing.T) {
 	if len(candidates) != 1 {
 		t.Fatalf("expected 1 candidate, got %d", len(candidates))
 	}
-	wantPoster := mtServer.URL + "/v1/images/primary/javdb/999?auto=false&pos=-1&quality=90&ratio=0.6666666666666666"
+	wantPoster := mtServer.URL + "/v1/images/primary/javdb/999?auto=true&pos=1&quality=90&ratio=-1&url=https%3A%2F%2Fexample.com%2Fposter.jpg"
 	wantBackdrop := mtServer.URL + "/v1/images/backdrop/javdb/999?quality=90"
 	if candidates[0].PosterURL != wantPoster || candidates[0].BackdropURL != wantBackdrop {
 		t.Fatalf("candidate artwork was not enriched: %#v", candidates[0])
@@ -108,5 +108,70 @@ func TestAdultProviderRouting(t *testing.T) {
 	mUnknown, _ := adultProvider.Search(context.Background(), "NONEXISTENT-999")
 	if mUnknown != nil {
 		t.Errorf("expected nil for nonexistent in auto mode when sources unavailable")
+	}
+}
+
+func TestBuiltinAdultScrapeUsesMetaTubeFaceAwareArtwork(t *testing.T) {
+	builtinServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/search":
+			_, _ = w.Write([]byte(`<a class="box" href="/v/local"><strong>SSIS-001 本地候选</strong></a>`))
+		case "/v/local":
+			_, _ = w.Write([]byte(`<h2>SSIS-001 本地标题</h2><img class="video-cover" src="/wide-cover.jpg">`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer builtinServer.Close()
+
+	metaTubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/movies/search" || r.URL.Query().Get("q") != "SSIS-001" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(struct {
+			Data []MetaTubeSearchResult `json:"data"`
+		}{
+			Data: []MetaTubeSearchResult{{
+				ID:       "999",
+				Number:   "SSIS-001",
+				Title:    "MetaTube candidate",
+				Provider: "AVE",
+				CoverURL: "https://example.com/wide-cover.jpg",
+			}},
+		})
+	}))
+	defer metaTubeServer.Close()
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.Setting{}, &model.APIConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	repos := repository.New(db)
+	for key, value := range map[string]string{
+		"adult.scraper.engine":            "builtin",
+		"adult.scraper.builtin_javdb_url": builtinServer.URL,
+		"adult.scraper.metatube_server":   metaTubeServer.URL,
+		"adult.scraper.crop_cover":        "true",
+	} {
+		if err := repos.Setting.Set(t.Context(), key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	provider := NewAdultProvider(zap.NewNop(), nil, repos)
+	match, err := provider.Search(t.Context(), "SSIS-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if match == nil {
+		t.Fatal("expected built-in match")
+	}
+	wantPoster := metaTubeServer.URL + "/v1/images/primary/AVE/999?auto=true&pos=1&quality=90&ratio=-1&url=https%3A%2F%2Fexample.com%2Fwide-cover.jpg"
+	if match.PosterURL != wantPoster {
+		t.Fatalf("built-in poster = %q, want face-aware URL %q", match.PosterURL, wantPoster)
 	}
 }

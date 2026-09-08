@@ -45,19 +45,32 @@ func (s *ScraperService) writeMediaArtworkFilesAfterScrape(ctx context.Context, 
 		return
 	}
 	isAdult := shouldCropAdultPoster(refreshed, lib)
+	artworkUpdates := map[string]any{}
 	if refreshed.PosterURL != "" {
-		s.downloadArtworkToPathWithOptions(ctx, dir, base+"-poster", refreshed.PosterURL, isAdult)
+		if dst := s.downloadArtworkToPathWithOptions(ctx, dir, base+"-poster", refreshed.PosterURL, isAdult); dst != "" {
+			artworkUpdates["poster_url"] = filepath.Join(filepath.Dir(refreshed.Path), filepath.Base(dst))
+		}
 	}
 	if refreshed.BackdropURL != "" {
-		s.downloadArtworkToPathWithOptions(ctx, dir, base+"-backdrop", refreshed.BackdropURL, false)
+		if dst := s.downloadArtworkToPathWithOptions(ctx, dir, base+"-backdrop", refreshed.BackdropURL, false); dst != "" {
+			artworkUpdates["backdrop_url"] = filepath.Join(filepath.Dir(refreshed.Path), filepath.Base(dst))
+		}
 	} else if isAdult && refreshed.PosterURL != "" {
 		// 番号海报原图为完整封套横图，在无独立背景图时直接作为背景图写出
-		s.downloadArtworkToPathWithOptions(ctx, dir, base+"-backdrop", refreshed.PosterURL, false)
+		if dst := s.downloadArtworkToPathWithOptions(ctx, dir, base+"-backdrop", refreshed.PosterURL, false); dst != "" {
+			artworkUpdates["backdrop_url"] = filepath.Join(filepath.Dir(refreshed.Path), filepath.Base(dst))
+		}
+	}
+	if len(artworkUpdates) > 0 {
+		if err := s.repo.DB.WithContext(ctx).Model(&model.Media{}).
+			Where("id = ?", refreshed.ID).Updates(artworkUpdates).Error; err != nil {
+			s.log.Warn("save local scraped artwork paths failed", zap.String("media_id", refreshed.ID), zap.Error(err))
+		}
 	}
 }
 
-func (s *ScraperService) downloadArtworkToPath(ctx context.Context, dir, name, raw string) {
-	s.downloadArtworkToPathWithOptions(ctx, dir, name, raw, false)
+func (s *ScraperService) downloadArtworkToPath(ctx context.Context, dir, name, raw string) string {
+	return s.downloadArtworkToPathWithOptions(ctx, dir, name, raw, false)
 }
 
 // shouldCropAdultPoster keeps adult-cover handling independent of which
@@ -77,9 +90,9 @@ func shouldCropAdultPoster(media *model.Media, lib *model.Library) bool {
 
 // downloadArtworkToPathWithOptions fetches an artwork URL via the image proxy cache and
 // writes it under dir/<name>.<ext>. For adult posters, it crops the right half of the cover.
-func (s *ScraperService) downloadArtworkToPathWithOptions(ctx context.Context, dir, name, raw string, cropAdultPoster bool) {
+func (s *ScraperService) downloadArtworkToPathWithOptions(ctx context.Context, dir, name, raw string, cropAdultPoster bool) string {
 	if !isHTTPish(raw) {
-		return
+		return ""
 	}
 	data, ctype, err := s.images.Fetch(ctx, raw)
 	if err != nil || len(data) == 0 {
@@ -87,10 +100,10 @@ func (s *ScraperService) downloadArtworkToPathWithOptions(ctx context.Context, d
 			zap.String("name", name),
 			zap.String("url", raw),
 			zap.Error(err))
-		return
+		return ""
 	}
 	if !isImageContentType(ctype) || isTransparentPlaceholderData(data) {
-		return
+		return ""
 	}
 	if cropAdultPoster {
 		if cropped, croppedType, err := CropAdultCoverPoster(data); err == nil && len(cropped) > 0 {
@@ -98,7 +111,7 @@ func (s *ScraperService) downloadArtworkToPathWithOptions(ctx context.Context, d
 			ctype = croppedType
 		}
 	}
-	s.writeArtworkDataToPath(dir, name, ctype, data)
+	return s.writeArtworkDataToPath(dir, name, ctype, data)
 }
 
 // writeArtworkDataToPath writes in-memory artwork bytes to dir/<name>.<ext>

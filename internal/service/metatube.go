@@ -300,7 +300,8 @@ func (p *MetaTubeProvider) convertSearchResultToMatch(cfg MetaTubeConfig, query 
 		}
 	}
 
-	posterURL, backdropURL := metaTubeArtworkURLs(cfg, res.Provider, res.ID)
+	posterSource := firstNonEmpty(res.BigCoverURL, res.CoverURL, res.BigThumbURL, res.ThumbURL)
+	posterURL, backdropURL := metaTubeArtworkURLs(cfg, res.Provider, res.ID, posterSource)
 	if posterURL == "" {
 		posterURL = firstNonEmpty(res.BigThumbURL, res.ThumbURL, res.BigCoverURL, res.CoverURL)
 	}
@@ -342,7 +343,8 @@ func (p *MetaTubeProvider) convertMovieInfoToMatch(cfg MetaTubeConfig, movie *Me
 
 	year := parseYearFromDate(movie.ReleaseDate)
 
-	posterURL, backdropURL := metaTubeArtworkURLs(cfg, movie.Provider, movie.ID)
+	posterSource := firstNonEmpty(movie.BigCoverURL, movie.CoverURL, movie.BigThumbURL, movie.ThumbURL)
+	posterURL, backdropURL := metaTubeArtworkURLs(cfg, movie.Provider, movie.ID, posterSource)
 	if posterURL == "" {
 		posterURL = firstNonEmpty(movie.BigThumbURL, movie.ThumbURL, movie.BigCoverURL, movie.CoverURL)
 	}
@@ -397,7 +399,7 @@ func (p *MetaTubeProvider) convertMovieInfoToMatch(cfg MetaTubeConfig, movie *Me
 	}
 }
 
-func metaTubeArtworkURLs(cfg MetaTubeConfig, provider, id string) (string, string) {
+func metaTubeArtworkURLs(cfg MetaTubeConfig, provider, id, posterSource string) (string, string) {
 	serverURL := strings.TrimRight(strings.TrimSpace(cfg.ServerURL), "/")
 	provider = strings.TrimSpace(provider)
 	id = strings.TrimSpace(id)
@@ -410,12 +412,16 @@ func metaTubeArtworkURLs(cfg MetaTubeConfig, provider, id string) (string, strin
 		values := url.Values{}
 		values.Set("quality", "90")
 		if primary {
-			values.Set("pos", "-1")
-			values.Set("auto", "false")
+			values.Set("ratio", "-1")
+			if strings.TrimSpace(posterSource) != "" {
+				values.Set("url", strings.TrimSpace(posterSource))
+			}
 			if cfg.CropCover {
-				values.Set("ratio", strconv.FormatFloat(2.0/3.0, 'f', -1, 64))
+				values.Set("pos", "1")
+				values.Set("auto", "true")
 			} else {
-				values.Set("ratio", "-1")
+				values.Set("pos", "-1")
+				values.Set("auto", "false")
 			}
 		}
 		return base + "?" + values.Encode()

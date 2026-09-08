@@ -93,7 +93,7 @@ func TestManualAdultMatchUsesSelectedMetaTubeDetailsAndRealBackdrop(t *testing.T
 	if detailCalls.Load() != 1 {
 		t.Fatalf("selected MetaTube detail calls = %d, want 1", detailCalls.Load())
 	}
-	wantPoster := upstream.URL + "/v1/images/primary/AVE/94600?auto=false&pos=-1&quality=90&ratio=0.6666666666666666"
+	wantPoster := upstream.URL + "/v1/images/primary/AVE/94600?auto=true&pos=1&quality=90&ratio=-1&url=https%3A%2F%2Fexample.com%2Fposter.jpg"
 	if match.PosterURL != wantPoster {
 		t.Fatalf("selected poster = %q, want %q", match.PosterURL, wantPoster)
 	}

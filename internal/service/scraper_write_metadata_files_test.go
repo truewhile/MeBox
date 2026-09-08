@@ -1,13 +1,22 @@
 package service
 
 import (
+	"bytes"
+	"image"
+	"image/color"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/glebarez/sqlite"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 
+	"github.com/truewhile/MeBox/internal/config"
 	"github.com/truewhile/MeBox/internal/model"
+	"github.com/truewhile/MeBox/internal/repository"
 )
 
 // TestWriteArtworkDataToPathWritesJellyfinSidecar verifies that in-memory
@@ -126,5 +135,67 @@ func TestSameDirectoryMediaUsesBaseScopedSidecars(t *testing.T) {
 	}
 	if filepath.Base(dst) != "A-poster.jpg" {
 		t.Fatalf("base = %q, want A-poster.jpg", filepath.Base(dst))
+	}
+}
+
+func TestLocalAdultArtworkStoresFaceAwarePosterPath(t *testing.T) {
+	wideCover := createTestImage(
+		900,
+		600,
+		color.RGBA{R: 255, A: 255},
+		color.RGBA{B: 255, A: 255},
+	)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write(wideCover)
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{}
+	cfg.Cache.CacheDir = t.TempDir()
+	images := NewImageProxy(cfg, zap.NewNop())
+	images.allowedRemoteHostsFn = func() []string { return []string{"127.0.0.1"} }
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.Media{}); err != nil {
+		t.Fatal(err)
+	}
+	repos := repository.New(db)
+	mediaDir := t.TempDir()
+	media := model.Media{
+		Title:        "IPX-235",
+		Path:         filepath.Join(mediaDir, "IPX-235.mp4"),
+		PosterURL:    upstream.URL + "/cover.jpg",
+		NSFW:         true,
+		ScrapeStatus: "matched",
+	}
+	if err := repos.DB.Create(&media).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	scraper := &ScraperService{cfg: cfg, log: zap.NewNop(), repo: repos, images: images}
+	scraper.writeMediaArtworkFilesAfterScrape(t.Context(), &media, &model.Library{Type: "adult"})
+
+	var got model.Media
+	if err := repos.DB.First(&got, "id = ?", media.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(got.PosterURL) != "IPX-235-poster.jpg" {
+		t.Fatalf("poster URL = %q, want local face-aware sidecar", got.PosterURL)
+	}
+	data, err := os.ReadFile(got.PosterURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cropped, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ratio := float64(cropped.Bounds().Dx()) / float64(cropped.Bounds().Dy())
+	if ratio < 0.65 || ratio > 0.68 {
+		t.Fatalf("local poster ratio = %.3f, want MetaTube primary ratio", ratio)
 	}
 }

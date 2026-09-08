@@ -74,7 +74,7 @@ func TestMetaTubeProviderSearch(t *testing.T) {
 	if len(m.Genres) != 1 || m.Genres[0] != "相沢みなみ" {
 		t.Errorf("unexpected genres: %v", m.Genres)
 	}
-	if want := server.URL + "/v1/images/primary/javdb/123456?auto=false&pos=-1&quality=90&ratio=-1"; m.PosterURL != want {
+	if want := server.URL + "/v1/images/primary/javdb/123456?auto=false&pos=-1&quality=90&ratio=-1&url=https%3A%2F%2Fexample.com%2Fcover.jpg"; m.PosterURL != want {
 		t.Errorf("poster URL = %q, want %q", m.PosterURL, want)
 	}
 	if want := server.URL + "/v1/images/backdrop/javdb/123456?quality=90"; m.BackdropURL != want {
@@ -131,7 +131,7 @@ func TestMetaTubeProviderGetMovie(t *testing.T) {
 	if match.Overview != "超绝美少女相沢みなみ出道作品！" {
 		t.Errorf("unexpected overview: %s", match.Overview)
 	}
-	if want := server.URL + "/v1/images/primary/javdb/123456?auto=false&pos=-1&quality=90&ratio=0.6666666666666666"; match.PosterURL != want {
+	if want := server.URL + "/v1/images/primary/javdb/123456?auto=true&pos=1&quality=90&ratio=-1&url=https%3A%2F%2Fexample.com%2Fbig_cover.jpg"; match.PosterURL != want {
 		t.Errorf("poster URL = %q, want %q", match.PosterURL, want)
 	}
 	if want := server.URL + "/v1/images/backdrop/javdb/123456?quality=90"; match.BackdropURL != want {
