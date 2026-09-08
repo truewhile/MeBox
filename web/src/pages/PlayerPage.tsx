@@ -229,6 +229,10 @@ export function PlayerPage() {
   const selectedSubtitle = subtitleIndex >= 0 ? subs[subtitleIndex] : undefined
   const burnedSubtitleStream =
     selectedSubtitle?.delivery === 'burn' ? selectedSubtitle.stream_index : undefined
+  // 直连不使用烧录字幕参数。字幕列表通常比媒体信息晚返回，若把该参数直接
+  // 作为播放 effect 的依赖，会在 STRM 的 302 直链仍在建立时重复设置 src，
+  // Chromium 会把被中断的首次加载报告成播放错误并误触发 HLS 回退。
+  const activeBurnedSubtitleStream = mode === 'hls' ? burnedSubtitleStream : undefined
   const mediaRef = useRef(media)
   mediaRef.current = media
   useEffect(() => {
@@ -241,7 +245,7 @@ export function PlayerPage() {
     const video = ref.current
     const durationSec = currentMedia.duration_sec || 0
     if (mode === 'hls') {
-      const url = hlsURL(mediaId, hlsStartSec, burnedSubtitleStream)
+      const url = hlsURL(mediaId, hlsStartSec, activeBurnedSubtitleStream)
       void import('hls.js').then(({ default: HlsCtor }) => {
         if (cancelled || !ref.current) return
         if (HlsCtor.isSupported()) {
@@ -260,6 +264,7 @@ export function PlayerPage() {
             mediaAPI
               .get(mediaId)
               .then((fresh) => {
+                if (cancelled || fresh.id !== mediaId) return
                 if ((fresh.duration_sec || 0) > 0) setMedia(fresh)
               })
               .catch(() => undefined)
@@ -300,7 +305,13 @@ export function PlayerPage() {
         setMode('direct')
       })
     } else {
-      video.src = streamURL(mediaId)
+      const url = streamURL(mediaId)
+      const absoluteURL = new URL(url, window.location.href).href
+      // 其它异步播放器状态更新不应重启同一个直连请求；STRM 的重定向/换链
+      // 比本地文件慢，重启请求可能产生一个短暂但会触发 onError 的中断。
+      if (video.src !== absoluteURL) {
+        video.src = url
+      }
       if (hlsUnavailable && needsTranscodeForBrowser(currentMedia)) {
         setPlayerError('当前正在直连播放原始文件；此封装或音轨浏览器兼容性有限，可能只有画面没有声音。请配置本机 ffmpeg 后切回 HLS 转码播放。')
       }
@@ -310,7 +321,7 @@ export function PlayerPage() {
       cancelled = true
       teardownHls()
     }
-  }, [burnedSubtitleStream, hlsUnavailable, hlsStartSec, mediaId, mode, params, setParams, teardownHls])
+  }, [activeBurnedSubtitleStream, hlsUnavailable, hlsStartSec, mediaId, mode, params, setParams, teardownHls])
 
   // Stop host ffmpeg when leaving this HLS player. The keepalive request also
   // survives route navigation while the component is being torn down.
@@ -495,7 +506,11 @@ export function PlayerPage() {
     [navigate, location.search, location.state],
   )
 
-  const versionList = useMemo(() => mediaVersionsOf(media), [media])
+  // URL 已切换但新媒体尚未返回时，不渲染上一条媒体遗留的版本入口。
+  const versionList = useMemo(
+    () => (media?.id === id ? mediaVersionsOf(media) : []),
+    [id, media],
+  )
   const switchVersion = useCallback(
     (version: Media) => {
       if (!version?.id || version.id === media?.id) return
