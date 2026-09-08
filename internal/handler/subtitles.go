@@ -16,7 +16,13 @@ func listSubtitlesHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusOK, gin.H{"tracks": []service.SubtitleTrack{}})
 			return
 		}
-		tracks, err := svc.Subtitle.Discover(c.Request.Context(), id)
+		var tracks []service.SubtitleTrack
+		var err error
+		if c.Query("include_embedded") == "true" {
+			tracks, err = svc.Subtitle.Discover(c.Request.Context(), id)
+		} else {
+			tracks, err = svc.Subtitle.DiscoverExternalOnly(c.Request.Context(), id)
+		}
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return

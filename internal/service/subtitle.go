@@ -94,28 +94,28 @@ func (s *SubtitleService) Discover(ctx context.Context, mediaID string) ([]Subti
 // DiscoverExternalOnly 只返回媒体旁边的外挂字幕文件，不含容器内嵌字幕轨。
 // Emby 字幕接口（/Videos/:id/Subtitles/...）用。
 func (s *SubtitleService) DiscoverExternalOnly(ctx context.Context, mediaID string) ([]SubtitleTrack, error) {
-	tracks, err := s.discover(ctx, mediaID)
+	cacheKey := "external:" + mediaID
+	if tracks, ok := s.cachedDiscovery(cacheKey); ok {
+		return tracks, nil
+	}
+	tracks, err := s.discoverExternalUncached(ctx, mediaID)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]SubtitleTrack, 0, len(tracks))
-	for _, track := range tracks {
-		if track.Source != "embedded" {
-			out = append(out, track)
-		}
-	}
-	return out, nil
+	s.rememberDiscovery(cacheKey, tracks)
+	return tracks, nil
 }
 
 func (s *SubtitleService) discover(ctx context.Context, mediaID string) ([]SubtitleTrack, error) {
-	if tracks, ok := s.cachedDiscovery(mediaID); ok {
+	cacheKey := "all:" + mediaID
+	if tracks, ok := s.cachedDiscovery(cacheKey); ok {
 		return tracks, nil
 	}
 	tracks, err := s.discoverUncached(ctx, mediaID)
 	if err != nil {
 		return nil, err
 	}
-	s.rememberDiscovery(mediaID, tracks)
+	s.rememberDiscovery(cacheKey, tracks)
 	return tracks, nil
 }
 
@@ -159,6 +159,30 @@ func (s *SubtitleService) discoverUncached(ctx context.Context, mediaID string) 
 	if m == nil {
 		return nil, errors.New("media not found")
 	}
+	tracks := discoverExternalSubtitleTracks(m)
+	embedded, err := s.discoverEmbedded(ctx, m)
+	if err != nil {
+		if s.log != nil {
+			s.log.Debug("discover embedded subtitles failed", zap.String("media_id", mediaID), zap.Error(err))
+		}
+	} else {
+		tracks = append(tracks, embedded...)
+	}
+	return tracks, nil
+}
+
+func (s *SubtitleService) discoverExternalUncached(ctx context.Context, mediaID string) ([]SubtitleTrack, error) {
+	m, err := s.repo.Media.FindByID(ctx, mediaID)
+	if err != nil {
+		return nil, err
+	}
+	if m == nil {
+		return nil, errors.New("media not found")
+	}
+	return discoverExternalSubtitleTracks(m), nil
+}
+
+func discoverExternalSubtitleTracks(m *model.Media) []SubtitleTrack {
 	dir := filepath.Dir(m.Path)
 	bases := mediaSidecarBaseVariants(m.Path)
 	if len(bases) == 0 {
@@ -214,15 +238,7 @@ func (s *SubtitleService) discoverUncached(ctx context.Context, mediaID string) 
 			})
 		}
 	}
-	embedded, err := s.discoverEmbedded(ctx, m)
-	if err != nil {
-		if s.log != nil {
-			s.log.Debug("discover embedded subtitles failed", zap.String("media_id", mediaID), zap.Error(err))
-		}
-	} else {
-		tracks = append(tracks, embedded...)
-	}
-	return tracks, nil
+	return tracks
 }
 
 type embeddedSubtitleProbe struct {

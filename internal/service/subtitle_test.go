@@ -2,7 +2,9 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,6 +44,43 @@ func TestSubtitleDiscoverNoTracksReturnsEmptySlice(t *testing.T) {
 	}
 	if tracks == nil {
 		t.Fatal("tracks is nil, want empty slice")
+	}
+	if len(tracks) != 0 {
+		t.Fatalf("len(tracks) = %d, want 0", len(tracks))
+	}
+}
+
+func TestDiscoverExternalOnlyDoesNotResolveOrProbeCloudMedia(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.Library{}, &model.Media{}); err != nil {
+		t.Fatal(err)
+	}
+
+	media := model.Media{
+		Title:   "Cloud Media",
+		Path:    "cloud://115/example/video.mkv",
+		STRMURL: "cloud://115/example/video.mkv",
+	}
+	if err := db.Create(&media).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewSubtitleService(&config.Config{}, zap.NewNop(), repository.New(db))
+	resolveCalls := 0
+	svc.SetStrmPlayTargetResolver(func(context.Context, string) (*StrmPlayResult, error) {
+		resolveCalls++
+		return nil, errors.New("resolver must not be called")
+	})
+
+	tracks, err := svc.DiscoverExternalOnly(t.Context(), media.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolveCalls != 0 {
+		t.Fatalf("STRM resolver called %d times, want 0", resolveCalls)
 	}
 	if len(tracks) != 0 {
 		t.Fatalf("len(tracks) = %d, want 0", len(tracks))

@@ -237,8 +237,22 @@ export function PlayerPage() {
         // 404 / 无权限等：给出可见错误提示，避免永久「加载中」
         setLoadError(`无法加载该媒体：${apiErrorMessage(err)}`)
       })
+    return () => {
+      cancelled = true
+    }
+  }, [id, modeParam, directOnly])
+
+  // Wire up the actual <video> element when we know the mode.
+  // Depend on media.id (not the media object): refreshing duration after
+  // MANIFEST_PARSED must not remount HLS or it storms EnsureJob / DELETE.
+  const mediaId = media?.id
+
+  // 直连播放只发现外挂字幕；只有 HLS 模式需要探测可烧录的内嵌字幕。
+  useEffect(() => {
+    if (!mediaId) return
+    let cancelled = false
     subtitlesAPI
-      .list(id)
+      .list(mediaId, mode === 'hls')
       .then((tracks) => {
         if (cancelled) return
         const list = tracks ?? []
@@ -249,16 +263,13 @@ export function PlayerPage() {
       .catch(() => {
         if (cancelled) return
         setSubs([])
+        setSubtitleIndex(-1)
       })
     return () => {
       cancelled = true
     }
-  }, [id, modeParam, directOnly])
+  }, [mediaId, mode])
 
-  // Wire up the actual <video> element when we know the mode.
-  // Depend on media.id (not the media object): refreshing duration after
-  // MANIFEST_PARSED must not remount HLS or it storms EnsureJob / DELETE.
-  const mediaId = media?.id
   const selectedSubtitle = subtitleIndex >= 0 ? subs[subtitleIndex] : undefined
   const burnedSubtitleStream =
     selectedSubtitle?.delivery === 'burn' ? selectedSubtitle.stream_index : undefined

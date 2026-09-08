@@ -13,9 +13,11 @@ export interface SubtitleTrack {
 }
 
 export const subtitlesAPI = {
-  list: (mediaId: string) =>
+  list: (mediaId: string, includeEmbedded = false) =>
     api
-      .get<{ tracks: SubtitleTrack[] | null }>(`/media/${mediaId}/subtitles`)
+      .get<{ tracks: SubtitleTrack[] | null }>(`/media/${mediaId}/subtitles`, {
+        params: includeEmbedded ? { include_embedded: 'true' } : undefined,
+      })
       .then((r) => r.data.tracks ?? []),
 
   url: (mediaId: string, path: string) => {
