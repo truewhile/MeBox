@@ -13,6 +13,7 @@ import type { Media } from '../types'
 import { getSeriesKey, seriesTitleFromPath } from '../utils/groupSeries'
 import { isRemoteEmbyID } from '../utils/remoteEmby'
 import { pickPlayerMode, needsTranscodeForBrowser, isDirectStreamMedia, type PlayerMode } from './playerPageModel'
+import { classifyDirectPlayError } from './directPlayError'
 import { apiErrorMessage } from './StrmManagePage'
 import { PlayerTopBar } from './PlayerTopBar'
 import { PlayerVideoStage } from './PlayerVideoStage'
@@ -42,6 +43,9 @@ export function PlayerPage() {
   const ref = useRef<HTMLVideoElement>(null)
   const hlsRef = useRef<Hls | null>(null)
   const lastSentRef = useRef(0)
+  const directRetryRef = useRef(false)
+  const retryingDirectRef = useRef(false)
+  const fallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const [media, setMedia] = useState<Media | null>(null)
   const [mode, setMode] = useState<PlayerMode>('direct')
@@ -178,10 +182,39 @@ export function PlayerPage() {
     setDanmakuSelectedSource('')
     setDanmakuInfo(null)
     setDanmakuSearching(true)
+    directRetryRef.current = false
+    retryingDirectRef.current = false
+    if (fallbackTimerRef.current) {
+      clearTimeout(fallbackTimerRef.current)
+      fallbackTimerRef.current = null
+    }
+    return () => {
+      if (fallbackTimerRef.current) {
+        clearTimeout(fallbackTimerRef.current)
+        fallbackTimerRef.current = null
+      }
+    }
   }, [id])
 
   // 依赖收敛为 mode 参数的字符串值：避免 params 对象引用每次变化都重复拉取元数据
   const modeParam = params.get('mode') as PlayerMode | null
+
+  const setPlaybackMode = useCallback(
+    (next: PlayerMode) => {
+      setMode(next)
+      const nextParams = new URLSearchParams(window.location.search)
+      nextParams.set('mode', next)
+      setParams(nextParams, { replace: true })
+    },
+    [setParams],
+  )
+
+  const clearFallbackTimer = useCallback(() => {
+    if (fallbackTimerRef.current) {
+      clearTimeout(fallbackTimerRef.current)
+      fallbackTimerRef.current = null
+    }
+  }, [])
 
   // Load metadata and pick a default mode.
   useEffect(() => {
@@ -249,7 +282,15 @@ export function PlayerPage() {
       void import('hls.js').then(({ default: HlsCtor }) => {
         if (cancelled || !ref.current) return
         if (HlsCtor.isSupported()) {
-          const hls = new HlsCtor({ enableWorker: true, lowLatencyMode: false })
+          const hls = new HlsCtor({
+            enableWorker: true,
+            lowLatencyMode: false,
+            // The server waits up to 45s for the first segment. Slow two-core
+            // hosts and remote STRM sources regularly need more than hls.js's
+            // 10s default, which otherwise aborts a healthy transcode.
+            manifestLoadingTimeOut: 60_000,
+            manifestLoadingMaxRetry: 1,
+          })
           try {
             video.currentTime = 0
           } catch {
@@ -274,9 +315,7 @@ export function PlayerPage() {
               setHlsUnavailable(true)
               setPlayerError('HLS 转码不可用，正在尝试直接播放原始文件。若出现有画面无声音，通常是 MKV/AC3/EAC3 音轨需要配置本机 ffmpeg 转码为 AAC。')
               toast.error('HLS 转码失败，尝试切换到直接播放')
-              setMode('direct')
-              params.set('mode', 'direct')
-              setParams(params, { replace: true })
+              setPlaybackMode('direct')
             }
           })
           if (cancelled) {
@@ -296,13 +335,13 @@ export function PlayerPage() {
           setHlsUnavailable(true)
           setPlayerError('当前浏览器不支持 HLS，正在尝试直接播放。')
           toast.error('当前浏览器不支持 HLS，降级到直接播放')
-          setMode('direct')
+          setPlaybackMode('direct')
         }
       }).catch(() => {
         if (cancelled) return
         setHlsUnavailable(true)
         setPlayerError('HLS 播放组件加载失败，正在尝试直接播放。')
-        setMode('direct')
+        setPlaybackMode('direct')
       })
     } else {
       const url = streamURL(mediaId)
@@ -310,18 +349,32 @@ export function PlayerPage() {
       // 其它异步播放器状态更新不应重启同一个直连请求；STRM 的重定向/换链
       // 比本地文件慢，重启请求可能产生一个短暂但会触发 onError 的中断。
       if (video.src !== absoluteURL) {
+        directRetryRef.current = false
+        clearFallbackTimer()
         video.src = url
+        void video.play().catch(() => undefined)
       }
       if (hlsUnavailable && needsTranscodeForBrowser(currentMedia)) {
         setPlayerError('当前正在直连播放原始文件；此封装或音轨浏览器兼容性有限，可能只有画面没有声音。请配置本机 ffmpeg 后切回 HLS 转码播放。')
       }
-      void video.play().catch(() => undefined)
     }
+    const onPlaying = () => clearFallbackTimer()
+    video.addEventListener('playing', onPlaying)
     return () => {
       cancelled = true
+      video.removeEventListener('playing', onPlaying)
       teardownHls()
     }
-  }, [activeBurnedSubtitleStream, hlsUnavailable, hlsStartSec, mediaId, mode, params, setParams, teardownHls])
+  }, [
+    activeBurnedSubtitleStream,
+    clearFallbackTimer,
+    hlsUnavailable,
+    hlsStartSec,
+    mediaId,
+    mode,
+    setPlaybackMode,
+    teardownHls,
+  ])
 
   // Stop host ffmpeg when leaving this HLS player. The keepalive request also
   // survives route navigation while the component is being torn down.
@@ -372,21 +425,30 @@ export function PlayerPage() {
     }
     const video = ref.current
     if (!video) return
+    let onSeeked: (() => void) | undefined
     const applyResume = () => {
       if (resumePosition > 0 && Math.abs(video.currentTime - resumePosition) > 2) {
+        onSeeked = () => {
+          setInitialSeekDone(true)
+          const m = Math.floor(resumePosition / 60)
+          const s = Math.floor(resumePosition % 60)
+          const timeStr = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
+          toast.success(`已恢复上次播放进度至 ${timeStr}`, { duration: 2500 })
+        }
+        video.addEventListener('seeked', onSeeked, { once: true })
         video.currentTime = resumePosition
-        setInitialSeekDone(true)
-        const m = Math.floor(resumePosition / 60)
-        const s = Math.floor(resumePosition % 60)
-        const timeStr = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
-        toast.success(`已恢复上次播放进度至 ${timeStr}`, { duration: 2500 })
+        return
       }
+      setInitialSeekDone(true)
     }
-    if (video.readyState >= 1) {
+    if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
       applyResume()
     } else {
-      video.addEventListener('loadedmetadata', applyResume, { once: true })
-      return () => video.removeEventListener('loadedmetadata', applyResume)
+      video.addEventListener('canplay', applyResume, { once: true })
+    }
+    return () => {
+      video.removeEventListener('canplay', applyResume)
+      if (onSeeked) video.removeEventListener('seeked', onSeeked)
     }
   }, [resumePosition, initialSeekDone, mode, hlsStartSec])
 
@@ -614,17 +676,14 @@ export function PlayerPage() {
       return
     }
     setHlsStartSec(ref.current?.currentTime || 0)
-    setMode('hls')
-    params.set('mode', 'hls')
-    setParams(params, { replace: true })
+    setPlaybackMode('hls')
   }, [
     directOnly,
     directOnlyKnown,
     isDirectStream,
     mode,
-    params,
     selectedSubtitle?.delivery,
-    setParams,
+    setPlaybackMode,
   ])
 
   const toggleMode = useCallback(() => {
@@ -636,10 +695,8 @@ export function PlayerPage() {
     if (next === 'hls') {
       setHlsStartSec(0)
     }
-    setMode(next)
-    params.set('mode', next)
-    setParams(params, { replace: true })
-  }, [isDirectStream, mode, params, setParams])
+    setPlaybackMode(next)
+  }, [isDirectStream, mode, setPlaybackMode])
 
   const handleSeekAbsolute = useCallback(
     (absoluteSec: number) => {
@@ -689,17 +746,47 @@ export function PlayerPage() {
     setSubtitleIndex(index)
     if (nextTrack?.delivery === 'burn' && mode !== 'hls' && !directOnly && !isDirectStream) {
       setHlsStartSec(ref.current?.currentTime || 0)
-      setMode('hls')
-      params.set('mode', 'hls')
-      setParams(params, { replace: true })
+      setPlaybackMode('hls')
     }
-  }, [directOnly, hlsStartSec, isDirectStream, mode, params, setParams, subs, subtitleIndex])
+  }, [directOnly, hlsStartSec, isDirectStream, mode, setPlaybackMode, subs, subtitleIndex])
 
   const handleVideoError = useCallback(() => {
-    // 浏览器对 <video src> 的错误描述非常有限，把详细原因
-    // 转给开发者控制台 + 一条 toast；常见原因是 codec 不支持。
-    if (mode === 'direct') {
-      if (isRemoteEmbyID(media?.id) || isDirectStreamMedia(media)) {
+    const video = ref.current
+    if (mode !== 'direct') {
+      setPlayerError('视频播放失败，请检查文件是否存在，或确认 ffmpeg 已正确配置。')
+      toast.error('视频播放失败，请检查文件是否存在')
+      return
+    }
+
+    if (retryingDirectRef.current) return
+
+    const expectedSrc = mediaId ? new URL(streamURL(mediaId), window.location.href).href : ''
+    const action = classifyDirectPlayError({
+      errorCode: video?.error?.code,
+      readyState: video?.readyState ?? 0,
+      elementSrc: video?.src ?? '',
+      expectedSrc,
+      alreadyRetried: directRetryRef.current,
+    })
+    if (action === 'ignore') return
+
+    if (action === 'retry' && video && mediaId) {
+      directRetryRef.current = true
+      retryingDirectRef.current = true
+      try {
+        video.load()
+        void video.play().catch(() => undefined)
+      } finally {
+        retryingDirectRef.current = false
+      }
+      return
+    }
+
+    const fallbackDirectPlay = () => {
+      if (modeRef.current !== 'direct') return
+      const current = ref.current
+      if (current && current.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) return
+      if (isRemoteEmbyID(mediaRef.current?.id) || isDirectStreamMedia(mediaRef.current)) {
         setPlayerError('直接播放失败。该媒体为远程 Emby 挂载直连播放（不进行转码）；当前浏览器可能不支持该视频编码或音频格式，建议使用外部播放器（如 PotPlayer / VLC / IINA）播放。')
         toast.error('直接播放失败，建议使用外部播放器')
       } else if (directOnly) {
@@ -710,16 +797,13 @@ export function PlayerPage() {
         toast.error('直接播放失败，HLS 转码不可用')
       } else {
         toast.error('直接播放失败，切换到 HLS 转码')
-        setMode('hls')
-        params.set('mode', 'hls')
-        setParams(params, { replace: true })
+        setPlaybackMode('hls')
       }
-      return
     }
 
-    setPlayerError('视频播放失败，请检查文件是否存在，或确认 ffmpeg 已正确配置。')
-    toast.error('视频播放失败，请检查文件是否存在')
-  }, [directOnly, hlsUnavailable, media, mode, params, setParams])
+    clearFallbackTimer()
+    fallbackTimerRef.current = setTimeout(fallbackDirectPlay, 1500)
+  }, [clearFallbackTimer, directOnly, hlsUnavailable, mediaId, mode, setPlaybackMode])
 
   const danmakuAutoTitle =
     danmakuInfo?.animeTitle ||

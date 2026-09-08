@@ -135,6 +135,25 @@ export function PlayerVideoStage({
     path: string
     cues: SubtitleCue[]
   } | null>(null)
+  // 直连 302 尚未完成时插入 <track> 会中断加载并误报播放失败；等 canplay 再挂。
+  const [tracksArmed, setTracksArmed] = useState(false)
+
+  useEffect(() => {
+    setTracksArmed(false)
+    const video = videoRef.current
+    if (!video || !media?.id) return
+    const arm = () => setTracksArmed(true)
+    if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+      arm()
+      return
+    }
+    video.addEventListener('canplay', arm)
+    video.addEventListener('playing', arm)
+    return () => {
+      video.removeEventListener('canplay', arm)
+      video.removeEventListener('playing', arm)
+    }
+  }, [media?.id, videoRef])
 
   useEffect(() => {
     const selectedTrack = subs[subtitleIndex]
@@ -383,19 +402,20 @@ export function PlayerVideoStage({
               className="h-full w-full object-contain bg-black"
               onError={onVideoError}
             >
-              {subs.map((track, index) =>
-                track.delivery === 'burn' ? null : (
-                <track
-                  key={track.path}
-                  data-subtitle-index={index}
-                  kind="subtitles"
-                  src={subtitlesAPI.url(media.id, track.path)}
-                  srcLang={track.lang}
-                  label={track.label || track.lang}
-                  default={subtitleIndex === index}
-                />
-                ),
-              )}
+              {tracksArmed &&
+                subs.map((track, index) =>
+                  track.delivery === 'burn' ? null : (
+                    <track
+                      key={track.path}
+                      data-subtitle-index={index}
+                      kind="subtitles"
+                      src={subtitlesAPI.url(media.id, track.path)}
+                      srcLang={track.lang}
+                      label={track.label || track.lang}
+                      default={subtitleIndex === index}
+                    />
+                  ),
+                )}
             </video>
             <DanmakuStage
               key={media.id}
