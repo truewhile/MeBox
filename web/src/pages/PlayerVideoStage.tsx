@@ -7,6 +7,46 @@ import type { Media } from '../types'
 import { DanmakuStage } from '../components/DanmakuStage'
 import { PlayerControls } from '../components/PlayerControls'
 
+type SubtitleCue = {
+  startTime: number
+  endTime: number
+  text: string
+}
+
+function parseVTTTimestamp(value: string): number {
+  const parts = value.trim().replace(',', '.').split(':')
+  if (parts.length !== 2 && parts.length !== 3) return Number.NaN
+  const seconds = Number(parts.pop())
+  const minutes = Number(parts.pop())
+  const hours = parts.length > 0 ? Number(parts.pop()) : 0
+  if (![hours, minutes, seconds].every(Number.isFinite)) return Number.NaN
+  return hours * 3600 + minutes * 60 + seconds
+}
+
+function parseWebVTTCues(body: string): SubtitleCue[] {
+  const blocks = body
+    .replace(/^\uFEFF/, '')
+    .replace(/\r\n?/g, '\n')
+    .split(/\n{2,}/)
+  const cues: SubtitleCue[] = []
+
+  for (const block of blocks) {
+    const lines = block.split('\n')
+    const timingIndex = lines.findIndex((line) => line.includes('-->'))
+    if (timingIndex < 0) continue
+
+    const [rawStart, rawEnd] = lines[timingIndex].split('-->', 2)
+    const startTime = parseVTTTimestamp(rawStart)
+    const endTime = parseVTTTimestamp(rawEnd.trim().split(/\s+/, 1)[0])
+    const text = lines.slice(timingIndex + 1).join('\n').trim()
+    if (Number.isFinite(startTime) && Number.isFinite(endTime) && endTime >= startTime && text) {
+      cues.push({ startTime, endTime, text })
+    }
+  }
+
+  return cues
+}
+
 type PlayerVideoStageProps = {
   media: Media | null
   /** 媒体元数据加载失败提示（非空时替代「加载中」展示）。 */
@@ -89,6 +129,42 @@ export function PlayerVideoStage({
   const revealControlsOnlyRef = useRef(false)
   // 当前展示的字幕文本（由自定义字幕层渲染，100% 透明无黑框）
   const [activeCueText, setActiveCueText] = useState<string>('')
+  // 独立保存完整 WebVTT 时间轴。HLS seek 会替换媒体源，Chromium 此时可能清空
+  // <track>.track.cues；独立时间轴不受 MediaSource 重挂载和轨道 mode 切换影响。
+  const [subtitleTimeline, setSubtitleTimeline] = useState<{
+    path: string
+    cues: SubtitleCue[]
+  } | null>(null)
+
+  useEffect(() => {
+    const selectedTrack = subs[subtitleIndex]
+    if (!media || subtitleIndex < 0 || !selectedTrack || selectedTrack.delivery !== 'webvtt') {
+      setSubtitleTimeline(null)
+      return
+    }
+
+    const controller = new AbortController()
+    setSubtitleTimeline(null)
+    fetch(subtitlesAPI.url(media.id, selectedTrack.path), { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error(`subtitle request failed: ${response.status}`)
+        return response.text()
+      })
+      .then((body) => {
+        setSubtitleTimeline({
+          path: selectedTrack.path,
+          cues: parseWebVTTCues(body),
+        })
+      })
+      .catch((error: unknown) => {
+        if (!(error instanceof DOMException && error.name === 'AbortError')) {
+          // 保留原生 TextTrack 作为请求失败时的降级路径。
+          setSubtitleTimeline(null)
+        }
+      })
+
+    return () => controller.abort()
+  }, [media, subs, subtitleIndex])
 
   // 监听舞台容器的真实尺寸（响应窗口大小调整和全屏切换）
   useEffect(() => {
@@ -170,6 +246,15 @@ export function PlayerVideoStage({
     }
 
     const updateCue = () => {
+      const absoluteTime = video.currentTime + (streamOffset ?? 0)
+      if (subtitleTimeline?.path === selectedTrack.path) {
+        const texts = subtitleTimeline.cues
+          .filter((cue) => absoluteTime >= cue.startTime && absoluteTime <= cue.endTime)
+          .map((cue) => cue.text)
+        setActiveCueText(texts.join('\n'))
+        return
+      }
+
       const selectedEl = video.querySelector<HTMLTrackElement>(
         `track[data-subtitle-index="${subtitleIndex}"]`,
       )
@@ -188,10 +273,14 @@ export function PlayerVideoStage({
           if (cue && cue.text) texts.push(cue.text)
         }
       } else if (tt.cues && tt.cues.length > 0) {
-        const cur = video.currentTime + (streamOffset ?? 0)
         for (let i = 0; i < tt.cues.length; i++) {
           const cue = tt.cues[i] as VTTCue
-          if (cue && cur >= cue.startTime && cur <= cue.endTime && cue.text) {
+          if (
+            cue &&
+            absoluteTime >= cue.startTime &&
+            absoluteTime <= cue.endTime &&
+            cue.text
+          ) {
             texts.push(cue.text)
           }
         }
@@ -251,7 +340,7 @@ export function PlayerVideoStage({
         }
       }
     }
-  }, [subtitleIndex, subs, videoRef, media, streamOffset])
+  }, [subtitleIndex, subs, videoRef, media, streamOffset, subtitleTimeline])
 
   // 根据视频画面宽高比与舞台宽高比，确定视频在哪个轴向撑满 100%
   const isWiderThanStage =
