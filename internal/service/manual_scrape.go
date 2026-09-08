@@ -137,10 +137,11 @@ func (s *ScraperService) manualRequestMatch(ctx context.Context, req ManualScrap
 		if match != nil {
 			// Older search responses used the portrait poster as a backdrop
 			// fallback. Do not let that placeholder replace a real preview
-			// image fetched from the selected MetaTube provider.
+			// image or processed primary image fetched from MetaTube.
 			if strings.TrimSpace(match.BackdropURL) != "" &&
 				strings.TrimSpace(req.BackdropURL) == strings.TrimSpace(req.PosterURL) {
 				req.BackdropURL = ""
+				req.PosterURL = ""
 			}
 			return mergeManualRequestIntoMatch(match, req), nil
 		}

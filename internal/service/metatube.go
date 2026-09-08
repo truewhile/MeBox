@@ -83,7 +83,7 @@ func (p *MetaTubeProvider) Search(ctx context.Context, cfg MetaTubeConfig, query
 
 	matches := make([]*Match, 0, len(results))
 	for _, res := range results {
-		match := p.convertSearchResultToMatch(query, &res)
+		match := p.convertSearchResultToMatch(cfg, query, &res)
 		if match != nil {
 			matches = append(matches, match)
 		}
@@ -134,7 +134,7 @@ func (p *MetaTubeProvider) GetMovie(ctx context.Context, cfg MetaTubeConfig, pro
 		return nil, fmt.Errorf("decode metatube movie response failed: %w", directErr)
 	}
 
-	return p.convertMovieInfoToMatch(&movie), nil
+	return p.convertMovieInfoToMatch(cfg, &movie), nil
 }
 
 // SearchAndGetBestMatch 执行搜索并拉取首个最佳结果的完整电影详情。
@@ -276,7 +276,7 @@ func (p *MetaTubeProvider) applyAuthHeader(req *http.Request, token string) {
 	req.Header.Set("User-Agent", "MeBox/1.0 (MetaTube Client)")
 }
 
-func (p *MetaTubeProvider) convertSearchResultToMatch(query string, res *MetaTubeSearchResult) *Match {
+func (p *MetaTubeProvider) convertSearchResultToMatch(cfg MetaTubeConfig, query string, res *MetaTubeSearchResult) *Match {
 	if res == nil {
 		return nil
 	}
@@ -300,14 +300,20 @@ func (p *MetaTubeProvider) convertSearchResultToMatch(query string, res *MetaTub
 		}
 	}
 
-	posterURL := firstNonEmpty(res.BigCoverURL, res.CoverURL, res.BigThumbURL, res.ThumbURL)
+	posterURL, backdropURL := metaTubeArtworkURLs(cfg, res.Provider, res.ID)
+	if posterURL == "" {
+		posterURL = firstNonEmpty(res.BigThumbURL, res.ThumbURL, res.BigCoverURL, res.CoverURL)
+	}
+	if backdropURL == "" {
+		backdropURL = firstNonEmpty(res.BigCoverURL, res.CoverURL, posterURL)
+	}
 
 	return &Match{
 		MediaType:    "adult",
 		Title:        formattedTitle,
 		OriginalName: code,
 		PosterURL:    posterURL,
-		BackdropURL:  posterURL,
+		BackdropURL:  backdropURL,
 		Year:         year,
 		ReleaseDate:  cleanDateString(res.ReleaseDate),
 		Rating:       res.Score,
@@ -318,7 +324,7 @@ func (p *MetaTubeProvider) convertSearchResultToMatch(query string, res *MetaTub
 	}
 }
 
-func (p *MetaTubeProvider) convertMovieInfoToMatch(movie *MetaTubeMovieInfo) *Match {
+func (p *MetaTubeProvider) convertMovieInfoToMatch(cfg MetaTubeConfig, movie *MetaTubeMovieInfo) *Match {
 	if movie == nil {
 		return nil
 	}
@@ -336,10 +342,16 @@ func (p *MetaTubeProvider) convertMovieInfoToMatch(movie *MetaTubeMovieInfo) *Ma
 
 	year := parseYearFromDate(movie.ReleaseDate)
 
-	posterURL := firstNonEmpty(movie.BigCoverURL, movie.CoverURL, movie.BigThumbURL, movie.ThumbURL)
-	backdropURL := posterURL
-	if len(movie.PreviewImages) > 0 && movie.PreviewImages[0] != "" {
-		backdropURL = movie.PreviewImages[0]
+	posterURL, backdropURL := metaTubeArtworkURLs(cfg, movie.Provider, movie.ID)
+	if posterURL == "" {
+		posterURL = firstNonEmpty(movie.BigThumbURL, movie.ThumbURL, movie.BigCoverURL, movie.CoverURL)
+	}
+	if backdropURL == "" {
+		if len(movie.PreviewImages) > 0 && movie.PreviewImages[0] != "" {
+			backdropURL = movie.PreviewImages[0]
+		} else {
+			backdropURL = firstNonEmpty(movie.BigCoverURL, movie.CoverURL, posterURL)
+		}
 	}
 
 	genres := make([]string, 0, len(movie.Genres)+len(movie.Actors)+4)
@@ -383,6 +395,33 @@ func (p *MetaTubeProvider) convertMovieInfoToMatch(movie *MetaTubeMovieInfo) *Ma
 		DoubanID:     movie.ID,
 		TheTVDBID:    movie.Provider,
 	}
+}
+
+func metaTubeArtworkURLs(cfg MetaTubeConfig, provider, id string) (string, string) {
+	serverURL := strings.TrimRight(strings.TrimSpace(cfg.ServerURL), "/")
+	provider = strings.TrimSpace(provider)
+	id = strings.TrimSpace(id)
+	if serverURL == "" || provider == "" || id == "" {
+		return "", ""
+	}
+
+	imageURL := func(kind string, primary bool) string {
+		base := fmt.Sprintf("%s/v1/images/%s/%s/%s", serverURL, kind, url.PathEscape(provider), url.PathEscape(id))
+		values := url.Values{}
+		values.Set("quality", "90")
+		if primary {
+			values.Set("pos", "-1")
+			values.Set("auto", "false")
+			if cfg.CropCover {
+				values.Set("ratio", strconv.FormatFloat(2.0/3.0, 'f', -1, 64))
+			} else {
+				values.Set("ratio", "-1")
+			}
+		}
+		return base + "?" + values.Encode()
+	}
+
+	return imageURL("primary", true), imageURL("backdrop", false)
 }
 
 func parseYearFromDate(dateStr string) int {

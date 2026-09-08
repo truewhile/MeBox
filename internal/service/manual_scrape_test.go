@@ -93,11 +93,13 @@ func TestManualAdultMatchUsesSelectedMetaTubeDetailsAndRealBackdrop(t *testing.T
 	if detailCalls.Load() != 1 {
 		t.Fatalf("selected MetaTube detail calls = %d, want 1", detailCalls.Load())
 	}
-	if match.PosterURL != "https://example.com/search-cover.jpg" {
-		t.Fatalf("selected poster = %q", match.PosterURL)
+	wantPoster := upstream.URL + "/v1/images/primary/AVE/94600?auto=false&pos=-1&quality=90&ratio=0.6666666666666666"
+	if match.PosterURL != wantPoster {
+		t.Fatalf("selected poster = %q, want %q", match.PosterURL, wantPoster)
 	}
-	if match.BackdropURL != "https://example.com/backdrop.jpg" {
-		t.Fatalf("backdrop = %q, want detail preview", match.BackdropURL)
+	wantBackdrop := upstream.URL + "/v1/images/backdrop/AVE/94600?quality=90"
+	if match.BackdropURL != wantBackdrop {
+		t.Fatalf("backdrop = %q, want %q", match.BackdropURL, wantBackdrop)
 	}
 }
 

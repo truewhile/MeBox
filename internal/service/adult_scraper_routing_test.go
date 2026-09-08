@@ -96,8 +96,9 @@ func TestAdultProviderRouting(t *testing.T) {
 	if len(candidates) != 1 {
 		t.Fatalf("expected 1 candidate, got %d", len(candidates))
 	}
-	if candidates[0].PosterURL != "https://example.com/poster.jpg" ||
-		candidates[0].BackdropURL != "https://example.com/backdrop.jpg" {
+	wantPoster := mtServer.URL + "/v1/images/primary/javdb/999?auto=false&pos=-1&quality=90&ratio=0.6666666666666666"
+	wantBackdrop := mtServer.URL + "/v1/images/backdrop/javdb/999?quality=90"
+	if candidates[0].PosterURL != wantPoster || candidates[0].BackdropURL != wantBackdrop {
 		t.Fatalf("candidate artwork was not enriched: %#v", candidates[0])
 	}
 
