@@ -94,8 +94,8 @@ func appendQueryToHLSSegments(playlist, rawQuery string) string {
 	if strings.TrimSpace(rawQuery) == "" {
 		return playlist
 	}
-	// Segment fetches only need auth/profile tokens; drop start= so a seek
-	// restart does not keep forcing EnsureJobFrom on every .ts hit.
+	// Segment fetches do not need start=, but must keep _seek as a cache-busting
+	// generation because every transcode restart reuses seg_00000.ts names.
 	q := filterHLSSegmentQuery(rawQuery)
 	if q == "" {
 		return playlist
@@ -131,7 +131,7 @@ func filterHLSSegmentQuery(rawQuery string) string {
 			key = part[:i]
 		}
 		switch strings.ToLower(key) {
-		case "start", "_seek":
+		case "start":
 			continue
 		}
 		kept = append(kept, part)

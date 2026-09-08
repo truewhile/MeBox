@@ -284,11 +284,14 @@ func TestShouldReplaceHLSJob(t *testing.T) {
 }
 
 func TestFilterHLSSegmentQueryDropsStart(t *testing.T) {
-	got := filterHLSSegmentQuery("token=abc&start=120.5&profile_id=1")
+	got := filterHLSSegmentQuery("token=abc&start=120.5&_seek=1001&profile_id=1")
 	if strings.Contains(got, "start=") {
 		t.Fatalf("start should be stripped, got %q", got)
 	}
 	if !strings.Contains(got, "token=abc") || !strings.Contains(got, "profile_id=1") {
 		t.Fatalf("auth/profile query should remain, got %q", got)
+	}
+	if !strings.Contains(got, "_seek=1001") {
+		t.Fatalf("_seek must remain to isolate cached segment generations, got %q", got)
 	}
 }

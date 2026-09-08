@@ -302,9 +302,12 @@ func TestRequestTokenFromMediaBrowserAuthorizationHeader(t *testing.T) {
 
 func TestAppendQueryToHLSSegments(t *testing.T) {
 	in := "#EXTM3U\n#EXTINF:4.0,\nseg_00000.ts\n#EXTINF:4.0,\nseg_00001.ts?old=1\n"
-	got := appendQueryToHLSSegments(in, "token=abc")
-	if !strings.Contains(got, "seg_00000.ts?token=abc") {
-		t.Fatalf("missing tokenized segment: %q", got)
+	got := appendQueryToHLSSegments(in, "token=abc&start=120.5&_seek=1001")
+	if !strings.Contains(got, "seg_00000.ts?token=abc&_seek=1001") {
+		t.Fatalf("missing token or seek generation on segment: %q", got)
+	}
+	if strings.Contains(got, "start=120.5") {
+		t.Fatalf("segment URL must not contain transcode start: %q", got)
 	}
 	if !strings.Contains(got, "seg_00001.ts?old=1") {
 		t.Fatalf("existing query should be preserved: %q", got)
