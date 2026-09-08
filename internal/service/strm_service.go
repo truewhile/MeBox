@@ -95,6 +95,9 @@ type StrmService struct {
 	oauthSessions map[string]*strm115AuthSession
 	wafUntil      time.Time // 115 风控/限流熔断截止时间（由 mu 保护）
 
+	providerMu       sync.Mutex
+	provider115Cache map[string]cloud.Provider // account ID -> shared provider/OpenClient
+
 	downloadSem115  chan struct{} // 115 换直链+下载并发上限（风控兜底）
 	downloadSemDAV  chan struct{} // WebDAV/OpenList/CloudDrive2 元数据下载并发上限
 	downloadSemOnce sync.Once
@@ -158,15 +161,16 @@ func (s *StrmService) releaseDownloadSlot(provider string) {
 // NewStrmService constructs the STRM service.
 func NewStrmService(cfg *config.Config, log *zap.Logger, repos *repository.Container, crypto *CryptoService) *StrmService {
 	return &StrmService{
-		log:           log,
-		repo:          repos,
-		cfg:           cfg,
-		crypto:        crypto,
-		http:          &http.Client{Timeout: 90 * time.Second},
-		stopCh:        make(chan struct{}),
-		baseCtx:       context.Background(),
-		running:       map[string]context.CancelFunc{},
-		oauthSessions: map[string]*strm115AuthSession{},
+		log:              log,
+		repo:             repos,
+		cfg:              cfg,
+		crypto:           crypto,
+		http:             &http.Client{Timeout: 90 * time.Second},
+		stopCh:           make(chan struct{}),
+		baseCtx:          context.Background(),
+		running:          map[string]context.CancelFunc{},
+		oauthSessions:    map[string]*strm115AuthSession{},
+		provider115Cache: map[string]cloud.Provider{},
 	}
 }
 
@@ -409,6 +413,9 @@ func (s *StrmService) UpdateStrmAccount(ctx context.Context, id, name string, en
 	if err := s.repo.StrmAccount.Update(ctx, acct); err != nil {
 		return nil, err
 	}
+	if acct.Provider == model.StrmProvider115 && len(config) > 0 {
+		s.invalidate115Provider(acct.ID)
+	}
 	return acct, nil
 }
 
@@ -426,6 +433,7 @@ func (s *StrmService) DeleteStrmAccount(ctx context.Context, id string) error {
 	if err := s.repo.StrmAccount.Delete(ctx, id); err != nil {
 		return err
 	}
+	s.invalidate115Provider(id)
 	// 级联清理远程 Emby 挂载：否则留下孤儿挂载，挂载计数/列表仍会显示。
 	// 账号已删，挂载清理失败只记日志，不让删除请求报错。
 	if _, err := s.repo.EmbyMount.DeleteByAccountID(ctx, id); err != nil && s.log != nil {
@@ -464,6 +472,23 @@ func (s *StrmService) ListAccounts(ctx context.Context) ([]model.StrmAccount, er
 
 // providerFor 依据账号配置构建网盘驱动。
 func (s *StrmService) providerFor(ctx context.Context, acct *model.StrmAccount) (cloud.Provider, error) {
+	if acct != nil && acct.Provider == model.StrmProvider115 {
+		s.providerMu.Lock()
+		defer s.providerMu.Unlock()
+		if provider := s.provider115Cache[acct.ID]; provider != nil {
+			return provider, nil
+		}
+		provider, err := s.newProvider(ctx, acct)
+		if err != nil {
+			return nil, err
+		}
+		s.provider115Cache[acct.ID] = provider
+		return provider, nil
+	}
+	return s.newProvider(ctx, acct)
+}
+
+func (s *StrmService) newProvider(ctx context.Context, acct *model.StrmAccount) (cloud.Provider, error) {
 	cfg, err := s.strmAccountConfig(acct)
 	if err != nil {
 		return nil, err
@@ -482,11 +507,31 @@ func (s *StrmService) providerFor(ctx context.Context, acct *model.StrmAccount) 
 	// refresh_token 再刷（一次性轮转），两者互相作废，最终把有效账号
 	// 标成“授权已失效”。
 	if oc, ok := provider.(interface{ OpenClient() *cloud115.OpenClient }); ok {
-		oc.OpenClient().OnTokenRefreshed = func(accessToken, refreshToken string) {
+		client := oc.OpenClient()
+		client.OnTokenRefreshed = func(accessToken, refreshToken string) {
+			// 账号重新授权/修改凭据后，旧客户端可能仍有在途请求。旧请求
+			// 刷新的令牌不能覆盖新授权写入的凭据。
+			if !s.isCurrent115Client(acct.ID, client) {
+				return
+			}
 			s.persist115Tokens(acct.ID, accessToken, refreshToken)
 		}
 	}
 	return provider, nil
+}
+
+func (s *StrmService) invalidate115Provider(accountID string) {
+	s.providerMu.Lock()
+	delete(s.provider115Cache, accountID)
+	s.providerMu.Unlock()
+}
+
+func (s *StrmService) isCurrent115Client(accountID string, client *cloud115.OpenClient) bool {
+	s.providerMu.Lock()
+	defer s.providerMu.Unlock()
+	provider := s.provider115Cache[accountID]
+	openProvider, ok := provider.(interface{ OpenClient() *cloud115.OpenClient })
+	return ok && openProvider.OpenClient() == client
 }
 
 // ─── 全局设置 ──────────────────────────────────────────────────────────────────

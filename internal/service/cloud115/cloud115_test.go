@@ -140,6 +140,47 @@ func TestRefreshTokenDead(t *testing.T) {
 	}
 }
 
+func TestConcurrentTokenFailuresShareOneRefresh(t *testing.T) {
+	var mu sync.Mutex
+	refreshCalls := 0
+	mockAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/open/refreshToken" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		mu.Lock()
+		refreshCalls++
+		mu.Unlock()
+		time.Sleep(50 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"state":true,"data":{"access_token":"at-new","refresh_token":"rt-new","expires_in":7200}}`))
+	})
+
+	client := NewOpenClient("100195129", "at-old", "rt-old")
+	var wg sync.WaitGroup
+	results := make(chan bool, 2)
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- client.tryRefreshTokenLocked(context.Background(), "at-old")
+		}()
+	}
+	wg.Wait()
+	close(results)
+	for ok := range results {
+		if !ok {
+			t.Fatal("concurrent refresh should reuse the refreshed token")
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if refreshCalls != 1 {
+		t.Fatalf("refresh calls = %d, want 1", refreshCalls)
+	}
+	if client.CurrentAccessToken() != "at-new" {
+		t.Fatalf("access token = %q, want at-new", client.CurrentAccessToken())
+	}
+}
+
 func TestFsListAndDownload(t *testing.T) {
 	mockAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

@@ -150,6 +150,7 @@ func (c *OpenClient) doJSON(ctx context.Context, method, rawURL string, form map
 		if err != nil {
 			return nil, err
 		}
+		attemptedAccess := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
 
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
@@ -218,7 +219,7 @@ func (c *OpenClient) doJSON(ctx context.Context, method, rawURL string, form map
 		// refresh_token 刷新后重试一次。刷新失败或重试后仍失败才返回，
 		// 避免长时间同步因 token 过期而整体失败。
 		if isTokenCode(base.Code) {
-			if access && c.tryRefreshTokenLocked(ctx) {
+			if access && c.tryRefreshTokenLocked(ctx, attemptedAccess) {
 				continue
 			}
 			if access {
@@ -305,21 +306,23 @@ func (c *OpenClient) doAuthJSONWithUA(ctx context.Context, method, rawURL string
 // tryRefreshTokenLocked 并发安全地刷新 access_token；成功返回 true（调用方
 // 应使用内存中的新 token 重试原请求）。
 //
-// 拿到写锁后在锁内读取 oldAccess，与持锁期间的当前值对比：若已被其他
-// goroutine 刷新过则直接复用新 token，避免并发请求连环轮转消耗 115 的
-// 一次性 refresh_token。全程持写锁读写 token 字段，无 TOCTOU 窗口。
+// failedAccess 是失败请求实际携带的 token。拿到写锁后与当前 token 对比：
+// 若已被其他 goroutine 刷新过则直接复用，避免并发请求连环轮转消耗 115
+// 的一次性 refresh_token。全程持写锁读写 token 字段，无 TOCTOU 窗口。
 //
 // 对"refresh_token 本身已失效/被吊销"（IsRefreshTokenDead，如 40140114/116/119/120）
 // 这类不可恢复的错误直接放弃并清空内存 token（提示需重新授权）。
 // 对其它失败（网络瞬时抖动、刷新接口可重试错误码等）做指数退避重试几次再放弃，
 // 避免同步长任务中途 token 到期时恰好撞上一个短暂的刷新失败就整体失败。
-func (c *OpenClient) tryRefreshTokenLocked(ctx context.Context) bool {
+func (c *OpenClient) tryRefreshTokenLocked(ctx context.Context, failedAccess string) bool {
 	c.tokenMu.Lock()
-	// 在已持有写锁内读取当前 token 作为"刷新前快照"，消除双重加锁窗口：
-	// 若在拿锁期间已有其他 goroutine 完成刷新，refreshTokenWhileLocked
-	// 内的 c.AccessToken != oldAccess 判断会立即命中并返回复用。
-	oldAccess := c.AccessToken
-	newToken, ok := c.refreshTokenWhileLocked(ctx, oldAccess)
+	// 请求发出后若其他 goroutine 已经刷新完成，直接复用新 token 重试；
+	// 不能再次轮换一次性的 refresh_token。
+	if failedAccess != "" && c.AccessToken != failedAccess {
+		c.tokenMu.Unlock()
+		return true
+	}
+	newToken, ok := c.refreshTokenWhileLocked(ctx, failedAccess)
 	c.tokenMu.Unlock()
 	// 回调必须在 tokenMu 释放后调用，避免上层在回调内访问客户端时死锁
 	if ok && newToken != nil && c.OnTokenRefreshed != nil {

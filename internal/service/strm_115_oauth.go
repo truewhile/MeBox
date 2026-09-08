@@ -293,7 +293,11 @@ func (s *StrmService) save115OAuthToken(ctx context.Context, session *strm115Aut
 	acct.LastTestAt = &now
 	acct.LastTestResult = "授权成功"
 	acct.LastTestOK = true
-	return s.repo.StrmAccount.Update(ctx, acct)
+	if err := s.repo.StrmAccount.Update(ctx, acct); err != nil {
+		return err
+	}
+	s.invalidate115Provider(acct.ID)
+	return nil
 }
 
 func (s *StrmService) drop115AuthSession(sessionID string) {
@@ -382,8 +386,15 @@ func (s *StrmService) refresh115TokensOnce(ctx context.Context) {
 				}
 			}
 		}
-		client := cloud115.NewOpenClient(cfg["app_id"], cfg["access_token"], cfg["refresh_token"])
-		token, err := client.RefreshToken(cfg["refresh_token"])
+		provider, err := s.providerFor(ctx, acct)
+		if err != nil {
+			continue
+		}
+		openProvider, ok := provider.(interface{ OpenClient() *cloud115.OpenClient })
+		if !ok || openProvider.OpenClient() == nil {
+			continue
+		}
+		token, err := openProvider.OpenClient().RefreshToken("")
 		if err != nil {
 			msg := "令牌刷新失败：" + err.Error()
 			if cloud115.IsRefreshTokenDead(err) {

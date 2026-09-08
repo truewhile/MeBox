@@ -477,24 +477,32 @@ func (c *OpenClient) GetToken(qrCode *QrCodeDataReturn) (*TokenData, error) {
 
 // RefreshToken 刷新访问令牌。
 func (c *OpenClient) RefreshToken(refreshToken string) (*TokenData, error) {
+	c.tokenMu.Lock()
 	if refreshToken == "" {
-		refreshToken = c.currentRefreshToken()
+		refreshToken = c.RefreshTokenStr
 	}
 	if refreshToken == "" {
+		c.tokenMu.Unlock()
 		return nil, fmt.Errorf("没有可用的 refresh_token")
 	}
 	token, err := c.doRefreshToken(refreshToken)
 	if err != nil {
 		// refresh_token 已失效时清空内存令牌（提示需重新授权）
 		if IsRefreshTokenDead(err) {
-			c.SetAuthToken("", "")
+			c.setAuthTokenLocked("", "")
 		}
+		c.tokenMu.Unlock()
 		return nil, err
 	}
 	if token.AccessToken == "" || token.RefreshToken == "" {
+		c.tokenMu.Unlock()
 		return nil, fmt.Errorf("115: 刷新返回空凭证（access_token/refresh_token 缺失）")
 	}
-	c.SetAuthToken(token.AccessToken, token.RefreshToken)
+	c.setAuthTokenLocked(token.AccessToken, token.RefreshToken)
+	c.tokenMu.Unlock()
+	if c.OnTokenRefreshed != nil {
+		c.OnTokenRefreshed(token.AccessToken, token.RefreshToken)
+	}
 	return token, nil
 }
 

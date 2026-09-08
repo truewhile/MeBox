@@ -10,6 +10,7 @@ import (
 	"github.com/truewhile/MeBox/internal/config"
 	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/repository"
+	"github.com/truewhile/MeBox/internal/service/cloud115"
 )
 
 func TestStrmAccountConfigPreviewOf(t *testing.T) {
@@ -68,6 +69,90 @@ func TestUpdateStrmAccountMergesConfigWithoutClearingSecrets(t *testing.T) {
 	}
 	if cfg["token"] != "tok" {
 		t.Fatalf("token was cleared: %#v", cfg)
+	}
+}
+
+func TestProviderForReuses115ClientUntilCredentialsChange(t *testing.T) {
+	svc := testStrmService(t)
+	ctx := context.Background()
+	acct, err := svc.CreateStrmAccount(ctx, "115", model.StrmProvider115, map[string]string{
+		"app_id":        "100195129",
+		"access_token":  "at-1",
+		"refresh_token": "rt-1",
+	})
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+
+	first, err := svc.providerFor(ctx, acct)
+	if err != nil {
+		t.Fatalf("first provider: %v", err)
+	}
+	second, err := svc.providerFor(ctx, acct)
+	if err != nil {
+		t.Fatalf("second provider: %v", err)
+	}
+	if first != second {
+		t.Fatal("115 provider should be shared per account")
+	}
+
+	updated, err := svc.UpdateStrmAccount(ctx, acct.ID, "", nil, map[string]string{
+		"access_token":  "at-2",
+		"refresh_token": "rt-2",
+	})
+	if err != nil {
+		t.Fatalf("update account: %v", err)
+	}
+	third, err := svc.providerFor(ctx, updated)
+	if err != nil {
+		t.Fatalf("provider after credential update: %v", err)
+	}
+	if first == third {
+		t.Fatal("credential update must invalidate the shared provider")
+	}
+
+	oldClient := first.(interface{ OpenClient() *cloud115.OpenClient }).OpenClient()
+	oldClient.OnTokenRefreshed("at-stale", "rt-stale")
+	fresh, err := svc.repo.StrmAccount.FindByID(ctx, acct.ID)
+	if err != nil || fresh == nil {
+		t.Fatalf("reload account: %v", err)
+	}
+	freshCfg, err := svc.strmAccountConfig(fresh)
+	if err != nil {
+		t.Fatalf("decode refreshed account: %v", err)
+	}
+	if freshCfg["access_token"] != "at-2" || freshCfg["refresh_token"] != "rt-2" {
+		t.Fatalf("stale client overwrote new credentials: %#v", freshCfg)
+	}
+}
+
+func TestPersist115TokensKeepsSharedClient(t *testing.T) {
+	svc := testStrmService(t)
+	ctx := context.Background()
+	acct, err := svc.CreateStrmAccount(ctx, "115", model.StrmProvider115, map[string]string{
+		"app_id":        "100195129",
+		"access_token":  "at-1",
+		"refresh_token": "rt-1",
+	})
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	first, err := svc.providerFor(ctx, acct)
+	if err != nil {
+		t.Fatalf("first provider: %v", err)
+	}
+
+	svc.persist115Tokens(acct.ID, "at-2", "rt-2")
+	fresh, err := svc.repo.StrmAccount.FindByID(ctx, acct.ID)
+	if err != nil || fresh == nil {
+		t.Fatalf("reload account: %v", err)
+	}
+	second, err := svc.providerFor(ctx, fresh)
+	if err != nil {
+		t.Fatalf("second provider: %v", err)
+	}
+	if first != second {
+		t.Fatal("automatic token persistence must keep the in-memory shared client")
 	}
 }
 
