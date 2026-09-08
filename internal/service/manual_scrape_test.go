@@ -35,6 +35,72 @@ func TestManualRequestMatchFallsBackToCandidatePayload(t *testing.T) {
 	}
 }
 
+func TestManualAdultMatchUsesSelectedMetaTubeDetailsAndRealBackdrop(t *testing.T) {
+	var detailCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/movies/AVE/94600" {
+			http.NotFound(w, r)
+			return
+		}
+		detailCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(struct {
+			Data MetaTubeMovieInfo `json:"data"`
+		}{
+			Data: MetaTubeMovieInfo{
+				ID:            "94600",
+				Number:        "CWPBD-138",
+				Title:         "Selected title",
+				Provider:      "AVE",
+				CoverURL:      "https://example.com/poster.jpg",
+				PreviewImages: []string{"https://example.com/backdrop.jpg"},
+			},
+		})
+	}))
+	defer upstream.Close()
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.Setting{}, &model.APIConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	repos := repository.New(db)
+	if err := repos.Setting.Set(t.Context(), "adult.scraper.engine", "metatube"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repos.Setting.Set(t.Context(), "adult.scraper.metatube_server", upstream.URL); err != nil {
+		t.Fatal(err)
+	}
+	adult := NewAdultProvider(zap.NewNop(), nil, repos)
+	scraper := &ScraperService{adult: adult}
+
+	match, err := scraper.manualRequestMatch(t.Context(), ManualScrapeRequest{
+		Source:       "adult",
+		MediaType:    "adult",
+		Title:        "CWPBD-138 Selected title",
+		OriginalName: "CWPBD-138",
+		PosterURL:    "https://example.com/search-cover.jpg",
+		BackdropURL:  "https://example.com/search-cover.jpg",
+		DoubanID:     "94600",
+		TheTVDBID:    "AVE",
+		NSFW:         true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detailCalls.Load() != 1 {
+		t.Fatalf("selected MetaTube detail calls = %d, want 1", detailCalls.Load())
+	}
+	if match.PosterURL != "https://example.com/search-cover.jpg" {
+		t.Fatalf("selected poster = %q", match.PosterURL)
+	}
+	if match.BackdropURL != "https://example.com/backdrop.jpg" {
+		t.Fatalf("backdrop = %q, want detail preview", match.BackdropURL)
+	}
+}
+
 func TestParsePositiveIDStringAcceptsProviderPrefixes(t *testing.T) {
 	cases := map[string]string{
 		"12345":          "12345",

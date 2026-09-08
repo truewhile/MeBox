@@ -25,7 +25,8 @@ func TestAdultProviderRouting(t *testing.T) {
 	repos := repository.New(db)
 
 	mtServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/movies/search" {
+		switch r.URL.Path {
+		case "/v1/movies/search":
 			q := r.URL.Query().Get("q")
 			if q == "SSIS-001" {
 				results := struct {
@@ -46,6 +47,21 @@ func TestAdultProviderRouting(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(results)
 				return
 			}
+		case "/v1/movies/javdb/999":
+			_ = json.NewEncoder(w).Encode(struct {
+				Data MetaTubeMovieInfo `json:"data"`
+			}{
+				Data: MetaTubeMovieInfo{
+					ID:            "999",
+					Number:        "SSIS-001",
+					Title:         "河北彩花 専属デビュー",
+					Provider:      "javdb",
+					CoverURL:      "https://example.com/poster.jpg",
+					PreviewImages: []string{"https://example.com/backdrop.jpg"},
+					ReleaseDate:   "2021-06-19",
+				},
+			})
+			return
 		}
 		http.NotFound(w, r)
 	}))
@@ -79,6 +95,10 @@ func TestAdultProviderRouting(t *testing.T) {
 	}
 	if len(candidates) != 1 {
 		t.Fatalf("expected 1 candidate, got %d", len(candidates))
+	}
+	if candidates[0].PosterURL != "https://example.com/poster.jpg" ||
+		candidates[0].BackdropURL != "https://example.com/backdrop.jpg" {
+		t.Fatalf("candidate artwork was not enriched: %#v", candidates[0])
 	}
 
 	// 2. Test auto mode with failing metatube query

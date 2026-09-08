@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -180,6 +181,7 @@ func (p *AdultProvider) SearchCandidates(ctx context.Context, query string) ([]*
 			if err != nil {
 				return nil, err
 			}
+			matches = p.enrichMetaTubeCandidates(ctx, mtCfg, code, matches)
 			for _, m := range matches {
 				m.OriginalName = code
 				m.Title = FormatAdultTitle(code, m.Title)
@@ -194,6 +196,7 @@ func (p *AdultProvider) SearchCandidates(ctx context.Context, query string) ([]*
 		if mtCfg.ServerURL != "" {
 			matches, err := p.metatube.Search(ctx, mtCfg, code)
 			if err == nil && len(matches) > 0 {
+				matches = p.enrichMetaTubeCandidates(ctx, mtCfg, code, matches)
 				for _, m := range matches {
 					m.OriginalName = code
 					m.Title = FormatAdultTitle(code, m.Title)
@@ -215,6 +218,50 @@ func (p *AdultProvider) SearchCandidates(ctx context.Context, query string) ([]*
 		}
 		return []*Match{m}, nil
 	}
+}
+
+// GetMetaTubeCandidate fetches the selected provider result instead of
+// re-running a search that may choose a different provider.
+func (p *AdultProvider) GetMetaTubeCandidate(ctx context.Context, provider, id string) (*Match, error) {
+	if p == nil || p.metatube == nil {
+		return nil, nil
+	}
+	provider = strings.TrimSpace(provider)
+	id = strings.TrimSpace(id)
+	if provider == "" || id == "" {
+		return nil, nil
+	}
+	engine := strings.ToLower(p.getSetting(ctx, "adult.scraper.engine", "builtin"))
+	if engine != "metatube" && engine != "auto" {
+		return nil, nil
+	}
+	cfg := p.ResolveMetaTubeConfig(ctx)
+	if cfg.ServerURL == "" {
+		return nil, nil
+	}
+	return p.metatube.GetMovie(ctx, cfg, provider, id)
+}
+
+func (p *AdultProvider) enrichMetaTubeCandidates(ctx context.Context, cfg MetaTubeConfig, code string, matches []*Match) []*Match {
+	var wg sync.WaitGroup
+	for i, candidate := range matches {
+		if candidate == nil ||
+			normalizeAdultCode(candidate.OriginalName) != code ||
+			strings.TrimSpace(candidate.DoubanID) == "" ||
+			strings.TrimSpace(candidate.TheTVDBID) == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(index int, current *Match) {
+			defer wg.Done()
+			detailed, err := p.metatube.GetMovie(ctx, cfg, current.TheTVDBID, current.DoubanID)
+			if err == nil && detailed != nil {
+				matches[index] = detailed
+			}
+		}(i, candidate)
+	}
+	wg.Wait()
+	return matches
 }
 
 func (p *AdultProvider) searchBuiltin(ctx context.Context, code string) (*Match, error) {
