@@ -16,7 +16,7 @@ var (
 	genericEpisodeWordsRE    = regexp.MustCompile(`^\s*第\s*[集期话話]\s*$`)
 	episodeReleaseTitleTagRE = regexp.MustCompile(`(?i)(?:^|[\s._-])s\d{1,2}e\d{1,3}(?:[\s._-]|$)`)
 	patTheatricalTitle       = regexp.MustCompile(`(?i)(?:剧场版|劇場版|动画电影|動畫電影|电影版|電影版|\bthe\s+movie\b|\bmovie\s*\d{1,2}\b)`)
-	patTheatricalFolder      = regexp.MustCompile(`(?i)[\\/](?:剧场版|劇場版|動畫電影|动画电影)[\\/]`)
+	patTheatricalFolder      = regexp.MustCompile(`(?i)[\\/][^\\/]*(?:剧场版|劇場版|動畫電影|动画电影|电影版|電影版)[^\\/]*[\\/]`)
 	theatricalNoiseRE        = regexp.MustCompile(`(?i)(?:剧场版|劇場版)\s*(?:第?\s*\d{1,3}\s*[部篇]?)?|电影版|電影版|动画电影|動畫電影`)
 )
 
@@ -48,7 +48,7 @@ func mediaLooksLikeTheatricalFeature(m *model.Media) bool {
 		return false
 	}
 	text := m.Title + " " + pathBaseSlash(m.Path)
-	return patTheatricalTitle.MatchString(text) || patTheatricalFolder.MatchString(m.Path)
+	return patTheatricalTitle.MatchString(text) || pathHasTheatricalFolder(m.Path)
 }
 
 func scrapeQueryCandidates(m *model.Media, lib *model.Library) []string {

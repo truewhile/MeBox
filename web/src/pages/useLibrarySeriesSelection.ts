@@ -1,7 +1,23 @@
 import { useEffect, useMemo } from 'react'
 
 import type { Media } from '../types'
-import { getSeriesKey, isTheatricalFeature, THEATRICAL_SEASON, type SeriesCard } from '../utils/groupSeries'
+import {
+  BONUS_SEASON,
+  EXTRA_SEASON,
+  getSeriesKey,
+  isTheatricalFeature,
+  NCED_SEASON,
+  NCOP_SEASON,
+  OAD_SEASON,
+  OMAKE_SEASON,
+  ONA_SEASON,
+  OVA_SEASON,
+  OVD_SEASON,
+  PICTURE_DRAMA_SEASON,
+  specialSectionForMedia,
+  THEATRICAL_SEASON,
+  type SeriesCard,
+} from '../utils/groupSeries'
 
 type SeasonEpisodes = {
   season: number
@@ -47,9 +63,9 @@ export function useLibrarySeriesSelection({
       : sourceItems.filter((m) => getSeriesKey(m) === selectedSeries.key)
     const seasons = new Map<number, Media[]>()
     for (const ep of eps) {
-      const s = isTheatricalFeature(ep)
-        ? THEATRICAL_SEASON
-        : ep.episode_num > 0 ? (ep.season_num ?? 0) : (ep.season_num || 1)
+      const specialSection = specialSectionForMedia(ep)
+      const s = specialSection ??
+        (ep.episode_num > 0 ? (ep.season_num ?? 0) : (ep.season_num || 1))
       if (!seasons.has(s)) seasons.set(s, [])
       seasons.get(s)!.push(ep)
     }
@@ -132,7 +148,19 @@ export function useLibrarySeriesSelection({
 }
 
 function seasonSortOrder(season: number): number {
-  if (season === 0) return -2
-  if (season === THEATRICAL_SEASON) return -1
-  return season
+  switch (season) {
+    case 0: return 0
+    case OVA_SEASON: return 1
+    case OAD_SEASON: return 2
+    case OVD_SEASON: return 3
+    case ONA_SEASON: return 4
+    case EXTRA_SEASON: return 5
+    case BONUS_SEASON: return 6
+    case OMAKE_SEASON: return 7
+    case PICTURE_DRAMA_SEASON: return 8
+    case NCOP_SEASON: return 9
+    case NCED_SEASON: return 10
+    case THEATRICAL_SEASON: return 11
+    default: return 100 + season
+  }
 }

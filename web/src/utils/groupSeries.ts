@@ -39,6 +39,16 @@ export type SeriesCard = {
 }
 
 export const THEATRICAL_SEASON = -1
+export const OVA_SEASON = -2
+export const OAD_SEASON = -3
+export const OVD_SEASON = -4
+export const ONA_SEASON = -5
+export const EXTRA_SEASON = -6
+export const BONUS_SEASON = -7
+export const OMAKE_SEASON = -8
+export const PICTURE_DRAMA_SEASON = -9
+export const NCOP_SEASON = -10
+export const NCED_SEASON = -11
 
 export function getSeriesKey(media: Media): string {
   return compactSeriesKey(getSeriesRawKey(media))
@@ -92,16 +102,19 @@ export function isEpisodeLike(media: Media): boolean {
 // 剧集类目录名(电视剧/动漫及其二级分类)。媒体路径落在这些目录下时, 即便
 // 季集号未识别出来, 也应按剧集对待, 跳转到 /library 分类视图而非 /media 单页。
 const EPISODIC_PATH_RE =
-  /[\\/](?:电视剧|剧集|连续剧|短剧|国产剧|国剧|大陆剧|华语剧|国产电视剧|大陆电视剧|华语电视剧|欧美剧|欧美电视剧|美剧|英剧|日韩剧|日韩电视剧|日剧|韩剧|港剧|台剧|港台剧|泰剧|综艺|纪录片|儿童|动漫|番剧|国漫|日番|韩漫|美漫|欧美动漫|欧美动画|其他动漫|anime|tv|series|shows?|season[\s._-]*\d|s\d{1,2}(?:[\s._-]|[\\/])|special[\s._-]*episodes?|specials?|sp|ovas?|oads?|extras?|bonus(?:es)?|omake|特别篇|特別篇|番外篇?|特典|外传|外傳|总集篇|總集篇)[\\/]/i
+  /[\\/](?:电视剧|剧集|连续剧|短剧|国产剧|国剧|大陆剧|华语剧|国产电视剧|大陆电视剧|华语电视剧|欧美剧|欧美电视剧|美剧|英剧|日韩剧|日韩电视剧|日剧|韩剧|港剧|台剧|港台剧|泰剧|综艺|纪录片|儿童|动漫|番剧|国漫|日番|韩漫|美漫|欧美动漫|欧美动画|其他动漫|anime|tv|series|shows?|season[\s._-]*\d|s\d{1,2}(?:[\s._-]|[\\/])|special[\s._-]*episodes?|specials?|sp|ovas?|oads?|ovds?|onas?|extras?|bonus(?:es)?|omake|picture[\s._-]*drama|ncop|nced|特别篇|特別篇|番外篇?|特典|外传|外傳|总集篇|總集篇|画像特典)[\\/]/i
 
 const THEATRICAL_TITLE_RE =
   /(?:剧场版|劇場版|动画电影|動畫電影|电影版|電影版|\bthe\s+movie\b|\bmovie\s*\d{1,2}\b)/i
 
+const THEATRICAL_FOLDER_NAME_RE =
+  /(?:剧场版|劇場版|动画电影|動畫電影|电影版|電影版)/i
+
 const THEATRICAL_FOLDER_RE =
-  /[\\/](?:剧场版|劇場版|动画电影|動畫電影)[\\/]/
+  /[\\/][^\\/]*(?:剧场版|劇場版|动画电影|動畫電影|电影版|電影版)[^\\/]*[\\/]/
 
 const SEASON_FOLDER_RE =
-  /^(?:s\d{1,2}|season[\s._-]*\d{1,2}|第\s*[0-9一二三四五六七八九十百零两]+\s*季|special[\s._-]*episodes?|specials?|sp|ovas?|oads?|extras?|bonus(?:es)?|omake|特别篇|特別篇|番外篇?|特典|外传|外傳|总集篇|總集篇|剧场版|劇場版|动画电影|動畫電影)$/i
+  /^(?:s\d{1,2}|season[\s._-]*\d{1,2}|第\s*[0-9一二三四五六七八九十百零两]+\s*季|special[\s._-]*episodes?|specials?|sp|ovas?|oads?|ovds?|onas?|extras?|bonus(?:es)?|omake|picture[\s._-]*drama|ncop|nced|特别篇|特別篇|番外篇?|特典|外传|外傳|总集篇|總集篇|画像特典|剧场版|劇場版|动画电影|動畫電影)$/i
 
 export function pathLooksEpisodic(media: Media): boolean {
   const path = (media.path || media.display_library_path || media.library_path || '')
@@ -112,6 +125,30 @@ export function isTheatricalFeature(media: Media): boolean {
   const path = media.path || ''
   if (SERIES_FILE_EPISODE_RE.test(path)) return false
   return THEATRICAL_TITLE_RE.test(`${media.title || ''} ${path}`) || THEATRICAL_FOLDER_RE.test(path)
+}
+
+const SPECIAL_SECTION_PATTERNS: Array<[number, RegExp]> = [
+  [OVA_SEASON, /(?:^|[^a-z0-9])ovas?(?:[\s._-]*\d+)?(?:[^a-z0-9]|$)/i],
+  [OAD_SEASON, /(?:^|[^a-z0-9])oads?(?:[\s._-]*\d+)?(?:[^a-z0-9]|$)/i],
+  [OVD_SEASON, /(?:^|[^a-z0-9])ovds?(?:[\s._-]*\d+)?(?:[^a-z0-9]|$)/i],
+  [ONA_SEASON, /(?:^|[^a-z0-9])onas?(?:[\s._-]*\d+)?(?:[^a-z0-9]|$)/i],
+  [PICTURE_DRAMA_SEASON, /(?:^|[^a-z0-9])(?:picture[\s._-]*drama|画像特典)(?:[^a-z0-9]|$)/i],
+  [NCOP_SEASON, /(?:^|[^a-z0-9])ncop(?:\d+)?(?:[^a-z0-9]|$)/i],
+  [NCED_SEASON, /(?:^|[^a-z0-9])nced(?:\d+)?(?:[^a-z0-9]|$)/i],
+  [EXTRA_SEASON, /(?:^|[^a-z0-9])extras?(?:[\s._-]*\d+)?(?:[^a-z0-9]|$)/i],
+  [BONUS_SEASON, /(?:^|[^a-z0-9])bonus(?:es)?(?:[\s._-]*\d+)?(?:[^a-z0-9]|$)/i],
+  [OMAKE_SEASON, /(?:^|[^a-z0-9])omake(?:[\s._-]*\d+)?(?:[^a-z0-9]|$)/i],
+]
+
+export function specialSectionForMedia(media: Media): number | null {
+  if (isTheatricalFeature(media)) return THEATRICAL_SEASON
+  const parts = (media.path || '').split(/[\\/]+/).filter(Boolean)
+  for (const part of parts) {
+    for (const [section, pattern] of SPECIAL_SECTION_PATTERNS) {
+      if (pattern.test(part)) return section
+    }
+  }
+  return null
 }
 
 export function isSeriesCard(card: SeriesCard): boolean {
@@ -170,10 +207,10 @@ function normalizeTitle(value?: string): string {
 }
 
 const SERIES_SPECIAL_CODE_RE =
-  /\s*[[(（【]?\s*(?:s0+\s*e?\s*\d+|season\s*0+(?:\s*episode)?\s*\d*|special(?:\s*episode)?s?\s*\d*|sp\s*\d*|ovas?\s*\d*|oads?\s*\d*|extras?\s*\d*|bonus(?:es)?\s*\d*|omake\s*\d*)\s*[\])）】]?$/i
+  /\s*[[(（【]?\s*(?:s0+\s*e?\s*\d+|season\s*0+(?:\s*episode)?\s*\d*|special(?:\s*episode)?s?\s*\d*|sp\s*\d*|ovas?\s*\d*|oads?\s*\d*|ovds?\s*\d*|onas?\s*\d*|extras?\s*\d*|bonus(?:es)?\s*\d*|omake\s*\d*|picture[\s._-]*drama\s*\d*|ncop\s*\d*|nced\s*\d*)\s*[\])）】]?$/i
 
 const SERIES_SPECIAL_CJK_RE =
-  /\s*[[(（【]?\s*(?:特别篇|特別篇|番外篇?|特典|外传|外傳|总集篇|總集篇)(?:\s*第?\s*[0-9一二三四五六七八九十百零两]+(?:[集话話期])?)?\s*[\])）】]?$/i
+  /\s*[[(（【]?\s*(?:特别篇|特別篇|番外篇?|特典|外传|外傳|总集篇|總集篇|画像特典)(?:\s*第?\s*[0-9一二三四五六七八九十百零两]+(?:[集话話期])?)?\s*[\])）】]?$/i
 
 function normalizePathSeriesTitle(value?: string): string {
   const title = normalizeTitle(value)
@@ -271,14 +308,18 @@ function seriesDirectoryNameFromPath(path?: string): string {
   if (parts.length < 2) return ''
   let dirIndex = parts.length - 2
   const lastPart = parts[parts.length - 1]
-  if (!seriesPathPartLooksLikeFile(lastPart) && !SEASON_FOLDER_RE.test(lastPart)) {
+  if (!seriesPathPartLooksLikeFile(lastPart) && !isSeriesContainerFolder(lastPart)) {
     dirIndex = parts.length - 1
   }
-  while (dirIndex >= 0 && SEASON_FOLDER_RE.test(parts[dirIndex])) {
+  while (dirIndex >= 0 && isSeriesContainerFolder(parts[dirIndex])) {
     dirIndex -= 1
   }
   if (dirIndex < 0) return ''
   return parts[dirIndex]
+}
+
+function isSeriesContainerFolder(name: string): boolean {
+  return SEASON_FOLDER_RE.test(name) || THEATRICAL_FOLDER_NAME_RE.test(name)
 }
 
 function seriesExternalIDFromPath(path?: string): string {

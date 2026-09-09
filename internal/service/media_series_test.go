@@ -408,18 +408,17 @@ func TestGroupMediaSeriesCardsKeepsTheatricalMovieWithTVSeries(t *testing.T) {
 	episode := model.Media{
 		Base:       model.Base{ID: "episode"},
 		LibraryID:  "anime",
-		Title:      "超人高校生们",
-		Path:       `/media/动漫/超人高校生们/Season 01/超人高校生们.S01E01.mkv`,
+		Title:      "摇曳露营△",
+		Path:       `/media/动漫/摇曳露营△ (2018)/Season 01/摇曳露营△.S01E01.mkv`,
 		SeasonNum:  1,
 		EpisodeNum: 1,
 	}
 	theatrical := model.Media{
-		Base:       model.Base{ID: "theatrical"},
-		LibraryID:  "anime",
-		Title:      "超人高校生们",
-		Path:       `/media/动漫/超人高校生们/剧场版/超人高校生们 剧场版.mkv`,
-		SeasonNum:  1,
-		EpisodeNum: 1,
+		Base:      model.Base{ID: "theatrical"},
+		LibraryID: "anime",
+		Title:     "摇曳露营△ 剧场版",
+		Path:      `/media/动漫/摇曳露营△ (2018)/摇曳露营△ 剧场版 (2022)/Eiga.Yurukyan.2022.Bluray.mkv`,
+		TMDbID:    566466,
 	}
 
 	cards := groupMediaSeriesCards([]model.Media{episode, theatrical})
@@ -539,4 +538,3 @@ func TestListMediaEpisodesKeepsIndependentMoviesSeparate(t *testing.T) {
 		t.Fatalf("ListMediaEpisodes got %#v, want exactly m1", eps)
 	}
 }
-

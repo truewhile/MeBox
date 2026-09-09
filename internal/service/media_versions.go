@@ -145,16 +145,32 @@ func mediaVersionGroupKey(m model.Media) string {
 		return fmt.Sprintf("embyremote:%s", m.ID)
 	}
 
-	if m.SeasonNum > 0 || m.EpisodeNum > 0 {
+	libKey := strings.ToLower(strings.TrimSpace(m.LibraryID))
+	if libKey == "" {
+		libKey = strings.ToLower(strings.TrimSpace(m.DisplayLibraryID))
+	}
+	specialKind := mediaSpecialKind(m.Path)
+	season, episode := m.SeasonNum, m.EpisodeNum
+	if specialKind != "" && specialKind != mediaSpecialTheatrical && episode <= 0 {
+		if parsedSeason, parsedEpisode := ParseEpisode(m.Path); parsedEpisode > 0 {
+			season, episode = parsedSeason, parsedEpisode
+		}
+	}
+
+	if season > 0 || episode > 0 {
+		kind := specialKind
+		if kind == "" {
+			kind = "episode"
+		}
 		switch {
 		case m.TMDbID > 0:
-			return fmt.Sprintf("episode:tmdb:%d:%d:%d", m.TMDbID, m.SeasonNum, m.EpisodeNum)
+			return fmt.Sprintf("episode:%s:tmdb:%d:%d:%d", kind, m.TMDbID, season, episode)
 		case m.BangumiID > 0:
-			return fmt.Sprintf("episode:bangumi:%d:%d:%d", m.BangumiID, m.SeasonNum, m.EpisodeNum)
+			return fmt.Sprintf("episode:%s:bangumi:%d:%d:%d", kind, m.BangumiID, season, episode)
 		case strings.TrimSpace(m.DoubanID) != "":
-			return fmt.Sprintf("episode:douban:%s:%d:%d", strings.ToLower(strings.TrimSpace(m.DoubanID)), m.SeasonNum, m.EpisodeNum)
+			return fmt.Sprintf("episode:%s:douban:%s:%d:%d", kind, strings.ToLower(strings.TrimSpace(m.DoubanID)), season, episode)
 		case strings.TrimSpace(m.TheTVDBID) != "":
-			return fmt.Sprintf("episode:thetvdb:%s:%d:%d", strings.ToLower(strings.TrimSpace(m.TheTVDBID)), m.SeasonNum, m.EpisodeNum)
+			return fmt.Sprintf("episode:%s:thetvdb:%s:%d:%d", kind, strings.ToLower(strings.TrimSpace(m.TheTVDBID)), season, episode)
 		}
 		title := firstNonEmpty(m.OriginalName, m.Title)
 		if title == "" {
@@ -166,36 +182,60 @@ func mediaVersionGroupKey(m model.Media) string {
 		}
 		return strings.Join([]string{
 			"episode",
-			strings.ToLower(strings.TrimSpace(m.LibraryID)),
+			kind,
+			libKey,
 			title,
-			fmt.Sprintf("%d:%d", m.SeasonNum, m.EpisodeNum),
+			fmt.Sprintf("%d:%d", season, episode),
 		}, "|")
 	}
 
-	libKey := strings.ToLower(strings.TrimSpace(m.LibraryID))
-	if libKey == "" {
-		libKey = strings.ToLower(strings.TrimSpace(m.DisplayLibraryID))
+	if specialKind != "" && specialKind != mediaSpecialTheatrical {
+		return mediaVersionStemGroupKey(m, libKey)
 	}
 
 	switch {
 	case m.TMDbID > 0:
 		if libKey != "" {
+			if specialKind != "" {
+				return fmt.Sprintf("movie:%s:%s:tmdb:%d", specialKind, libKey, m.TMDbID)
+			}
 			return fmt.Sprintf("movie:%s:tmdb:%d", libKey, m.TMDbID)
+		}
+		if specialKind != "" {
+			return fmt.Sprintf("movie:%s:tmdb:%d", specialKind, m.TMDbID)
 		}
 		return fmt.Sprintf("tmdb:%d", m.TMDbID)
 	case m.BangumiID > 0:
 		if libKey != "" {
+			if specialKind != "" {
+				return fmt.Sprintf("movie:%s:%s:bangumi:%d", specialKind, libKey, m.BangumiID)
+			}
 			return fmt.Sprintf("movie:%s:bangumi:%d", libKey, m.BangumiID)
+		}
+		if specialKind != "" {
+			return fmt.Sprintf("movie:%s:bangumi:%d", specialKind, m.BangumiID)
 		}
 		return fmt.Sprintf("bangumi:%d", m.BangumiID)
 	case strings.TrimSpace(m.DoubanID) != "":
 		if libKey != "" {
+			if specialKind != "" {
+				return fmt.Sprintf("movie:%s:%s:douban:%s", specialKind, libKey, strings.ToLower(strings.TrimSpace(m.DoubanID)))
+			}
 			return fmt.Sprintf("movie:%s:douban:%s", libKey, strings.ToLower(strings.TrimSpace(m.DoubanID)))
+		}
+		if specialKind != "" {
+			return "movie:" + specialKind + ":douban:" + strings.ToLower(strings.TrimSpace(m.DoubanID))
 		}
 		return "douban:" + strings.ToLower(strings.TrimSpace(m.DoubanID))
 	case strings.TrimSpace(m.TheTVDBID) != "":
 		if libKey != "" {
+			if specialKind != "" {
+				return fmt.Sprintf("movie:%s:%s:thetvdb:%s", specialKind, libKey, strings.ToLower(strings.TrimSpace(m.TheTVDBID)))
+			}
 			return fmt.Sprintf("movie:%s:thetvdb:%s", libKey, strings.ToLower(strings.TrimSpace(m.TheTVDBID)))
+		}
+		if specialKind != "" {
+			return "movie:" + specialKind + ":thetvdb:" + strings.ToLower(strings.TrimSpace(m.TheTVDBID))
 		}
 		return "thetvdb:" + strings.ToLower(strings.TrimSpace(m.TheTVDBID))
 	}

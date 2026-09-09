@@ -71,6 +71,73 @@ func TestGroupEpisodeVersionsForDisplayMergesAndKeepsEpisodeOrder(t *testing.T) 
 	}
 }
 
+func TestGroupMediaVersionsSeparatesAnimeSpecialKindsAndNumbers(t *testing.T) {
+	rows := []model.Media{
+		{
+			Base:      model.Base{ID: "movie"},
+			LibraryID: "anime",
+			Title:     "摇曳露营△",
+			Path:      "/media/动漫/摇曳露营△/摇曳露营△ 剧场版 (2022)/movie.strm",
+			TMDbID:    76075,
+		},
+		{
+			Base:      model.Base{ID: "ova-1"},
+			LibraryID: "anime",
+			Title:     "摇曳露营△",
+			Path:      "/media/动漫/摇曳露营△/OVA/Yuru Camp OVA01.strm",
+			TMDbID:    76075,
+		},
+		{
+			Base:      model.Base{ID: "ova-2"},
+			LibraryID: "anime",
+			Title:     "摇曳露营△",
+			Path:      "/media/动漫/摇曳露营△/OVA/Yuru Camp OVA02.strm",
+			TMDbID:    76075,
+		},
+		{
+			Base:      model.Base{ID: "oad-1"},
+			LibraryID: "anime",
+			Title:     "摇曳露营△",
+			Path:      "/media/动漫/摇曳露营△/OAD/Yuru Camp OAD01.strm",
+			TMDbID:    76075,
+		},
+	}
+
+	grouped := groupMediaVersions(rows)
+	if len(grouped) != 4 {
+		t.Fatalf("grouped len = %d, want theatrical, OVA01, OVA02 and OAD01 separate: %#v", len(grouped), grouped)
+	}
+	for _, item := range grouped {
+		if len(item.Versions) > 1 {
+			t.Fatalf("unrelated anime extras were merged as versions: %#v", item.Versions)
+		}
+	}
+}
+
+func TestGroupMediaVersionsMergesSameNumberedOVAEncodes(t *testing.T) {
+	rows := []model.Media{
+		{
+			Base:      model.Base{ID: "ova-1-hd"},
+			LibraryID: "anime",
+			Path:      "/media/动漫/示例/OVA/Show OVA01 1080p.mkv",
+			TMDbID:    123,
+			SizeBytes: 100,
+		},
+		{
+			Base:      model.Base{ID: "ova-1-uhd"},
+			LibraryID: "anime",
+			Path:      "/media/动漫/示例/OVA/Show OVA01 2160p.mkv",
+			TMDbID:    123,
+			SizeBytes: 200,
+		},
+	}
+
+	grouped := groupMediaVersions(rows)
+	if len(grouped) != 1 || len(grouped[0].Versions) != 2 {
+		t.Fatalf("same numbered OVA encodes should be versions: %#v", grouped)
+	}
+}
+
 func TestGroupMediaVersionsMergesMovieEncodingVariants(t *testing.T) {
 	hd := model.Media{
 		LibraryID:    "movies",

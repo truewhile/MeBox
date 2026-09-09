@@ -4,7 +4,21 @@ import { Play, Search } from 'lucide-react'
 import { imageURL } from '../api/client'
 import { ExternalPlayerButton } from '../components/ExternalPlayerButton'
 import type { Media } from '../types'
-import { isTheatricalFeature, seriesTitleFromPath, THEATRICAL_SEASON } from '../utils/groupSeries'
+import {
+  BONUS_SEASON,
+  EXTRA_SEASON,
+  isTheatricalFeature,
+  NCED_SEASON,
+  NCOP_SEASON,
+  OAD_SEASON,
+  OMAKE_SEASON,
+  ONA_SEASON,
+  OVA_SEASON,
+  OVD_SEASON,
+  PICTURE_DRAMA_SEASON,
+  seriesTitleFromPath,
+  THEATRICAL_SEASON,
+} from '../utils/groupSeries'
 import { formatSize } from './libraryPageModel'
 
 type SeasonGroup = {
@@ -135,9 +149,21 @@ export function LibrarySeriesEpisodes({
 }
 
 function seasonLabel(season: number): string {
-  if (season === 0) return '特别篇'
-  if (season === THEATRICAL_SEASON) return '剧场版'
-  return `第 ${season} 季`
+  switch (season) {
+    case 0: return '特别篇'
+    case THEATRICAL_SEASON: return '剧场版'
+    case OVA_SEASON: return 'OVA'
+    case OAD_SEASON: return 'OAD'
+    case OVD_SEASON: return 'OVD'
+    case ONA_SEASON: return 'ONA'
+    case EXTRA_SEASON: return 'Extra'
+    case BONUS_SEASON: return 'Bonus'
+    case OMAKE_SEASON: return 'Omake'
+    case PICTURE_DRAMA_SEASON: return 'Picture Drama'
+    case NCOP_SEASON: return 'NCOP'
+    case NCED_SEASON: return 'NCED'
+    default: return `第 ${season} 季`
+  }
 }
 
 function episodeDisplayTitle(ep: Media, siblings: Media[]): string {

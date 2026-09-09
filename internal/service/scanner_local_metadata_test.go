@@ -69,6 +69,49 @@ func TestScanLibraryUsesLocalMetadata(t *testing.T) {
 	}
 }
 
+func TestScanAnimeTheatricalFolderUsesMovieNFO(t *testing.T) {
+	root := t.TempDir()
+	showDir := filepath.Join(root, "摇曳露营△ (2018)")
+	movieDir := filepath.Join(showDir, "摇曳露营△ 剧场版 (2022)")
+	if err := os.MkdirAll(movieDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(showDir, "tvshow.nfo"), []byte(
+		`<tvshow><title>错误的剧集标题</title><tmdbid>76075</tmdbid><year>2018</year></tvshow>`,
+	), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mediaPath := filepath.Join(movieDir, "Eiga.Yurukyan.2022.Bluray.mkv")
+	if err := os.WriteFile(mediaPath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nfoPath(mediaPath), []byte(
+		`<movie><title>摇曳露营△ 剧场版</title><tmdbid>566466</tmdbid><year>2022</year></movie>`,
+	), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db := newServiceTestDB(t, &model.Library{}, &model.Media{}, &model.Setting{})
+	repos := repository.New(db)
+	lib := model.Library{Name: "动漫", Path: root, Type: "anime", Enabled: true}
+	if err := repos.Library.Create(t.Context(), &lib); err != nil {
+		t.Fatal(err)
+	}
+
+	scanner := NewScannerService(&config.Config{}, zap.NewNop(), repos, NewHub(zap.NewNop()), nil, nil)
+	if _, err := scanner.ScanLibrary(t.Context(), lib.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var media model.Media
+	if err := db.First(&media, "path = ?", mediaPath).Error; err != nil {
+		t.Fatal(err)
+	}
+	if media.Title != "摇曳露营△ 剧场版" || media.TMDbID != 566466 || media.Year != 2022 {
+		t.Fatalf("theatrical movie metadata = title %q tmdb %d year %d", media.Title, media.TMDbID, media.Year)
+	}
+}
+
 func TestScanLibraryDoesNotMarkArtworkOnlyAsMatched(t *testing.T) {
 	root := t.TempDir()
 	mediaPath := filepath.Join(root, "SSIS-001-CD1.mp4")

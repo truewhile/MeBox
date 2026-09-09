@@ -120,8 +120,8 @@ const (
 )
 
 var (
-	embySeasonDirRE    = regexp.MustCompile(`(?i)^(season[\s._-]*\d+|s\d+|specials?|sp|ova|oad|extra|extras|第\s*[0-9一二三四五六七八九十百零两]+\s*季|特别篇|特別篇|番外|特典)$`)
-	embySeasonSuffixRE = regexp.MustCompile(`(?i)(?:[\s._-]+(?:season[\s._-]*\d+|s\d+|第\s*[0-9一二三四五六七八九十百零两]+\s*季|specials?|sp|ova|oad|extra|extras|特别篇|特別篇|番外|特典)|\s*第\s*[0-9一二三四五六七八九十百零两]+\s*季)\s*$`)
+	embySeasonDirRE    = regexp.MustCompile(`(?i)^(season[\s._-]*\d+|s\d+|specials?|sp|ovas?|oads?|ovds?|onas?|extras?|bonus(?:es)?|omake|picture[\s._-]*drama|ncop|nced|第\s*[0-9一二三四五六七八九十百零两]+\s*季|特别篇|特別篇|番外|特典|画像特典)$`)
+	embySeasonSuffixRE = regexp.MustCompile(`(?i)(?:[\s._-]+(?:season[\s._-]*\d+|s\d+|第\s*[0-9一二三四五六七八九十百零两]+\s*季|specials?|sp|ovas?|oads?|ovds?|onas?|extras?|bonus(?:es)?|omake|picture[\s._-]*drama|ncop|nced|特别篇|特別篇|番外|特典|画像特典)|\s*第\s*[0-9一二三四五六七八九十百零两]+\s*季)\s*$`)
 	embyYearSuffixRE   = regexp.MustCompile(`\s*[\(（\[]\d{4}[\)）\]]\s*$`)
 	embyEpisodeTitleRE = regexp.MustCompile(`(?i)\s*[-_ ]*s\d{1,2}e\d{1,3}.*$`)
 )

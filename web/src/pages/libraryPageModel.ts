@@ -15,7 +15,7 @@ export function seriesSourceRoot(episodes: Media[]): string {
   if (!firstPath) return ''
   const dir = dirname(firstPath)
   const base = basename(dir)
-  if (/^(?:s\d{1,2}|season[\s._-]*\d{1,2}|第\s*\d{1,2}\s*季|specials?|sp|ova|oad|extra|extras|特别篇|特別篇|番外|特典)$/i.test(base)) {
+  if (/^(?:s\d{1,2}|season[\s._-]*\d{1,2}|第\s*\d{1,2}\s*季|specials?|sp|ovas?|oads?|ovds?|onas?|extras?|bonus(?:es)?|omake|picture[\s._-]*drama|ncop|nced|特别篇|特別篇|番外|特典|画像特典)$/i.test(base)) {
     return dirname(dir)
   }
   return dir

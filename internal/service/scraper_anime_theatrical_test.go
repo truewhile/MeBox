@@ -77,6 +77,14 @@ func TestMediaLooksLikeTheatricalFeatureIgnoresStaleEpisodeIdentity(t *testing.T
 		t.Fatal("theatrical path should override stale persisted season/episode fields")
 	}
 
+	namedFolder := &model.Media{
+		Title: "Eiga Yurukyan 2022 Bluray",
+		Path:  `/media/anime/摇曳露营△ (2018)/摇曳露营△ 剧场版 (2022)/Eiga.Yurukyan.2022.Bluray.mkv`,
+	}
+	if !mediaLooksLikeTheatricalFeature(namedFolder) {
+		t.Fatal("a named theatrical folder with a year should be detected from the full path")
+	}
+
 	realEpisode := &model.Media{
 		Title:      "剧场版制作幕后",
 		Path:       `/media/anime/超人高校生们/Season 01/超人高校生们.S01E01.mkv`,

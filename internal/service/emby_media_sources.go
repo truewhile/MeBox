@@ -55,6 +55,17 @@ func (e *EmbyService) mediaVersionSiblings(ctx context.Context, m *model.Media) 
 	if err := q.Find(&rows).Error; err != nil || len(rows) == 0 {
 		return []model.Media{*m}
 	}
+	targetKey := e.mediaVersionKey(ctx, m)
+	filtered := rows[:0]
+	for i := range rows {
+		if e.mediaVersionKey(ctx, &rows[i]) == targetKey {
+			filtered = append(filtered, rows[i])
+		}
+	}
+	rows = filtered
+	if len(rows) == 0 {
+		return []model.Media{*m}
+	}
 	rows = e.collapseExactPathRows(rows)
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].ID == m.ID {
@@ -97,11 +108,28 @@ func (e *EmbyService) mediaVersionKey(ctx context.Context, m *model.Media) strin
 	if libraryGroup == "" {
 		libraryGroup = strings.TrimSpace(m.LibraryID)
 	}
+	kind := mediaSpecialKind(m.Path)
+	season, episode := m.SeasonNum, m.EpisodeNum
+	if kind != "" && kind != mediaSpecialTheatrical && episode <= 0 {
+		if parsedSeason, parsedEpisode := ParseEpisode(m.Path); parsedEpisode > 0 {
+			season, episode = parsedSeason, parsedEpisode
+		}
+	}
+	kindKey := ""
+	if kind != "" {
+		kindKey = "|kind:" + kind
+	}
+	if kind != "" && kind != mediaSpecialTheatrical && episode <= 0 {
+		if stemKey := mediaVersionStemGroupKey(*m, libraryGroup); stemKey != "" {
+			return stemKey + kindKey
+		}
+		return libraryGroup + "|special-item:" + kind + "|id:" + m.ID
+	}
 	if m.TMDbID > 0 {
-		return fmt.Sprintf("%s|tmdb:%d|s:%d|e:%d", libraryGroup, m.TMDbID, m.SeasonNum, m.EpisodeNum)
+		return fmt.Sprintf("%s|tmdb:%d|s:%d|e:%d%s", libraryGroup, m.TMDbID, season, episode, kindKey)
 	}
 	if m.BangumiID > 0 {
-		return fmt.Sprintf("%s|bangumi:%d|s:%d|e:%d", libraryGroup, m.BangumiID, m.SeasonNum, m.EpisodeNum)
+		return fmt.Sprintf("%s|bangumi:%d|s:%d|e:%d%s", libraryGroup, m.BangumiID, season, episode, kindKey)
 	}
 	title := strings.ToLower(strings.TrimSpace(m.Title))
 	if title == "" {
@@ -110,7 +138,7 @@ func (e *EmbyService) mediaVersionKey(ctx context.Context, m *model.Media) strin
 	if title == "" {
 		return ""
 	}
-	return fmt.Sprintf("%s|title:%s|y:%d|s:%d|e:%d", libraryGroup, title, m.Year, m.SeasonNum, m.EpisodeNum)
+	return fmt.Sprintf("%s|title:%s|y:%d|s:%d|e:%d%s", libraryGroup, title, m.Year, season, episode, kindKey)
 }
 
 func preferMediaVersion(candidate, current model.Media) bool {
