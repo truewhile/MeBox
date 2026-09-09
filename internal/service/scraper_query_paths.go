@@ -13,10 +13,10 @@ func mediaFolderTitle(mediaPath, libraryRoot string) string {
 		if base == "" || base == "." {
 			return ""
 		}
-		if isTechnicalMediaFolder(base) || strictSeasonFolderMatched(base) {
-			dir = parentSlashPath(dir)
-			continue
-		}
+			if isTechnicalMediaFolder(base) || strictSeasonFolderMatched(base) || isTheatricalFolder(base) {
+				dir = parentSlashPath(dir)
+				continue
+			}
 		if isMediaCollectionFolder(base) {
 			dir = parentSlashPath(dir)
 			continue
@@ -104,7 +104,7 @@ func parentSlashPath(value string) string {
 
 func seriesFolderTitle(mediaPath, libraryRoot string) string {
 	dir := parentSlashPath(mediaPath)
-	if strictSeasonFolderMatched(pathBaseSlash(dir)) {
+	if strictSeasonFolderMatched(pathBaseSlash(dir)) || isTheatricalFolder(pathBaseSlash(dir)) {
 		dir = parentSlashPath(dir)
 	}
 	if root := comparableLibraryRoot(libraryRoot); root != "" && sameSlashPath(dir, root) {
@@ -114,10 +114,21 @@ func seriesFolderTitle(mediaPath, libraryRoot string) string {
 	if base == "" || base == "." {
 		return ""
 	}
-	if isGenericMediaCategoryFolder(base) || isTechnicalMediaFolder(base) || strictSeasonFolderMatched(base) {
+	if isGenericMediaCategoryFolder(base) || isTechnicalMediaFolder(base) || strictSeasonFolderMatched(base) || isTheatricalFolder(base) {
 		return ""
 	}
 	return base
+}
+
+func isTheatricalFolder(name string) bool {
+	key := strings.ToLower(strings.TrimSpace(name))
+	key = strings.Trim(key, `\/`)
+	switch key {
+	case "剧场版", "劇場版", "动画电影", "動畫電影", "特别篇", "特別篇", "specials", "sp", "ova", "oad":
+		return true
+	default:
+		return false
+	}
 }
 
 func libraryRootTitle(libraryRoot string) string {

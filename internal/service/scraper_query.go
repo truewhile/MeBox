@@ -15,7 +15,40 @@ var (
 	episodeTitleQueryRE      = regexp.MustCompile(`^\s*第\s*[0-9一二三四五六七八九十百零两]+\s*[集期话話](?:\s*[上下])?\s*[:：].+`)
 	genericEpisodeWordsRE    = regexp.MustCompile(`^\s*第\s*[集期话話]\s*$`)
 	episodeReleaseTitleTagRE = regexp.MustCompile(`(?i)(?:^|[\s._-])s\d{1,2}e\d{1,3}(?:[\s._-]|$)`)
+	patTheatricalTitle       = regexp.MustCompile(`(?i)(?:剧场版|劇場版|动画电影|動畫電影|电影版|電影版|\bthe\s+movie\b|\bmovie\s*\d{1,2}\b)`)
+	patTheatricalFolder      = regexp.MustCompile(`(?i)[\\/](?:剧场版|劇場版|動畫電影|动画电影)[\\/]`)
+	theatricalNoiseRE        = regexp.MustCompile(`(?i)(?:剧场版|劇場版)\s*(?:第?\s*\d{1,3}\s*[部篇]?)?|电影版|電影版|动画电影|動畫電影`)
 )
+
+func theatricalTitleVariants(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if !theatricalNoiseRE.MatchString(raw) {
+		return []string{raw}
+	}
+	stripped := theatricalNoiseRE.ReplaceAllString(raw, " ")
+	stripped = strings.Join(strings.Fields(stripped), " ")
+	if stripped != "" && !strings.EqualFold(stripped, raw) {
+		return []string{stripped, raw}
+	}
+	return []string{raw}
+}
+
+func mediaLooksLikeTheatricalFeature(m *model.Media) bool {
+	if m == nil {
+		return false
+	}
+	if m.SeasonNum > 0 || m.EpisodeNum > 0 {
+		return false
+	}
+	if season, ep := ParseEpisode(m.Path); season > 0 || ep > 0 {
+		return false
+	}
+	text := m.Title + " " + pathBaseSlash(m.Path)
+	return patTheatricalTitle.MatchString(text) || patTheatricalFolder.MatchString(m.Path)
+}
 
 func scrapeQueryCandidates(m *model.Media, lib *model.Library) []string {
 	return scrapeQueryCandidatesWithNormalizer(m, lib, func(raw string) (string, int) {
@@ -33,31 +66,59 @@ func scrapeQueryCandidatesWithNormalizer(m *model.Media, lib *model.Library, cle
 	seen := map[string]struct{}{}
 	var out []string
 	add := func(raw string) {
-		cleaned, _ := clean(raw)
-		if cleaned == "" {
-			cleaned = strings.TrimSpace(raw)
-		}
-		for _, candidate := range titleCandidates(cleaned) {
-			if unsafeAutomaticEpisodeQuery(candidate) {
-				continue
+		for _, variant := range theatricalTitleVariants(raw) {
+			cleaned, _ := clean(variant)
+			if cleaned == "" {
+				cleaned = strings.TrimSpace(variant)
 			}
-			key := strings.ToLower(candidate)
-			if _, ok := seen[key]; ok || candidate == "" {
-				continue
+			for _, candidate := range titleCandidates(cleaned) {
+				if unsafeAutomaticEpisodeQuery(candidate) {
+					continue
+				}
+				key := strings.ToLower(candidate)
+				if _, ok := seen[key]; ok || candidate == "" {
+					continue
+				}
+				seen[key] = struct{}{}
+				out = append(out, candidate)
 			}
-			seen[key] = struct{}{}
-			out = append(out, candidate)
 		}
 	}
-	episodic := mediaIsEpisodic(m, lib)
-	if lib != nil && episodic {
-		add(seriesFolderTitle(m.Path, lib.Path))
+
+	isTheatrical := mediaLooksLikeTheatricalFeature(m)
+	if isTheatrical {
+		add(m.Title)
+		add(m.Path)
+		if lib != nil {
+			seriesTitle := seriesFolderTitle(m.Path, lib.Path)
+			if seriesTitle != "" {
+				baseName := pathBaseSlash(m.Path)
+				stem := mediaFileStem(baseName)
+				if stem == "" {
+					stem = strings.TrimSuffix(baseName, filepath.Ext(baseName))
+				}
+				cleanStem, _ := clean(stem)
+				if cleanStem == "" {
+					cleanStem = stem
+				}
+				if !strings.Contains(strings.ToLower(cleanStem), strings.ToLower(seriesTitle)) {
+					add(seriesTitle + " " + cleanStem)
+				}
+			}
+			add(mediaFolderTitle(m.Path, lib.Path))
+		}
+	} else {
+		episodic := mediaIsEpisodic(m, lib)
+		if lib != nil && episodic {
+			add(seriesFolderTitle(m.Path, lib.Path))
+		}
+		if lib != nil {
+			add(mediaFolderTitle(m.Path, lib.Path))
+		}
+		add(m.Title)
+		add(m.Path)
 	}
-	if lib != nil {
-		add(mediaFolderTitle(m.Path, lib.Path))
-	}
-	add(m.Title)
-	add(m.Path)
+
 	if len(out) == 0 {
 		base := pathBaseSlash(m.Path)
 		out = append(out, strings.TrimSuffix(base, filepath.Ext(base)))
@@ -106,6 +167,9 @@ func containsCJK(s string) bool {
 }
 
 func mediaIsEpisodic(m *model.Media, lib *model.Library) bool {
+	if m != nil && mediaLooksLikeTheatricalFeature(m) {
+		return false
+	}
 	if m != nil && (m.SeasonNum > 0 || m.EpisodeNum > 0) {
 		return true
 	}

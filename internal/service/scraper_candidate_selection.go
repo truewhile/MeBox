@@ -8,6 +8,27 @@ import (
 )
 
 func (s *ScraperService) lookupAutomaticTMDb(ctx context.Context, kind, query string, year int) *Match {
+	if match := s.lookupAutomaticTMDbPrimary(ctx, kind, query, year); match != nil {
+		return match
+	}
+	fallbackKind := ""
+	normalized := normalizeOrganizeMediaType(kind)
+	if normalized == "anime" {
+		if isTVMetadataKind(kind) {
+			fallbackKind = "movie"
+		} else {
+			fallbackKind = "tv"
+		}
+	}
+	if fallbackKind != "" {
+		if fbMatch := s.lookupAutomaticTMDbPrimary(ctx, fallbackKind, query, year); fbMatch != nil {
+			return fbMatch
+		}
+	}
+	return nil
+}
+
+func (s *ScraperService) lookupAutomaticTMDbPrimary(ctx context.Context, kind, query string, year int) *Match {
 	var (
 		candidates []*Match
 		err        error
@@ -175,13 +196,25 @@ func metadataMatchCompatibleWithType(expectedType string, match *Match) bool {
 		return true
 	}
 	switch expectedType {
-	case "tv", "anime", "variety":
+	case "tv", "variety":
 		return matchType == "tv" || matchType == "anime" || matchType == "variety"
+	case "anime":
+		return matchType == "anime" || matchType == "tv" || matchType == "movie" || matchType == "variety"
 	case "movie", "adult":
 		return matchType == "movie" || matchType == "adult"
 	default:
 		return expectedType == matchType
 	}
+}
+
+func metadataMatchCompatibleWithTheatrical(expectedType string, isTheatrical bool, match *Match) bool {
+	if isTheatrical &&
+		normalizeOrganizeMediaType(expectedType) == "movie" &&
+		match != nil &&
+		normalizeOrganizeMediaType(match.MediaType) == "anime" {
+		return true
+	}
+	return metadataMatchCompatibleWithType(expectedType, match)
 }
 
 func queryNeedsEnglishTMDbFallback(query string) bool {

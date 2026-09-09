@@ -22,7 +22,10 @@ func (s *ScraperService) lookup(ctx context.Context, lib *model.Library, media *
 	// was previously polluted into S01E20x. Do not let the dirty path override
 	// that caller-supplied media type; TV/anime libraries still force TV below.
 	explicitEpisode := media != nil && (media.SeasonNum > 0 || media.EpisodeNum > 0)
-	if (normalizeOrganizeMediaType(kind) != "movie" || explicitEpisode) && mediaIsEpisodic(media, lib) {
+	isTheatrical := mediaLooksLikeTheatricalFeature(media)
+	if isTheatrical {
+		kind = "movie"
+	} else if (normalizeOrganizeMediaType(kind) != "movie" || explicitEpisode) && mediaIsEpisodic(media, lib) {
 		kind = "tv"
 	}
 	if s.tmdb != nil && s.tmdb.Enabled() {
@@ -30,9 +33,15 @@ func (s *ScraperService) lookup(ctx context.Context, lib *model.Library, media *
 			match.Provider = "tmdb"
 			return match
 		}
+		if isTheatrical {
+			if match := s.lookupAutomaticTMDb(ctx, "tv", query, year); match != nil {
+				match.Provider = "tmdb"
+				return match
+			}
+		}
 	}
 	if s.douban != nil && s.douban.Enabled() {
-		if m, err := s.douban.SearchMatch(ctx, query); err == nil && m != nil && metadataMatchCompatibleWithType(kind, m) {
+		if m, err := s.douban.SearchMatch(ctx, query); err == nil && m != nil && metadataMatchCompatibleWithTheatrical(kind, isTheatrical, m) {
 			m.Provider = "douban"
 			return m
 		} else if err != nil {
@@ -40,7 +49,7 @@ func (s *ScraperService) lookup(ctx context.Context, lib *model.Library, media *
 		}
 	}
 	if s.bangumi != nil && s.bangumi.Enabled() {
-		if m, err := s.bangumi.Search(ctx, query); err == nil && m != nil && metadataMatchCompatibleWithType(kind, m) {
+		if m, err := s.bangumi.Search(ctx, query); err == nil && m != nil && metadataMatchCompatibleWithTheatrical(kind, isTheatrical, m) {
 			m.Provider = "bangumi"
 			return m
 		} else if err != nil {
