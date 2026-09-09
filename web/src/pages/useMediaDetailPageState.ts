@@ -8,6 +8,7 @@ import { playbackAPI } from '../api/playback'
 import { confirmActionResult } from '../components/confirmAction'
 import { useEpisodeArtworkPreference } from '../hooks/useEpisodeArtworkPreference'
 import type { Media } from '../types'
+import { seasonSortOrder } from '../utils/groupSeries'
 import { mediaLibraryBackTarget } from './MediaDetailPageModel'
 
 interface MediaDetailPageStateParams {
@@ -77,7 +78,7 @@ export function useMediaDetailPageState({ id, navigate }: MediaDetailPageStatePa
       list.sort((a, b) => (a.episode_num || 0) - (b.episode_num || 0))
     }
     return Array.from(seasons.entries())
-      .sort(([a], [b]) => a - b)
+      .sort(([a], [b]) => seasonSortOrder(a) - seasonSortOrder(b))
       .map(([season, list]) => ({ season, episodes: list }))
   }, [episodes])
 

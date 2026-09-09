@@ -3,7 +3,7 @@ import { Check, Film, ListVideo, Play, Search, X } from 'lucide-react'
 
 import { imageURL } from '../api/client'
 import type { Media } from '../types'
-import { seriesTitleFromPath } from '../utils/groupSeries'
+import { seasonLabel, seasonSortOrder, seriesTitleFromPath } from '../utils/groupSeries'
 
 export type SeasonGroup = {
   season: number
@@ -42,7 +42,7 @@ export function PlayerPlaylistPanel({
       list.sort((a, b) => (a.episode_num || 0) - (b.episode_num || 0))
     }
     return Array.from(seasonsMap.entries())
-      .sort(([a], [b]) => a - b)
+      .sort(([a], [b]) => seasonSortOrder(a) - seasonSortOrder(b))
       .map(([season, list]) => ({ season, episodes: list }))
   }, [episodes])
 
@@ -128,7 +128,7 @@ export function PlayerPlaylistPanel({
                     : 'bg-white/5 text-white/70 hover:bg-white/10 hover:text-white'
                 }`}
               >
-                <span>{season === 0 ? '特别篇' : `第 ${season} 季`}</span>
+                <span>{seasonLabel(season)}</span>
                 <span className="text-[10px] opacity-75">({sesEps.length})</span>
                 {isPlayingThisSeason && !isSelected && (
                   <span className="h-1.5 w-1.5 rounded-full bg-rose-400" />

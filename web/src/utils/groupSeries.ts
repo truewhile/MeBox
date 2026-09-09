@@ -151,6 +151,49 @@ export function specialSectionForMedia(media: Media): number | null {
   return null
 }
 
+/**
+ * 季按钮显示顺序:第一季、第二季 … 第 XX 季 → 特别篇 → 剧场版 → OVA → OAD → 其余特典。
+ *
+ * 正片季(季号 > 0)按季号升序排最前;特殊分区(0 / 负数季)按固定优先级排在后面。
+ * 各季分组页(剧集库 / 详情页 / 播放器选集)共用这一顺序,避免三处各排各的。
+ */
+export function seasonSortOrder(season: number): number {
+  if (season > 0) return season
+  switch (season) {
+    case 0: return 1000 // 特别篇紧随正片
+    case THEATRICAL_SEASON: return 1001 // 剧场版
+    case OVA_SEASON: return 1002
+    case OAD_SEASON: return 1003
+    case OVD_SEASON: return 1004
+    case ONA_SEASON: return 1005
+    case EXTRA_SEASON: return 1006
+    case BONUS_SEASON: return 1007
+    case OMAKE_SEASON: return 1008
+    case PICTURE_DRAMA_SEASON: return 1009
+    case NCOP_SEASON: return 1010
+    case NCED_SEASON: return 1011
+    default: return 2000 // 未知季兜底,排最后
+  }
+}
+
+export function seasonLabel(season: number): string {
+  switch (season) {
+    case 0: return '特别篇'
+    case THEATRICAL_SEASON: return '剧场版'
+    case OVA_SEASON: return 'OVA'
+    case OAD_SEASON: return 'OAD'
+    case OVD_SEASON: return 'OVD'
+    case ONA_SEASON: return 'ONA'
+    case EXTRA_SEASON: return 'Extra'
+    case BONUS_SEASON: return 'Bonus'
+    case OMAKE_SEASON: return 'Omake'
+    case PICTURE_DRAMA_SEASON: return 'Picture Drama'
+    case NCOP_SEASON: return 'NCOP'
+    case NCED_SEASON: return 'NCED'
+    default: return `第 ${season} 季`
+  }
+}
+
 export function isSeriesCard(card: SeriesCard): boolean {
   return (
     card.count > 1 ||
