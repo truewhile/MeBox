@@ -44,8 +44,8 @@ export function ManualScrapeDialog({
   if (!open || !media) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-900/40 px-4 py-8 backdrop-blur-sm">
-      <div className="flex max-h-[86vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-sand-200 bg-white shadow-2xl">
+    <div className="fixed inset-0 z-50 flex min-w-0 items-center justify-center overflow-hidden bg-ink-900/40 px-4 py-8 backdrop-blur-sm">
+      <div className="flex min-w-0 max-h-[86vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-sand-200 bg-white shadow-2xl">
         <ManualScrapeDialogHeader title={scopeLabel || media.title} targetCount={dialog.targetIds.length} onClose={onClose} />
 
         <ManualScrapeSearchControls
@@ -60,7 +60,7 @@ export function ManualScrapeDialog({
           onEpisodeArtworkChange={dialog.setIncludeEpisodeArtwork}
         />
 
-        <div className="flex-1 overflow-y-auto p-5">
+        <div className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-5">
           <ManualScrapeCandidateList items={dialog.items} applyingKey={dialog.applyingKey} onApply={dialog.apply} />
         </div>
       </div>

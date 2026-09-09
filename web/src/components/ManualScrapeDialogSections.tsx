@@ -20,14 +20,14 @@ export function ManualScrapeDialogHeader({
   onClose: () => void
 }) {
   return (
-    <div className="flex items-start justify-between gap-4 border-b border-sand-200 px-5 py-4">
-      <div>
+    <div className="flex min-w-0 items-start justify-between gap-4 border-b border-sand-200 px-5 py-4">
+      <div className="min-w-0">
         <h2 className="font-display text-xl font-bold text-ink-600">手动搜索刮削</h2>
-        <p className="mt-1 text-xs text-sand-500">
+        <p className="mt-1 truncate text-xs text-sand-500">
           {title} · {targetCount > 1 ? `将应用到 ${targetCount} 个媒体` : '单个媒体'}
         </p>
       </div>
-      <button onClick={onClose} className="btn-ghost h-9 w-9 p-0" aria-label="关闭">
+      <button onClick={onClose} className="btn-ghost h-9 w-9 shrink-0 p-0" aria-label="关闭">
         <X size={16} />
       </button>
     </div>
@@ -58,7 +58,7 @@ export function ManualScrapeSearchControls({
   onEpisodeArtworkChange,
 }: ManualScrapeSearchControlsProps) {
   return (
-    <div className="grid gap-4 border-b border-sand-200 bg-sand-50/40 p-5">
+    <div className="grid min-w-0 gap-4 border-b border-sand-200 bg-sand-50/40 p-5">
       <ManualScrapeQueryBar
         query={query}
         searching={searching}
@@ -170,7 +170,7 @@ export function ManualScrapeCandidateList({
   }
 
   return (
-    <div className="grid gap-3">
+    <div className="grid min-w-0 gap-3">
       {items.map((item) => {
         const key = candidateKey(item)
         return (
@@ -199,7 +199,7 @@ function ManualScrapeCandidateRow({
   onApply: (item: ManualScrapeCandidate) => void
 }) {
   return (
-    <div className="flex flex-col gap-4 rounded-xl border border-sand-200 bg-white p-3 shadow-sm sm:flex-row">
+    <div className="flex min-w-0 max-w-full flex-col gap-4 overflow-hidden rounded-xl border border-sand-200 bg-white p-3 shadow-sm sm:flex-row">
       <div className="h-28 w-20 shrink-0 overflow-hidden rounded-lg bg-sand-100">
         {item.poster_url ? (
           <img src={imageURL(item.poster_url)} alt={item.title} loading="lazy" decoding="async" className="h-full w-full object-cover" referrerPolicy="no-referrer" />
@@ -208,14 +208,14 @@ function ManualScrapeCandidateRow({
         )}
       </div>
       <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <h3 className="truncate font-semibold text-ink-600">{item.title}</h3>
-          <span className="rounded-full bg-brand-50 px-2 py-0.5 text-[11px] font-bold uppercase text-brand-700">{item.source}</span>
-          {item.nsfw ? <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-bold text-rose-600">成人</span> : null}
-          {item.year ? <span className="text-xs text-sand-500">{item.year}</span> : null}
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <h3 className="min-w-0 max-w-full flex-1 truncate font-semibold text-ink-600">{item.title}</h3>
+          <span className="shrink-0 rounded-full bg-brand-50 px-2 py-0.5 text-[11px] font-bold uppercase text-brand-700">{item.source}</span>
+          {item.nsfw ? <span className="shrink-0 rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-bold text-rose-600">成人</span> : null}
+          {item.year ? <span className="shrink-0 text-xs text-sand-500">{item.year}</span> : null}
         </div>
         <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-ink-50">{item.overview || '暂无简介'}</p>
-        <p className="mt-2 text-[11px] font-semibold text-sand-500">{candidateIDText(item)}</p>
+        <p className="mt-2 break-words text-[11px] font-semibold text-sand-500">{candidateIDText(item)}</p>
       </div>
       <button onClick={() => onApply(item)} disabled={disabled} className="btn-outline h-10 w-full shrink-0 justify-center px-3 text-xs sm:w-auto sm:self-center">
         {applying ? <LoaderCircle size={14} className="animate-spin" /> : <Check size={14} />}

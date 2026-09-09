@@ -46,25 +46,26 @@ type strmSyncState struct {
 	rec      *model.StrmSyncRecord
 	syncType string
 
-	mu                  sync.Mutex
-	processed           int                         // 已处理文件计数（用于定期落库进度）
-	lastProgressFlush   time.Time                   // 上次进度落库时间
-	seenVideo           map[string]bool             // "v:"+strm 去扩展名相对路径 → 远端存在该视频（供 prune）
-	seenMeta            map[string]bool             // "m:"+相对路径 → 远端存在该元数据
-	remoteMeta          map[string][]remoteMetaItem // "m:"+相对路径 → 远端元数据副本列表（多副本聚合，支持择优比对与冗余清理）
-	seenMetaTarget      map[string]cloud.FileEntry
-	seenVideoTarget     map[string]cloud.FileEntry
+	mu                sync.Mutex
+	processed         int                         // 已处理文件计数（用于定期落库进度）
+	lastProgressFlush time.Time                   // 上次进度落库时间
+	seenVideo         map[string]bool             // "v:"+strm 去扩展名相对路径 → 远端存在该视频（供 prune）
+	seenDir           map[string]bool             // 清洗后的目录相对路径 → 远端存在该目录（供整目录 prune）
+	seenMeta          map[string]bool             // "m:"+相对路径 → 远端存在该元数据
+	remoteMeta        map[string][]remoteMetaItem // "m:"+相对路径 → 远端元数据副本列表（多副本聚合，支持择优比对与冗余清理）
+	seenMetaTarget    map[string]cloud.FileEntry
+	seenVideoTarget   map[string]cloud.FileEntry
 	// remoteVideos：prefer 模式下同名（去扩展名）视频候选列表，walk 结束后择优写盘
-	remoteVideos map[string][]remoteVideoCandidate
+	remoteVideos        map[string][]remoteVideoCandidate
 	activeDownloadPaths map[string]bool // 本地已在排队/进行的下载任务路径（内存去重）
 	activeUploadPaths   map[string]bool // 本地已在排队/进行的上传任务路径（内存去重）
 	// recentDoneUploadSizes：近期已成功上传的 local_path → size，缩短「done 但列表未到」窗口内的重复入队
 	recentDoneUploadSizes map[string]int64
 	pendingDownloads      []*model.StrmDownloadTask
 	pendingUploads        []*model.StrmUploadTask
-	dirCache            sync.Map          // dirID (string) -> relativePath (string)
-	dirPathToID         map[string]string // relativePath (string) -> dirID（115 上传父目录寻址用，walk 后构建）
-	dirCacheDirty       map[string]string // 待批量落库的目录缓存（dirID → 相对路径），避免逐目录单条 upsert
+	dirCache              sync.Map          // dirID (string) -> relativePath (string)
+	dirPathToID           map[string]string // relativePath (string) -> dirID（115 上传父目录寻址用，walk 后构建）
+	dirCacheDirty         map[string]string // 待批量落库的目录缓存（dirID → 相对路径），避免逐目录单条 upsert
 
 	scanIncomplete atomic.Bool // 远端目录树/文件列表本次扫描不完整 → 禁止增量 prune 误删本地文件
 }
@@ -281,6 +282,7 @@ func (s *StrmService) runSync(ctx context.Context, p *model.StrmSyncPath, rec *m
 		rec:             rec,
 		syncType:        rec.SyncType,
 		seenVideo:       map[string]bool{},
+		seenDir:         map[string]bool{"": true},
 		seenMeta:        map[string]bool{},
 		remoteMeta:      map[string][]remoteMetaItem{},
 		seenMetaTarget:  map[string]cloud.FileEntry{},
@@ -535,36 +537,38 @@ func (st *strmSyncState) walkRemote() error {
 						if task.rel != "" {
 							rel = task.rel + "/" + cleanName
 						}
-							if entry.IsDir {
-								st.dirCache.Store(entry.ID, rel)
-								st.deferDirCacheSave(entry.ID, rel)
-								push(dirTask{id: entry.ID, rel: rel})
-							} else {
-								st.processRemoteFile(entry, rel)
-							}
+						if entry.IsDir {
+							st.markSeenDir(rel)
+							st.dirCache.Store(entry.ID, rel)
+							st.deferDirCacheSave(entry.ID, rel)
+							push(dirTask{id: entry.ID, rel: rel})
+						} else {
+							st.processRemoteFile(entry, rel)
 						}
-						walkMu.Lock()
-						pending--
-						if pending == 0 {
-							walkCond.Broadcast()
-						}
-						walkMu.Unlock()
 					}
-				}); err != nil {
-					cancel()
+					walkMu.Lock()
+					pending--
+					if pending == 0 {
+						walkCond.Broadcast()
+					}
+					walkMu.Unlock()
 				}
-			}()
-		}
-		wg.Wait()
-		st.flushDirCacheSave()
-		if firstErr != nil {
-			return firstErr
-		}
+			}); err != nil {
+				cancel()
+			}
+		}()
+	}
+	wg.Wait()
+	st.flushDirCacheSave()
+	if firstErr != nil {
+		return firstErr
+	}
 	return ctx.Err()
 }
 
 // processRemoteFile 分类处理远端文件：视频生成 STRM，元数据入下载队列。
 func (st *strmSyncState) processRemoteFile(entry cloud.FileEntry, rel string) {
+	st.markSeenDir(filepath.ToSlash(filepath.Dir(rel)))
 	fileName := entry.Name
 	if st.isExcluded(fileName) {
 		return
@@ -698,16 +702,16 @@ func (st *strmSyncState) walk115Flat(open115 *cloud115.OpenClient) error {
 				if pathCounts[item.Path] > 1 {
 					continue
 				}
-					st.dirCache.Store(item.DirID, cleanDirRel(item.Path))
-				}
+				st.dirCache.Store(item.DirID, cleanDirRel(item.Path))
 			}
 		}
+	}
 
-		// 2. 自适应分治拉取文件列表（单目录超 9500 时自动对子目录并发分治扁平化）
-		allFiles, err := st.fetch115FilesAdaptive(ctx, open115, rootCID)
-		if err != nil {
-			return err
-		}
+	// 2. 自适应分治拉取文件列表（单目录超 9500 时自动对子目录并发分治扁平化）
+	allFiles, err := st.fetch115FilesAdaptive(ctx, open115, rootCID)
+	if err != nil {
+		return err
+	}
 
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -1031,10 +1035,10 @@ func list115DirDirect(ctx context.Context, open115 *cloud115.OpenClient, cid str
 
 // fetch115FilesAdaptive 采用自适应分治策略抓取 115 目录树下的全部文件：
 // 115 开放平台扁平搜索对 offset+limit 有 10000 的最大深度限制。
-// - 若子树文件总数 < 9500，直接使用全速扁平分页批量拉取；
-// - 若子树文件总数 >= 9500（大库或超大分类目录），自动分治：仅单层列出该目录的直属子项（cur=1），
-//   直属纯文件直接收集，直属子目录则派发为独立的子树任务继续递归探测与拉取；
-// - 若超大单目录下无子目录或层级过深（>10层），安全回退到 errFallbackToWalkRemote。
+//   - 若子树文件总数 < 9500，直接使用全速扁平分页批量拉取；
+//   - 若子树文件总数 >= 9500（大库或超大分类目录），自动分治：仅单层列出该目录的直属子项（cur=1），
+//     直属纯文件直接收集，直属子目录则派发为独立的子树任务继续递归探测与拉取；
+//   - 若超大单目录下无子目录或层级过深（>10层），安全回退到 errFallbackToWalkRemote。
 func (st *strmSyncState) fetch115FilesAdaptive(ctx context.Context, open115 *cloud115.OpenClient, rootCID string) ([]cloud115.RemoteFile, error) {
 	var (
 		allFiles []cloud115.RemoteFile
@@ -1637,6 +1641,10 @@ func (st *strmSyncState) walkLocalSource() error {
 		default:
 		}
 		if d.IsDir() {
+			rel, relErr := filepath.Rel(srcRoot, path)
+			if relErr == nil {
+				st.markSeenDir(filepath.ToSlash(rel))
+			}
 			return nil
 		}
 		rel, err := filepath.Rel(srcRoot, path)
@@ -1898,8 +1906,104 @@ func (st *strmSyncState) taskExists(kind, syncPathID, localPath string) bool {
 	return count > 0
 }
 
-// pruneLocal 清理本地多余 .strm（远端已不存在的视频），可选删除空目录。
-// 元数据文件（nfo/图片/字幕等）一律保留：本地刮削结果不因网盘端缺失而被删除。
+// markSeenDir 记录远端存在的目录及其全部祖先目录。
+func (st *strmSyncState) markSeenDir(rel string) {
+	rel = strings.Trim(filepath.ToSlash(rel), "/")
+	if rel == "." {
+		rel = ""
+	}
+	st.mu.Lock()
+	if st.seenDir == nil {
+		st.seenDir = map[string]bool{"": true}
+	}
+	for {
+		st.seenDir[rel] = true
+		if rel == "" {
+			break
+		}
+		if idx := strings.LastIndexByte(rel, '/'); idx >= 0 {
+			rel = rel[:idx]
+		} else {
+			rel = ""
+		}
+	}
+	st.mu.Unlock()
+}
+
+// refreshUnseen115Dirs 补查本地存在、但 115 扁平文件列表未覆盖的目录。
+// 扁平接口不返回空目录；逐层补查这些候选目录可以避免把远端仍存在的空目录误删。
+func (st *strmSyncState) refreshUnseen115Dirs(localRoot string, dirs []string) error {
+	if st.p.Provider != model.StrmProvider115 || st.provider == nil {
+		return nil
+	}
+	dirIDs := map[string]string{"": strings.TrimSpace(st.p.RemotePath)}
+	if dirIDs[""] == "" {
+		dirIDs[""] = "0"
+	}
+	st.dirCache.Range(func(key, value any) bool {
+		id, idOK := key.(string)
+		rel, relOK := value.(string)
+		if idOK && relOK && id != "" {
+			dirIDs[cleanDirRel(rel)] = id
+		}
+		return true
+	})
+	liveIDs := map[string]string{"": dirIDs[""]}
+	listed := map[string]bool{}
+
+	sort.Strings(dirs)
+	for _, dir := range dirs {
+		rel, err := filepath.Rel(localRoot, dir)
+		if err != nil {
+			continue
+		}
+		rel = cleanDirRel(filepath.ToSlash(rel))
+		st.mu.Lock()
+		seen := st.seenDir[rel]
+		st.mu.Unlock()
+		if seen {
+			if id := dirIDs[rel]; id != "" {
+				liveIDs[rel] = id
+			}
+			continue
+		}
+
+		parentRel := ""
+		if idx := strings.LastIndexByte(rel, '/'); idx >= 0 {
+			parentRel = rel[:idx]
+		}
+		parentID := liveIDs[parentRel]
+		if parentID == "" {
+			continue // 父目录已确认不存在，子目录也必然是本地孤儿
+		}
+		if listed[parentRel] {
+			continue
+		}
+		entries, err := st.provider.List(st.ctx, parentID)
+		if err != nil {
+			return fmt.Errorf("核对 115 远端目录 %s 失败：%w", parentRel, err)
+		}
+		listed[parentRel] = true
+		for _, entry := range entries {
+			if !entry.IsDir {
+				continue
+			}
+			childRel := cleanEntryName(entry.Name, true)
+			if parentRel != "" {
+				childRel = parentRel + "/" + childRel
+			}
+			st.markSeenDir(childRel)
+			liveIDs[childRel] = entry.ID
+			dirIDs[childRel] = entry.ID
+		}
+	}
+	return nil
+}
+
+// pruneLocal 清理本地远端已不存在的内容：
+//   - 整个目录在远端不存在时，递归删除该本地目录（包括元数据）；
+//   - 目录仍存在但视频已删除时，仅删除对应的 .strm，保留本地元数据；
+//   - DeleteDir 开启时，最后再清理其余空目录。
 func (st *strmSyncState) pruneLocal() error {
 	// 增量同步保护：本次远端扫描不完整（目录详情解析失败 / 文件父路径降级）时，
 	// seenVideo 覆盖不全，按"远端不存在"清理会误删刚下载或已存在的本地 .strm，
@@ -1911,6 +2015,7 @@ func (st *strmSyncState) pruneLocal() error {
 	}
 	localRoot := filepath.Clean(st.p.LocalPath)
 	var dirs []string
+	var strmFiles []string
 	err := filepath.WalkDir(localRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -1933,13 +2038,74 @@ func (st *strmSyncState) pruneLocal() error {
 		}
 		rel = filepath.ToSlash(rel)
 		ext := strings.ToLower(filepath.Ext(rel))
-		remove := false
 		if ext == ".strm" {
-			relSansExt := rel[:len(rel)-len(ext)]
+			strmFiles = append(strmFiles, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if err := st.refreshUnseen115Dirs(localRoot, dirs); err != nil {
+		return err
+	}
+
+	// 先从浅到深找出最上层孤儿目录；父目录已判定为孤儿时无需重复处理子目录。
+	sort.Strings(dirs)
+	orphanRoots := make([]string, 0)
+	for _, dir := range dirs {
+		rel, relErr := filepath.Rel(localRoot, dir)
+		if relErr != nil {
+			continue
+		}
+		rel = filepath.ToSlash(rel)
+		st.mu.Lock()
+		existsRemotely := st.seenDir[rel]
+		st.mu.Unlock()
+		if existsRemotely {
+			continue
+		}
+		underOrphan := false
+		for _, root := range orphanRoots {
+			childRel, childErr := filepath.Rel(root, dir)
+			if childErr == nil && childRel != ".." && !strings.HasPrefix(childRel, ".."+string(filepath.Separator)) {
+				underOrphan = true
+				break
+			}
+		}
+		if !underOrphan {
+			orphanRoots = append(orphanRoots, dir)
+		}
+	}
+	for _, dir := range orphanRoots {
+		var fileCount int64
+		_ = filepath.WalkDir(dir, func(_ string, d os.DirEntry, walkErr error) error {
+			if walkErr == nil && !d.IsDir() {
+				fileCount++
+			}
+			return nil
+		})
+		if err := os.RemoveAll(dir); err == nil {
 			st.mu.Lock()
-			remove = !st.seenVideo["v:"+relSansExt]
+			st.rec.Pruned += fileCount
 			st.mu.Unlock()
 		}
+	}
+
+	// 对仍存在于远端的目录，按原规则清理失去远端视频来源的单个 .strm。
+	for _, path := range strmFiles {
+		if _, err := os.Stat(path); err != nil {
+			continue // 已随孤儿目录递归删除
+		}
+		rel, relErr := filepath.Rel(localRoot, path)
+		if relErr != nil {
+			continue
+		}
+		rel = filepath.ToSlash(rel)
+		relSansExt := strings.TrimSuffix(rel, filepath.Ext(rel))
+		st.mu.Lock()
+		remove := !st.seenVideo["v:"+relSansExt]
+		st.mu.Unlock()
 		if remove {
 			if err := os.Remove(path); err == nil {
 				st.mu.Lock()
@@ -1947,11 +2113,8 @@ func (st *strmSyncState) pruneLocal() error {
 				st.mu.Unlock()
 			}
 		}
-		return nil
-	})
-	if err != nil {
-		return err
 	}
+
 	if st.cfg.DeleteDir {
 		sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
 		for _, dir := range dirs {

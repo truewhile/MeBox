@@ -489,14 +489,12 @@ func taskNames(tasks []model.StrmUploadTask) []string {
 	return names
 }
 
-// TestPruneLocalKeepsLocalMeta 验证清理规则：远端已删除的视频 .strm 仍会被清理，
-// 但本地元数据一律保留（即使开启"下载元数据"且未开启"上传元数据"、网盘端没有
-// 该元数据，也不再删除本地刮削好的 nfo/图片/字幕）。
-func TestPruneLocalKeepsLocalMeta(t *testing.T) {
+// TestPruneLocalRemovesOrphanDirectory 验证远端目录不存在时，会递归删除整个本地
+// 目录，包括其中的 strm、NFO、图片等文件。
+func TestPruneLocalRemovesOrphanDirectory(t *testing.T) {
 	svc := testStrmService(t)
 	localDir := t.TempDir()
 
-	// 阿凡达.strm（对应视频已被网盘删除 → 应清理）+ 阿凡达.nfo（网盘没有 → 保留）
 	writeFile(t, filepath.Join(localDir, "电影", "阿凡达.strm"), "http://test.local:8096/x")
 	writeFile(t, filepath.Join(localDir, "电影", "阿凡达.nfo"), "<local scraped meta/>")
 	writeFile(t, filepath.Join(localDir, "电影", "poster.jpg"), "local-poster")
@@ -518,10 +516,40 @@ func TestPruneLocalKeepsLocalMeta(t *testing.T) {
 		rec:        &model.StrmSyncRecord{},
 		syncType:   model.StrmSyncTypeFull,
 		seenVideo:  map[string]bool{},
+		seenDir:    map[string]bool{"": true},
 		seenMeta:   map[string]bool{},
 		remoteMeta: map[string][]remoteMetaItem{},
 	}
-	// 本次远端扫描既没有看到视频，也没有看到任何元数据
+	if err := st.pruneLocal(); err != nil {
+		t.Fatalf("pruneLocal failed: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(localDir, "电影")); !os.IsNotExist(err) {
+		t.Fatalf("orphan directory should be removed recursively, stat err = %v", err)
+	}
+	if st.rec.Pruned != 3 {
+		t.Fatalf("expected 3 pruned files, got %d", st.rec.Pruned)
+	}
+}
+
+// TestPruneLocalKeepsMetaInExistingDirectory 验证目录仍在远端时，只清理失去
+// 视频来源的 strm，不删除本地刮削元数据。
+func TestPruneLocalKeepsMetaInExistingDirectory(t *testing.T) {
+	svc := testStrmService(t)
+	localDir := t.TempDir()
+	writeFile(t, filepath.Join(localDir, "电影", "阿凡达.strm"), "http://test.local:8096/x")
+	writeFile(t, filepath.Join(localDir, "电影", "阿凡达.nfo"), "<local scraped meta/>")
+
+	st := &strmSyncState{
+		s:         svc,
+		ctx:       context.Background(),
+		p:         &model.StrmSyncPath{Base: model.Base{ID: "prune-existing-dir"}, LocalPath: localDir},
+		cfg:       &strmPathConfig{},
+		rec:       &model.StrmSyncRecord{},
+		syncType:  model.StrmSyncTypeFull,
+		seenVideo: map[string]bool{},
+		seenDir:   map[string]bool{"": true, "电影": true},
+	}
 	if err := st.pruneLocal(); err != nil {
 		t.Fatalf("pruneLocal failed: %v", err)
 	}
@@ -530,10 +558,7 @@ func TestPruneLocalKeepsLocalMeta(t *testing.T) {
 		t.Fatalf("orphan .strm should be pruned, stat err = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(localDir, "电影", "阿凡达.nfo")); err != nil {
-		t.Fatalf("local meta must be kept even when missing on remote: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(localDir, "电影", "poster.jpg")); err != nil {
-		t.Fatalf("local poster must be kept even when missing on remote: %v", err)
+		t.Fatalf("local meta in an existing remote directory must be kept: %v", err)
 	}
 	if st.rec.Pruned != 1 {
 		t.Fatalf("expected 1 pruned (strm only), got %d", st.rec.Pruned)
