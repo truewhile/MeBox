@@ -6,11 +6,10 @@ import { imageURL } from '../api/client'
 import { ExternalPlayerButton } from '../components/ExternalPlayerButton'
 import { MediaFavouriteButton } from '../components/MediaFavouriteButton'
 import type { Media } from '../types'
-import { seriesTitle, type SeriesCard } from '../utils/groupSeries'
+import { isTheatricalFeature, seriesTitle, type SeriesCard } from '../utils/groupSeries'
 
 type LibrarySeriesDetailHeaderProps = {
   series: SeriesCard
-  visibleEpisodes: Media[]
   allEpisodes: Media[]
   playbackFrom: string
   isAdmin: boolean
@@ -31,7 +30,6 @@ type LibrarySeriesDetailHeaderProps = {
 
 export function LibrarySeriesDetailHeader({
   series,
-  visibleEpisodes,
   allEpisodes,
   playbackFrom,
   isAdmin,
@@ -49,7 +47,9 @@ export function LibrarySeriesDetailHeader({
   onOrganize,
   onDelete,
 }: LibrarySeriesDetailHeaderProps) {
-  const firstEpisode = firstPlayableEpisode(visibleEpisodes.length > 0 ? visibleEpisodes : allEpisodes)
+  const tvEpisodes = allEpisodes.filter((media) => !isTheatricalFeature(media))
+  const theatricalCount = allEpisodes.length - tvEpisodes.length
+  const firstEpisode = firstPlayableEpisode(tvEpisodes)
 
   return (
     <>
@@ -61,7 +61,9 @@ export function LibrarySeriesDetailHeader({
         <h2 className="truncate font-display text-2xl font-bold text-ink-600">
           {seriesTitle(series.rep)}
         </h2>
-        <span className="text-sm text-sand-500">共 {series.count} 集</span>
+        <span className="text-sm text-sand-500">
+          共 {tvEpisodes.length} 集{theatricalCount > 0 ? ` · ${theatricalCount} 部剧场版` : ''}
+        </span>
       </div>
 
       <div className="flex flex-col gap-6 sm:flex-row">
@@ -115,7 +117,7 @@ export function LibrarySeriesDetailHeader({
                 </button>
                 <button onClick={onManualScrape} disabled={!!seriesToolBusy} className="btn-outline px-3.5 py-2 text-xs gap-1.5">
                   <Search size={13} className="text-[#c9954a]" />
-                  <span>手动匹配整剧</span>
+                  <span>{theatricalCount > 0 ? '手动匹配 TV 版' : '手动匹配整剧'}</span>
                 </button>
                 <button onClick={onMetadataEdit} disabled={!!seriesToolBusy} className="btn-outline px-3.5 py-2 text-xs gap-1.5">
                   <Pencil size={13} />

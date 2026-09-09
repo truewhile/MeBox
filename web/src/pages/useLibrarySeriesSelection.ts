@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from 'react'
 
 import type { Media } from '../types'
-import { getSeriesKey, type SeriesCard } from '../utils/groupSeries'
+import { getSeriesKey, isTheatricalFeature, THEATRICAL_SEASON, type SeriesCard } from '../utils/groupSeries'
 
 type SeasonEpisodes = {
   season: number
@@ -47,7 +47,9 @@ export function useLibrarySeriesSelection({
       : sourceItems.filter((m) => getSeriesKey(m) === selectedSeries.key)
     const seasons = new Map<number, Media[]>()
     for (const ep of eps) {
-      const s = ep.episode_num > 0 ? (ep.season_num ?? 0) : (ep.season_num || 1)
+      const s = isTheatricalFeature(ep)
+        ? THEATRICAL_SEASON
+        : ep.episode_num > 0 ? (ep.season_num ?? 0) : (ep.season_num || 1)
       if (!seasons.has(s)) seasons.set(s, [])
       seasons.get(s)!.push(ep)
     }
@@ -55,7 +57,7 @@ export function useLibrarySeriesSelection({
       list.sort((a, b) => (a.episode_num || 0) - (b.episode_num || 0))
     }
     return Array.from(seasons.entries())
-      .sort(([a], [b]) => a - b)
+      .sort(([a], [b]) => seasonSortOrder(a) - seasonSortOrder(b))
       .map(([season, episodes]) => ({ season, episodes }))
   }, [isSeriesLibrary, selectedSeries, items, seriesEpisodeItems])
 
@@ -70,7 +72,7 @@ export function useLibrarySeriesSelection({
   )
 
   const selectedSeriesMediaIDs = useMemo(
-    () => selectedSeriesEpisodes.map((ep) => ep.id),
+    () => selectedSeriesEpisodes.filter((ep) => !isTheatricalFeature(ep)).map((ep) => ep.id),
     [selectedSeriesEpisodes],
   )
 
@@ -127,4 +129,10 @@ export function useLibrarySeriesSelection({
     handleSeriesClick,
     clearSelectedSeries,
   }
+}
+
+function seasonSortOrder(season: number): number {
+  if (season === 0) return -2
+  if (season === THEATRICAL_SEASON) return -1
+  return season
 }

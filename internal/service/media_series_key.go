@@ -173,7 +173,7 @@ func seriesTitleFromMediaPath(path string) string {
 	if last := parts[len(parts)-1]; !seriesPathPartLooksLikeFile(last) && !seriesSeasonDirRE.MatchString(filepath.Base(last)) {
 		dirIndex = len(parts) - 1
 	}
-	for dirIndex >= 0 && seriesSeasonDirRE.MatchString(filepath.Base(parts[dirIndex])) {
+	for dirIndex >= 0 && (seriesSeasonDirRE.MatchString(filepath.Base(parts[dirIndex])) || isTheatricalFolder(parts[dirIndex])) {
 		dirIndex--
 	}
 	if dirIndex < 0 {

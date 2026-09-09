@@ -404,6 +404,33 @@ func TestGroupMediaSeriesCardsKeepsMovieVersionsAsOneMovie(t *testing.T) {
 	}
 }
 
+func TestGroupMediaSeriesCardsKeepsTheatricalMovieWithTVSeries(t *testing.T) {
+	episode := model.Media{
+		Base:       model.Base{ID: "episode"},
+		LibraryID:  "anime",
+		Title:      "超人高校生们",
+		Path:       `/media/动漫/超人高校生们/Season 01/超人高校生们.S01E01.mkv`,
+		SeasonNum:  1,
+		EpisodeNum: 1,
+	}
+	theatrical := model.Media{
+		Base:       model.Base{ID: "theatrical"},
+		LibraryID:  "anime",
+		Title:      "超人高校生们",
+		Path:       `/media/动漫/超人高校生们/剧场版/超人高校生们 剧场版.mkv`,
+		SeasonNum:  1,
+		EpisodeNum: 1,
+	}
+
+	cards := groupMediaSeriesCards([]model.Media{episode, theatrical})
+	if len(cards) != 1 {
+		t.Fatalf("cards=%#v, want theatrical movie retained with TV series", cards)
+	}
+	if cards[0].Count != 2 {
+		t.Fatalf("series card count=%d, want TV episode plus theatrical movie", cards[0].Count)
+	}
+}
+
 func TestGroupMediaSeriesCardsDoesNotCollideMovieAndTVExternalIDs(t *testing.T) {
 	movie := model.Media{
 		Base:      model.Base{ID: "movie"},

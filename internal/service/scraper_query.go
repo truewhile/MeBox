@@ -40,9 +40,10 @@ func mediaLooksLikeTheatricalFeature(m *model.Media) bool {
 	if m == nil {
 		return false
 	}
-	if m.SeasonNum > 0 || m.EpisodeNum > 0 {
-		return false
-	}
+	// Trust an episode marker that is actually present in the path, but do not
+	// trust persisted season/episode fields here. Older scans could incorrectly
+	// assign those fields to a theatrical file, which would permanently prevent
+	// both manual re-scraping and separation from the TV series.
 	if season, ep := ParseEpisode(m.Path); season > 0 || ep > 0 {
 		return false
 	}

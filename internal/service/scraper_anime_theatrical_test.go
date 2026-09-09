@@ -66,6 +66,28 @@ func TestMetadataMatchCompatibilityForTheatricalFeatures(t *testing.T) {
 	}
 }
 
+func TestMediaLooksLikeTheatricalFeatureIgnoresStaleEpisodeIdentity(t *testing.T) {
+	media := &model.Media{
+		Title:      "未命名",
+		Path:       `/media/anime/超人高校生们/剧场版/超人高校生们 剧场版.mkv`,
+		SeasonNum:  1,
+		EpisodeNum: 1,
+	}
+	if !mediaLooksLikeTheatricalFeature(media) {
+		t.Fatal("theatrical path should override stale persisted season/episode fields")
+	}
+
+	realEpisode := &model.Media{
+		Title:      "剧场版制作幕后",
+		Path:       `/media/anime/超人高校生们/Season 01/超人高校生们.S01E01.mkv`,
+		SeasonNum:  1,
+		EpisodeNum: 1,
+	}
+	if mediaLooksLikeTheatricalFeature(realEpisode) {
+		t.Fatal("an actual episode marker in the path must remain episodic")
+	}
+}
+
 func TestScrapeQueryCandidatesForAnimeTheatricalMix(t *testing.T) {
 	lib := &model.Library{
 		Path: `/media/anime`,

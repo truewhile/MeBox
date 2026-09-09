@@ -5,7 +5,7 @@ import { motion } from 'framer-motion'
 import { historyAPI } from '../api/history'
 import type { Media } from '../types'
 import { useAuthStore } from '../stores/auth'
-import type { SeriesCard } from '../utils/groupSeries'
+import { isTheatricalFeature, type SeriesCard } from '../utils/groupSeries'
 import {
   sortMediaList,
   sortSeriesList,
@@ -150,6 +150,9 @@ export function LibraryPage() {
     setSelectedSeason,
     onClearSeriesState: () => setSeriesMetadataEditOpen(false),
   })
+  const selectedSeriesScrapeMedia = selectedSeriesEpisodes.find((media) => !isTheatricalFeature(media))
+    ?? selectedSeries?.rep
+    ?? null
 
   const {
     scraping,
@@ -287,6 +290,7 @@ export function LibraryPage() {
         onOrganize={handleSeriesOrganize}
         onDelete={handleSeriesDelete}
         onSeasonChange={setSelectedSeason}
+        onManualScrapeMedia={setManualMovie}
       />
 
       <LibraryPageDialogs
@@ -296,6 +300,7 @@ export function LibraryPage() {
         seriesMetadataEditOpen={seriesMetadataEditOpen}
         manualMovie={manualMovie}
         selectedSeries={selectedSeries}
+        selectedSeriesScrapeMedia={selectedSeriesScrapeMedia}
         selectedSeriesMediaIDs={selectedSeriesMediaIDs}
         libraryType={library?.type}
         scrapeEpisodeArtwork={scrapeEpisodeArtwork}

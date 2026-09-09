@@ -313,6 +313,80 @@ func TestManualSearchReturnsMovieFallbackForTVTypedTMDbSearch(t *testing.T) {
 	}
 }
 
+func TestManualSearchAnimeTheatricalPrefersTMDbMovie(t *testing.T) {
+	var paths []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/search/movie":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"results": []map[string]any{{
+					"id":             635302,
+					"title":          "鬼灭之刃 剧场版 无限列车篇",
+					"original_title": "劇場版「鬼滅の刃」無限列車編",
+					"release_date":   "2020-10-16",
+				}},
+			})
+		case "/search/tv":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"results": []map[string]any{{
+					"id":             85937,
+					"name":           "鬼灭之刃",
+					"original_name":  "鬼滅の刃",
+					"first_air_date": "2019-04-06",
+				}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.Library{}, &model.Series{}, &model.Media{}); err != nil {
+		t.Fatal(err)
+	}
+	repos := repository.New(db)
+	cfg := &config.Config{}
+	cfg.Secrets.TMDbAPIKey = "test-key"
+	cfg.Secrets.TMDbAPIProxy = upstream.URL
+	log := zap.NewNop()
+	scraper := NewScraperService(cfg, log, repos, NewTMDbProvider(cfg, log, nil), nil, nil, nil, NewHub(log))
+
+	lib := model.Library{Name: "动漫", Path: `/media/anime`, Type: "anime", Enabled: true}
+	if err := repos.DB.Create(&lib).Error; err != nil {
+		t.Fatal(err)
+	}
+	media := model.Media{
+		LibraryID: lib.ID,
+		Title:     "鬼灭之刃 剧场版 无限列车篇",
+		Path:      `/media/anime/鬼灭之刃/鬼灭之刃 剧场版 无限列车篇.mkv`,
+	}
+	if err := repos.DB.Create(&media).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := scraper.ManualSearch(t.Context(), &media, media.Title, "tmdb", "anime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 || results[0].TMDbID != 635302 || results[0].MediaType != "movie" {
+		t.Fatalf("manual theatrical results=%#v, paths=%v", results, paths)
+	}
+	if len(paths) == 0 || paths[0] != "/search/movie" {
+		t.Fatalf("TMDb search paths=%v, want movie first", paths)
+	}
+	for _, path := range paths {
+		if path == "/search/tv" {
+			t.Fatalf("manual theatrical search unexpectedly queried TV after finding movie: paths=%v", paths)
+		}
+	}
+}
+
 func TestManualSearchAllProvidersTMDbNumericIDTriesMovieAndTVNamespaces(t *testing.T) {
 	var paths []string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

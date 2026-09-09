@@ -1,10 +1,10 @@
 import { Link } from 'react-router-dom'
-import { Play } from 'lucide-react'
+import { Play, Search } from 'lucide-react'
 
 import { imageURL } from '../api/client'
 import { ExternalPlayerButton } from '../components/ExternalPlayerButton'
 import type { Media } from '../types'
-import { seriesTitleFromPath } from '../utils/groupSeries'
+import { isTheatricalFeature, seriesTitleFromPath, THEATRICAL_SEASON } from '../utils/groupSeries'
 import { formatSize } from './libraryPageModel'
 
 type SeasonGroup = {
@@ -18,7 +18,9 @@ type LibrarySeriesEpisodesProps = {
   selectedSeason: number | null
   visibleEpisodes: Media[]
   playbackFrom: string
+  isAdmin?: boolean
   onSeasonChange: (season: number) => void
+  onManualScrape?: (media: Media) => void
 }
 
 export function LibrarySeriesEpisodes({
@@ -27,7 +29,9 @@ export function LibrarySeriesEpisodes({
   selectedSeason,
   visibleEpisodes,
   playbackFrom,
+  isAdmin = false,
   onSeasonChange,
+  onManualScrape,
 }: LibrarySeriesEpisodesProps) {
   if (loading) {
     return (
@@ -53,14 +57,14 @@ export function LibrarySeriesEpisodes({
                 : 'border-sand-200 bg-white text-ink-100 hover:border-brand-200 hover:text-brand-600')
             }
           >
-            {season === 0 ? '特别篇' : `第 ${season} 季`} · {episodes.length} 集
+            {seasonLabel(season)} · {episodes.length} {season === THEATRICAL_SEASON ? '部' : '集'}
           </button>
         ))}
       </div>
 
       <div>
         <h3 className="mb-3 font-display text-lg font-semibold text-ink-600">
-          {displaySeason === 0 ? '特别篇' : `第 ${displaySeason} 季`}
+          {seasonLabel(displaySeason)}
         </h3>
         <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
           {visibleEpisodes.map((ep) => {
@@ -107,7 +111,20 @@ export function LibrarySeriesEpisodes({
                     </p>
                   </div>
                 </Link>
-                <ExternalPlayerButton mediaId={ep.id} label="外部" compact />
+                <div className="flex shrink-0 items-center gap-1">
+                  {isAdmin && onManualScrape && isTheatricalFeature(ep) && (
+                    <button
+                      type="button"
+                      onClick={() => onManualScrape(ep)}
+                      className="btn-outline !px-2 !py-1.5 text-[11px]"
+                      title="手动匹配剧场版"
+                    >
+                      <Search size={12} />
+                      匹配
+                    </button>
+                  )}
+                  <ExternalPlayerButton mediaId={ep.id} label="外部" compact />
+                </div>
               </div>
             )
           })}
@@ -115,6 +132,12 @@ export function LibrarySeriesEpisodes({
       </div>
     </>
   )
+}
+
+function seasonLabel(season: number): string {
+  if (season === 0) return '特别篇'
+  if (season === THEATRICAL_SEASON) return '剧场版'
+  return `第 ${season} 季`
 }
 
 function episodeDisplayTitle(ep: Media, siblings: Media[]): string {

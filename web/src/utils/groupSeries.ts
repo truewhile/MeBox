@@ -38,6 +38,8 @@ export type SeriesCard = {
   last_added_at?: string
 }
 
+export const THEATRICAL_SEASON = -1
+
 export function getSeriesKey(media: Media): string {
   return compactSeriesKey(getSeriesRawKey(media))
 }
@@ -92,12 +94,24 @@ export function isEpisodeLike(media: Media): boolean {
 const EPISODIC_PATH_RE =
   /[\\/](?:电视剧|剧集|连续剧|短剧|国产剧|国剧|大陆剧|华语剧|国产电视剧|大陆电视剧|华语电视剧|欧美剧|欧美电视剧|美剧|英剧|日韩剧|日韩电视剧|日剧|韩剧|港剧|台剧|港台剧|泰剧|综艺|纪录片|儿童|动漫|番剧|国漫|日番|韩漫|美漫|欧美动漫|欧美动画|其他动漫|anime|tv|series|shows?|season[\s._-]*\d|s\d{1,2}(?:[\s._-]|[\\/])|special[\s._-]*episodes?|specials?|sp|ovas?|oads?|extras?|bonus(?:es)?|omake|特别篇|特別篇|番外篇?|特典|外传|外傳|总集篇|總集篇)[\\/]/i
 
+const THEATRICAL_TITLE_RE =
+  /(?:剧场版|劇場版|动画电影|動畫電影|电影版|電影版|\bthe\s+movie\b|\bmovie\s*\d{1,2}\b)/i
+
+const THEATRICAL_FOLDER_RE =
+  /[\\/](?:剧场版|劇場版|动画电影|動畫電影)[\\/]/
+
 const SEASON_FOLDER_RE =
-  /^(?:s\d{1,2}|season[\s._-]*\d{1,2}|第\s*[0-9一二三四五六七八九十百零两]+\s*季|special[\s._-]*episodes?|specials?|sp|ovas?|oads?|extras?|bonus(?:es)?|omake|特别篇|特別篇|番外篇?|特典|外传|外傳|总集篇|總集篇)$/i
+  /^(?:s\d{1,2}|season[\s._-]*\d{1,2}|第\s*[0-9一二三四五六七八九十百零两]+\s*季|special[\s._-]*episodes?|specials?|sp|ovas?|oads?|extras?|bonus(?:es)?|omake|特别篇|特別篇|番外篇?|特典|外传|外傳|总集篇|總集篇|剧场版|劇場版|动画电影|動畫電影)$/i
 
 export function pathLooksEpisodic(media: Media): boolean {
   const path = (media.path || media.display_library_path || media.library_path || '')
   return EPISODIC_PATH_RE.test(path)
+}
+
+export function isTheatricalFeature(media: Media): boolean {
+  const path = media.path || ''
+  if (SERIES_FILE_EPISODE_RE.test(path)) return false
+  return THEATRICAL_TITLE_RE.test(`${media.title || ''} ${path}`) || THEATRICAL_FOLDER_RE.test(path)
 }
 
 export function isSeriesCard(card: SeriesCard): boolean {
