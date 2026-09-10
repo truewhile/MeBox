@@ -13,7 +13,12 @@ import (
 // lookup runs the provider chain after local NFO has been considered:
 // TMDb -> Douban -> Bangumi -> TheTVDB. Douban and Bangumi do not require API
 // keys; providers that are unavailable or return an error are skipped.
-func (s *ScraperService) lookup(ctx context.Context, lib *model.Library, media *model.Media, query string, year int) *Match {
+//
+// Results are cached per (kind, theatrical, query, year) because every
+// episode of a show produces the same candidate; bypassCache forces a fresh
+// provider round-trip for user-triggered rematches but still refreshes the
+// cache so later episodes reuse the corrected result.
+func (s *ScraperService) lookup(ctx context.Context, lib *model.Library, media *model.Media, query string, year int, bypassCache bool) *Match {
 	kind := ""
 	if lib != nil {
 		kind = lib.Type
@@ -28,6 +33,21 @@ func (s *ScraperService) lookup(ctx context.Context, lib *model.Library, media *
 	} else if (normalizeOrganizeMediaType(kind) != "movie" || explicitEpisode) && mediaIsEpisodic(media, lib) {
 		kind = "tv"
 	}
+
+	cacheKey := scrapeLookupCacheKey(kind, query, year, isTheatrical)
+	if !bypassCache {
+		if cached, ok := s.lookupCache.get(cacheKey); ok {
+			return cached
+		}
+	}
+	match := s.lookupUncached(ctx, kind, isTheatrical, query, year)
+	// Always refresh the cache, even on bypassed (forced) lookups, so a
+	// corrected rematch replaces the stale entry for later episodes.
+	s.lookupCache.set(cacheKey, match)
+	return match
+}
+
+func (s *ScraperService) lookupUncached(ctx context.Context, kind string, isTheatrical bool, query string, year int) *Match {
 	if s.tmdb != nil && s.tmdb.Enabled() {
 		if match := s.lookupAutomaticTMDb(ctx, kind, query, year); match != nil {
 			match.Provider = "tmdb"
@@ -107,6 +127,13 @@ func (s *ScraperService) EnrichLibraryDetailed(ctx context.Context, libraryID st
 
 func (s *ScraperService) EnrichLibraryDetailedWithOptions(ctx context.Context, libraryID string, options ScrapeOptions) (EnrichLibraryResult, error) {
 	result := EnrichLibraryResult{LibraryID: libraryID}
+	// A manual retry must not reuse stale negative cache entries from the
+	// previous run, otherwise "重新刮削" looks like it did nothing. Positives
+	// are kept so the rest of the season still dedupes; the first re-queried
+	// episode refreshes the entry for the rows behind it.
+	if options.RetryNoMatch && s != nil {
+		s.lookupCache.clearNegatives()
+	}
 	rows, err := s.scrapeCandidateRows(ctx, libraryID, options)
 	if err != nil {
 		return result, err

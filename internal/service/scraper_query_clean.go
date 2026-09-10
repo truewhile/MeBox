@@ -24,11 +24,15 @@ var noiseTokens = []string{
 	"hkfree", "yify", "rarbg", "ettv", "fgt", "tgx", "ctrlhd", "ntb", "flux", "qhstudio",
 
 	// 流媒体平台 / 字幕组 / 国家版本（动漫常见）
-	"netflix", "nf", "amzn", "hulu", "disney", "max", "hbo",
+	// 注意：不要把同时是常见英文单词的标记放进来（如 max / web / judas），
+	// 否则 "Mad Max"、"Web Therapy" 这类正常标题会被误删。裸 "WEB" 发布标记
+	// 通常位于分辨率之后，由 releaseBoundary 截断规则处理；"WEB-DL" 则由
+	// multiWordNoise 单独匹配。
+	"netflix", "nf", "amzn", "hulu", "disney", "hbo",
 	"linetv", "ourtv", "iqiyi", "youku", "bilibili", "qiyi", "krj",
 	"atvp", "appletv", "apple-tv", "tx", "txweb",
 	"crunchyroll", "funimation", "anidb", "horriblesubs", "subsplease",
-	"erai-raws", "judas", "asw", "smcat", "leopard-raws", "ohys-raws", "colortv",
+	"erai-raws", "asw", "smcat", "leopard-raws", "ohys-raws", "colortv",
 	"mweb", "ubweb", "hhweb", "adweb", "chdweb", "kurosawa", "qhstudio",
 
 	// 中文字幕标记
@@ -54,6 +58,20 @@ var releaseBoundaryTokenSet = map[string]struct{}{
 	"webdl": {}, "hdrip": {}, "bluray": {}, "webrip": {}, "web": {}, "remux": {},
 	"x264": {}, "x265": {}, "h264": {}, "h265": {}, "h266": {}, "hevc": {}, "avc": {}, "av1": {}, "vvc": {},
 }
+
+// weakReleaseBoundaryTokenSet are release tags that double as plausible title
+// words. Before any release signal has been seen they are kept as part of the
+// title ("Mad Max", "Web Therapy"), so a title is never truncated to nothing;
+// after a real signal they behave like any other tag.
+var weakReleaseBoundaryTokenSet = map[string]struct{}{
+	"bd": {}, "dvd": {}, "web": {},
+}
+
+// releaseSignalToken marks the position of an extracted year. The year itself
+// is not a title token, but its presence still proves the following tokens are
+// release tags ("复仇者联盟4.2019.BD.1080p" must drop "BD"). A control rune is
+// used so it can never collide with a real filename token.
+const releaseSignalToken = "\u0001"
 
 var dynamicReleaseBoundaryTokenRE = regexp.MustCompile(`(?i)^(?:\d{3,4}p|\d{2,3}fps)$`)
 
@@ -86,7 +104,9 @@ func CleanQuery(raw string) (title string, year int) {
 	if m := yearPattern.FindStringSubmatch(lower); len(m) >= 2 {
 		if v, err := strconv.Atoi(m[1]); err == nil {
 			year = v
-			lower = strings.ReplaceAll(lower, m[1], " ")
+			// Keep a positional marker: the year is not a title token, but its
+			// presence arms release-tag truncation for what follows.
+			lower = strings.ReplaceAll(lower, m[1], " "+releaseSignalToken+" ")
 		}
 	}
 
@@ -110,17 +130,35 @@ func CleanQuery(raw string) (title string, year int) {
 	}
 	// 拆分后丢掉过短（≤1）且全为 ASCII 数字 / 字母的"碎片"，避免
 	// 「2」「0」「v」之类残留干扰 TMDb 搜索。中文字符不算碎片。
+	//
+	// seenReleaseBoundary 只有在遇到分辨率/编码等强标记后才置位，置位后其余
+	// ASCII 词一律视为发布尾巴丢弃；releaseSignalled 则宽松得多，年份标记也会
+	// 置位，它只用来武装弱标记（bd/dvd/web）。这样 "Web Therapy" 不会被截空，
+	// 而 "2019.Avatar.1080p" 这种年份前置的标题也不会因为年份标记把后面的
+	// 真实标题词当成尾巴丢掉。
 	out := make([]string, 0, 8)
 	seenReleaseBoundary := false
+	releaseSignalled := false
 	for _, w := range strings.Fields(lower) {
+		if w == releaseSignalToken {
+			releaseSignalled = true
+			continue
+		}
 		if dynamicReleaseBoundaryTokenRE.MatchString(w) {
+			releaseSignalled = true
 			seenReleaseBoundary = true
 			continue
 		}
-		if _, ok := noiseTokenSet[w]; ok {
-			if _, boundary := releaseBoundaryTokenSet[w]; boundary {
+		if _, boundary := releaseBoundaryTokenSet[w]; boundary {
+			if _, weak := weakReleaseBoundaryTokenSet[w]; weak && !releaseSignalled {
+				// Ambiguous tag that is also a plausible title word; keep it
+				// until a real release signal proves we are past the title.
+			} else {
+				releaseSignalled = true
 				seenReleaseBoundary = true
+				continue
 			}
+		} else if _, ok := noiseTokenSet[w]; ok {
 			continue
 		}
 		if seenReleaseBoundary && isASCIIWord(w) {

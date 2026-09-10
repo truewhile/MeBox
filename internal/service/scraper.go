@@ -63,12 +63,17 @@ func (s *ScraperService) EnrichOneWithOptions(ctx context.Context, m *model.Medi
 		}
 	}
 
+	// Same stale-negative problem as the library path: a single-item retry
+	// (queue task / manual rescrape) must get a fresh provider round-trip.
+	if options.RetryNoMatch && s != nil {
+		s.lookupCache.clearNegatives()
+	}
 	candidates := scrapeQueryCandidatesWithRecognition(ctx, s.repo, m, lib)
 	var query string
 	match := (*Match)(nil)
 	for _, candidate := range candidates {
 		query = candidate
-		candidateMatch := s.lookup(ctx, lib, m, candidate, year)
+		candidateMatch := s.lookup(ctx, lib, m, candidate, year, options.ForceRematch)
 		if candidateMatch == nil {
 			continue
 		}
