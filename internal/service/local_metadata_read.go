@@ -23,6 +23,9 @@ func ReadLocalMetadata(mediaPath, libraryRoot string, seriesLike bool) (*LocalMe
 	}
 	meta := metadataFromDoc(doc, filepath.Dir(path), false)
 	mergeArtworkMetadata(meta, mediaPath, filepath.Dir(path))
+	// A sidecar written while resolution tokens were misread as SxxExx must not
+	// reintroduce the bogus season/episode on rescan.
+	dropResolutionArtifactEpisodeIdentity(meta, mediaPath)
 	return meta, nil
 }
 
@@ -116,6 +119,9 @@ func readSeriesMetadata(mediaPath, libraryRoot string) (*LocalMetadata, error) {
 	} else {
 		mergeArtworkMetadata(meta, mediaPath, showBaseDir)
 	}
+	// A sidecar written while resolution tokens were misread as SxxExx must not
+	// reintroduce the bogus season/episode on rescan.
+	dropResolutionArtifactEpisodeIdentity(meta, mediaPath)
 	return meta, nil
 }
 

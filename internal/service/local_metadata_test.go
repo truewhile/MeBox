@@ -6,6 +6,48 @@ import (
 	"testing"
 )
 
+func TestReadLocalMetadataDropsResolutionArtifactEpisode(t *testing.T) {
+	// 刮削曾把分辨率 1920x1080 误读成 S20E108 并回写进边车 NFO；
+	// 重扫时必须忽略这个伪季集号，否则旧文件会把错误身份灌回 DB。
+	root := t.TempDir()
+	showDir := filepath.Join(root, "彼得·格里尔的贤者时间")
+	if err := os.MkdirAll(showDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mediaPath := filepath.Join(showDir,
+		"[UHA-WINGS][Peter Grill to Kenja no Jikan][01][BDRIP 1920x1080 HEVC-YUV420P10 FLAC].strm")
+	if err := os.WriteFile(mediaPath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nfoPath(mediaPath), []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<episodedetails>
+  <title>第 108 集</title>
+  <showtitle>彼得·格里尔的贤者时间</showtitle>
+  <season>20</season>
+  <episode>108</episode>
+  <tmdbid>99080</tmdbid>
+</episodedetails>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadLocalMetadata(mediaPath, root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("metadata is nil")
+	}
+	if got.SeasonNum != 0 || got.EpisodeNum != 0 {
+		t.Fatalf("resolution artifact season/episode not dropped: s=%d e=%d", got.SeasonNum, got.EpisodeNum)
+	}
+	if got.EpisodeTitle != "" {
+		t.Fatalf("generated episode title not dropped: %q", got.EpisodeTitle)
+	}
+	if got.Title != "彼得·格里尔的贤者时间" {
+		t.Fatalf("series title = %q, want 彼得·格里尔的贤者时间", got.Title)
+	}
+}
+
 func TestReadLocalMovieMetadata(t *testing.T) {
 	dir := t.TempDir()
 	mediaPath := filepath.Join(dir, "Inception.2010.mkv")

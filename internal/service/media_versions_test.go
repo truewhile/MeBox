@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -110,6 +111,41 @@ func TestGroupMediaVersionsSeparatesAnimeSpecialKindsAndNumbers(t *testing.T) {
 	for _, item := range grouped {
 		if len(item.Versions) > 1 {
 			t.Fatalf("unrelated anime extras were merged as versions: %#v", item.Versions)
+		}
+	}
+}
+
+func TestGroupMediaVersionsKeepsBracketNumberedEpisodesSeparate(t *testing.T) {
+	// UHA-WINGS 命名：[组名][标题][01][BDRIP 1920x1080 ...].strm。
+	// 曾因 1920x1080 被解析成 S20E108，12 集全部折叠成一集的多个版本。
+	rows := make([]model.Media, 0, 12)
+	for episode := 1; episode <= 12; episode++ {
+		rows = append(rows, model.Media{
+			Base:      model.Base{ID: fmt.Sprintf("ep-%02d", episode)},
+			LibraryID: "anime",
+			Title:     "彼得·格里尔的贤者时间",
+			Path: fmt.Sprintf(
+				"/media/影视库/动漫/彼得·格里尔的贤者时间/[UHA-WINGS][Peter Grill to Kenja no Jikan][%02d][BDRIP 1920x1080 HEVC-YUV420P10 FLAC].strm",
+				episode),
+			TMDbID: 99080,
+		})
+	}
+	for i := range rows {
+		season, episode := ParseEpisode(rows[i].Path)
+		rows[i].SeasonNum = season
+		rows[i].EpisodeNum = episode
+	}
+
+	grouped := groupMediaVersions(rows)
+	if len(grouped) != 12 {
+		t.Fatalf("grouped len = %d, want 12 distinct episodes: %#v", len(grouped), grouped)
+	}
+	for _, item := range grouped {
+		if len(item.Versions) > 1 {
+			t.Fatalf("distinct episodes were folded into versions: %#v", item.Versions)
+		}
+		if item.SeasonNum != 1 || item.EpisodeNum < 1 || item.EpisodeNum > 12 {
+			t.Fatalf("unexpected episode identity s=%d e=%d", item.SeasonNum, item.EpisodeNum)
 		}
 	}
 }
