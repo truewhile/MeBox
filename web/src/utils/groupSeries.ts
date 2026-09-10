@@ -127,6 +127,31 @@ export function isTheatricalFeature(media: Media): boolean {
   return THEATRICAL_TITLE_RE.test(`${media.title || ''} ${path}`) || THEATRICAL_FOLDER_RE.test(path)
 }
 
+/**
+ * 把剧集列表展开成"每一行 media"。
+ *
+ * 剧集接口会把同一集的多版本(含被误判折叠的行)合成一个 item, 真实的行放在
+ * `versions` 里, 顶层只保留代表行。批量操作(整剧匹配 / 整剧刮削 / 编辑整剧 /
+ * 删除整剧)必须作用到每一行, 否则只会更新代表行, 折叠掉的版本被漏掉。
+ *
+ * 注意 `versions` 已包含代表行本身, 因此命中 versions 时不要再额外加回 item,
+ * 否则会重复。仅用于「操作」而非展示——展示仍按折叠后的剧集渲染版本切换器。
+ */
+export function expandSeriesMediaVersions(episodes: Media[] = []): Media[] {
+  const out: Media[] = []
+  const seen = new Set<string>()
+  for (const ep of episodes) {
+    if (!ep) continue
+    const rows = ep.versions && ep.versions.length > 0 ? ep.versions : [ep]
+    for (const row of rows) {
+      if (!row || !row.id || seen.has(row.id)) continue
+      seen.add(row.id)
+      out.push(row)
+    }
+  }
+  return out
+}
+
 const SPECIAL_SECTION_PATTERNS: Array<[number, RegExp]> = [
   [OVA_SEASON, /(?:^|[^a-z0-9])ovas?(?:[\s._-]*\d+)?(?:[^a-z0-9]|$)/i],
   [OAD_SEASON, /(?:^|[^a-z0-9])oads?(?:[\s._-]*\d+)?(?:[^a-z0-9]|$)/i],

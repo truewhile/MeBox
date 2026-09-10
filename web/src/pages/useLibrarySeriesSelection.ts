@@ -2,6 +2,7 @@ import { useEffect, useMemo } from 'react'
 
 import type { Media } from '../types'
 import {
+  expandSeriesMediaVersions,
   getSeriesKey,
   isTheatricalFeature,
   seasonSortOrder,
@@ -77,9 +78,15 @@ export function useLibrarySeriesSelection({
     [selectedEpisodes],
   )
 
-  const selectedSeriesMediaIDs = useMemo(
-    () => selectedSeriesEpisodes.filter((ep) => !isTheatricalFeature(ep)).map((ep) => ep.id),
+  // 批量/整剧操作必须覆盖被折叠进 versions 的每一行, 否则只作用到代表行。
+  const selectedSeriesAllEpisodes = useMemo(
+    () => expandSeriesMediaVersions(selectedSeriesEpisodes),
     [selectedSeriesEpisodes],
+  )
+
+  const selectedSeriesMediaIDs = useMemo(
+    () => selectedSeriesAllEpisodes.filter((ep) => !isTheatricalFeature(ep)).map((ep) => ep.id),
+    [selectedSeriesAllEpisodes],
   )
 
   useEffect(() => {
@@ -131,6 +138,7 @@ export function useLibrarySeriesSelection({
     selectedEpisodes,
     visibleEpisodes,
     selectedSeriesEpisodes,
+    selectedSeriesAllEpisodes,
     selectedSeriesMediaIDs,
     handleSeriesClick,
     clearSelectedSeries,
