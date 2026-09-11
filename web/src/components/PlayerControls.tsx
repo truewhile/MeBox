@@ -16,6 +16,12 @@ import {
 } from 'lucide-react'
 import type { SubtitleTrack } from '../api/subtitles'
 import type { SubtitleChineseMode } from '../utils/subtitleChinese'
+import {
+  SUBTITLE_POSITION_OPTIONS,
+  SUBTITLE_STYLE_OPTIONS,
+  type SubtitlePosition,
+  type SubtitleStylePreset,
+} from '../utils/subtitleDisplay'
 
 // PlayerControls — custom bottom control bar replacing the native <video
 // controls> (which cannot host custom buttons). The danmaku toggle sits right
@@ -39,6 +45,10 @@ type PlayerControlsProps = {
   onSelectSubtitle: (index: number) => void
   subtitleChineseMode: SubtitleChineseMode
   onSubtitleChineseModeChange: (mode: SubtitleChineseMode) => void
+  subtitlePosition: SubtitlePosition
+  onSubtitlePositionChange: (position: SubtitlePosition) => void
+  subtitleStyle: SubtitleStylePreset
+  onSubtitleStyleChange: (style: SubtitleStylePreset) => void
   danmakuOpen: boolean
   danmakuEnabled: boolean
   onToggleDanmaku: () => void
@@ -68,6 +78,10 @@ export function PlayerControls({
   onSelectSubtitle,
   subtitleChineseMode,
   onSubtitleChineseModeChange,
+  subtitlePosition,
+  onSubtitlePositionChange,
+  subtitleStyle,
+  onSubtitleStyleChange,
   danmakuOpen,
   danmakuEnabled,
   onToggleDanmaku,
@@ -361,7 +375,10 @@ export function PlayerControls({
   const displayTime = isScrubbing && scrubValue !== null ? scrubValue : currentTime
   const selectedSubtitle = subtitleIndex >= 0 ? subs[subtitleIndex] : undefined
   const canConvertSelectedSubtitle =
-    selectedSubtitle?.source === 'external' && selectedSubtitle.delivery === 'webvtt'
+    selectedSubtitle?.source === 'external' &&
+    (selectedSubtitle.delivery === 'webvtt' || selectedSubtitle.delivery === 'ass')
+  const canAdjustSelectedSubtitle = selectedSubtitle?.delivery === 'webvtt'
+  const usesOriginalASS = selectedSubtitle?.delivery === 'ass'
 
   return (
     <div
@@ -455,7 +472,7 @@ export function PlayerControls({
               )}
             </button>
             {subtitleMenuOpen && (
-              <div className="absolute bottom-11 right-0 z-30 min-w-44 rounded-xl border border-white/15 bg-black/85 p-1 shadow-2xl backdrop-blur">
+              <div className="absolute bottom-11 right-0 z-30 max-h-[70vh] min-w-44 overflow-y-auto rounded-xl border border-white/15 bg-black/85 p-1 shadow-2xl backdrop-blur">
                 <button
                   type="button"
                   onClick={() => {
@@ -481,10 +498,56 @@ export function PlayerControls({
                     }`}
                     title={track.label || track.lang}
                   >
-                    <span className="truncate">{track.label || track.lang || `字幕 ${index + 1}`}</span>
+                    <span className="truncate">
+                      {track.label || track.lang || `字幕 ${index + 1}`}
+                      {track.delivery === 'ass' ? ' · ASS' : ''}
+                    </span>
                     {subtitleIndex === index && <span className="ml-auto text-rose-400">●</span>}
                   </button>
                 ))}
+                {canAdjustSelectedSubtitle && (
+                  <div className="mt-1 border-t border-white/10 pt-1">
+                    <p className="px-3 py-1 text-[10px] text-white/45">字幕位置</p>
+                    <div className="flex flex-wrap gap-1 px-2 pb-1">
+                      {SUBTITLE_POSITION_OPTIONS.map(([value, label]) => (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => onSubtitlePositionChange(value)}
+                          className={`rounded-md px-2 py-1 text-[10px] transition ${
+                            subtitlePosition === value
+                              ? 'bg-rose-500/20 text-rose-300'
+                              : 'bg-white/5 text-white/70 hover:bg-white/10'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="px-3 py-1 text-[10px] text-white/45">字幕样式</p>
+                    <div className="flex flex-wrap gap-1 px-2 pb-1">
+                      {SUBTITLE_STYLE_OPTIONS.map(([value, label]) => (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => onSubtitleStyleChange(value)}
+                          className={`rounded-md px-2 py-1 text-[10px] transition ${
+                            subtitleStyle === value
+                              ? 'bg-rose-500/20 text-rose-300'
+                              : 'bg-white/5 text-white/70 hover:bg-white/10'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {usesOriginalASS && (
+                  <p className="mx-2 mt-1 border-t border-white/10 px-1 pt-2 text-[10px] leading-relaxed text-white/45">
+                    ASS/SSA 使用字幕文件自带的样式与位置，不做统一覆盖。
+                  </p>
+                )}
                 {canConvertSelectedSubtitle && (
                   <div className="mt-1 border-t border-white/10 pt-1">
                     <p className="px-3 py-1 text-[10px] text-white/45">外挂字幕简繁转换</p>

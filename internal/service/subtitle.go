@@ -234,7 +234,7 @@ func discoverExternalSubtitleTracks(m *model.Media) []SubtitleTrack {
 				Path:     filepath.Join(c, e.Name()),
 				Codec:    codec,
 				Source:   "external",
-				Delivery: "webvtt",
+				Delivery: subtitleDeliveryForCodec(codec),
 			})
 		}
 	}
@@ -297,6 +297,18 @@ func (s *SubtitleService) discoverEmbedded(ctx context.Context, media *model.Med
 	return subtitleTracksFromProbe(probe), nil
 }
 
+// subtitleDeliveryForCodec selects the browser rendering path for a text
+// subtitle codec. ASS/SSA keep their original bytes and are rendered by
+// libass in the web player; other text formats are converted to WebVTT.
+func subtitleDeliveryForCodec(codec string) string {
+	switch strings.ToLower(strings.TrimSpace(codec)) {
+	case "ass", "ssa":
+		return "ass"
+	default:
+		return "webvtt"
+	}
+}
+
 func subtitleTracksFromProbe(probe embeddedSubtitleProbe) []SubtitleTrack {
 	tracks := make([]SubtitleTrack, 0, len(probe.Streams))
 	for _, stream := range probe.Streams {
@@ -314,7 +326,7 @@ func subtitleTracksFromProbe(probe embeddedSubtitleProbe) []SubtitleTrack {
 		} else if stream.Disposition.Default != 0 {
 			label += "（默认）"
 		}
-		delivery := "webvtt"
+		delivery := subtitleDeliveryForCodec(codec)
 		if imageSubtitleCodecs[codec] {
 			delivery = "burn"
 		}
@@ -464,6 +476,9 @@ func (s *SubtitleService) ServeRaw(ctx context.Context, mediaID, sub string, w i
 	if err != nil || m == nil {
 		return errors.New("media not found")
 	}
+	if strings.HasPrefix(sub, "embedded:") {
+		return errors.New("embedded subtitle is not available in raw mode")
+	}
 	abs, err := filepath.Abs(sub)
 	if err != nil {
 		return err
@@ -472,6 +487,9 @@ func (s *SubtitleService) ServeRaw(ctx context.Context, mediaID, sub string, w i
 	if !pathWithin(abs, mediaDir) {
 		return fmt.Errorf("path escape")
 	}
+	if _, ok := extToCodec[strings.ToLower(filepath.Ext(abs))]; !ok {
+		return errors.New("unsupported subtitle format")
+	}
 	f, err := os.Open(abs) // #nosec G304 -- abs is constrained to the media file directory with pathWithin.
 	if err != nil {
 		return err
@@ -479,4 +497,50 @@ func (s *SubtitleService) ServeRaw(ctx context.Context, mediaID, sub string, w i
 	defer f.Close()
 	_, err = io.Copy(w, f)
 	return err
+}
+
+// ServeASS returns an ASS/SSA stream suitable for libass-wasm. External ASS
+// files are sent unchanged; embedded ASS/SSA tracks are remuxed to ASS by
+// ffmpeg. This keeps fonts, positioning and typesetting data available to the
+// browser renderer instead of flattening the track through assToVTT first.
+func (s *SubtitleService) ServeASS(ctx context.Context, mediaID, sub string, w io.Writer) error {
+	m, err := s.repo.Media.FindByID(ctx, mediaID)
+	if err != nil || m == nil {
+		return errors.New("media not found")
+	}
+	if strings.HasPrefix(sub, "embedded:") {
+		index, err := strconv.Atoi(strings.TrimPrefix(sub, "embedded:"))
+		if err != nil || index < 0 {
+			return errors.New("invalid embedded subtitle")
+		}
+		return s.serveEmbeddedASS(ctx, m, index, w)
+	}
+	switch strings.ToLower(filepath.Ext(sub)) {
+	case ".ass", ".ssa":
+		return s.ServeRaw(ctx, mediaID, sub, w)
+	default:
+		return errors.New("subtitle is not ASS/SSA")
+	}
+}
+
+func (s *SubtitleService) serveEmbeddedASS(ctx context.Context, media *model.Media, streamIndex int, w io.Writer) error {
+	input, err := s.resolveInput(ctx, media)
+	if err != nil {
+		return err
+	}
+	bin, err := resolveLocalExecutable(s.cfg.App.FFmpegPath, "ffmpeg")
+	if err != nil {
+		return err
+	}
+	args := []string{"-hide_banner", "-loglevel", "error"}
+	args = append(args, ffmpegHTTPInputArgs(input)...)
+	args = append(args, "-i", input.Source, "-map", "0:"+strconv.Itoa(streamIndex), "-c:s", "ass", "-f", "ass", "-")
+	cmd := exec.CommandContext(ctx, bin, args...) // #nosec G204 -- executable is resolved locally and arguments do not use a shell.
+	cmd.Stdout = w
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("extract embedded ASS subtitle: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }

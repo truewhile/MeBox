@@ -21,6 +21,11 @@ export default defineConfig({
       },
     },
   },
+  worker: {
+    // JASSUB ships its libass worker as an ES module. Vite's default IIFE
+    // worker output cannot split that worker's own imports.
+    format: 'es',
+  },
   build: {
     outDir: 'dist',
     sourcemap: false,

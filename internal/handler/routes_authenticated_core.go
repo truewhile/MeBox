@@ -54,6 +54,7 @@ func registerAuthedMediaRoutes(authed *gin.RouterGroup, svc *service.Container) 
 	authed.DELETE("/media/:id", middleware.AdminRequired(), deleteMediaHandler(svc))
 	authed.GET("/media/:id/subtitles", listSubtitlesHandler(svc))
 	authed.GET("/subtitles/:id", serveSubtitleHandler(svc))
+	authed.GET("/subtitles/:id/ass", serveASSSubtitleHandler(svc))
 	authed.POST("/media/:id/nfo", middleware.AdminRequired(), exportNFOHandler(svc))
 	authed.POST("/libraries/:id/nfo", middleware.AdminRequired(), exportLibraryNFOHandler(svc))
 }

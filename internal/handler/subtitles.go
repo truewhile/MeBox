@@ -34,6 +34,22 @@ func listSubtitlesHandler(svc *service.Container) gin.HandlerFunc {
 	}
 }
 
+func serveASSSubtitleHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		path := c.Query("path")
+		if path == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "missing path"})
+			return
+		}
+		c.Header("Content-Type", "text/plain; charset=utf-8")
+		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+		if err := svc.Subtitle.ServeASS(c.Request.Context(), c.Param("id"), path, c.Writer); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+	}
+}
+
 func serveSubtitleHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		path := c.Query("path")

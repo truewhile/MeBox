@@ -100,11 +100,23 @@ func TestEmbeddedSubtitleProbeClassifiesTextAndBitmapTracks(t *testing.T) {
 	if len(tracks) != 2 {
 		t.Fatalf("len(tracks) = %d, want 2", len(tracks))
 	}
-	if tracks[0].Delivery != "webvtt" || tracks[0].Path != "embedded:2" {
+	if tracks[0].Delivery != "ass" || tracks[0].Path != "embedded:2" {
 		t.Fatalf("text track = %#v", tracks[0])
 	}
 	if tracks[1].Delivery != "burn" || tracks[1].StreamIndex != 4 {
 		t.Fatalf("bitmap track = %#v", tracks[1])
+	}
+}
+
+func TestSubtitleDeliveryClassifiesASSForLibass(t *testing.T) {
+	if got := subtitleDeliveryForCodec("ass"); got != "ass" {
+		t.Fatalf("ass delivery = %q, want ass", got)
+	}
+	if got := subtitleDeliveryForCodec("ssa"); got != "ass" {
+		t.Fatalf("ssa delivery = %q, want ass", got)
+	}
+	if got := subtitleDeliveryForCodec("subrip"); got != "webvtt" {
+		t.Fatalf("subrip delivery = %q, want webvtt", got)
 	}
 }
 
@@ -175,5 +187,18 @@ func TestSubtitleServeRawWritesSourceBytes(t *testing.T) {
 	// ServeRaw must NOT convert ASS->VTT; it returns the exact source bytes.
 	if got := buf.String(); got != raw {
 		t.Fatalf("ServeRaw returned %q, want raw %q", got, raw)
+	}
+
+	buf.Reset()
+	if err := svc.ServeASS(t.Context(), media.ID, subPath, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if got := buf.String(); got != raw {
+		t.Fatalf("ServeASS returned %q, want raw ASS %q", got, raw)
+	}
+
+	buf.Reset()
+	if err := svc.ServeRaw(t.Context(), media.ID, videoPath, &buf); err == nil {
+		t.Fatal("ServeRaw accepted a non-subtitle file")
 	}
 }

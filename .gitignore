@@ -66,6 +66,7 @@ config.yaml
 .tmp-live-backups/
 .tmp-*
 .codex-*
+.codex/
 downloads/
 media/
 *.pid

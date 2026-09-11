@@ -8,7 +8,7 @@ export interface SubtitleTrack {
   url: string
   codec: string
   source: 'external' | 'embedded'
-  delivery: 'webvtt' | 'burn'
+  delivery: 'webvtt' | 'ass' | 'burn'
   stream_index?: number
 }
 
@@ -23,6 +23,13 @@ export const subtitlesAPI = {
   url: (mediaId: string, path: string) => {
     const token = useAuthStore.getState().token ?? ''
     return `/api/subtitles/${encodeURIComponent(mediaId)}?path=${encodeURIComponent(
+      path,
+    )}&token=${encodeURIComponent(token)}`
+  },
+
+  assUrl: (mediaId: string, path: string) => {
+    const token = useAuthStore.getState().token ?? ''
+    return `/api/subtitles/${encodeURIComponent(mediaId)}/ass?path=${encodeURIComponent(
       path,
     )}&token=${encodeURIComponent(token)}`
   },

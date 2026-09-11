@@ -18,6 +18,14 @@ import {
   normalizeSubtitleChineseMode,
   type SubtitleChineseMode,
 } from '../utils/subtitleChinese'
+import {
+  loadSubtitlePosition,
+  loadSubtitleStyle,
+  saveSubtitlePosition,
+  saveSubtitleStyle,
+  type SubtitlePosition,
+  type SubtitleStylePreset,
+} from '../utils/subtitleDisplay'
 import { pickPlayerMode, needsTranscodeForBrowser, isDirectStreamMedia, type PlayerMode } from './playerPageModel'
 import { classifyDirectPlayError } from './directPlayError'
 import { apiErrorMessage } from './StrmManagePage'
@@ -63,6 +71,8 @@ export function PlayerPage() {
     useState<SubtitleChineseMode>(() =>
       normalizeSubtitleChineseMode(authUser?.subtitle_chinese_mode),
     )
+  const [subtitlePosition, setSubtitlePosition] = useState<SubtitlePosition>(loadSubtitlePosition)
+  const [subtitleStyle, setSubtitleStyle] = useState<SubtitleStylePreset>(loadSubtitleStyle)
   const persistedSubtitleChineseModeRef = useRef(subtitleChineseMode)
   const subtitlePreferenceTouchedRef = useRef(false)
   const subtitlePreferenceSaveQueueRef = useRef<Promise<void>>(Promise.resolve())
@@ -878,6 +888,16 @@ export function PlayerPage() {
     fallbackTimerRef.current = setTimeout(fallbackDirectPlay, 1500)
   }, [clearFallbackTimer, directOnly, hlsUnavailable, mediaId, mode, setPlaybackMode])
 
+  const changeSubtitlePosition = useCallback((nextPosition: SubtitlePosition) => {
+    setSubtitlePosition(nextPosition)
+    saveSubtitlePosition(nextPosition)
+  }, [])
+
+  const changeSubtitleStyle = useCallback((nextStyle: SubtitleStylePreset) => {
+    setSubtitleStyle(nextStyle)
+    saveSubtitleStyle(nextStyle)
+  }, [])
+
   const danmakuAutoTitle =
     danmakuInfo?.animeTitle ||
     media?.original_name?.trim() ||
@@ -910,6 +930,10 @@ export function PlayerPage() {
         onSelectSubtitle={selectSubtitle}
         subtitleChineseMode={subtitleChineseMode}
         onSubtitleChineseModeChange={changeSubtitleChineseMode}
+        subtitlePosition={subtitlePosition}
+        onSubtitlePositionChange={changeSubtitlePosition}
+        subtitleStyle={subtitleStyle}
+        onSubtitleStyleChange={changeSubtitleStyle}
         videoRef={ref}
         onVideoError={handleVideoError}
         danmakuEnabled={danmakuEnabled}
