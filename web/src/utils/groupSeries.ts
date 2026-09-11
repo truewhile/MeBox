@@ -480,18 +480,29 @@ export function groupSeries(items: Media[] = []): SeriesCard[] {
       if (betterSeriesLinkMedia(m, g.linkMedia)) {
         g.linkMedia = m
       }
-      const currentArtwork = artworkScore(m)
-      const representativeArtwork = artworkScore(g.rep)
-      if (currentArtwork > representativeArtwork) {
+      if (betterSeriesRepresentative(m, g.rep)) {
         g.rep = m
-      } else if (currentArtwork === representativeArtwork) {
-        const cur = (m.season_num ?? 0) * 10000 + (m.episode_num ?? 0)
-        const rep = (g.rep.season_num ?? 0) * 10000 + (g.rep.episode_num ?? 0)
-        if (cur > 0 && (rep === 0 || cur < rep)) g.rep = m
       }
     }
   }
   return Array.from(groups.values())
+}
+
+function betterSeriesRepresentative(candidate: Media, current: Media): boolean {
+  // A theatrical feature can have local poster/background artwork that scores
+  // higher than the TV poster. Keep the TV row as the series-card identity so
+  // the movie cannot replace the whole series title and overview.
+  const candidateTheatrical = isTheatricalFeature(candidate)
+  const currentTheatrical = isTheatricalFeature(current)
+  if (candidateTheatrical !== currentTheatrical) return !candidateTheatrical
+
+  const candidateArtwork = artworkScore(candidate)
+  const currentArtwork = artworkScore(current)
+  if (candidateArtwork !== currentArtwork) return candidateArtwork > currentArtwork
+
+  const cur = (candidate.season_num ?? 0) * 10000 + (candidate.episode_num ?? 0)
+  const rep = (current.season_num ?? 0) * 10000 + (current.episode_num ?? 0)
+  return cur > 0 && (rep === 0 || cur < rep)
 }
 
 function repeatedSeriesExternalRawKey(media: Media): string {

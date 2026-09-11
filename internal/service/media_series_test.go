@@ -410,15 +410,19 @@ func TestGroupMediaSeriesCardsKeepsTheatricalMovieWithTVSeries(t *testing.T) {
 		LibraryID:  "anime",
 		Title:      "摇曳露营△",
 		Path:       `/media/动漫/摇曳露营△ (2018)/Season 01/摇曳露营△.S01E01.mkv`,
+		PosterURL:  "https://image.tmdb.org/t/p/w500/episode.jpg",
 		SeasonNum:  1,
 		EpisodeNum: 1,
 	}
 	theatrical := model.Media{
-		Base:      model.Base{ID: "theatrical"},
-		LibraryID: "anime",
-		Title:     "摇曳露营△ 剧场版",
-		Path:      `/media/动漫/摇曳露营△ (2018)/摇曳露营△ 剧场版 (2022)/Eiga.Yurukyan.2022.Bluray.mkv`,
-		TMDbID:    566466,
+		Base:        model.Base{ID: "theatrical"},
+		LibraryID:   "anime",
+		Title:       "摇曳露营△ 剧场版",
+		Path:        `/media/动漫/摇曳露营△ (2018)/摇曳露营△ 剧场版 (2022)/Eiga.Yurukyan.2022.Bluray.mkv`,
+		PosterURL:   "/media/动漫/摇曳露营△ (2018)/剧场版/poster.jpg",
+		BackdropURL: "/media/动漫/摇曳露营△ (2018)/剧场版/background.jpg",
+		Overview:    "剧场版简介",
+		TMDbID:      566466,
 	}
 
 	cards := groupMediaSeriesCards([]model.Media{episode, theatrical})
@@ -427,6 +431,12 @@ func TestGroupMediaSeriesCardsKeepsTheatricalMovieWithTVSeries(t *testing.T) {
 	}
 	if cards[0].Count != 2 {
 		t.Fatalf("series card count=%d, want TV episode plus theatrical movie", cards[0].Count)
+	}
+	if cards[0].Rep.ID != episode.ID {
+		t.Fatalf("series representative=%q, want TV episode %q", cards[0].Rep.ID, episode.ID)
+	}
+	if cards[0].Rep.Title != episode.Title {
+		t.Fatalf("series representative title=%q, want %q", cards[0].Rep.Title, episode.Title)
 	}
 }
 

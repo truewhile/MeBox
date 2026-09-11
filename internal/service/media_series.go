@@ -301,16 +301,8 @@ func groupMediaSeriesCards(items []model.Media) []SeriesCard {
 			if betterSeriesLinkMedia(item, card.LinkMedia) {
 				card.LinkMedia = item
 			}
-			currentArtwork := seriesArtworkScore(item)
-			representativeArtwork := seriesArtworkScore(card.Rep)
-			if currentArtwork > representativeArtwork {
+			if betterSeriesRepresentative(item, card.Rep) {
 				card.Rep = item
-			} else if currentArtwork == representativeArtwork {
-				cur := item.SeasonNum*10000 + item.EpisodeNum
-				rep := card.Rep.SeasonNum*10000 + card.Rep.EpisodeNum
-				if cur > 0 && (rep == 0 || cur < rep) {
-					card.Rep = item
-				}
 			}
 			continue
 		}
@@ -333,6 +325,27 @@ func groupMediaSeriesCards(items []model.Media) []SeriesCard {
 		cards = append(cards, group.card)
 	}
 	return cards
+}
+
+func betterSeriesRepresentative(candidate, current model.Media) bool {
+	// A theatrical feature can have local poster.jpg/background.jpg files and
+	// therefore a higher artwork score than its TV episodes. Keep the TV row as
+	// the visible identity of a mixed series card so a movie cannot hijack the
+	// series title, overview, and artwork.
+	candidateTheatrical := mediaLooksLikeTheatricalFeature(&candidate)
+	currentTheatrical := mediaLooksLikeTheatricalFeature(&current)
+	if candidateTheatrical != currentTheatrical {
+		return !candidateTheatrical
+	}
+
+	currentArtwork := seriesArtworkScore(candidate)
+	representativeArtwork := seriesArtworkScore(current)
+	if currentArtwork != representativeArtwork {
+		return currentArtwork > representativeArtwork
+	}
+	cur := candidate.SeasonNum*10000 + candidate.EpisodeNum
+	rep := current.SeasonNum*10000 + current.EpisodeNum
+	return cur > 0 && (rep == 0 || cur < rep)
 }
 
 func seriesMediaTime(media model.Media) time.Time {
