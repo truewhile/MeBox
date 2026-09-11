@@ -43,7 +43,7 @@ var artworkSidecarSuffixes = []string{
 // artworkSidecarExtensions are the image extensions a sidecar may use. Both
 // "base-poster.jpg" (bare separator) and "base.poster.jpg" (dotted separator)
 // rely on suffix matching, so we probe the common image extensions.
-var artworkSidecarExtensions = []string{".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tbn"}
+var artworkSidecarExtensions = []string{".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tbn", ".img"}
 
 // transferSidecarArtwork moves/copies/links the scraped poster/backdrop
 // sidecar files alongside its media using the same transfer mode, mirroring

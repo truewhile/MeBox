@@ -200,7 +200,7 @@ func (s *ScannerService) writeLocalScanMedia(in localScanWriteInput) {
 		in.writeBatch.AddWithAfter(in.path, in.media, in.after)
 		return
 	}
-	if err := s.repo.Media.Upsert(in.ctx, in.media); err != nil {
+	if err := s.repo.Media.UpsertWithAliases(in.ctx, in.media, missingSTRMPathAliases(in.path)); err != nil {
 		addScanError(in.res, in.path, err)
 		s.log.Warn("upsert media failed", zap.String("path", in.path), zap.Error(err))
 		return
@@ -252,8 +252,10 @@ func (s *ScannerService) duplicateByFileID(ctx context.Context, fileID, path str
 }
 
 func (s *ScannerService) mediaPathExists(ctx context.Context, path string) bool {
+	paths := []string{path}
+	paths = append(paths, missingSTRMPathAliases(path)...)
 	var count int64
 	err := s.repo.DB.WithContext(ctx).Unscoped().Model(&model.Media{}).
-		Where("path = ?", path).Count(&count).Error
+		Where("path IN ?", paths).Count(&count).Error
 	return err == nil && count > 0
 }

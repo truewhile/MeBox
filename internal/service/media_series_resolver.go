@@ -67,16 +67,19 @@ func newMediaSeriesKeyResolver(items []model.Media) mediaSeriesKeyResolver {
 
 func (r mediaSeriesKeyResolver) key(media model.Media) string {
 	if mediaLooksEpisodicForGrouping(media) {
-		if key := repeatedSeriesTitleKey(media); key != "" && r.titleCounts[key] > 1 {
-			return compactSeriesKey(key)
-		}
 		if pathKey := mediaSeriesRawKey(media); strings.HasPrefix(pathKey, "library-path") {
 			if titleKey := r.pathTitles[pathKey]; titleKey != "" {
 				return compactSeriesKey(titleKey)
 			}
+			// A series directory is the strongest identity for mixed rows:
+			// main episodes and specials (CM/NCOP/PV/OVA) may be scraped to
+			// slightly different titles, but they still belong to one show.
 			if r.pathCounts[pathKey] > 1 {
 				return compactSeriesKey(pathKey)
 			}
+		}
+		if key := repeatedSeriesTitleKey(media); key != "" && r.titleCounts[key] > 1 {
+			return compactSeriesKey(key)
 		}
 		if key := repeatedSeriesExternalKey(media); key != "" && r.externalCounts[key] > 1 {
 			return compactSeriesKey(key)

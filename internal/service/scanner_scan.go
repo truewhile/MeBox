@@ -117,6 +117,10 @@ func (s *ScannerService) scanLibrary(ctx context.Context, libraryID string, auto
 			}
 			continue
 		}
+		// Flush alias-aware upserts before pruning missing paths. This lets a
+		// foo.strm <-> foo.mkv.strm rename migrate the existing row (including
+		// scraped metadata) instead of deleting it as "old path missing".
+		writeBatch.Flush()
 		scannedRoots++
 		removed, err := s.pruneMissingMediaForRoot(ctx, lib.ID, root.ID, root.Path, seen)
 		if err != nil {

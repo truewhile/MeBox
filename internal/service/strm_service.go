@@ -49,7 +49,7 @@ const (
 
 const (
 	StrmDefaultVideoExt = "mkv,mp4,avi,rmvb,rm,mov,ts,wmv,flv,m4v,iso,mpg,mpeg,webm"
-	StrmDefaultMetaExt  = "nfo,jpg,jpeg,png,srt,ass,ssa,sub,txt,bmp,webp"
+	StrmDefaultMetaExt  = "nfo,jpg,jpeg,png,srt,ass,ssa,sub,txt,bmp,webp,img"
 	StrmDefaultExclude  = "sample,trailer,预告"
 )
 

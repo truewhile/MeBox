@@ -417,3 +417,22 @@ func TestReadLocalMetadataArtworkFallbackOnGarbageShowNFO(t *testing.T) {
 		t.Fatalf("expected episode artwork fallback, got %+v", got)
 	}
 }
+
+func TestReadLocalMetadataFindsLegacyImgPoster(t *testing.T) {
+	root := t.TempDir()
+	mediaPath := filepath.Join(root, "Jigokuraku.S01E14.mkv.strm")
+	poster := filepath.Join(root, "Jigokuraku.S01E14-poster.img")
+	if err := os.WriteFile(mediaPath, []byte("https://example.test/video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(poster, testJPEG, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadLocalMetadata(mediaPath, root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.PosterURL != poster {
+		t.Fatalf("PosterURL = %q, want legacy .img poster %q", got.PosterURL, poster)
+	}
+}

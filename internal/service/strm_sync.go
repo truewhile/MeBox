@@ -612,6 +612,12 @@ func (st *strmSyncState) isVideoExt(ext string, size int64) bool {
 }
 
 func (st *strmSyncState) isMetaExt(ext string) bool {
+	// Legacy MeBox installs may have persisted strm.meta_ext without img.
+	// .img is emitted by the artwork writer as a fallback image container, so
+	// keep accepting existing sidecars without requiring a settings migration.
+	if strings.EqualFold(ext, ".img") {
+		return true
+	}
 	for _, e := range st.cfg.MetaExt {
 		if "."+e == ext {
 			return true

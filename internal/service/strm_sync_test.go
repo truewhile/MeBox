@@ -1680,3 +1680,10 @@ func TestHandleVideoKeepExtWritesAllVersions(t *testing.T) {
 		t.Fatalf("NewStrm=%d want 2", st.rec.NewStrm)
 	}
 }
+
+func TestStrmSyncTreatsLegacyImgAsMetadata(t *testing.T) {
+	st := &strmSyncState{cfg: &strmPathConfig{MetaExt: csvSplit("nfo,jpg")}}
+	if !st.isMetaExt(".img") {
+		t.Fatal("legacy .img sidecars must remain metadata even when an old setting omits img")
+	}
+}

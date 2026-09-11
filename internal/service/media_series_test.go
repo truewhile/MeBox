@@ -47,14 +47,14 @@ func TestListRecentSeriesCardsCountsAllEpisodesInSeries(t *testing.T) {
 	if len(cards) != 1 {
 		t.Fatalf("recent cards = %#v, want one series card", cards)
 	}
-		if cards[0].Count != 40 {
-			t.Fatalf("recent series count = %d, want full 40 episodes", cards[0].Count)
-		}
-		expectedLastAdded := now.Add(40 * time.Minute)
-		if cards[0].LastAddedAt == nil || !cards[0].LastAddedAt.Equal(expectedLastAdded) {
-			t.Fatalf("recent series LastAddedAt = %v, want %v", cards[0].LastAddedAt, expectedLastAdded)
-		}
+	if cards[0].Count != 40 {
+		t.Fatalf("recent series count = %d, want full 40 episodes", cards[0].Count)
 	}
+	expectedLastAdded := now.Add(40 * time.Minute)
+	if cards[0].LastAddedAt == nil || !cards[0].LastAddedAt.Equal(expectedLastAdded) {
+		t.Fatalf("recent series LastAddedAt = %v, want %v", cards[0].LastAddedAt, expectedLastAdded)
+	}
+}
 
 func TestMediaSeriesKeyCollapsesNestedSpecialFolders(t *testing.T) {
 	main := model.Media{
@@ -377,6 +377,51 @@ func TestGroupMediaSeriesCardsMergesPollutedEpisodeFoldersBySharedShowID(t *test
 	}
 }
 
+func TestGroupMediaSeriesCardsKeepsMixedTitlesInSameEpisodicDirectoryTogether(t *testing.T) {
+	items := []model.Media{
+		{
+			Base:         model.Base{ID: "main-1"},
+			LibraryID:    "anime",
+			Title:        "住在拔作岛上的我应该如何是好？",
+			Path:         `/media/影视库/动漫/拔作岛/[64bitsub][Nukitashi][01][AVC_2×FLAC].mkv.strm`,
+			SeasonNum:    1,
+			EpisodeNum:   1,
+			ScrapeStatus: "matched",
+		},
+		{
+			Base:         model.Base{ID: "main-2"},
+			LibraryID:    "anime",
+			Title:        "住在拔作岛上的我应该如何是好？",
+			Path:         `/media/影视库/动漫/拔作岛/[64bitsub][Nukitashi][02][AVC_2×FLAC].mkv.strm`,
+			SeasonNum:    1,
+			EpisodeNum:   2,
+			ScrapeStatus: "matched",
+		},
+		{
+			Base:         model.Base{ID: "special-1"},
+			LibraryID:    "anime",
+			Title:        "nukitashi",
+			Path:         `/media/影视库/动漫/拔作岛/[64bitsub][Nukitashi][CM_01][AVC_FLAC].mkv.strm`,
+			ScrapeStatus: "matched",
+		},
+		{
+			Base:         model.Base{ID: "special-2"},
+			LibraryID:    "anime",
+			Title:        "nukitashi",
+			Path:         `/media/影视库/动漫/拔作岛/[64bitsub][Nukitashi][PV_01][AVC_FLAC].mkv.strm`,
+			ScrapeStatus: "matched",
+		},
+	}
+
+	cards := groupMediaSeriesCards(items)
+	if len(cards) != 1 {
+		t.Fatalf("cards=%#v, want main episodes and specials in the same directory folded into one card", cards)
+	}
+	if cards[0].Count != 4 {
+		t.Fatalf("series count=%d, want 4 items", cards[0].Count)
+	}
+}
+
 func TestGroupMediaSeriesCardsKeepsMovieVersionsAsOneMovie(t *testing.T) {
 	items := []model.Media{
 		{
@@ -503,11 +548,11 @@ func TestGroupMediaSeriesCardsKeepsIndependentMoviesSeparateInSharedSubdirectory
 		{LibraryID: "movies", Title: "cd1", Path: `/media/电影/指环王 (2001)/cd1.mkv`},
 		{LibraryID: "movies", Title: "cd2", Path: `/media/电影/指环王 (2001)/cd2.mkv`},
 	}
-		cdCards := groupMediaSeriesCards(cdItems)
-		if len(cdCards) != 1 {
-			t.Fatalf("got %d cards for cd1/cd2, want 1 folded movie card", len(cdCards))
-		}
+	cdCards := groupMediaSeriesCards(cdItems)
+	if len(cdCards) != 1 {
+		t.Fatalf("got %d cards for cd1/cd2, want 1 folded movie card", len(cdCards))
 	}
+}
 
 func TestListMediaEpisodesKeepsIndependentMoviesSeparate(t *testing.T) {
 	db := newServiceTestDB(t, &model.Library{}, &model.Media{})

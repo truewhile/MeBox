@@ -48,6 +48,17 @@ func TestCleanQuery(t *testing.T) {
 	}
 }
 
+func TestCleanQueryIgnoresKeepExtSTRMSuffix(t *testing.T) {
+	plain := filepath.Join("/media/anime", "Jigokuraku 2023 S01E14.strm")
+	keepExt := filepath.Join("/media/anime", "Jigokuraku 2023 S01E14.mkv.strm")
+	plainTitle, plainYear := CleanQuery(plain)
+	keepTitle, keepYear := CleanQuery(keepExt)
+	if plainTitle != keepTitle || plainYear != keepYear {
+		t.Fatalf("keep_ext changed scrape identity: plain=(%q,%d) keep_ext=(%q,%d)",
+			plainTitle, plainYear, keepTitle, keepYear)
+	}
+}
+
 func TestScrapeQueryCandidatesCleanDirtySeriesFolder(t *testing.T) {
 	lib := &model.Library{
 		Path: `F:\media\电视剧\欧美剧`,

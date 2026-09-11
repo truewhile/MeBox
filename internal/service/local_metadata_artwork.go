@@ -158,7 +158,7 @@ func firstExistingImage(dir string, names ...string) string {
 		return ""
 	}
 	for _, name := range names {
-		for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tbn"} {
+		for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tbn", ".img"} {
 			path := filepath.Join(dir, name+ext)
 			if fileExists(path) {
 				return filepath.Clean(path)
@@ -221,7 +221,7 @@ func firstExistingPosterImage(dir string, names ...string) string {
 		if isRejectedPosterName(name) {
 			continue
 		}
-		for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tbn"} {
+		for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tbn", ".img"} {
 			path := filepath.Join(dir, name+ext)
 			if fileExists(path) && likelyPosterImage(path) {
 				return filepath.Clean(path)
@@ -240,7 +240,7 @@ func firstAdultLooseImage(dir, kind string) string {
 	fallback := []string{}
 	for _, path := range matches {
 		ext := strings.ToLower(filepath.Ext(path))
-		if ext != ".jpg" && ext != ".jpeg" && ext != ".png" && ext != ".webp" && ext != ".gif" && ext != ".bmp" && ext != ".tbn" {
+		if ext != ".jpg" && ext != ".jpeg" && ext != ".png" && ext != ".webp" && ext != ".gif" && ext != ".bmp" && ext != ".tbn" && ext != ".img" {
 			continue
 		}
 		name := strings.ToLower(strings.TrimSuffix(filepath.Base(path), ext))
