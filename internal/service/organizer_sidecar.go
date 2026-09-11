@@ -84,6 +84,7 @@ func transferSidecarArtwork(srcMedia, dstMedia string, mode TransferMode) error 
 	if dstBase == "" {
 		dstBase = strings.TrimSuffix(filepath.Base(dstMedia), filepath.Ext(dstMedia))
 	}
+	srcAdultCode := AdultCodeFromMediaPath(srcMedia)
 	for _, src := range sources {
 		name := filepath.Base(src)
 		// Remap any legacy "Title.mkv-poster.jpg" onto the shared destination stem.
@@ -97,7 +98,10 @@ func transferSidecarArtwork(srcMedia, dstMedia string, mode TransferMode) error 
 			}
 		}
 		dstName := name
-		if suffix != "" && dstBase != "" {
+		if srcAdultCode != "" && strings.HasPrefix(strings.ToLower(name), strings.ToLower(srcAdultCode)) {
+			// Adult sidecars are keyed by code (e.g. ADN-188-poster.jpg) and should
+			// follow the media without being renamed to the display title stem.
+		} else if suffix != "" && dstBase != "" {
 			dstName = dstBase + suffix
 		}
 		dst := filepath.Join(dstDir, dstName)

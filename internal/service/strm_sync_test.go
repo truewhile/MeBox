@@ -825,6 +825,7 @@ func TestWalkRemoteConcurrent(t *testing.T) {
 	if err := st.walkRemote(); err != nil {
 		t.Fatalf("walkRemote failed: %v", err)
 	}
+	st.flushPreferredVideos()
 
 	for _, dir := range []string{"root", "a", "a1", "b"} {
 		if provider.listed[dir] != 1 {
@@ -1113,6 +1114,7 @@ func TestWalk115FlatConcurrentProcessing(t *testing.T) {
 	if err := st.walk115Flat(oc); err != nil {
 		t.Fatalf("walk115Flat: %v", err)
 	}
+	st.flushPreferredVideos()
 
 	// 3 个视频的 strm 全部生成
 	if st.rec.NewStrm != 3 {
@@ -1168,6 +1170,7 @@ func TestWalk115FlatConcurrentProcessing(t *testing.T) {
 	if err := st2.walk115Flat(oc); err != nil {
 		t.Fatalf("incremental walk115Flat: %v", err)
 	}
+	st2.flushPreferredVideos()
 	if infoCalls != 0 {
 		t.Fatalf("incremental sync should reuse dir cache, got %d get_info calls", infoCalls)
 	}
@@ -1461,6 +1464,7 @@ func TestWalk115AdaptiveHierarchicalFlatScan(t *testing.T) {
 	if err := st.walk115Flat(oc); err != nil {
 		t.Fatalf("walk115Flat adaptive failed: %v", err)
 	}
+	st.flushPreferredVideos()
 
 	// 1个根目录视频 + 2个Heyzo视频 + 1个S1视频 = 共4个视频成功生成 .strm
 	if st.rec.NewStrm != 4 {

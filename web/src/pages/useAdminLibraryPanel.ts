@@ -180,7 +180,7 @@ function useLibraryActions(refresh: () => Promise<void>) {
   }
 
   const toggleCarouselLibrary = async (library: Library) => {
-    const next = !Boolean(library.carousel_enabled)
+    const next = !library.carousel_enabled
     await libraryAPI.update(library.id, { carousel_enabled: next })
     toast.success(next ? `「${library.name}」已加入首页轮播` : `「${library.name}」已移出首页轮播`)
     await refresh()

@@ -21,7 +21,8 @@ import { strmAPI } from '../api/strm'
 import type { StrmQueueSnapshot, StrmTask, StrmTaskStatus } from '../types/strm'
 import { STRM_PROVIDER_LABELS } from '../types/strm'
 import { apiErrorMessage, formatBytes, formatTime, taskStatusMeta } from './StrmManagePage'
-import { TaskDetailModal, getFileIcon } from './strm-queue/TaskDetailModal'
+import { TaskDetailModal } from './strm-queue/TaskDetailModal'
+import { getFileIcon } from './strm-queue/taskFileIcon'
 import { copyToClipboard, useTaskSelection } from './queue-shared'
 
 const FILTERS: { key: 'all' | StrmTaskStatus; label: string; icon: typeof Clock; color: string }[] = [
@@ -190,9 +191,8 @@ export function StrmQueuePanel({
   }
 
   // Filter and search tasks in memory
-  const tasks = snapshot?.tasks ?? []
   const filteredTasks = useMemo(() => {
-    let list = tasks
+    let list = snapshot?.tasks ?? []
     if (filter !== 'all') {
       list = list.filter((t) => t.status === filter)
     }
@@ -207,7 +207,7 @@ export function StrmQueuePanel({
       )
     }
     return list
-  }, [tasks, filter, search])
+  }, [snapshot?.tasks, filter, search])
 
   const counts = snapshot?.counts
   const pendingCount = counts?.pending ?? 0

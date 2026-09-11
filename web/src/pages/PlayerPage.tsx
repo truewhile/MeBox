@@ -311,7 +311,10 @@ export function PlayerPage() {
   // Chromium 会把被中断的首次加载报告成播放错误并误触发 HLS 回退。
   const activeBurnedSubtitleStream = mode === 'hls' ? burnedSubtitleStream : undefined
   const mediaRef = useRef(media)
-  mediaRef.current = media
+  useEffect(() => {
+    mediaRef.current = media
+  }, [media])
+
   useEffect(() => {
     if (!mediaId || !ref.current) return
     const currentMedia = mediaRef.current
@@ -498,9 +501,11 @@ export function PlayerPage() {
 
   // 使用 ref 实时同步进度计算所需的状态，避免每次 hlsStartSec 改变都触发 cleanup 并误上报旧进度
   const hlsStartSecRef = useRef(hlsStartSec)
-  hlsStartSecRef.current = hlsStartSec
   const modeRef = useRef(mode)
-  modeRef.current = mode
+  useEffect(() => {
+    hlsStartSecRef.current = hlsStartSec
+    modeRef.current = mode
+  }, [hlsStartSec, mode])
 
   // Persist resume position every 10 seconds while playing, and immediately upon pause/unmount.
   useEffect(() => {

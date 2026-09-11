@@ -74,12 +74,15 @@ func localPosterCandidates(mediaPath string) []string {
 		add(base + "-cover")
 		add(base + ".cover")
 		add(base)
+	}
+	for _, name := range []string{"poster", "folder", "cover", "movie", "show"} {
+		add(name)
+	}
+	for _, base := range mediaSidecarBaseVariants(mediaPath) {
 		add(base + "-thumb")
 		add(base + ".thumb")
 	}
-	for _, name := range []string{"poster", "folder", "cover", "movie", "show", "thumb"} {
-		add(name)
-	}
+	add("thumb")
 	return append(adultArtworkNameCandidates(mediaPath, "poster"), names...)
 }
 

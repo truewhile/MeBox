@@ -55,7 +55,9 @@ export function LayoutUserMenu({
   const [menuPosition, setMenuPosition] = useState<MenuPosition | null>(null)
   const [isOtpOpen, setIsOtpOpen] = useState(false)
 
-  onCloseRef.current = onClose
+  useEffect(() => {
+    onCloseRef.current = onClose
+  }, [onClose])
 
   const updateMenuPosition = useCallback(() => {
     const trigger = triggerRef.current

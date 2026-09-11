@@ -28,7 +28,7 @@ export function AdminLibraryTable({ libs, ...actions }: LibraryTableProps) {
   const [browsingRoot, setBrowsingRoot] = useState<{ libraryID: string; root: LibraryRoot; initialPath?: string } | null>(null)
   const [addingRootLib, setAddingRootLib] = useState<Library | null>(null)
   const [draggingId, setDraggingId] = useState<string | null>(null)
-  const dragOverId = useRef<string | null>(null)
+  const [dragOverId, setDragOverId] = useState<string | null>(null)
 
   const handleSelectRootPath = (selectedPath: string) => {
     if (browsingRoot) {
@@ -59,7 +59,7 @@ export function AdminLibraryTable({ libs, ...actions }: LibraryTableProps) {
 
   const handleDrop = (e: DragEvent, overId: string) => {
     e.preventDefault()
-    dragOverId.current = null
+    setDragOverId(null)
     setDraggingId(null)
     if (draggingId && overId !== draggingId) {
       handleReorder(draggingId, overId)
@@ -90,19 +90,19 @@ export function AdminLibraryTable({ libs, ...actions }: LibraryTableProps) {
                 onBrowseRoot={(root) => setBrowsingRoot({ libraryID: library.id, root, initialPath: root.path })}
                 onOpenAddRoot={() => setAddingRootLib(library)}
                 dragging={draggingId === library.id}
-                dragOver={dragOverId.current === library.id}
+                dragOver={dragOverId === library.id}
                 onDragStart={(e) => {
                   e.dataTransfer.effectAllowed = 'move'
-                  dragOverId.current = null
+                  setDragOverId(null)
                   setDraggingId(library.id)
                 }}
                 onDragOver={(e) => {
                   e.preventDefault()
                   e.dataTransfer.dropEffect = 'move'
-                  if (dragOverId.current !== library.id) dragOverId.current = library.id
+                  if (dragOverId !== library.id) setDragOverId(library.id)
                 }}
                 onDragEnd={() => {
-                  dragOverId.current = null
+                  setDragOverId(null)
                   setDraggingId(null)
                 }}
                 onDrop={(e) => handleDrop(e, library.id)}

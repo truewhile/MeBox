@@ -46,14 +46,21 @@ func (s *ScraperService) writeMediaArtworkFilesAfterScrape(ctx context.Context, 
 	}
 	isAdult := shouldCropAdultPoster(refreshed, lib)
 	artworkUpdates := map[string]any{}
+	shouldPersistLocalArtworkURL := func(raw string) bool {
+		return isAdult || !isHTTPish(raw)
+	}
 	if refreshed.PosterURL != "" {
 		if dst := s.downloadArtworkToPathWithOptions(ctx, dir, base+"-poster", refreshed.PosterURL, isAdult); dst != "" {
-			artworkUpdates["poster_url"] = filepath.Join(filepath.Dir(refreshed.Path), filepath.Base(dst))
+			if shouldPersistLocalArtworkURL(refreshed.PosterURL) {
+				artworkUpdates["poster_url"] = filepath.Join(filepath.Dir(refreshed.Path), filepath.Base(dst))
+			}
 		}
 	}
 	if refreshed.BackdropURL != "" {
 		if dst := s.downloadArtworkToPathWithOptions(ctx, dir, base+"-backdrop", refreshed.BackdropURL, false); dst != "" {
-			artworkUpdates["backdrop_url"] = filepath.Join(filepath.Dir(refreshed.Path), filepath.Base(dst))
+			if shouldPersistLocalArtworkURL(refreshed.BackdropURL) {
+				artworkUpdates["backdrop_url"] = filepath.Join(filepath.Dir(refreshed.Path), filepath.Base(dst))
+			}
 		}
 	} else if isAdult && refreshed.PosterURL != "" {
 		// 番号海报原图为完整封套横图，在无独立背景图时直接作为背景图写出

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Captions,
   CaptionsOff,
@@ -84,11 +84,11 @@ export function PlayerControls({
   streamOffset = 0,
   onSeekAbsolute,
 }: PlayerControlsProps) {
-  const video = () => videoRef.current
-  const container = () =>
+  const video = useCallback(() => videoRef.current, [videoRef])
+  const container = useCallback(() =>
     videoRef.current?.closest<HTMLElement>('[data-player-stage]') ??
     videoRef.current?.parentElement ??
-    null
+    null, [videoRef])
 
   const [playing, setPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
@@ -255,15 +255,14 @@ export function PlayerControls({
       el.removeEventListener('leavepictureinpicture', syncPip)
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoRef, knownDuration, streamOffset, onUiVisibleChange])
+  }, [container, video, knownDuration, streamOffset, onUiVisibleChange])
 
   // Keep the scrubber max in sync when metadata duration arrives after mount.
   useEffect(() => {
     const el = video()
     const streamDur = el && Number.isFinite(el.duration) ? el.duration : 0
     setDuration(Math.max(knownDuration || 0, streamOffset + streamDur))
-  }, [knownDuration, streamOffset])
+  }, [knownDuration, streamOffset, video])
 
   // 当悬停或菜单状态改变时，更新控制栏计时器
   useEffect(() => {
@@ -277,7 +276,7 @@ export function PlayerControls({
         hideTimerRef.current = setTimeout(() => onUiVisibleChange(false), 3000)
       }
     }
-  }, [controlsHovered, isScrubbing, subtitleMenuOpen, danmakuOpen, playlistOpen, onUiVisibleChange])
+  }, [controlsHovered, isScrubbing, subtitleMenuOpen, danmakuOpen, playlistOpen, onUiVisibleChange, video])
 
   const togglePlay = () => {
     const el = video()

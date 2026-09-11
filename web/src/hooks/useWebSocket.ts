@@ -15,7 +15,10 @@ export function useWebSocket(onEvent: (topic: string, payload: unknown) => void)
   const ref = useRef<WebSocket | null>(null)
   const token = useAuthStore((s) => s.token)
   const onEventRef = useRef(onEvent)
-  onEventRef.current = onEvent
+
+  useEffect(() => {
+    onEventRef.current = onEvent
+  }, [onEvent])
 
   useEffect(() => {
     if (!token) return

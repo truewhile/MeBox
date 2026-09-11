@@ -1,4 +1,3 @@
-/* eslint-disable react-refresh/only-export-components */
 import { useCallback, useEffect, useState } from 'react'
 import toast from 'react-hot-toast'
 import {

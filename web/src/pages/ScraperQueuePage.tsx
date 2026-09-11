@@ -23,7 +23,8 @@ import { imageURL } from '../api/client'
 import { scraperAPI } from '../api/scraper'
 import type { ScrapeQueueSnapshot, ScrapeTask, ScrapeTaskStatus } from '../types/scraper'
 import { apiErrorMessage, formatTime, taskStatusMeta } from './StrmManagePage'
-import { PROVIDER_LABELS, ScrapeDetailModal } from './scraper-queue/ScrapeDetailModal'
+import { ScrapeDetailModal } from './scraper-queue/ScrapeDetailModal'
+import { PROVIDER_LABELS } from './scraper-queue/scrapeLabels'
 import { copyToClipboard, useTaskSelection } from './queue-shared'
 
 const FILTERS: { key: 'all' | ScrapeTaskStatus; label: string; icon: typeof Clock; color: string }[] = [
@@ -196,9 +197,8 @@ export function ScraperQueuePage({ embedded = false }: { embedded?: boolean }) {
   }
 
   // Filter and search
-  const tasks = snapshot?.tasks ?? []
   const filteredTasks = useMemo(() => {
-    let list = tasks
+    let list = snapshot?.tasks ?? []
     if (filter !== 'all') {
       list = list.filter((t) => t.status === filter)
     }
@@ -214,7 +214,7 @@ export function ScraperQueuePage({ embedded = false }: { embedded?: boolean }) {
       )
     }
     return list
-  }, [tasks, filter, search])
+  }, [snapshot?.tasks, filter, search])
 
   const counts = snapshot?.counts
   const pendingCount = counts?.pending ?? 0
