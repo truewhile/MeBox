@@ -114,9 +114,15 @@ function LayoutHeaderSearch() {
   const [loading, setLoading] = useState(false)
   const [results, setResults] = useState<Media[]>([])
   const containerRef = useRef<HTMLDivElement>(null)
+  const isOpenRef = useRef(false)
   // 递增序号守卫：快速连续输入时丢弃过期响应
   const searchSeqRef = useRef(0)
   const navigate = useNavigate()
+
+  const setSearchOpen = (open: boolean) => {
+    isOpenRef.current = open
+    setIsOpen(open)
+  }
 
   useEffect(() => {
     const trimmed = query.trim()
@@ -124,6 +130,8 @@ function LayoutHeaderSearch() {
       searchSeqRef.current += 1
       setResults([])
       setLoading(false)
+      isOpenRef.current = false
+      setIsOpen(false)
       return
     }
 
@@ -134,7 +142,7 @@ function LayoutHeaderSearch() {
         const res = await mediaAPI.search(trimmed, 8)
         if (seq !== searchSeqRef.current) return
         setResults(res.items || [])
-        setIsOpen(true)
+        if (isOpenRef.current) setIsOpen(true)
       } catch {
         // 请求失败时保留旧结果，避免网络抖动清空下拉
       } finally {
@@ -148,6 +156,7 @@ function LayoutHeaderSearch() {
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        isOpenRef.current = false
         setIsOpen(false)
       }
     }
@@ -156,14 +165,14 @@ function LayoutHeaderSearch() {
   }, [])
 
   const handleSelect = (item: Media) => {
-    setIsOpen(false)
+    setSearchOpen(false)
     setQuery('')
     navigate(favouriteMediaLink(item))
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
-      setIsOpen(false)
+      setSearchOpen(false)
     } else if (e.key === 'Enter' && results.length > 0) {
       handleSelect(results[0])
     }
@@ -180,11 +189,12 @@ function LayoutHeaderSearch() {
           type="text"
           value={query}
           onChange={(e) => {
-            setQuery(e.target.value)
-            if (e.target.value.trim()) setIsOpen(true)
+            const nextQuery = e.target.value
+            setQuery(nextQuery)
+            setSearchOpen(Boolean(nextQuery.trim()))
           }}
           onFocus={() => {
-            if (results.length > 0) setIsOpen(true)
+            if (query.trim()) setSearchOpen(true)
           }}
           onKeyDown={handleKeyDown}
           placeholder="搜索媒体…"
@@ -198,7 +208,7 @@ function LayoutHeaderSearch() {
             onClick={() => {
               setQuery('')
               setResults([])
-              setIsOpen(false)
+              setSearchOpen(false)
             }}
             className="absolute right-3 text-[var(--app-muted)] hover:text-[var(--app-text)] p-0.5 rounded-lg"
           >
