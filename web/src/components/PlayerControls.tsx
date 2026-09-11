@@ -15,6 +15,7 @@ import {
   VolumeX,
 } from 'lucide-react'
 import type { SubtitleTrack } from '../api/subtitles'
+import type { SubtitleChineseMode } from '../utils/subtitleChinese'
 
 // PlayerControls — custom bottom control bar replacing the native <video
 // controls> (which cannot host custom buttons). The danmaku toggle sits right
@@ -36,6 +37,8 @@ type PlayerControlsProps = {
   /** 当前激活字幕轨道：-1=关闭，0..n-1=对应轨道。 */
   subtitleIndex: number
   onSelectSubtitle: (index: number) => void
+  subtitleChineseMode: SubtitleChineseMode
+  onSubtitleChineseModeChange: (mode: SubtitleChineseMode) => void
   danmakuOpen: boolean
   danmakuEnabled: boolean
   onToggleDanmaku: () => void
@@ -63,6 +66,8 @@ export function PlayerControls({
   subs,
   subtitleIndex,
   onSelectSubtitle,
+  subtitleChineseMode,
+  onSubtitleChineseModeChange,
   danmakuOpen,
   danmakuEnabled,
   onToggleDanmaku,
@@ -355,6 +360,9 @@ export function PlayerControls({
     document.pictureInPictureEnabled
 
   const displayTime = isScrubbing && scrubValue !== null ? scrubValue : currentTime
+  const selectedSubtitle = subtitleIndex >= 0 ? subs[subtitleIndex] : undefined
+  const canConvertSelectedSubtitle =
+    selectedSubtitle?.source === 'external' && selectedSubtitle.delivery === 'webvtt'
 
   return (
     <div
@@ -448,7 +456,7 @@ export function PlayerControls({
               )}
             </button>
             {subtitleMenuOpen && (
-              <div className="absolute bottom-11 right-0 z-30 min-w-36 rounded-xl border border-white/15 bg-black/85 p-1 shadow-2xl backdrop-blur">
+              <div className="absolute bottom-11 right-0 z-30 min-w-44 rounded-xl border border-white/15 bg-black/85 p-1 shadow-2xl backdrop-blur">
                 <button
                   type="button"
                   onClick={() => {
@@ -478,6 +486,35 @@ export function PlayerControls({
                     {subtitleIndex === index && <span className="ml-auto text-rose-400">●</span>}
                   </button>
                 ))}
+                {canConvertSelectedSubtitle && (
+                  <div className="mt-1 border-t border-white/10 pt-1">
+                    <p className="px-3 py-1 text-[10px] text-white/45">外挂字幕简繁转换</p>
+                    {(
+                      [
+                        ['original', '保持原文'],
+                        ['simplified', '转换为简体'],
+                        ['traditional', '转换为繁体'],
+                      ] as const
+                    ).map(([mode, label]) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => {
+                          onSubtitleChineseModeChange(mode)
+                          setSubtitleMenuOpen(false)
+                        }}
+                        className={`flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-xs transition hover:bg-white/10 ${
+                          subtitleChineseMode === mode ? 'text-rose-400' : 'text-white/85'
+                        }`}
+                      >
+                        <span>{label}</span>
+                        {subtitleChineseMode === mode && (
+                          <span className="ml-auto text-rose-400">●</span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>

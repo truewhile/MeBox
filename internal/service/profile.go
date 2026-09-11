@@ -27,12 +27,13 @@ func NewProfileService(log *zap.Logger, repo *repository.Container) *ProfileServ
 // ProfileUpdate is the patch object accepted by UpdateProfile. Empty
 // fields are ignored so the same payload can be reused across screens.
 type ProfileUpdate struct {
-	Username  *string `json:"username,omitempty"`
-	Nickname  *string `json:"nickname,omitempty"`
-	Email     *string `json:"email,omitempty"`
-	AvatarURL *string `json:"avatar_url,omitempty"`
-	HideAdult *bool   `json:"hide_adult,omitempty"`
-	Password  string  `json:"password,omitempty"`
+	Username            *string `json:"username,omitempty"`
+	Nickname            *string `json:"nickname,omitempty"`
+	Email               *string `json:"email,omitempty"`
+	AvatarURL           *string `json:"avatar_url,omitempty"`
+	HideAdult           *bool   `json:"hide_adult,omitempty"`
+	SubtitleChineseMode *string `json:"subtitle_chinese_mode,omitempty"`
+	Password            string  `json:"password,omitempty"`
 }
 
 // UpdateProfile applies a non-credential patch to the user.
@@ -72,6 +73,15 @@ func (p *ProfileService) UpdateProfile(ctx context.Context, userID string, patch
 	}
 	if patch.HideAdult != nil {
 		updates["hide_adult"] = *patch.HideAdult
+	}
+	if patch.SubtitleChineseMode != nil {
+		mode := strings.ToLower(strings.TrimSpace(*patch.SubtitleChineseMode))
+		switch mode {
+		case "original", "simplified", "traditional":
+			updates["subtitle_chinese_mode"] = mode
+		default:
+			return nil, errors.New("subtitle_chinese_mode must be original, simplified, or traditional")
+		}
 	}
 	if len(updates) > 0 {
 		if err := p.repo.DB.Model(&model.User{}).Where("id = ?", userID).

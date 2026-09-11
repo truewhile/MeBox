@@ -16,6 +16,7 @@
     "framer-motion": "^12.38.0",
     "hls.js": "^1.5.11",
     "lucide-react": "^0.379.0",
+    "opencc-js": "^1.4.2",
     "qrcode": "^1.5.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

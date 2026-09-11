@@ -9,9 +9,15 @@ import { danmakuAPI, type DanmakuAnime, type DanmakuLoadedInfo } from '../api/da
 import { playbackAPI } from '../api/playback'
 import { subtitlesAPI, type SubtitleTrack } from '../api/subtitles'
 import { systemAPI } from '../api/system'
+import { profileAPI } from '../api/profile'
+import { useAuthStore } from '../stores/auth'
 import type { Media } from '../types'
 import { getSeriesKey, seriesTitleFromPath } from '../utils/groupSeries'
 import { isRemoteEmbyID } from '../utils/remoteEmby'
+import {
+  normalizeSubtitleChineseMode,
+  type SubtitleChineseMode,
+} from '../utils/subtitleChinese'
 import { pickPlayerMode, needsTranscodeForBrowser, isDirectStreamMedia, type PlayerMode } from './playerPageModel'
 import { classifyDirectPlayError } from './directPlayError'
 import { apiErrorMessage } from './StrmManagePage'
@@ -51,6 +57,15 @@ export function PlayerPage() {
   const [mode, setMode] = useState<PlayerMode>('direct')
   const [subs, setSubs] = useState<SubtitleTrack[]>([])
   const [subtitleIndex, setSubtitleIndex] = useState<number>(0)
+  const authUser = useAuthStore((state) => state.user)
+  const setAuthUser = useAuthStore((state) => state.setUser)
+  const [subtitleChineseMode, setSubtitleChineseMode] =
+    useState<SubtitleChineseMode>(() =>
+      normalizeSubtitleChineseMode(authUser?.subtitle_chinese_mode),
+    )
+  const persistedSubtitleChineseModeRef = useRef(subtitleChineseMode)
+  const subtitlePreferenceTouchedRef = useRef(false)
+  const subtitlePreferenceSaveQueueRef = useRef<Promise<void>>(Promise.resolve())
   const [hlsUnavailable, setHlsUnavailable] = useState(false)
   const [playerError, setPlayerError] = useState('')
   // 媒体元数据加载失败（404 / 无权限等）：舞台区直接展示错误而不是永远「加载中」
@@ -111,6 +126,24 @@ export function PlayerPage() {
       .catch(() => setDirectOnly(false))
       .finally(() => setDirectOnlyKnown(true))
   }, [])
+
+  // 每次进入播放器都从数据库刷新用户的字幕转换偏好；本地登录缓存只用作首屏初值。
+  useEffect(() => {
+    let cancelled = false
+    profileAPI
+      .get()
+      .then((user) => {
+        if (cancelled || subtitlePreferenceTouchedRef.current) return
+        const savedMode = normalizeSubtitleChineseMode(user.subtitle_chinese_mode)
+        persistedSubtitleChineseModeRef.current = savedMode
+        setSubtitleChineseMode(savedMode)
+        setAuthUser(user)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [setAuthUser])
 
   // 读取宿主机已保存的弹幕参数作为面板初始值（无 admin 权限也可读）。
   useEffect(() => {
@@ -761,6 +794,30 @@ export function PlayerPage() {
     }
   }, [directOnly, hlsStartSec, isDirectStream, mode, setPlaybackMode, subs, subtitleIndex])
 
+  const changeSubtitleChineseMode = useCallback(
+    (nextMode: SubtitleChineseMode) => {
+      subtitlePreferenceTouchedRef.current = true
+      setSubtitleChineseMode(nextMode)
+
+      const save = subtitlePreferenceSaveQueueRef.current.then(async () => {
+        const user = await profileAPI.update({ subtitle_chinese_mode: nextMode })
+        persistedSubtitleChineseModeRef.current = nextMode
+        setAuthUser(user)
+        toast.success('字幕转换偏好已保存，后续播放将自动沿用')
+      })
+      subtitlePreferenceSaveQueueRef.current = save.catch(() => undefined)
+      void save.catch(() => {
+        setSubtitleChineseMode((currentMode) =>
+          currentMode === nextMode
+            ? persistedSubtitleChineseModeRef.current
+            : currentMode,
+        )
+        toast.error('字幕转换偏好保存失败，已恢复上次设置')
+      })
+    },
+    [setAuthUser],
+  )
+
   const handleVideoError = useCallback(() => {
     const video = ref.current
     if (mode !== 'direct') {
@@ -846,6 +903,8 @@ export function PlayerPage() {
         subs={subs}
         subtitleIndex={subtitleIndex}
         onSelectSubtitle={selectSubtitle}
+        subtitleChineseMode={subtitleChineseMode}
+        onSubtitleChineseModeChange={changeSubtitleChineseMode}
         videoRef={ref}
         onVideoError={handleVideoError}
         danmakuEnabled={danmakuEnabled}

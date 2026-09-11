@@ -7,6 +7,7 @@ export interface User {
   email?: string
   avatar_url?: string
   hide_adult?: boolean
+  subtitle_chinese_mode?: 'original' | 'simplified' | 'traditional'
   force_password_reset: boolean
   is_active: boolean
   allowed_library_ids?: string[]

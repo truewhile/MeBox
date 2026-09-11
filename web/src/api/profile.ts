@@ -2,12 +2,15 @@ import { api } from './client'
 import type { User } from '../types'
 
 export const profileAPI = {
+  get: () => api.get<User>('/me').then((r) => r.data),
+
   update: (patch: {
     username?: string
     nickname?: string
     email?: string
     avatar_url?: string
     hide_adult?: boolean
+    subtitle_chinese_mode?: 'original' | 'simplified' | 'traditional'
     password?: string
   }) =>
     api.patch<User>('/me', patch).then((r) => r.data),

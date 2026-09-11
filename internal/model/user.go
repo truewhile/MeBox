@@ -28,6 +28,9 @@ type User struct {
 	// PinnedLibraryIDs 存储用户置顶的媒体库 ID 列表（JSON 字符串），顺序即置顶优先级。
 	PinnedLibraryIDs  string   `gorm:"type:text" json:"-"`
 	PinnedLibraryList []string `gorm:"-" json:"pinned_library_ids,omitempty"`
+	// SubtitleChineseMode 是网页播放器外挂字幕的简繁转换偏好：
+	// original / simplified / traditional。
+	SubtitleChineseMode string `gorm:"size:16;not null;default:original" json:"subtitle_chinese_mode"`
 	// ExpiredAt is the account expiry time. Nil means the account never
 	// expires. When set and in the past, the account is treated as expired
 	// (login blocked) until an admin or a redemption code renews it.

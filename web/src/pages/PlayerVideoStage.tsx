@@ -4,6 +4,10 @@ import type { PointerEvent, ReactNode, RefObject } from 'react'
 import { subtitlesAPI, type SubtitleTrack } from '../api/subtitles'
 import { type DanmakuAnime, type DanmakuLoadedInfo } from '../api/danmaku'
 import type { Media } from '../types'
+import {
+  loadSubtitleChineseConverter,
+  type SubtitleChineseMode,
+} from '../utils/subtitleChinese'
 import { DanmakuStage } from '../components/DanmakuStage'
 import { PlayerControls } from '../components/PlayerControls'
 
@@ -64,6 +68,8 @@ type PlayerVideoStageProps = {
   /** 当前激活字幕轨道：-1=关闭，0..n-1=对应轨道。 */
   subtitleIndex: number
   onSelectSubtitle: (index: number) => void
+  subtitleChineseMode: SubtitleChineseMode
+  onSubtitleChineseModeChange: (mode: SubtitleChineseMode) => void
   videoRef: RefObject<HTMLVideoElement>
   onVideoError: () => void
   danmakuEnabled: boolean
@@ -102,6 +108,8 @@ export function PlayerVideoStage({
   subs,
   subtitleIndex,
   onSelectSubtitle,
+  subtitleChineseMode,
+  onSubtitleChineseModeChange,
   videoRef,
   onVideoError,
   danmakuEnabled,
@@ -137,6 +145,8 @@ export function PlayerVideoStage({
   const revealControlsOnlyRef = useRef(false)
   // 当前展示的字幕文本（由自定义字幕层渲染，100% 透明无黑框）
   const [activeCueText, setActiveCueText] = useState<string>('')
+  const [subtitleChineseConverter, setSubtitleChineseConverter] =
+    useState<(text: string) => string>(() => (text: string) => text)
   // 独立保存完整 WebVTT 时间轴。HLS seek 会替换媒体源，Chromium 此时可能清空
   // <track>.track.cues；独立时间轴不受 MediaSource 重挂载和轨道 mode 切换影响。
   const [subtitleTimeline, setSubtitleTimeline] = useState<{
@@ -145,6 +155,32 @@ export function PlayerVideoStage({
   } | null>(null)
   // 直连 302 尚未完成时插入 <track> 会中断加载并误报播放失败；等 canplay 再挂。
   const [tracksArmed, setTracksArmed] = useState(false)
+
+  useEffect(() => {
+    const selectedTrack = subs[subtitleIndex]
+    let cancelled = false
+
+    setSubtitleChineseConverter(() => (text: string) => text)
+    if (
+      subtitleChineseMode === 'original' ||
+      selectedTrack?.source !== 'external' ||
+      selectedTrack.delivery !== 'webvtt'
+    ) {
+      return
+    }
+
+    void loadSubtitleChineseConverter(subtitleChineseMode)
+      .then((converter) => {
+        if (!cancelled) setSubtitleChineseConverter(() => converter)
+      })
+      .catch(() => {
+        // 字典分包加载失败时保留原文，避免影响字幕正常显示。
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [subs, subtitleIndex, subtitleChineseMode])
 
   useEffect(() => {
     setTracksArmed(false)
@@ -281,7 +317,7 @@ export function PlayerVideoStage({
             .filter((cue) => absoluteTime >= cue.startTime && absoluteTime <= cue.endTime)
             .map((cue) => cue.text),
         )
-        setActiveCueText(texts.join('\n'))
+        setActiveCueText(subtitleChineseConverter(texts.join('\n')))
         return
       }
 
@@ -315,7 +351,7 @@ export function PlayerVideoStage({
           }
         }
       }
-      setActiveCueText(uniqueSubtitleTexts(texts).join('\n'))
+      setActiveCueText(subtitleChineseConverter(uniqueSubtitleTexts(texts).join('\n')))
     }
 
     const apply = () => {
@@ -370,7 +406,16 @@ export function PlayerVideoStage({
         }
       }
     }
-  }, [subtitleIndex, subs, videoRef, media, streamOffset, subtitleTimeline, tracksArmed])
+  }, [
+    subtitleIndex,
+    subs,
+    videoRef,
+    media,
+    streamOffset,
+    subtitleTimeline,
+    tracksArmed,
+    subtitleChineseConverter,
+  ])
 
   // 根据视频画面宽高比与舞台宽高比，确定视频在哪个轴向撑满 100%
   const isWiderThanStage =
@@ -464,6 +509,8 @@ export function PlayerVideoStage({
             subs={subs}
             subtitleIndex={subtitleIndex}
             onSelectSubtitle={onSelectSubtitle}
+            subtitleChineseMode={subtitleChineseMode}
+            onSubtitleChineseModeChange={onSubtitleChineseModeChange}
             danmakuOpen={danmakuOpen}
             danmakuEnabled={danmakuEnabled}
             onToggleDanmaku={onToggleDanmaku}
