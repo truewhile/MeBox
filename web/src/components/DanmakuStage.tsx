@@ -34,6 +34,8 @@ type DanmakuStageProps = {
   onLoaded?: (info: DanmakuLoadedInfo | null) => void
   /** Called when multiple anime matched and the user must pick one. */
   onCandidates?: (candidates: DanmakuAnime[]) => void
+  /** Called after a successful load with other libraries for the same episode. */
+  onAlternatives?: (alternatives: DanmakuAnime[]) => void
 }
 
 // Average of the engine's durationRange (ms). Used to compute how far a
@@ -55,6 +57,7 @@ export function DanmakuStage({
   searchTrigger = 0,
   onLoaded,
   onCandidates,
+  onAlternatives,
 }: DanmakuStageProps) {
   const holderRef = useRef<HTMLDivElement>(null)
   const managerRef = useRef<Manager<Comment> | null>(null)
@@ -143,10 +146,13 @@ export function DanmakuStage({
         if (res.candidates && res.candidates.length > 0) {
           // 多番剧命中：交回播放器展示候选让用户选择（disambiguation）。
           comments = []
+          onAlternatives?.([])
           onCandidates?.(res.candidates)
           return
         }
         if (res.enabled) {
+          // 弹幕已自动加载；若同一集还有其它来源，一并交回播放器供随时切换。
+          onAlternatives?.(res.alternatives ?? [])
           comments = parseDanmaku(res.raw || '', res.source_type)
             .filter((c) => Number.isFinite(c.time) && c.time >= 0)
             .sort((a, b) => a.time - b.time)
@@ -158,9 +164,11 @@ export function DanmakuStage({
             matchMode: res.match_mode,
             totalCount: comments.length,
             sourceType: res.source_type,
+            mergedSources: res.merged_sources ?? 0,
           }
         } else {
           comments = []
+          onAlternatives?.([])
           loadedInfo = {
             totalCount: 0,
           }

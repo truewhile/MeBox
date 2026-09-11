@@ -27,7 +27,17 @@ export interface DanmakuFetchResult {
   font_size: string
   area: string
   raw?: string
+  /** Number of sources merged into `raw`; absent/0 means not merged. */
+  merged_sources?: number
   candidates?: DanmakuAnime[]
+  /**
+   * Same episode, other sources. Unlike `candidates` (which means "pick one
+   * before anything loads"), `alternatives` arrives together with a loaded
+   * library: the backend already auto-picked one and offers the rest so the
+   * user can switch without re-searching. Aggregating sources such as LogVar
+   * return several libraries for the same episode.
+   */
+  alternatives?: DanmakuAnime[]
   anime_title?: string
   episode_title?: string
   episode_id?: number
@@ -41,6 +51,8 @@ export interface DanmakuLoadedInfo {
   matchMode?: 'hash' | 'filename' | 'search' | 'manual' | string
   totalCount: number
   sourceType?: 'auto' | 'xml' | 'json'
+  /** Number of sources merged into the loaded comments (0 = not merged). */
+  mergedSources?: number
 }
 
 export type DanmakuFetchOptions = {
@@ -73,6 +85,16 @@ export const danmakuAPI = {
         opacity: string
         font_size: string
         area: string
+        /** Per-user preference: merge the same episode's multiple sources. */
+        merge_sources: boolean
       }>('/danmaku/config')
+      .then((r) => r.data),
+
+  // updateSettings persists per-user danmaku preferences (survives reload).
+  updateSettings: (settings: { mergeSources: boolean }) =>
+    api
+      .put<{ merge_sources: boolean }>('/danmaku/settings', {
+        merge_sources: settings.mergeSources,
+      })
       .then((r) => r.data),
 }

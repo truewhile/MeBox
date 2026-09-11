@@ -105,27 +105,359 @@ func TestDanmakuFetchHashMatchLayer(t *testing.T) {
 	require.Contains(t, seen, `"matchMode":"hashAndFileName"`)
 }
 
-// 第 1 层拉弹幕：配置了自定义源时优先自定义源，失败才回退官方。
-func TestDanmakuFetchHashMatchUsesConfiguredSourceFirst(t *testing.T) {
+// 第 1 层拉弹幕：官方 match 给出的 episodeId 属于官方 ID 空间，不能直接拿去
+// 请求第三方源（真实源上只会 404）。必须用官方给到的剧名+集数在配置源里重定位
+// 到配置源自己的 episodeId，再用它拉弹幕。
+func TestDanmakuFetchHashMatchRemapsEpisodeIDToConfiguredSource(t *testing.T) {
 	videoPath, _ := writeDanmakuTestVideo(t, "测试动画.第01话.mkv")
 
-	cfgSrv := newDanmakuSourceServer(t) // /api/v2/comment/25484 → 弹幕A
-	official := danmakuOfficialServer(t,
-		`{"success":true,"isMatched":true,"matches":[{"episodeId":25484,"animeId":1001,"animeTitle":"测试动画"}]}`,
-		`<?xml version="1.0"?><i><d p="0.5,1,16777215,user1">弹幕B官方</d></i>`,
-		nil)
+	// 配置源使用自己的 ID 空间：官方是 90001，配置源是 25484。
+	// 副标题一致，用于跨源确认是同一集。
+	const subtitle = "测试副标题"
+	cfgMux := http.NewServeMux()
+	cfgMux.HandleFunc("/api/v2/search/episodes", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"hasMore":false,"animes":[{"animeId":1001,"animeTitle":"测试动画","episodes":[{"episodeId":25484,"episodeTitle":"第1话 `+subtitle+`"}]}]}`)
+	})
+	cfgMux.HandleFunc("/api/v2/comment/25484", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, `<?xml version="1.0"?><i><d p="0.5,1,16777215,user1">弹幕A</d></i>`)
+	})
+	cfgSrv := httptest.NewServer(cfgMux)
+	t.Cleanup(cfgSrv.Close)
+
+	officialMux := http.NewServeMux()
+	officialMux.HandleFunc("/api/v2/match", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"success":true,"isMatched":true,"matches":[{"episodeId":90001,"animeId":1001,"animeTitle":"测试动画","episodeTitle":"第1话 `+subtitle+`"}]}`)
+	})
+	officialMux.HandleFunc("/api/v2/comment/90001", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, `<?xml version="1.0"?><i><d p="0.5,1,16777215,user1">弹幕B官方</d></i>`)
+	})
+	official := httptest.NewServer(officialMux)
+	t.Cleanup(official.Close)
 	overrideDanmakuOfficialBase(t, official.URL)
 
 	svc := newDanmakuTestService(t)
 	ctx := context.Background()
-	require.NoError(t, svc.repo.Setting.Set(ctx, DanmakuSourceKey, cfgSrv.URL()))
+	require.NoError(t, svc.repo.Setting.Set(ctx, DanmakuSourceKey, cfgSrv.URL))
 	seedDanmakuVideoMedia(t, svc, "mC", "测试动画", videoPath, 32000, 0)
 
 	res, err := svc.Fetch(ctx, "mC", "", "")
 	require.NoError(t, err)
-	// 配置源优先：弹幕来自自定义源而非官方。
+	// 弹幕取自配置源，且用的是重定位后的 ID。
 	require.Contains(t, res.Raw, "弹幕A")
 	require.NotContains(t, res.Raw, "弹幕B官方")
+	require.Equal(t, int64(25484), res.EpisodeID)
+	require.Equal(t, "hash", res.MatchMode)
+}
+
+// 配置源能定位到该集，但返回的是空弹幕库（count=0）时必须回官方兜底：
+// 第三方目录里有条目不代表真的收录了弹幕。
+func TestDanmakuFetchHashMatchFallsBackWhenConfiguredLibraryIsEmpty(t *testing.T) {
+	videoPath, _ := writeDanmakuTestVideo(t, "测试动画.第01话.mkv")
+
+	const subtitle = "测试副标题"
+	cfgMux := http.NewServeMux()
+	cfgMux.HandleFunc("/api/v2/search/episodes", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"hasMore":false,"animes":[{"animeId":1001,"animeTitle":"测试动画","episodes":[{"episodeId":25484,"episodeTitle":"第1话 `+subtitle+`"}]}]}`)
+	})
+	// 该集在配置源上存在，但弹幕为空。
+	cfgMux.HandleFunc("/api/v2/comment/25484", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"count":0,"comments":[]}`)
+	})
+	cfgSrv := httptest.NewServer(cfgMux)
+	t.Cleanup(cfgSrv.Close)
+
+	officialMux := http.NewServeMux()
+	officialMux.HandleFunc("/api/v2/match", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"success":true,"isMatched":true,"matches":[{"episodeId":90001,"animeId":1001,"animeTitle":"测试动画","episodeTitle":"第1话 `+subtitle+`"}]}`)
+	})
+	officialMux.HandleFunc("/api/v2/comment/90001", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, `<?xml version="1.0"?><i><d p="0.5,1,16777215,user1">官方兜底弹幕</d></i>`)
+	})
+	official := httptest.NewServer(officialMux)
+	t.Cleanup(official.Close)
+	overrideDanmakuOfficialBase(t, official.URL)
+
+	svc := newDanmakuTestService(t)
+	ctx := context.Background()
+	require.NoError(t, svc.repo.Setting.Set(ctx, DanmakuSourceKey, cfgSrv.URL))
+	seedDanmakuVideoMedia(t, svc, "mEmpty", "测试动画", videoPath, 32000, 0)
+
+	res, err := svc.Fetch(ctx, "mEmpty", "", "")
+	require.NoError(t, err)
+	require.Contains(t, res.Raw, "官方兜底弹幕")
+	require.Equal(t, int64(90001), res.EpisodeID)
+}
+
+// 同一集在配置源里命中多个来源时：自动加载第一条，其余作为可切换来源返回，
+// 让用户能在面板里直接切换，而不必重新搜索。
+func TestDanmakuFetchHashMatchReturnsAlternatives(t *testing.T) {
+	videoPath, _ := writeDanmakuTestVideo(t, "多来源动画.第01话.mkv")
+
+	const subtitle = "同一个副标题"
+	cfgMux := http.NewServeMux()
+	cfgMux.HandleFunc("/api/v2/search/episodes", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// 三个来源都指向同一集（副标题与集数一致），模拟 LogVar 聚合多站。
+		fmt.Fprint(w, `{"hasMore":false,"animes":[`+
+			`{"animeId":1,"animeTitle":"多来源动画 from dandan","episodes":[{"episodeId":101,"episodeTitle":"第1话 `+subtitle+`"}]},`+
+			`{"animeId":2,"animeTitle":"多来源动画 from bilibili","episodes":[{"episodeId":102,"episodeTitle":"第1话 `+subtitle+`"}]},`+
+			`{"animeId":3,"animeTitle":"多来源动画 from qq","episodes":[{"episodeId":103,"episodeTitle":"第1话 `+subtitle+`"}]}]}`)
+	})
+	cfgMux.HandleFunc("/api/v2/comment/101", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, `<?xml version="1.0"?><i><d p="0.5,1,16777215,user1">首选来源弹幕</d></i>`)
+	})
+	cfgSrv := httptest.NewServer(cfgMux)
+	t.Cleanup(cfgSrv.Close)
+
+	officialMux := http.NewServeMux()
+	officialMux.HandleFunc("/api/v2/match", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"success":true,"isMatched":true,"matches":[{"episodeId":90001,"animeId":9,"animeTitle":"多来源动画","episodeTitle":"第1话 `+subtitle+`"}]}`)
+	})
+	officialMux.HandleFunc("/api/v2/comment/90001", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, `<?xml version="1.0"?><i><d p="0.5,1,16777215,user1">官方弹幕</d></i>`)
+	})
+	official := httptest.NewServer(officialMux)
+	t.Cleanup(official.Close)
+	overrideDanmakuOfficialBase(t, official.URL)
+
+	svc := newDanmakuTestService(t)
+	ctx := context.Background()
+	require.NoError(t, svc.repo.Setting.Set(ctx, DanmakuSourceKey, cfgSrv.URL))
+	seedDanmakuVideoMedia(t, svc, "mAlt", "多来源动画", videoPath, 32000, 0)
+
+	res, err := svc.Fetch(ctx, "mAlt", "", "")
+	require.NoError(t, err)
+
+	// 自动加载第一个来源（沿用既有取值逻辑）。
+	require.Contains(t, res.Raw, "首选来源弹幕")
+	require.Equal(t, int64(101), res.EpisodeID)
+	require.Equal(t, "hash", res.MatchMode)
+
+	// 三个来源全部作为可切换列表返回。
+	require.Len(t, res.Alternatives, 3)
+	var ids []int64
+	for _, a := range res.Alternatives {
+		for _, e := range a.Episodes {
+			ids = append(ids, e.EpisodeID)
+		}
+	}
+	require.Equal(t, []int64{101, 102, 103}, ids)
+
+	// Candidates 的语义必须保持不变（这里不是"必须选择"），否则前端会停止自动加载。
+	require.Empty(t, res.Candidates)
+}
+
+// 只有一个来源时不应产生 alternatives，避免面板出现无意义的单条列表。
+func TestDanmakuFetchHashMatchNoAlternativesForSingleSource(t *testing.T) {
+	videoPath, _ := writeDanmakuTestVideo(t, "单来源动画.第01话.mkv")
+
+	const subtitle = "唯一副标题"
+	cfgMux := http.NewServeMux()
+	cfgMux.HandleFunc("/api/v2/search/episodes", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"hasMore":false,"animes":[{"animeId":1,"animeTitle":"单来源动画","episodes":[{"episodeId":201,"episodeTitle":"第1话 `+subtitle+`"}]}]}`)
+	})
+	cfgMux.HandleFunc("/api/v2/comment/201", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, `<?xml version="1.0"?><i><d p="0.5,1,16777215,user1">唯一来源弹幕</d></i>`)
+	})
+	cfgSrv := httptest.NewServer(cfgMux)
+	t.Cleanup(cfgSrv.Close)
+
+	officialMux := http.NewServeMux()
+	officialMux.HandleFunc("/api/v2/match", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"success":true,"isMatched":true,"matches":[{"episodeId":90002,"animeId":9,"animeTitle":"单来源动画","episodeTitle":"第1话 `+subtitle+`"}]}`)
+	})
+	official := httptest.NewServer(officialMux)
+	t.Cleanup(official.Close)
+	overrideDanmakuOfficialBase(t, official.URL)
+
+	svc := newDanmakuTestService(t)
+	ctx := context.Background()
+	require.NoError(t, svc.repo.Setting.Set(ctx, DanmakuSourceKey, cfgSrv.URL))
+	seedDanmakuVideoMedia(t, svc, "mOne", "单来源动画", videoPath, 32000, 0)
+
+	res, err := svc.Fetch(ctx, "mOne", "", "")
+	require.NoError(t, err)
+	require.Contains(t, res.Raw, "唯一来源弹幕")
+	require.Empty(t, res.Alternatives)
+}
+
+// 开启合并后：同一集的多个来源被合并，重复弹幕（时间+内容相同）只保留一条。
+func TestDanmakuFetchMergeSourcesCombinesAndDeduplicates(t *testing.T) {
+	videoPath, _ := writeDanmakuTestVideo(t, "合并动画.第01话.mkv")
+
+	const subtitle = "同一副标题"
+	cfgMux := http.NewServeMux()
+	cfgMux.HandleFunc("/api/v2/search/episodes", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"hasMore":false,"animes":[`+
+			`{"animeId":1,"animeTitle":"来源A","episodes":[{"episodeId":301,"episodeTitle":"第1话 `+subtitle+`"}]},`+
+			`{"animeId":2,"animeTitle":"来源B","episodes":[{"episodeId":302,"episodeTitle":"第1话 `+subtitle+`"}]}]}`)
+	})
+	// A 与 B 各有一条重复弹幕（1.0 秒「重复弹幕」）和各自独有的一条。
+	cfgMux.HandleFunc("/api/v2/comment/301", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"count":2,"comments":[`+
+			`{"p":"1.00,1,16777215,u1","m":"重复弹幕"},`+
+			`{"p":"2.00,1,16777215,u1","m":"只在A"}]}`)
+	})
+	cfgMux.HandleFunc("/api/v2/comment/302", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"count":2,"comments":[`+
+			`{"p":"1.00,1,16777215,u2","m":"重复弹幕"},`+
+			`{"p":"3.00,1,16777215,u2","m":"只在B"}]}`)
+	})
+	cfgSrv := httptest.NewServer(cfgMux)
+	t.Cleanup(cfgSrv.Close)
+
+	officialMux := http.NewServeMux()
+	officialMux.HandleFunc("/api/v2/match", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"success":true,"isMatched":true,"matches":[{"episodeId":90003,"animeId":9,"animeTitle":"合并动画","episodeTitle":"第1话 `+subtitle+`"}]}`)
+	})
+	official := httptest.NewServer(officialMux)
+	t.Cleanup(official.Close)
+	overrideDanmakuOfficialBase(t, official.URL)
+
+	svc := newDanmakuTestService(t)
+	ctx := context.Background()
+	require.NoError(t, svc.repo.Setting.Set(ctx, DanmakuSourceKey, cfgSrv.URL))
+	seedDanmakuVideoMedia(t, svc, "mMerge", "合并动画", videoPath, 32000, 0)
+
+	res, err := svc.FetchWithOptions(ctx, "mMerge", "", "", DanmakuFetchOptions{MergeSources: true})
+	require.NoError(t, err)
+	require.Equal(t, 2, res.MergedSources, "expected both sources to be merged")
+
+	merged := parseDanmakuComments(res.Raw)
+	require.Len(t, merged, 3, "duplicate comment must collapse: got %#v", merged)
+	require.Equal(t, "重复弹幕", merged[0].Text)
+	require.Equal(t, 1.0, merged[0].TimeSec)
+	require.Equal(t, "只在A", merged[1].Text)
+	require.Equal(t, "只在B", merged[2].Text)
+	// 合并结果用 JSON 输出，前端据此选择解析分支。
+	require.Equal(t, "json", res.SourceType)
+}
+
+// 未开启合并时，行为与原来一致：只加载自动选中的那一个来源。
+func TestDanmakuFetchWithoutMergeLoadsSingleSource(t *testing.T) {
+	videoPath, _ := writeDanmakuTestVideo(t, "不合并动画.第01话.mkv")
+
+	const subtitle = "同一副标题"
+	cfgMux := http.NewServeMux()
+	cfgMux.HandleFunc("/api/v2/search/episodes", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"hasMore":false,"animes":[`+
+			`{"animeId":1,"animeTitle":"来源A","episodes":[{"episodeId":401,"episodeTitle":"第1话 `+subtitle+`"}]},`+
+			`{"animeId":2,"animeTitle":"来源B","episodes":[{"episodeId":402,"episodeTitle":"第1话 `+subtitle+`"}]}]}`)
+	})
+	cfgMux.HandleFunc("/api/v2/comment/401", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"count":1,"comments":[{"p":"1.00,1,16777215,u1","m":"只在A"}]}`)
+	})
+	cfgMux.HandleFunc("/api/v2/comment/402", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"count":1,"comments":[{"p":"1.00,1,16777215,u2","m":"只在B"}]}`)
+	})
+	cfgSrv := httptest.NewServer(cfgMux)
+	t.Cleanup(cfgSrv.Close)
+
+	officialMux := http.NewServeMux()
+	officialMux.HandleFunc("/api/v2/match", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"success":true,"isMatched":true,"matches":[{"episodeId":90004,"animeId":9,"animeTitle":"不合并动画","episodeTitle":"第1话 `+subtitle+`"}]}`)
+	})
+	official := httptest.NewServer(officialMux)
+	t.Cleanup(official.Close)
+	overrideDanmakuOfficialBase(t, official.URL)
+
+	svc := newDanmakuTestService(t)
+	ctx := context.Background()
+	require.NoError(t, svc.repo.Setting.Set(ctx, DanmakuSourceKey, cfgSrv.URL))
+	seedDanmakuVideoMedia(t, svc, "mNoMerge", "不合并动画", videoPath, 32000, 0)
+
+	res, err := svc.Fetch(ctx, "mNoMerge", "", "")
+	require.NoError(t, err)
+	require.Zero(t, res.MergedSources)
+	require.Equal(t, int64(401), res.EpisodeID)
+	// 只应有自动选中来源的弹幕。
+	require.Contains(t, res.Raw, "只在A")
+	require.NotContains(t, res.Raw, "只在B")
+	// 两个来源仍然作为可切换项返回（合并开关不影响候选列表）。
+	require.Len(t, res.Alternatives, 2)
+}
+
+// 合并偏好按用户持久化。
+func TestDanmakuMergeSourcesPreferencePersistsPerUser(t *testing.T) {
+	svc := newDanmakuTestService(t)
+	ctx := context.Background()
+
+	userA := model.User{Username: "merge-user-a", PasswordHash: "x", Role: "user", IsActive: true}
+	userA.ID = "user-a"
+	userB := model.User{Username: "merge-user-b", PasswordHash: "x", Role: "user", IsActive: true}
+	userB.ID = "user-b"
+	require.NoError(t, svc.repo.User.Create(ctx, &userA))
+	require.NoError(t, svc.repo.User.Create(ctx, &userB))
+
+	require.False(t, svc.MergeSourcesEnabled(ctx, "user-a"))
+	require.NoError(t, svc.SetMergeSources(ctx, "user-a", true))
+	require.True(t, svc.MergeSourcesEnabled(ctx, "user-a"))
+	// 另一个用户不受影响。
+	require.False(t, svc.MergeSourcesEnabled(ctx, "user-b"))
+
+	// 重新读取确认已落库，且 ConfigForUser 会带出该偏好。
+	cfg := svc.ConfigForUser(ctx, "user-a")
+	require.True(t, cfg.MergeSources)
+	require.False(t, svc.ConfigForUser(ctx, "user-b").MergeSources)
+}
+
+// 配置源搜不到对应剧集时必须回退官方：用官方自身的 episodeId 请求官方，
+// 而不是拿官方 ID 去撞配置源。
+func TestDanmakuFetchHashMatchFallsBackToOfficialWhenConfiguredHasNoMatch(t *testing.T) {
+	videoPath, _ := writeDanmakuTestVideo(t, "冷门动画.第01话.mkv")
+
+	cfgMux := http.NewServeMux()
+	cfgMux.HandleFunc("/api/v2/search/episodes", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"hasMore":false,"animes":[]}`)
+	})
+	cfgSrv := httptest.NewServer(cfgMux)
+	t.Cleanup(cfgSrv.Close)
+
+	officialMux := http.NewServeMux()
+	officialMux.HandleFunc("/api/v2/match", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"success":true,"isMatched":true,"matches":[{"episodeId":90001,"animeId":1001,"animeTitle":"冷门动画","episodeTitle":"第1话 无人知晓"}]}`)
+	})
+	officialMux.HandleFunc("/api/v2/comment/90001", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, `<?xml version="1.0"?><i><d p="0.5,1,16777215,user1">弹幕来自官方</d></i>`)
+	})
+	official := httptest.NewServer(officialMux)
+	t.Cleanup(official.Close)
+	overrideDanmakuOfficialBase(t, official.URL)
+
+	svc := newDanmakuTestService(t)
+	ctx := context.Background()
+	require.NoError(t, svc.repo.Setting.Set(ctx, DanmakuSourceKey, cfgSrv.URL))
+	seedDanmakuVideoMedia(t, svc, "mNoMatch", "冷门动画", videoPath, 32000, 0)
+
+	res, err := svc.Fetch(ctx, "mNoMatch", "", "")
+	require.NoError(t, err)
+	require.Contains(t, res.Raw, "弹幕来自官方")
+	require.Equal(t, int64(90001), res.EpisodeID)
 }
 
 func TestDanmakuFetchHashMatchConfiguredFailsFallsBackOfficial(t *testing.T) {

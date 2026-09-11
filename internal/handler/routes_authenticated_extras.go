@@ -12,6 +12,7 @@ func registerAuthedUISurfaceRoutes(authed *gin.RouterGroup, svc *service.Contain
 
 	authed.GET("/danmaku/:id", getDanmakuHandler(svc))
 	authed.GET("/danmaku/config", getDanmakuConfigHandler(svc))
+	authed.PUT("/danmaku/settings", updateDanmakuSettingsHandler(svc))
 
 	authed.GET("/watch-history", historyListHandler(svc))
 	authed.GET("/watch-history/stats", historyStatsHandler(svc))

@@ -124,6 +124,11 @@ type CacheConfig struct {
 	RedisURL           string `mapstructure:"redis_url"`
 	RedisPrefix        string `mapstructure:"redis_prefix"`
 	MediaTTLSeconds    int    `mapstructure:"media_ttl_seconds"`
+	// EmbyLatestTTLSeconds 是 Emby「最新添加」(Items/Latest) 的缓存时长。
+	// 客户端刷新首页时会并发请求全部媒体库的 Latest（生产环境观察到 73 个
+	// 并发），缓存过短会让这批请求同时穿透并各自重建 payload，在低配主机
+	// 上造成秒级延迟。默认 300 秒，新入库内容最迟 5 分钟后出现在最新列表。
+	EmbyLatestTTLSeconds int `mapstructure:"emby_latest_ttl_seconds"`
 }
 
 type SearchConfig struct {

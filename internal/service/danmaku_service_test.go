@@ -22,7 +22,8 @@ func newDanmakuTestService(t *testing.T) *DanmakuService {
 	// 独立临时文件库，避免测试间通过共享内存库串数据。
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "danmaku-test.db")), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.Setting{}, &model.Media{}))
+	// 需要 users 表：弹幕合并偏好按用户存储在 user 行上。
+	require.NoError(t, db.AutoMigrate(&model.Setting{}, &model.Media{}, &model.User{}))
 	repos := repository.New(db)
 	t.Cleanup(func() {
 		sqlDB, err := db.DB()

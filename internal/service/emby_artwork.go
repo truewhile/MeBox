@@ -71,6 +71,54 @@ func (e *EmbyService) ImageURL(ctx context.Context, id, imageType string) (strin
 	return "", nil
 }
 
+// imageInfoTypes 是 GET /Items/{Id}/Images 会报告的图片类型。只列 MeBox
+// 真正存储的两类：ImageURL 对 Thumb / Logo / Banner 等其余类型会回退到
+// 主图，若一并列出会让客户端以为存在这些图并去请求，实际拿到的却是主图。
+var imageInfoTypes = []string{"Primary", "Backdrop"}
+
+// ImageInfos 返回条目的图片清单，对应 Emby 的 GET /Items/{Id}/Images。
+// 客户端用它在详情页决定要加载哪些图；缺失该接口会落到 404，部分客户端
+// 因此把条目当成"无图"而放弃渲染海报。
+func (e *EmbyService) ImageInfos(ctx context.Context, id string) []map[string]any {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil
+	}
+	out := make([]map[string]any, 0, 2)
+	seen := map[string]bool{}
+	for _, imageType := range imageInfoTypes {
+		raw, err := e.ImageURL(ctx, id, imageType)
+		if err != nil {
+			continue
+		}
+		raw = strings.TrimSpace(raw)
+		// 非 Backdrop 类型在缺图时会回退到主图，去重避免同一张图重复出现。
+		if raw == "" || seen[raw] {
+			continue
+		}
+		seen[raw] = true
+		out = append(out, map[string]any{
+			"ImageType":  imageType,
+			"ImageIndex": 0,
+			"ImageTag":   id,
+		})
+	}
+	return out
+}
+
+// UserAvatarURL 返回用户头像的来源地址；用户未设置头像时返回空串。
+func (e *EmbyService) UserAvatarURL(ctx context.Context, userID string) string {
+	userID = strings.TrimSpace(userID)
+	if userID == "" || e == nil || e.repo == nil || e.repo.User == nil {
+		return ""
+	}
+	user, err := e.repo.User.FindByID(ctx, userID)
+	if err != nil || user == nil {
+		return ""
+	}
+	return strings.TrimSpace(user.AvatarURL)
+}
+
 // cachedLibraryCover returns a previously resolved library cover URL within TTL.
 func (e *EmbyService) cachedLibraryCover(id string) (string, bool) {
 	if e == nil || strings.TrimSpace(id) == "" {

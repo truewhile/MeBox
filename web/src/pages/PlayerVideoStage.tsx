@@ -158,6 +158,7 @@ type PlayerVideoStageProps = {
   onToggleDanmaku: () => void
   onDanmakuLoaded: (info: DanmakuLoadedInfo | null) => void
   onDanmakuCandidates: (candidates: DanmakuAnime[]) => void
+  onDanmakuAlternatives: (alternatives: DanmakuAnime[]) => void
   /** Danmaku settings panel; rendered inside the stage so it stays visible in fullscreen. */
   danmakuPanel: ReactNode
   /** Playlist drawer / panel; rendered inside the stage so it stays visible in fullscreen. */
@@ -202,6 +203,7 @@ export function PlayerVideoStage({
   onToggleDanmaku,
   onDanmakuLoaded,
   onDanmakuCandidates,
+  onDanmakuAlternatives,
   danmakuPanel,
   playlistPanel,
   hasPrevEpisode,
@@ -588,6 +590,7 @@ export function PlayerVideoStage({
               searchTrigger={danmakuSearchTrigger}
               onLoaded={onDanmakuLoaded}
               onCandidates={onDanmakuCandidates}
+              onAlternatives={onDanmakuAlternatives}
             />
             {tracksArmed && media && assTrack && assFallbackPath !== assTrack.path ? (
               <AssSubtitleStage

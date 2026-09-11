@@ -140,7 +140,7 @@ func (e *EmbyService) LatestItems(ctx context.Context, userID, parentID string, 
 		if episodic, err := e.libraryIsEpisodic(ctx, parentID); err == nil && episodic {
 			out, err := e.latestSeriesItemsForLibrary(ctx, userID, parentID, limit)
 			if err == nil && e.cache != nil {
-				e.cache.SetJSON(ctx, cacheKey, embyLatestCacheValue{Items: out}, time.Duration(e.mediaCacheTTLSeconds())*time.Second)
+				e.cache.SetJSON(ctx, cacheKey, embyLatestCacheValue{Items: out}, time.Duration(e.embyLatestCacheTTLSeconds())*time.Second)
 			}
 			return out, err
 		}
@@ -166,7 +166,7 @@ func (e *EmbyService) LatestItems(ctx context.Context, userID, parentID string, 
 		return nil, err
 	}
 	if e.cache != nil {
-		e.cache.SetJSON(ctx, cacheKey, embyLatestCacheValue{Items: out}, time.Duration(e.mediaCacheTTLSeconds())*time.Second)
+		e.cache.SetJSON(ctx, cacheKey, embyLatestCacheValue{Items: out}, time.Duration(e.embyLatestCacheTTLSeconds())*time.Second)
 	}
 	return out, nil
 }

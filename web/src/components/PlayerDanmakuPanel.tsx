@@ -23,6 +23,16 @@ type PlayerDanmakuPanelProps = {
   onFontSizeChange: (v: number) => void
   /** Multiple anime matched — user must pick one. */
   candidates: DanmakuAnime[]
+  /**
+   * Other libraries holding this same episode. Danmaku is already loaded from
+   * one of them; these exist so the user can switch sources on the spot.
+   */
+  alternatives: DanmakuAnime[]
+  /** Per-user preference: merge the same episode's sources into one list. */
+  mergeSources: boolean
+  onMergeSourcesChange: (v: boolean) => void
+  /** True while the merge preference is being persisted. */
+  mergeSaving?: boolean
   /** Human-readable label of the currently selected library. */
   selectedSource?: string
   /** Title used by auto-matching (e.g. anime title, media title or filename). */
@@ -48,6 +58,10 @@ export function PlayerDanmakuPanel({
   fontSize,
   onFontSizeChange,
   candidates,
+  alternatives,
+  mergeSources,
+  onMergeSourcesChange,
+  mergeSaving = false,
   selectedSource,
   autoMatchTitle,
   danmakuInfo,
@@ -113,6 +127,11 @@ export function PlayerDanmakuPanel({
   }
 
   const isCustomOrManual = Boolean(search || selectedSource || danmakuInfo?.matchMode === 'manual')
+
+  // 候选来源摊平成「番剧 + 集」的一维列表：每个来源通常只含命中的那一集。
+  const alternativeRows = alternatives.flatMap((anime) =>
+    anime.episodes.map((ep) => ({ anime, ep })),
+  )
 
   return (
     // 面板悬浮于视频上方：阻止点击冒泡，避免触发视频区域的播放/暂停切换。
@@ -283,6 +302,83 @@ export function PlayerDanmakuPanel({
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* 同集其它来源：弹幕已自动加载，这里直接切换即可 */}
+      {enabled && alternatives.length > 0 && (
+        <div className="mb-4 rounded-xl border border-sky-400/25 bg-sky-400/5 p-2.5">
+          <div className="mb-1.5 px-1 text-xs font-medium text-sky-200">
+            同集其它来源（{alternativeRows.length}）
+          </div>
+          <div className="mb-1.5 px-1 text-[10px] leading-relaxed text-white/45">
+            当前已自动加载一个来源，点其它条目可直接切换，无需重新搜索。
+          </div>
+          <div className="max-h-52 overflow-y-auto pr-1">
+            {alternativeRows.map(({ anime, ep }, i) => {
+              const current = String(danmakuInfo?.episodeId ?? '') === String(ep.episodeId)
+              return (
+                <button
+                  key={`${anime.animeId}-${ep.episodeId}-${i}`}
+                  onClick={() => onSelectEpisode(ep.episodeId, anime.animeTitle, ep.episodeTitle)}
+                  className={
+                    'mb-1 flex w-full items-start gap-1.5 rounded-md px-1.5 py-1.5 text-left text-xs transition ' +
+                    (current
+                      ? 'bg-sky-500/20 text-white'
+                      : 'text-white/70 hover:bg-sky-500/15 hover:text-white')
+                  }
+                  title={`切换到《${anime.animeTitle}》的《${ep.episodeTitle}》`}
+                >
+                  <span className="mt-0.5 shrink-0">
+                    {current ? (
+                      <Check size={12} className="text-sky-300" />
+                    ) : (
+                      <Film size={12} className="text-white/35" />
+                    )}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate">{anime.animeTitle || `来源 ${i + 1}`}</span>
+                    {ep.episodeTitle && (
+                      <span className="mt-0.5 block truncate text-[10px] text-white/50">
+                        {ep.episodeTitle}
+                      </span>
+                    )}
+                  </span>
+                  {current && (
+                    <span className="mt-0.5 shrink-0 text-[10px] text-sky-300">当前</span>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* 合并多来源：仅在确实存在多个同集来源时才出现，避免无意义的开关 */}
+      {enabled && alternativeRows.length > 1 && (
+        <div className="mb-4 rounded-xl border border-emerald-400/25 bg-emerald-400/5 p-2.5">
+          <label className="flex cursor-pointer items-start justify-between gap-2">
+            <span className="min-w-0">
+              <span className="block text-xs font-medium text-emerald-200">合并多来源弹幕</span>
+              <span className="mt-0.5 block text-[10px] leading-relaxed text-white/45">
+                把以上来源的弹幕合并，并按时间与内容去重后一起显示。该设置会保存到账号。
+              </span>
+            </span>
+            <span className="flex shrink-0 items-center gap-1.5 pt-0.5">
+              {mergeSaving && <Loader2 size={11} className="animate-spin text-emerald-300" />}
+              <input
+                type="checkbox"
+                checked={mergeSources}
+                onChange={(e) => onMergeSourcesChange(e.target.checked)}
+                className="h-4 w-4 accent-emerald-500"
+              />
+            </span>
+          </label>
+          {mergeSources && danmakuInfo?.mergedSources ? (
+            <div className="mt-1.5 border-t border-white/10 pt-1.5 text-[10px] text-emerald-300/80">
+              已合并 {danmakuInfo.mergedSources} 个来源
+            </div>
+          ) : null}
         </div>
       )}
 

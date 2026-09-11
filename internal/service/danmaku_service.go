@@ -13,10 +13,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"go.uber.org/zap"
 
@@ -57,6 +59,14 @@ type DanmakuRenderConfig struct {
 	Opacity  string `json:"opacity"`
 	FontSize string `json:"font_size"`
 	Area     string `json:"area"`
+	// MergeSources 是当前用户的弹幕合并偏好（按用户存储）。
+	MergeSources bool `json:"merge_sources"`
+}
+
+// DanmakuFetchOptions 承载单次抓取的调用方偏好。
+type DanmakuFetchOptions struct {
+	// MergeSources 为真时，同一集的多个来源会被合并去重后一起返回。
+	MergeSources bool
 }
 
 // DanmakuFetchResult is what /api/danmaku/:id returns. Raw holds the upstream
@@ -71,13 +81,21 @@ type DanmakuRenderConfig struct {
 // metadata so the player UI can display which episode was loaded.
 type DanmakuFetchResult struct {
 	DanmakuRenderConfig
-	SourceType   string         `json:"source_type"`
-	Raw          string         `json:"raw,omitempty"`
-	Candidates   []DanmakuAnime `json:"candidates,omitempty"`
+	SourceType string         `json:"source_type"`
+	Raw        string         `json:"raw,omitempty"`
+	Candidates []DanmakuAnime `json:"candidates,omitempty"`
+	// Alternatives 是「同一集的其它可选来源」。与 Candidates 语义不同：
+	// Candidates 表示自动匹配不唯一、必须由用户选择后才能加载弹幕；
+	// Alternatives 表示弹幕已经自动加载好了，这里额外提供同集的其它来源
+	// （LogVar 聚合了多个视频网站，同一集常有多个库）供用户随时切换，
+	// 不必再手动搜索一遍。
+	Alternatives []DanmakuAnime `json:"alternatives,omitempty"`
 	AnimeTitle   string         `json:"anime_title,omitempty"`
 	EpisodeTitle string         `json:"episode_title,omitempty"`
 	EpisodeID    int64          `json:"episode_id,omitempty"`
 	MatchMode    string         `json:"match_mode,omitempty"`
+	// MergedSources 表示本次结果由多少个来源合并而成（未合并时为 0）。
+	MergedSources int `json:"merged_sources,omitempty"`
 }
 
 // DanmakuAnime is one search hit (an anime) with its episode list, mirroring
@@ -177,6 +195,41 @@ func (s *DanmakuService) Config(ctx context.Context) DanmakuRenderConfig {
 	return cfg
 }
 
+// ConfigForUser 在全局渲染设置之外附加当前用户的个性化偏好。
+func (s *DanmakuService) ConfigForUser(ctx context.Context, userID string) DanmakuRenderConfig {
+	cfg := s.Config(ctx)
+	cfg.MergeSources = s.MergeSourcesEnabled(ctx, userID)
+	return cfg
+}
+
+// MergeSourcesEnabled 返回该用户的弹幕合并偏好，读取失败时回退为关闭。
+func (s *DanmakuService) MergeSourcesEnabled(ctx context.Context, userID string) bool {
+	if s == nil || s.repo == nil || s.repo.User == nil {
+		return false
+	}
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return false
+	}
+	user, err := s.repo.User.FindByID(ctx, userID)
+	if err != nil || user == nil {
+		return false
+	}
+	return user.DanmakuMergeSources
+}
+
+// SetMergeSources 持久化该用户的弹幕合并偏好。
+func (s *DanmakuService) SetMergeSources(ctx context.Context, userID string, enabled bool) error {
+	if s == nil || s.repo == nil || s.repo.User == nil {
+		return errors.New("danmaku settings unavailable")
+	}
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return errors.New("missing user")
+	}
+	return s.repo.User.UpdateFields(ctx, userID, map[string]any{"danmaku_merge_sources": enabled})
+}
+
 // Fetch retrieves danmaku for the given media. keyword overrides the
 // media-derived search term (empty = use the video's own name); pass it from
 // the player when the user searches for a custom title. episodeID forces a
@@ -199,6 +252,11 @@ func (s *DanmakuService) Config(ctx context.Context) DanmakuRenderConfig {
 // When danmaku is disabled the result carries Enabled=false so the player can
 // silently skip rendering.
 func (s *DanmakuService) Fetch(ctx context.Context, mediaID, keyword, episodeID string) (*DanmakuFetchResult, error) {
+	return s.FetchWithOptions(ctx, mediaID, keyword, episodeID, DanmakuFetchOptions{})
+}
+
+// FetchWithOptions 是 Fetch 的带偏好版本。
+func (s *DanmakuService) FetchWithOptions(ctx context.Context, mediaID, keyword, episodeID string, opts DanmakuFetchOptions) (*DanmakuFetchResult, error) {
 	res := &DanmakuFetchResult{DanmakuRenderConfig: s.Config(ctx), SourceType: "auto"}
 	if !res.Enabled {
 		return res, nil
@@ -234,6 +292,12 @@ func (s *DanmakuService) Fetch(ctx context.Context, mediaID, keyword, episodeID 
 	}
 
 	target := ""
+	// targetBase 是 target 所属的源。各源的 episodeId 空间互相独立，必须用
+	// 产生该 ID 的源去请求弹幕，否则会拿到 404；默认沿用「配置源优先」行为。
+	targetBase := configured
+	// hashOfficialID 记录 hash 层的官方 episodeId。仅当配置源重定位成功时
+	// 才填，用于「配置源该集无弹幕」时回官方兜底。
+	hashOfficialID := int64(0)
 
 	// 1) hash 识别：始终走官方 /api/v2/match（keyword 手动覆盖时跳过，直接走第 3 层）。
 	if target == "" && !manualKeyword && media != nil && (media.Path != "" || IsEmbyRemoteID(media.ID)) {
@@ -250,11 +314,31 @@ func (s *DanmakuService) Fetch(ctx context.Context, mediaID, keyword, episodeID 
 			if err != nil {
 				s.log.Warn("danmaku hash match failed", zap.String("media_id", mediaID), zap.Error(err))
 			} else if len(matches) > 0 {
-				target = fmt.Sprintf("%d", matches[0].EpisodeID)
-				res.AnimeTitle = matches[0].AnimeTitle
-				res.EpisodeTitle = matches[0].EpisodeTitle
-				res.EpisodeID = matches[0].EpisodeID
+				match := matches[0]
+				res.AnimeTitle = match.AnimeTitle
+				res.EpisodeTitle = match.EpisodeTitle
+				res.EpisodeID = match.EpisodeID
 				res.MatchMode = "hash"
+				// match 返回的是官方 ID 空间的 episodeId，直接拿去问第三方源
+				// 只会 404（实测各源 ID 空间独立）。先用官方给到的剧名+集数
+				// 在配置源里重定位到它自己的 episodeId；定位不到就整条走官方。
+				if configured != "" && !sameDanmakuBase(configured, official) {
+					if matched, ok := s.lookupConfiguredEpisodes(ctx, configured, match); ok {
+						configuredID := firstDanmakuEpisodeID(matched)
+						target = strconv.FormatInt(configuredID, 10)
+						targetBase = configured
+						res.EpisodeID = configuredID
+						hashOfficialID = match.EpisodeID
+						// 同集有多个来源时全部带上，供面板里直接切换。
+						if len(matched) > 1 {
+							res.Alternatives = matched
+						}
+					}
+				}
+				if target == "" {
+					target = strconv.FormatInt(match.EpisodeID, 10)
+					targetBase = official
+				}
 			}
 		}
 	}
@@ -262,9 +346,10 @@ func (s *DanmakuService) Fetch(ctx context.Context, mediaID, keyword, episodeID 
 	// 2) 按播放的文件名 + 集数搜索（keyword 手动覆盖时跳过，直接走第 3 层）。
 	if target == "" && !manualKeyword && media != nil && media.Path != "" {
 		if fileName := danmakuMatchFileName(media.Path); fileName != "" && fileName != term.name {
-			if candidates, err := s.searchCandidatesWithFallback(ctx, configured, official, fileName, term.episode); err == nil &&
+			if candidates, base, err := s.searchCandidatesWithSource(ctx, configured, official, fileName, term.episode); err == nil &&
 				len(candidates) == 1 && len(candidates[0].Episodes) > 0 {
 				target = fmt.Sprintf("%d", candidates[0].Episodes[0].EpisodeID)
+				targetBase = base
 				res.AnimeTitle = candidates[0].AnimeTitle
 				res.EpisodeTitle = candidates[0].Episodes[0].EpisodeTitle
 				res.EpisodeID = candidates[0].Episodes[0].EpisodeID
@@ -276,7 +361,7 @@ func (s *DanmakuService) Fetch(ctx context.Context, mediaID, keyword, episodeID 
 	// 3) 现有自动识别：标题层级（original_name → title → 文件名）+ 集数，
 	//    多结果返回候选列表交给播放器（歧义处理）。
 	if target == "" {
-		candidates, err := s.searchCandidatesWithFallback(ctx, configured, official, term.name, term.episode)
+		candidates, base, err := s.searchCandidatesWithSource(ctx, configured, official, term.name, term.episode)
 		if err != nil {
 			s.log.Warn("danmaku search failed", zap.String("media_id", mediaID), zap.String("name", term.name), zap.String("episode", term.episode), zap.Error(err))
 			return res, err
@@ -289,19 +374,157 @@ func (s *DanmakuService) Fetch(ctx context.Context, mediaID, keyword, episodeID 
 			return res, errors.New("no danmaku library found for this video")
 		}
 		target = fmt.Sprintf("%d", candidates[0].Episodes[0].EpisodeID)
+		targetBase = base
 		res.AnimeTitle = candidates[0].AnimeTitle
 		res.EpisodeTitle = candidates[0].Episodes[0].EpisodeTitle
 		res.EpisodeID = candidates[0].Episodes[0].EpisodeID
 		res.MatchMode = "search"
 	}
 
-	raw, st, err := s.fetchCommentWithFallback(ctx, configured, official, target)
+	raw, st, err := s.fetchCommentWithFallback(ctx, targetBase, official, target)
 	if err != nil {
 		s.log.Warn("danmaku comment fetch failed", zap.String("media_id", mediaID), zap.String("episode_id", target), zap.Error(err))
 		return res, err
 	}
+	// 第三方目录里存在该集，不代表它真的收录了弹幕（实测部分条目返回
+	// count=0）。这种「拿到空库」的情况要用官方 episodeId 再试一次，否则
+	// 重定位后反而会静默变成无弹幕 —— 旧写法是靠官方 ID 撞 404 才走到官方
+	// 兜底的，改用重定位就必须显式补上这一步。
+	if hashOfficialID != 0 && danmakuCommentCount(raw) == 0 {
+		officialTarget := strconv.FormatInt(hashOfficialID, 10)
+		if officialRaw, officialType, officialErr := s.fetchCommentFromBase(ctx, official, officialTarget); officialErr == nil &&
+			danmakuCommentCount(officialRaw) > 0 {
+			raw, st = officialRaw, officialType
+			res.EpisodeID = hashOfficialID
+		} else if officialErr != nil {
+			s.log.Debug("danmaku official fallback for empty configured library failed",
+				zap.String("episode_id", officialTarget), zap.Error(officialErr))
+		}
+	}
+	// 合并多来源：仅在上游确实返回了多个同集来源时才有意义。
+	if opts.MergeSources && len(res.Alternatives) > 1 {
+		if mergedRaw, mergedCount, ok := s.mergeAlternativeSources(ctx, targetBase, res.Alternatives, res.EpisodeID, raw); ok {
+			raw, st = mergedRaw, "json"
+			res.MergedSources = mergedCount
+		}
+	}
 	res.Raw, res.SourceType = raw, st
 	return res, nil
+}
+
+// mergeAlternativeSources 并发抓取同一集的多个来源，按「时间 + 内容」去重后
+// 合并成单个载荷。已有载荷（existingRaw）会被复用，避免重复请求。
+// 返回合并后的载荷、实际参与合并的来源数与是否成功。
+func (s *DanmakuService) mergeAlternativeSources(ctx context.Context, base string, alternatives []DanmakuAnime, existingID int64, existingRaw string) (string, int, bool) {
+	ids := make([]int64, 0, len(alternatives)+1)
+	seen := map[int64]bool{}
+	if existingID > 0 {
+		seen[existingID] = true
+		ids = append(ids, existingID)
+	}
+	for _, anime := range alternatives {
+		for _, ep := range anime.Episodes {
+			if ep.EpisodeID <= 0 || seen[ep.EpisodeID] {
+				continue
+			}
+			seen[ep.EpisodeID] = true
+			ids = append(ids, ep.EpisodeID)
+			if len(ids) >= danmakuMergeMaxSources {
+				break
+			}
+		}
+		if len(ids) >= danmakuMergeMaxSources {
+			break
+		}
+	}
+	// 少于两个来源时无需合并。
+	if len(ids) < 2 {
+		return "", 0, false
+	}
+
+	var (
+		mu        sync.Mutex
+		collected [][]danmakuComment
+		wg        sync.WaitGroup
+		sem       = make(chan struct{}, danmakuMergeConcurrency)
+	)
+	collect := func(raw string) {
+		comments := parseDanmakuComments(raw)
+		if len(comments) == 0 {
+			return
+		}
+		mu.Lock()
+		collected = append(collected, comments)
+		mu.Unlock()
+	}
+	for _, id := range ids {
+		if id == existingID && existingRaw != "" {
+			collect(existingRaw)
+			continue
+		}
+		wg.Add(1)
+		go func(id int64) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			body, _, err := s.fetchCommentFromBase(ctx, base, strconv.FormatInt(id, 10))
+			if err != nil {
+				// 单个来源失败不影响整体合并，静默跳过。
+				return
+			}
+			collect(body)
+		}(id)
+	}
+	wg.Wait()
+
+	if len(collected) < 2 {
+		return "", 0, false
+	}
+	merged := mergeDanmakuComments(collected)
+	if len(merged) == 0 {
+		return "", 0, false
+	}
+	encoded := encodeDanmakuComments(merged)
+	if encoded == "" {
+		return "", 0, false
+	}
+	return encoded, len(collected), true
+}
+
+// fetchCommentFromBase 从单个源拉取弹幕，不做任何回退。
+func (s *DanmakuService) fetchCommentFromBase(ctx context.Context, base, target string) (raw, sourceType string, err error) {
+	raw, err = s.fetchBody(ctx, fmt.Sprintf("%s/api/v2/comment/%s?withRelated=true", base, target), true)
+	if err != nil {
+		return "", "auto", err
+	}
+	return raw, detectDanmakuSourceType(raw), nil
+}
+
+// danmakuCommentCount 估算弹幕条数，用于判断某个源是否真的返回了内容。
+// 同时兼容 dandanplay JSON 与 Bilibili XML 两种载荷。
+func danmakuCommentCount(raw string) int {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0
+	}
+	switch {
+	case strings.HasPrefix(trimmed, "{"):
+		var payload struct {
+			Count    int               `json:"count"`
+			Comments []json.RawMessage `json:"comments"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+			return 0
+		}
+		if payload.Count > 0 {
+			return payload.Count
+		}
+		return len(payload.Comments)
+	case strings.HasPrefix(trimmed, "<"):
+		return strings.Count(trimmed, "<d ")
+	default:
+		return 0
+	}
 }
 
 // detectDanmakuSourceType guesses the comment payload format from its body.
@@ -794,13 +1017,14 @@ func sameDanmakuBase(a, b string) bool {
 	return errA == nil && errB == nil && strings.EqualFold(ua.Host, ub.Host)
 }
 
-// fetchCommentWithFallback fetches a comment library from the configured
-// source first (when set and different from official), falling back to the
-// official endpoint on failure.
-func (s *DanmakuService) fetchCommentWithFallback(ctx context.Context, configured, official, target string) (raw, sourceType string, err error) {
+// fetchCommentWithFallback fetches a comment library from primary first (when
+// set and different from official), falling back to the official endpoint on
+// failure. primary must be the source that issued target: episode ids are only
+// meaningful inside the source that produced them.
+func (s *DanmakuService) fetchCommentWithFallback(ctx context.Context, primary, official, target string) (raw, sourceType string, err error) {
 	var bases []string
-	if configured != "" && !sameDanmakuBase(configured, official) {
-		bases = append(bases, configured)
+	if primary != "" && !sameDanmakuBase(primary, official) {
+		bases = append(bases, primary)
 	}
 	bases = append(bases, official)
 	var lastErr error
@@ -817,16 +1041,168 @@ func (s *DanmakuService) fetchCommentWithFallback(ctx context.Context, configure
 	return "", "auto", lastErr
 }
 
-// searchCandidatesWithFallback searches the configured source first (when
-// set and different from official), falling back to the official endpoint on
-// failure.
-func (s *DanmakuService) searchCandidatesWithFallback(ctx context.Context, configured, official, name, episode string) ([]DanmakuAnime, error) {
+// searchCandidatesWithSource searches the configured source first (when set
+// and different from official), falling back to the official endpoint on
+// failure. It also reports which base produced the hits, because the caller
+// must fetch comments from that same base — episode ids are source-local.
+func (s *DanmakuService) searchCandidatesWithSource(ctx context.Context, configured, official, name, episode string) ([]DanmakuAnime, string, error) {
 	if configured != "" && !sameDanmakuBase(configured, official) {
 		candidates, err := s.searchCandidates(ctx, configured, name, episode)
 		if err == nil {
-			return candidates, nil
+			return candidates, configured, nil
 		}
 		s.log.Warn("danmaku search failed on configured source, falling back to official", zap.String("source", configured), zap.Error(err))
 	}
-	return s.searchCandidates(ctx, official, name, episode)
+	candidates, err := s.searchCandidates(ctx, official, name, episode)
+	return candidates, official, err
+}
+
+// danmakuEpisodeNumberRE 从「第N话 / 第N話 / 第N集」里取出集数。各源标题格式
+// 不一（有的只有集数、有的带副标题），正则只认集数标记本身。
+var danmakuEpisodeNumberRE = regexp.MustCompile(`第\s*(\d+(?:\.\d+)?)\s*[话話集]`)
+
+// danmakuEpisodeNumber 返回标题中的集数，取不到时返回空串。
+func danmakuEpisodeNumber(title string) string {
+	m := danmakuEpisodeNumberRE.FindStringSubmatch(title)
+	if len(m) < 2 {
+		return ""
+	}
+	return m[1]
+}
+
+// danmakuEpisodeSubtitle 返回「第N话」之后的副标题，用于区分同名前作/续作。
+func danmakuEpisodeSubtitle(title string) string {
+	loc := danmakuEpisodeNumberRE.FindStringIndex(title)
+	if loc == nil {
+		return ""
+	}
+	return strings.TrimSpace(title[loc[1]:])
+}
+
+// normalizeDanmakuText 去掉标点与空白，便于跨源比对副标题。注意它只做字符
+// 归一化，不剥离集数标记 —— 调用方传入的可能已经是剥离后的副标题。
+func normalizeDanmakuText(s string) []rune {
+	out := make([]rune, 0, 32)
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// danmakuSubtitleMatches 判断两个源的副标题是否指向同一集。
+//
+// 完全一致直接判定相同，且不设长度门槛 —— 中文副标题常常只有两三个字
+// （「辛」「序曲」），但它们本身就是很强的标识。只有在做包含/前缀这类模糊
+// 比对时才要求足够长度，避免短串误配到别的集。同一集在不同源的副标题长度
+// 也可能不同（一侧带 "-Fractal Androgynous-" 之类后缀），故保留模糊分支。
+func danmakuSubtitleMatches(candidateTitle, subtitle string) bool {
+	// candidateTitle 是完整标题，subtitle 已经剥离过集数标记，两者处理方式不同。
+	a := normalizeDanmakuText(danmakuEpisodeSubtitle(candidateTitle))
+	b := normalizeDanmakuText(subtitle)
+	if len(a) == 0 || len(b) == 0 {
+		return false
+	}
+	if string(a) == string(b) {
+		return true
+	}
+	const fuzzyMinRunes = 4
+	if len(a) < fuzzyMinRunes || len(b) < fuzzyMinRunes {
+		return false
+	}
+	if strings.Contains(string(a), string(b)) || strings.Contains(string(b), string(a)) {
+		return true
+	}
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	if n > 12 {
+		n = 12
+	}
+	return string(a[:n]) == string(b[:n])
+}
+
+// lookupConfiguredEpisodes 用官方 match 给出的「剧名 + 集数」在配置源里重新
+// 定位同一集，返回配置源里所有指向该集的结果。
+//
+// 必须重定位：各源 episodeId 空间互相独立，官方 ID（如 135500001）在第三方
+// 源上只是一个不存在的编号，直接请求必然 404。官方 match 返回的 animeTitle /
+// episodeTitle 正好提供了跨源检索所需的剧名、集数与副标题。
+//
+// 返回列表而非单条：LogVar 这类源聚合了多个视频网站，同一集常有多个库，
+// 调用方取第一条自动加载，其余作为可切换来源交给用户。
+func (s *DanmakuService) lookupConfiguredEpisodes(ctx context.Context, configured string, m danmakuMatch) ([]DanmakuAnime, bool) {
+	episodeNum := danmakuEpisodeNumber(m.EpisodeTitle)
+	if episodeNum == "" || strings.TrimSpace(m.AnimeTitle) == "" {
+		return nil, false
+	}
+	candidates, err := s.searchCandidates(ctx, configured, m.AnimeTitle, episodeNum)
+	if err != nil {
+		s.log.Debug("danmaku configured lookup failed",
+			zap.String("source", configured),
+			zap.String("anime", m.AnimeTitle),
+			zap.Error(err))
+		return nil, false
+	}
+	matched := matchDanmakuEpisodes(candidates, episodeNum, m.EpisodeTitle)
+	if len(matched) == 0 {
+		return nil, false
+	}
+	return matched, true
+}
+
+// firstDanmakuEpisodeID 返回匹配列表里的第一条 episodeId，作为自动选中的库。
+func firstDanmakuEpisodeID(matched []DanmakuAnime) int64 {
+	for _, anime := range matched {
+		for _, ep := range anime.Episodes {
+			if ep.EpisodeID > 0 {
+				return ep.EpisodeID
+			}
+		}
+	}
+	return 0
+}
+
+// pickDanmakuEpisodeID 从配置源的搜索结果里挑出与目标集最匹配的一条。
+//
+// 搜索按「剧名+集数」返回，但同名不同季/不同版本会同时命中，且顺序不保证
+// 正确：实测「命运石之门 第18话」首条是《命运石之门 0(2018)》、《战区88 OVA
+// 第1话》首条是《战区88(2004) TV》，两者内容都不对，只有副标题能区分。因此：
+//   - 目标带副标题时，必须找到副标题一致的候选，否则放弃（宁可回退官方，
+//     也不能给用户放错番的弹幕）；
+//   - 目标没有副标题（如「第11话」）时，退而要求集数一致。
+func pickDanmakuEpisodeID(candidates []DanmakuAnime, episodeNum, episodeTitle string) (int64, bool) {
+	if id := firstDanmakuEpisodeID(matchDanmakuEpisodes(candidates, episodeNum, episodeTitle)); id != 0 {
+		return id, true
+	}
+	return 0, false
+}
+
+// matchDanmakuEpisodes 在搜索结果里筛出所有指向目标集的结果，保留原有的番剧
+// 分组结构（只留下命中的集数），因此调用方既能取第一条自动加载，也能把整个
+// 列表作为可切换来源展示。
+func matchDanmakuEpisodes(candidates []DanmakuAnime, episodeNum, episodeTitle string) []DanmakuAnime {
+	subtitle := danmakuEpisodeSubtitle(episodeTitle)
+	out := make([]DanmakuAnime, 0, len(candidates))
+	for _, anime := range candidates {
+		hits := make([]DanmakuEpisode, 0, len(anime.Episodes))
+		for _, ep := range anime.Episodes {
+			if ep.EpisodeID <= 0 || danmakuEpisodeNumber(ep.EpisodeTitle) != episodeNum {
+				continue
+			}
+			// 目标带副标题时必须副标题一致；没有副标题时仅凭集数匹配。
+			if subtitle != "" && !danmakuSubtitleMatches(ep.EpisodeTitle, subtitle) {
+				continue
+			}
+			hits = append(hits, ep)
+		}
+		if len(hits) == 0 {
+			continue
+		}
+		anime.Episodes = hits
+		out = append(out, anime)
+	}
+	return out
 }

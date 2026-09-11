@@ -98,10 +98,15 @@ export function PlayerPage() {
   const [danmakuEpisodeId, setDanmakuEpisodeId] = useState<number | string | null>(null)
   // 自动匹配歧义（多番剧命中）时的候选列表。
   const [danmakuCandidates, setDanmakuCandidates] = useState<DanmakuAnime[]>([])
+  // 同一集的其它可选来源（弹幕已自动加载，用户可随时切换，无需重新搜索）。
+  const [danmakuAlternatives, setDanmakuAlternatives] = useState<DanmakuAnime[]>([])
   // 已加载弹幕的元数据信息（番剧名、单集名、条数、匹配模式等）。
   const [danmakuInfo, setDanmakuInfo] = useState<DanmakuLoadedInfo | null>(null)
   // 用户当前选定的弹幕来源描述（面板中展示）。
   const [danmakuSelectedSource, setDanmakuSelectedSource] = useState('')
+  // 弹幕合并偏好：从 /danmaku/config 读取（按用户落库），切换后写回并重新抓取。
+  const [danmakuMergeSources, setDanmakuMergeSources] = useState(false)
+  const [danmakuMergeSaving, setDanmakuMergeSaving] = useState(false)
   const [danmakuOpacity, setDanmakuOpacity] = useState(1)
   const [danmakuFontSize, setDanmakuFontSize] = useState(24)
   const [danmakuArea, setDanmakuArea] = useState(1)
@@ -168,11 +173,45 @@ export function PlayerPage() {
       .catch(() => undefined)
   }, [])
 
+  // 读取弹幕配置（含按用户存储的合并偏好），初始化面板。
+  useEffect(() => {
+    let cancelled = false
+    danmakuAPI
+      .config()
+      .then((cfg) => {
+        if (cancelled) return
+        setDanmakuMergeSources(Boolean(cfg.merge_sources))
+      })
+      .catch(() => {
+        // 配置读取失败时保持默认（不合并），不影响播放。
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // 切换合并开关：先落库，成功后再重新抓取，避免与后端读到的偏好不一致。
+  const danmakuChangeMergeSources = useCallback((next: boolean) => {
+    setDanmakuMergeSaving(true)
+    danmakuAPI
+      .updateSettings({ mergeSources: next })
+      .then(() => {
+        setDanmakuMergeSources(next)
+        setDanmakuSearching(true)
+        setDanmakuSearchTrigger((prev) => prev + 1)
+      })
+      .catch(() => {
+        // 保存失败时保持原值，用户可重试。
+      })
+      .finally(() => setDanmakuMergeSaving(false))
+  }, [])
+
   // 用户手动搜索：带关键词重新拉取（search=null 时按视频名）。
   // loading 状态由 DanmakuStage 拉取完成回调（onLoaded）驱动。
   const searchDanmaku = useCallback((kw: string) => {
     setDanmakuSearching(true)
     setDanmakuCandidates([])
+    setDanmakuAlternatives([])
     setDanmakuEpisodeId(null)
     setDanmakuInfo(null)
     setDanmakuSearch(kw || null)
@@ -182,6 +221,11 @@ export function PlayerPage() {
   const danmakuLoaded = useCallback((info: DanmakuLoadedInfo | null) => {
     setDanmakuSearching(false)
     setDanmakuInfo(info)
+  }, [])
+
+  // 同一集的其它来源：弹幕已自动加载好，这里只更新可切换列表。
+  const danmakuGotAlternatives = useCallback((alternatives: DanmakuAnime[]) => {
+    setDanmakuAlternatives(alternatives)
   }, [])
 
   // 多番剧命中（disambiguation）：展示候选让用户选择。
@@ -197,6 +241,8 @@ export function PlayerPage() {
   const danmakuSelectEpisode = useCallback((episodeId: number, animeTitle: string, episodeTitle: string) => {
     setDanmakuEpisodeId(episodeId)
     setDanmakuCandidates([])
+    // 刻意不清空 danmakuAlternatives：切到别的来源后仍要能继续切换回去，
+    // 否则用户每次都得重新搜一遍。
     setDanmakuSearching(true)
     // 展示当前所选来源（面板标题处可见）。
     setDanmakuSelectedSource(episodeTitle ? `${animeTitle}・${episodeTitle}` : animeTitle)
@@ -207,6 +253,7 @@ export function PlayerPage() {
   const danmakuResetAuto = useCallback(() => {
     setDanmakuEpisodeId(null)
     setDanmakuCandidates([])
+    setDanmakuAlternatives([])
     setDanmakuSearching(true)
     setDanmakuSearch(null)
     setDanmakuSelectedSource('')
@@ -221,6 +268,7 @@ export function PlayerPage() {
     setHlsStartSec(0)
     setDanmakuEpisodeId(null)
     setDanmakuCandidates([])
+    setDanmakuAlternatives([])
     setDanmakuSearch(null)
     setDanmakuSelectedSource('')
     setDanmakuInfo(null)
@@ -947,6 +995,7 @@ export function PlayerPage() {
         onToggleDanmaku={toggleDanmakuOpen}
         onDanmakuLoaded={danmakuLoaded}
         onDanmakuCandidates={danmakuGotCandidates}
+        onDanmakuAlternatives={danmakuGotAlternatives}
         hasPrevEpisode={Boolean(prevEpisode)}
         hasNextEpisode={Boolean(nextEpisode)}
         onPrevEpisode={handlePrevEpisode}
@@ -984,6 +1033,10 @@ export function PlayerPage() {
             fontSize={danmakuFontSize}
             onFontSizeChange={setDanmakuFontSize}
             candidates={danmakuCandidates}
+            alternatives={danmakuAlternatives}
+            mergeSources={danmakuMergeSources}
+            onMergeSourcesChange={danmakuChangeMergeSources}
+            mergeSaving={danmakuMergeSaving}
             selectedSource={danmakuSelectedSource}
             autoMatchTitle={danmakuAutoTitle}
             danmakuInfo={danmakuInfo}

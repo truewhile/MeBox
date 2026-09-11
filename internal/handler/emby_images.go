@@ -50,6 +50,49 @@ func embyItemImageHandler(svc *service.Container) gin.HandlerFunc {
 	}
 }
 
+// embyItemImagesHandler 处理不带 Type 的 GET /Items/{Id}/Images，返回图片
+// 清单（Emby 的 ImageInfo 数组）。客户端据此决定详情页加载哪些图。
+func embyItemImagesHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := strings.TrimSpace(c.Param("id"))
+		if svc == nil || svc.Emby == nil || id == "" {
+			c.JSON(http.StatusOK, []any{})
+			return
+		}
+		infos := svc.Emby.ImageInfos(c.Request.Context(), id)
+		if infos == nil {
+			infos = []map[string]any{}
+		}
+		c.JSON(http.StatusOK, infos)
+	}
+}
+
+// embyUserImageHandler 处理 /Users/{UserId}/Images/{Type}。Emby 对未设置
+// 头像的用户同样返回 404，但响应必须带缓存头，否则客户端每次进入设置页
+// 都会重复请求同一个空头像（日志中曾观察到每分钟重试）。
+func embyUserImageHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		uid := strings.TrimSpace(c.Param("userId"))
+		raw := ""
+		if svc != nil && svc.Emby != nil && uid != "" {
+			raw = svc.Emby.UserAvatarURL(c.Request.Context(), uid)
+		}
+		if raw == "" || svc == nil || svc.ImageProxy == nil {
+			embyMissingAvatar(c)
+			return
+		}
+		if err := svc.ImageProxy.Serve(c.Request.Context(), c.Writer, c.Request, raw); err != nil {
+			embyMissingAvatar(c)
+		}
+	}
+}
+
+// embyMissingAvatar 以 Emby 语义返回"该用户没有头像"，并允许客户端长期缓存。
+func embyMissingAvatar(c *gin.Context) {
+	c.Header("Cache-Control", "public, max-age=86400")
+	c.Status(http.StatusNotFound)
+}
+
 func clearEmbyImageNoStoreHeaders(c *gin.Context) {
 	c.Writer.Header().Del("Cache-Control")
 	c.Writer.Header().Del("Pragma")
