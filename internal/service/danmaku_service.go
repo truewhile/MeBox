@@ -239,14 +239,16 @@ func (s *DanmakuService) SetMergeSources(ctx context.Context, userID string, ena
 //  1. match: MD5 of the first 16MB of the video (local file read directly,
 //     .strm resolved to a direct link and range-fetched) → /api/v2/match
 //     against the official endpoint, which yields the episode library id.
-//  2. search by the playing file's name + episode number.
-//  3. current auto-identification (original name → title → file name + episode,
+//  2. scraped metadata: title + episode number + episode title, filtered by
+//     release year and subtitle to disambiguate same-name seasons.
+//  3. search by the playing file's name + episode number.
+//  4. current auto-identification (original name → title → file name + episode,
 //     single hit used, several hits returned as candidates for the player).
-//  4. manual: the player picks from the returned candidates (episodeID /
+//  5. manual: the player picks from the returned candidates (episodeID /
 //     keyword override).
 //
 // Comments are always fetched from the configured source first (when set)
-// and fall back to the official endpoint on failure; identification itself
+// and fall back to the official endpoint on failure. Only hash identification
 // always goes to the official endpoint.
 //
 // When danmaku is disabled the result carries Enabled=false so the player can
@@ -343,7 +345,24 @@ func (s *DanmakuService) FetchWithOptions(ctx context.Context, mediaID, keyword,
 		}
 	}
 
-	// 2) 按播放的文件名 + 集数搜索（keyword 手动覆盖时跳过，直接走第 3 层）。
+	// 2) hash 未命中时，优先使用刮削后的剧名、集数和集标题匹配。
+	// 该层能解决官方 hash 库未收录、但本地已经刮削出准确季度和单集标题的情况。
+	if target == "" && !manualKeyword && media != nil {
+		if matched, base, ok := s.lookupScrapedEpisodes(ctx, configured, official, media); ok {
+			configuredID := firstDanmakuEpisodeID(matched)
+			target = strconv.FormatInt(configuredID, 10)
+			targetBase = base
+			res.AnimeTitle = matched[0].AnimeTitle
+			res.EpisodeTitle = matched[0].Episodes[0].EpisodeTitle
+			res.EpisodeID = configuredID
+			res.MatchMode = "metadata"
+			if len(matched) > 1 {
+				res.Alternatives = matched
+			}
+		}
+	}
+
+	// 3) 按播放的文件名 + 集数搜索（keyword 手动覆盖时跳过，直接走第 4 层）。
 	if target == "" && !manualKeyword && media != nil && media.Path != "" {
 		if fileName := danmakuMatchFileName(media.Path); fileName != "" && fileName != term.name {
 			if candidates, base, err := s.searchCandidatesWithSource(ctx, configured, official, fileName, term.episode); err == nil &&
@@ -358,7 +377,7 @@ func (s *DanmakuService) FetchWithOptions(ctx context.Context, mediaID, keyword,
 		}
 	}
 
-	// 3) 现有自动识别：标题层级（original_name → title → 文件名）+ 集数，
+	// 4) 现有自动识别：标题层级（original_name → title → 文件名）+ 集数，
 	//    多结果返回候选列表交给播放器（歧义处理）。
 	if target == "" {
 		candidates, base, err := s.searchCandidatesWithSource(ctx, configured, official, term.name, term.episode)
@@ -947,7 +966,10 @@ type danmakuMatch struct {
 
 // matchOfficial identifies the video via POST /api/v2/match on the official
 // endpoint (always official, signed with the app credentials). Returns the
-// candidate list; empty means nothing matched.
+// candidate list only when the upstream explicitly reports a confident match;
+// empty means nothing matched. The API may return fuzzy suggestions together
+// with isMatched=false; those are not safe to auto-select because their first
+// item can belong to an unrelated anime.
 //
 // fileName must be URL-escaped: the official API rejects raw non-ASCII file
 // names with errorCode 2 (verified against the live API — QueryEscape's
@@ -997,13 +1019,14 @@ func (s *DanmakuService) matchOfficial(ctx context.Context, fileName, fileHash s
 		return nil, fmt.Errorf("danmaku match returned HTTP %d", resp.StatusCode)
 	}
 	var out struct {
-		Success bool           `json:"success"`
-		Matches []danmakuMatch `json:"matches"`
+		Success   bool           `json:"success"`
+		IsMatched bool           `json:"isMatched"`
+		Matches   []danmakuMatch `json:"matches"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("danmaku match returned invalid JSON: %w", err)
 	}
-	if !out.Success {
+	if !out.Success || !out.IsMatched {
 		return nil, nil
 	}
 	return out.Matches, nil
@@ -1061,6 +1084,9 @@ func (s *DanmakuService) searchCandidatesWithSource(ctx context.Context, configu
 // 不一（有的只有集数、有的带副标题），正则只认集数标记本身。
 var danmakuEpisodeNumberRE = regexp.MustCompile(`第\s*(\d+(?:\.\d+)?)\s*[话話集]`)
 
+// danmakuTitleYearRE 匹配搜索源标题里的年份，例如「命运石之门(2011)」。
+var danmakuTitleYearRE = regexp.MustCompile(`\((?:19|20)\d{2}\)`)
+
 // danmakuEpisodeNumber 返回标题中的集数，取不到时返回空串。
 func danmakuEpisodeNumber(title string) string {
 	m := danmakuEpisodeNumberRE.FindStringSubmatch(title)
@@ -1091,6 +1117,16 @@ func normalizeDanmakuText(s string) []rune {
 	return out
 }
 
+// danmakuTitleYear 返回标题中显式标注的年份；没有年份时返回 0。
+func danmakuTitleYear(title string) int {
+	m := danmakuTitleYearRE.FindString(title)
+	if len(m) != 6 {
+		return 0
+	}
+	year, _ := strconv.Atoi(m[1:5])
+	return year
+}
+
 // danmakuSubtitleMatches 判断两个源的副标题是否指向同一集。
 //
 // 完全一致直接判定相同，且不设长度门槛 —— 中文副标题常常只有两三个字
@@ -1114,6 +1150,9 @@ func danmakuSubtitleMatches(candidateTitle, subtitle string) bool {
 	if strings.Contains(string(a), string(b)) || strings.Contains(string(b), string(a)) {
 		return true
 	}
+	if danmakuRuneSimilarity(a, b) >= 0.7 {
+		return true
+	}
 	n := len(a)
 	if len(b) < n {
 		n = len(b)
@@ -1122,6 +1161,34 @@ func danmakuSubtitleMatches(candidateTitle, subtitle string) bool {
 		n = 12
 	}
 	return string(a[:n]) == string(b[:n])
+}
+
+// danmakuRuneSimilarity 返回两个字符串的 LCS 相似度，分母取较短长度。
+// 弹幕源的日文/英文副标题常比刮削标题更长，因此不能直接用整体编辑距离；
+// 例如「起始与终结的序章」和「始与终的序章-Turning Point-」应被视为同一集。
+func danmakuRuneSimilarity(a, b []rune) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	prev := make([]int, len(b)+1)
+	for _, ra := range a {
+		cur := make([]int, len(b)+1)
+		for j, rb := range b {
+			if ra == rb {
+				cur[j+1] = prev[j] + 1
+			} else if cur[j] > prev[j+1] {
+				cur[j+1] = cur[j]
+			} else {
+				cur[j+1] = prev[j+1]
+			}
+		}
+		prev = cur
+	}
+	minLen := len(a)
+	if len(b) < minLen {
+		minLen = len(b)
+	}
+	return float64(prev[len(b)]) / float64(minLen)
 }
 
 // lookupConfiguredEpisodes 用官方 match 给出的「剧名 + 集数」在配置源里重新
@@ -1151,6 +1218,84 @@ func (s *DanmakuService) lookupConfiguredEpisodes(ctx context.Context, configure
 		return nil, false
 	}
 	return matched, true
+}
+
+// lookupScrapedEpisodes uses already-scraped media metadata to locate the
+// correct library when hash identification missed. Unlike the generic title
+// search, this path requires an explicit episode-title match and, when known,
+// a matching release year. That prevents Steins;Gate (2011) from being
+// confused with Steins;Gate 0 (2018) or other same-name entries.
+func (s *DanmakuService) lookupScrapedEpisodes(ctx context.Context, configured, official string, media *model.Media) ([]DanmakuAnime, string, bool) {
+	title, episodeNum, episodeTitle, ok := scrapedDanmakuMetadata(media)
+	if !ok {
+		return nil, "", false
+	}
+	candidates, base, err := s.searchCandidatesWithSource(ctx, configured, official, title, episodeNum)
+	if err != nil {
+		s.log.Debug("danmaku scraped metadata lookup failed",
+			zap.String("title", title),
+			zap.String("episode", episodeNum),
+			zap.Error(err))
+		return nil, "", false
+	}
+	matched := matchScrapedDanmakuEpisodes(candidates, title, media.Year, episodeNum, episodeTitle)
+	if len(matched) == 0 {
+		return nil, "", false
+	}
+	return matched, base, true
+}
+
+// scrapedDanmakuMetadata returns the query fields only when the media has
+// enough scraped information to identify a specific episode.
+func scrapedDanmakuMetadata(media *model.Media) (title, episodeNum, episodeTitle string, ok bool) {
+	if media == nil {
+		return "", "", "", false
+	}
+	title = strings.TrimSpace(media.Title)
+	if title == "" {
+		title = strings.TrimSpace(media.OriginalName)
+	}
+	episodeTitle = strings.TrimSpace(media.EpisodeTitle)
+	if title == "" || media.EpisodeNum <= 0 || episodeTitle == "" {
+		return "", "", "", false
+	}
+	return title, strconv.Itoa(media.EpisodeNum), episodeTitle, true
+}
+
+// matchScrapedDanmakuEpisodes filters title search hits by release year and
+// episode subtitle. The returned list keeps the source grouping so multiple
+// libraries for the same episode remain switchable in the player.
+func matchScrapedDanmakuEpisodes(candidates []DanmakuAnime, title string, year int, episodeNum, episodeTitle string) []DanmakuAnime {
+	out := make([]DanmakuAnime, 0, len(candidates))
+	for _, anime := range candidates {
+		if !danmakuAnimeTitleMatches(anime.AnimeTitle, title, year) {
+			continue
+		}
+		hits := matchDanmakuEpisodeHits(anime.Episodes, episodeNum, episodeTitle)
+		if len(hits) == 0 {
+			continue
+		}
+		anime.Episodes = hits
+		out = append(out, anime)
+	}
+	return out
+}
+
+// danmakuAnimeTitleMatches checks the scraped title and, when present, the
+// candidate's year. A candidate with a conflicting explicit year is rejected
+// even if its title contains the scraped title.
+func danmakuAnimeTitleMatches(animeTitle, mediaTitle string, year int) bool {
+	candidate := string(normalizeDanmakuText(animeTitle))
+	target := string(normalizeDanmakuText(mediaTitle))
+	if candidate == "" || target == "" || !strings.Contains(candidate, target) {
+		return false
+	}
+	if year > 0 {
+		if candidateYear := danmakuTitleYear(animeTitle); candidateYear > 0 && candidateYear != year {
+			return false
+		}
+	}
+	return true
 }
 
 // firstDanmakuEpisodeID 返回匹配列表里的第一条 episodeId，作为自动选中的库。
@@ -1184,20 +1329,9 @@ func pickDanmakuEpisodeID(candidates []DanmakuAnime, episodeNum, episodeTitle st
 // 分组结构（只留下命中的集数），因此调用方既能取第一条自动加载，也能把整个
 // 列表作为可切换来源展示。
 func matchDanmakuEpisodes(candidates []DanmakuAnime, episodeNum, episodeTitle string) []DanmakuAnime {
-	subtitle := danmakuEpisodeSubtitle(episodeTitle)
 	out := make([]DanmakuAnime, 0, len(candidates))
 	for _, anime := range candidates {
-		hits := make([]DanmakuEpisode, 0, len(anime.Episodes))
-		for _, ep := range anime.Episodes {
-			if ep.EpisodeID <= 0 || danmakuEpisodeNumber(ep.EpisodeTitle) != episodeNum {
-				continue
-			}
-			// 目标带副标题时必须副标题一致；没有副标题时仅凭集数匹配。
-			if subtitle != "" && !danmakuSubtitleMatches(ep.EpisodeTitle, subtitle) {
-				continue
-			}
-			hits = append(hits, ep)
-		}
+		hits := matchDanmakuEpisodeHits(anime.Episodes, episodeNum, episodeTitle)
 		if len(hits) == 0 {
 			continue
 		}
@@ -1205,4 +1339,26 @@ func matchDanmakuEpisodes(candidates []DanmakuAnime, episodeNum, episodeTitle st
 		out = append(out, anime)
 	}
 	return out
+}
+
+// matchDanmakuEpisodeHits 返回同一番剧里指向目标集的弹幕库。
+func matchDanmakuEpisodeHits(episodes []DanmakuEpisode, episodeNum, episodeTitle string) []DanmakuEpisode {
+	subtitle := danmakuEpisodeSubtitle(episodeTitle)
+	// 刮削后的 episode_title 通常只保存副标题本身（例如「起始与终结的序章」），
+	// 不带「第1话」前缀。此时把它整体作为副标题参与比对。
+	if subtitle == "" && danmakuEpisodeNumber(episodeTitle) == "" {
+		subtitle = strings.TrimSpace(episodeTitle)
+	}
+	hits := make([]DanmakuEpisode, 0, len(episodes))
+	for _, ep := range episodes {
+		if ep.EpisodeID <= 0 || danmakuEpisodeNumber(ep.EpisodeTitle) != episodeNum {
+			continue
+		}
+		// 目标带副标题时必须副标题一致；没有副标题时仅凭集数匹配。
+		if subtitle != "" && !danmakuSubtitleMatches(ep.EpisodeTitle, subtitle) {
+			continue
+		}
+		hits = append(hits, ep)
+	}
+	return hits
 }

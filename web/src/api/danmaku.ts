@@ -41,14 +41,14 @@ export interface DanmakuFetchResult {
   anime_title?: string
   episode_title?: string
   episode_id?: number
-  match_mode?: 'hash' | 'filename' | 'search' | 'manual' | string
+  match_mode?: 'hash' | 'filename' | 'metadata' | 'search' | 'manual' | string
 }
 
 export interface DanmakuLoadedInfo {
   animeTitle?: string
   episodeTitle?: string
   episodeId?: number | string
-  matchMode?: 'hash' | 'filename' | 'search' | 'manual' | string
+  matchMode?: 'hash' | 'filename' | 'metadata' | 'search' | 'manual' | string
   totalCount: number
   sourceType?: 'auto' | 'xml' | 'json'
   /** Number of sources merged into the loaded comments (0 = not merged). */

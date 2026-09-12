@@ -109,6 +109,12 @@ export function PlayerDanmakuPanel({
             <Tag size={10} /> 文件名匹配
           </span>
         )
+      case 'metadata':
+        return (
+          <span className="inline-flex items-center gap-0.5 rounded border border-cyan-500/30 bg-cyan-500/15 px-1.5 py-0.5 text-[10px] font-medium text-cyan-300">
+            <Search size={10} /> 刮削信息匹配
+          </span>
+        )
       case 'search':
         return (
           <span className="inline-flex items-center gap-0.5 rounded border border-violet-500/30 bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-medium text-violet-300">

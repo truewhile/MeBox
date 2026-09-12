@@ -43,6 +43,30 @@ func TestDanmakuEpisodeSubtitle(t *testing.T) {
 	}
 }
 
+// 刮削信息匹配：优先使用本地已刮削的年份、集数和集标题，不能再被同名续作
+// 或缺少集标题的平台源抢走。
+func TestMatchScrapedDanmakuEpisodesUsesYearAndEpisodeTitle(t *testing.T) {
+	candidates := []DanmakuAnime{
+		{AnimeID: 1, AnimeTitle: "命运石之门 0(2018)【TV动画】from dandan&animeko", Episodes: []DanmakuEpisode{
+			{EpisodeID: 10299, EpisodeTitle: "【dandan&animeko】 第1话 零化域的缺失之环-Absolute Zero-"},
+		}},
+		{AnimeID: 2, AnimeTitle: "命运石之门(2011)【TV动画】from dandan&animeko", Episodes: []DanmakuEpisode{
+			{EpisodeID: 10322, EpisodeTitle: "【dandan&animeko】 第1话 始与终的序章-Turning Point-"},
+		}},
+		{AnimeID: 3, AnimeTitle: "命运石之门(2011)【动漫】from 360", Episodes: []DanmakuEpisode{
+			{EpisodeID: 10218, EpisodeTitle: "【qq】 第1集"},
+		}},
+	}
+
+	got := matchScrapedDanmakuEpisodes(candidates, "命运石之门", 2011, "1", "起始与终结的序章")
+	if len(got) != 1 {
+		t.Fatalf("matched %d anime, want 1: %#v", len(got), got)
+	}
+	if got[0].AnimeID != 2 || len(got[0].Episodes) != 1 || got[0].Episodes[0].EpisodeID != 10322 {
+		t.Fatalf("picked wrong source: %#v", got)
+	}
+}
+
 // 真实数据形态：官方 match 给出的剧名+集数在配置源里会命中多季/多版本，
 // 且顺序不可靠。必须靠副标题选中正确的那一集。
 func TestPickDanmakuEpisodeIDDisambiguatesBySubtitle(t *testing.T) {

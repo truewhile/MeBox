@@ -491,13 +491,14 @@ func TestDanmakuFetchHashMatchConfiguredFailsFallsBackOfficial(t *testing.T) {
 	require.Contains(t, res.Raw, "弹幕官方兜底")
 }
 
-// 第 1 层未命中（matches 为空）→ 第 2 层按文件名+集数搜索。
+// 第 1 层未命中时，即使官方附带模糊候选，也不能把第一条当作精准匹配；
+// 应继续走第 2 层按文件名+集数搜索。
 func TestDanmakuFetchHashMissFallsBackToFileNameSearch(t *testing.T) {
 	videoPath, _ := writeDanmakuTestVideo(t, "测试动画.第01话.mkv")
 
 	cfgSrv := newDanmakuSourceServer(t) // 搜索 + 弹幕A
 	official := danmakuOfficialServer(t,
-		`{"success":true,"isMatched":false,"matches":[]}`,
+		`{"success":true,"isMatched":false,"matches":[{"episodeId":120140001,"animeId":12014,"animeTitle":"91天","episodeTitle":"第1话 杀人之夜"}]}`,
 		`<i></i>`, nil)
 	overrideDanmakuOfficialBase(t, official.URL)
 
@@ -510,8 +511,53 @@ func TestDanmakuFetchHashMissFallsBackToFileNameSearch(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, res.Enabled)
 	require.Contains(t, res.Raw, "弹幕A")
-	// 第 2 层命中：搜索请求按文件名进行。
-	require.Contains(t, cfgSrv.lastSearch, "anime=")
+	require.Equal(t, "filename", res.MatchMode)
+	require.Equal(t, "测试动画", res.AnimeTitle)
+	// 第 2 层命中：搜索请求按文件名进行，而不是误用官方第一条模糊候选。
+	query, err := url.ParseQuery(cfgSrv.lastSearch)
+	require.NoError(t, err)
+	require.Contains(t, query.Get("anime"), "测试动画.第01话")
+	require.NotContains(t, query.Get("anime"), "91天")
+}
+
+// hash 未精确命中时，若本地已有刮削的剧名、年份、集数和集标题，应先用这些
+// 元数据锁定正确来源，而不是直接进入大量候选的手工选择。
+func TestDanmakuFetchHashMissUsesScrapedMetadata(t *testing.T) {
+	videoPath, _ := writeDanmakuTestVideo(t, "local-release-name.mkv")
+	cfgSrv := newDanmakuSourceServerWithSearch(t,
+		`{"hasMore":false,"animes":[`+
+			`{"animeId":1,"animeTitle":"命运石之门 0(2018)【TV动画】from dandan&animeko","episodes":[{"episodeId":120140001,"episodeTitle":"【dandan&animeko】 第1话 零化域的缺失之环-Absolute Zero-"}]},`+
+			`{"animeId":2,"animeTitle":"命运石之门(2011)【TV动画】from dandan&animeko","episodes":[{"episodeId":25484,"episodeTitle":"【dandan&animeko】 第1话 始与终的序章-Turning Point-"}]},`+
+			`{"animeId":3,"animeTitle":"命运石之门(2011)【动漫】from 360","episodes":[{"episodeId":120140002,"episodeTitle":"【qq】 第1集"}]}`+
+			`]}`)
+	official := danmakuOfficialServer(t,
+		`{"success":true,"isMatched":false,"matches":[{"episodeId":120140001,"animeId":12014,"animeTitle":"91天","episodeTitle":"第1话 杀人之夜"}]}`,
+		`<i></i>`, nil)
+	overrideDanmakuOfficialBase(t, official.URL)
+
+	svc := newDanmakuTestService(t)
+	ctx := context.Background()
+	require.NoError(t, svc.repo.Setting.Set(ctx, DanmakuSourceKey, cfgSrv.URL()))
+	media := model.Media{
+		Title:        "命运石之门",
+		Year:         2011,
+		EpisodeNum:   1,
+		EpisodeTitle: "起始与终结的序章",
+		Path:         videoPath,
+		SizeBytes:    32000,
+		ScrapeStatus: "matched",
+	}
+	media.ID = "mScrapedMeta"
+	require.NoError(t, svc.repo.DB.Create(&media).Error)
+
+	res, err := svc.Fetch(ctx, media.ID, "", "")
+	require.NoError(t, err)
+	require.True(t, res.Enabled)
+	require.Contains(t, res.Raw, "弹幕A")
+	require.Equal(t, "metadata", res.MatchMode)
+	require.Equal(t, "命运石之门(2011)【TV动画】from dandan&animeko", res.AnimeTitle)
+	require.Equal(t, int64(25484), res.EpisodeID)
+	require.Empty(t, res.Candidates)
 }
 
 // strm：通过解析出的直链 Range 拉 16MB 前缀算 hash → match → 拉弹幕。
