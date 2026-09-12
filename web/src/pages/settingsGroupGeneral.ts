@@ -100,6 +100,14 @@ export const generalSettingsGroup: SettingGroup = {
       defaultValue: '1',
     },
     {
+      key: 'cache.memory_max_size_mb',
+      label: '进程内缓存上限 (MB)',
+      type: 'number',
+      hint: 'JSON/列表等热缓存共用的内存上限。低配机器建议 32-64，内存充足可用 128-256；保存后会立即裁剪超额缓存，默认 128MB',
+      defaultValue: '128',
+      placeholder: '128',
+    },
+    {
       key: 'cache.images_max_size_mb',
       label: '图片缓存上限 (MB)',
       type: 'number',

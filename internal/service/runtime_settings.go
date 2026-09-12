@@ -119,6 +119,22 @@ func ApplyRuntimeSetting(cfg *config.Config, key, value string) {
 			}
 			cfg.Cache.ImagesMaxSizeMB = n
 		}
+	case "cache.memory_max_size_mb":
+		n := config.DefaultCacheMemoryMaxSizeMB
+		if value != "" {
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return
+			}
+			n = parsed
+		}
+		if n <= 0 {
+			n = config.DefaultCacheMemoryMaxSizeMB
+		}
+		if n > 4096 {
+			n = 4096
+		}
+		cfg.Cache.MemoryMaxSizeMB = n
 	}
 }
 

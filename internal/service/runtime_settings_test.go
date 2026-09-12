@@ -41,3 +41,22 @@ func TestApplyRuntimeSettingTranscodeSwitches(t *testing.T) {
 		t.Fatalf("max cpu threads = %d, want clamp 1", cfg.App.MaxCPUThreads)
 	}
 }
+
+func TestApplyRuntimeSettingMemoryCacheLimit(t *testing.T) {
+	cfg := &config.Config{}
+
+	ApplyRuntimeSetting(cfg, "cache.memory_max_size_mb", "64")
+	if cfg.Cache.MemoryMaxSizeMB != 64 {
+		t.Fatalf("memory cache limit = %d, want 64", cfg.Cache.MemoryMaxSizeMB)
+	}
+
+	ApplyRuntimeSetting(cfg, "cache.memory_max_size_mb", "")
+	if cfg.Cache.MemoryMaxSizeMB != config.DefaultCacheMemoryMaxSizeMB {
+		t.Fatalf("empty value should restore default, got %d", cfg.Cache.MemoryMaxSizeMB)
+	}
+
+	ApplyRuntimeSetting(cfg, "cache.memory_max_size_mb", "99999")
+	if cfg.Cache.MemoryMaxSizeMB != 4096 {
+		t.Fatalf("memory cache limit should clamp to 4096, got %d", cfg.Cache.MemoryMaxSizeMB)
+	}
+}

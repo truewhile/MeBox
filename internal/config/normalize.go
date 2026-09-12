@@ -47,6 +47,9 @@ func (c *Config) normalize() error {
 	if c.Cache.ImagesMaxSizeMB < 0 {
 		c.Cache.ImagesMaxSizeMB = 0
 	}
+	if c.Cache.MemoryMaxSizeMB <= 0 {
+		c.Cache.MemoryMaxSizeMB = DefaultCacheMemoryMaxSizeMB
+	}
 	if c.Cache.RedisPrefix == "" {
 		c.Cache.RedisPrefix = "mebox"
 	}

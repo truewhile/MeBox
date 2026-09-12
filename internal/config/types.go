@@ -113,10 +113,12 @@ type LoggingConfig struct {
 	MaxBackups     int    `mapstructure:"max_backups"`
 }
 
-// CacheConfig 控制磁盘转码/刮削缓存。
+// CacheConfig 控制磁盘转写缓存和进程内热缓存。
 type CacheConfig struct {
-	CacheDir           string `mapstructure:"cache_dir"`
-	ImagesMaxSizeMB    int    `mapstructure:"images_max_size_mb"`
+	CacheDir        string `mapstructure:"cache_dir"`
+	ImagesMaxSizeMB int    `mapstructure:"images_max_size_mb"`
+	// MemoryMaxSizeMB 限制进程内 L1 缓存总字节数，JSON/对象缓存共用该预算。
+	MemoryMaxSizeMB    int    `mapstructure:"memory_max_size_mb"`
 	MaxDiskUsageMB     int    `mapstructure:"max_disk_usage_mb"`
 	TTLHours           int    `mapstructure:"ttl_hours"`
 	AutoCleanup        bool   `mapstructure:"auto_cleanup"`

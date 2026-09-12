@@ -46,6 +46,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Cache.MediaTTLSeconds != 90 {
 		t.Fatalf("expected default media cache ttl 90, got %d", cfg.Cache.MediaTTLSeconds)
 	}
+	if cfg.Cache.MemoryMaxSizeMB != DefaultCacheMemoryMaxSizeMB {
+		t.Fatalf("expected default runtime cache memory limit %d, got %d", DefaultCacheMemoryMaxSizeMB, cfg.Cache.MemoryMaxSizeMB)
+	}
 	if cfg.Search.Index != "mebox_media" {
 		t.Fatalf("expected default search index, got %q", cfg.Search.Index)
 	}
@@ -88,6 +91,7 @@ func TestEnvOverride(t *testing.T) {
 	t.Setenv("MEBOX_DATABASE_DSN", "postgres://mebox:secret@postgres:5432/mebox?sslmode=disable")
 	t.Setenv("MEBOX_CACHE_REDIS_URL", "redis://redis:6379/0")
 	t.Setenv("MEBOX_CACHE_MEDIA_TTL_SECONDS", "30")
+	t.Setenv("MEBOX_CACHE_MEMORY_MAX_SIZE_MB", "48")
 	t.Setenv("MEBOX_SEARCH_BACKEND", "opensearch")
 	t.Setenv("MEBOX_SEARCH_OPENSEARCH_URL", "http://opensearch:9200")
 	t.Setenv("MEBOX_LICENSE_SERVER_URL", "https://license.example.com")
@@ -103,8 +107,8 @@ func TestEnvOverride(t *testing.T) {
 	if cfg.Database.Type != "postgres" || cfg.Database.DSN == "" {
 		t.Fatalf("expected postgres database config from env, got type=%q dsn=%q", cfg.Database.Type, cfg.Database.DSN)
 	}
-	if cfg.Cache.RedisURL != "redis://redis:6379/0" || cfg.Cache.MediaTTLSeconds != 30 {
-		t.Fatalf("expected redis cache config from env, got url=%q ttl=%d", cfg.Cache.RedisURL, cfg.Cache.MediaTTLSeconds)
+	if cfg.Cache.RedisURL != "redis://redis:6379/0" || cfg.Cache.MediaTTLSeconds != 30 || cfg.Cache.MemoryMaxSizeMB != 48 {
+		t.Fatalf("expected redis cache config from env, got url=%q ttl=%d memory=%d", cfg.Cache.RedisURL, cfg.Cache.MediaTTLSeconds, cfg.Cache.MemoryMaxSizeMB)
 	}
 	if cfg.Search.Backend != "opensearch" || cfg.Search.OpenSearchURL != "http://opensearch:9200" {
 		t.Fatalf("expected opensearch config from env, got backend=%q url=%q", cfg.Search.Backend, cfg.Search.OpenSearchURL)

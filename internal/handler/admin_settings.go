@@ -68,6 +68,9 @@ func updateSettingHandler(svc *service.Container) gin.HandlerFunc {
 		if req.Key == "cache.images_max_size_mb" && svc.Scheduler != nil {
 			_ = svc.Scheduler.RunNowAsync(c.Request.Context(), "image_cache_cleanup")
 		}
+		if req.Key == "cache.memory_max_size_mb" && svc.Cache != nil {
+			svc.Cache.SetMaxSizeMB(svc.Cfg.Cache.MemoryMaxSizeMB)
+		}
 		c.Status(http.StatusNoContent)
 	}
 }
