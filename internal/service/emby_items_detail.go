@@ -132,15 +132,16 @@ func (e *EmbyService) LatestItems(ctx context.Context, userID, parentID string, 
 	cacheKey := e.embyLatestCacheKey(userID, parentID, limit)
 	var cached embyLatestCacheValue
 	if e.cache != nil && e.cache.GetJSON(ctx, cacheKey, &cached) {
+		e.rememberArtworkRefs(cached.Artwork)
 		return cached.Items, nil
 	}
 	q := e.repo.DB.WithContext(ctx).Model(&model.Media{}).Where("deleted_at IS NULL")
 	q = e.applyUserMediaVisibility(ctx, q, userID)
 	if parentID != "" {
 		if episodic, err := e.libraryIsEpisodic(ctx, parentID); err == nil && episodic {
-			out, err := e.latestSeriesItemsForLibrary(ctx, userID, parentID, limit)
+			out, artwork, err := e.latestSeriesItemsForLibrary(ctx, userID, parentID, limit)
 			if err == nil && e.cache != nil {
-				e.cache.SetJSON(ctx, cacheKey, embyLatestCacheValue{Items: out}, time.Duration(e.embyLatestCacheTTLSeconds())*time.Second)
+				e.cache.SetJSON(ctx, cacheKey, embyLatestCacheValue{Items: out, Artwork: artwork}, time.Duration(e.embyLatestCacheTTLSeconds())*time.Second)
 			}
 			return out, err
 		}
@@ -171,7 +172,7 @@ func (e *EmbyService) LatestItems(ctx context.Context, userID, parentID string, 
 	return out, nil
 }
 
-func (e *EmbyService) latestSeriesItemsForLibrary(ctx context.Context, userID, libraryID string, limit int) ([]map[string]any, error) {
+func (e *EmbyService) latestSeriesItemsForLibrary(ctx context.Context, userID, libraryID string, limit int) ([]map[string]any, map[string]embyArtworkRef, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
@@ -180,7 +181,7 @@ func (e *EmbyService) latestSeriesItemsForLibrary(ctx context.Context, userID, l
 	q = e.applyUserMediaVisibility(ctx, q, userID)
 	var rows []model.Media
 	if err := q.Order(mediaReleaseOrderSQL(true)).Limit(embySeriesGroupingLimit).Find(&rows).Error; err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	groups := e.seriesGroupsFromMedia(ctx, rows)
 	sortSeriesGroups(groups, ItemsParams{SortBy: "premieredate", SortOrder: "Descending"})
@@ -191,7 +192,7 @@ func (e *EmbyService) latestSeriesItemsForLibrary(ctx context.Context, userID, l
 	for _, group := range groups {
 		items = append(items, e.seriesPayload(group))
 	}
-	return items, nil
+	return items, e.artworkRefsForSeriesGroups(groups), nil
 }
 
 // ResumeItems 列出有未完成播放进度的媒体。
@@ -519,11 +520,11 @@ func (e *EmbyService) itemPayload(ctx context.Context, m *model.Media, fav bool,
 	if seriesID != "" {
 		if sEntry, ok, _ := e.payloadSeriesEntry(ctx, seriesID); ok {
 			if sEntry.posterURL != "" {
-				item["SeriesPrimaryImageTag"] = seriesID
+				item["SeriesPrimaryImageTag"] = embyVirtualImageTag(seriesID, embyVirtualPrimaryTagSuffix)
 			}
-			if len(backdropTags) == 0 && sEntry.backdropURL != "" {
+			if len(backdropTags) == 0 && (sEntry.backdropURL != "" || sEntry.posterURL != "") {
 				item["ParentBackdropItemId"] = seriesID
-				item["ParentBackdropImageTags"] = []string{seriesID + "-bd"}
+				item["ParentBackdropImageTags"] = []string{embyVirtualImageTag(seriesID, embyVirtualBackdropTagSuffix)}
 			}
 		}
 	}

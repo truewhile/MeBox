@@ -117,6 +117,18 @@ const (
 	embyVirtualCacheTTL     = 10 * time.Minute
 	embyVisibilityCacheTTL  = 30 * time.Second
 	embySeriesGroupingLimit = maxMediaSearchLimit
+	// Virtual artwork used to be wiped entirely once the in-memory map crossed
+	// a few thousand entries. A homepage refresh asks Latest for every library
+	// at once, so that wipe dropped the series the client was about to paint.
+	// Caps are sized for that fan-out; overflow evicts the oldest entries only.
+	embyVirtualSeriesCap  = 8000
+	embyVirtualSeasonCap  = 16000
+	embyVirtualArtworkCap = 24000
+	// Clients that already cached the 1x1 placeholder treat a stable tag as
+	// immutable. Virtual ids are the ones that served that placeholder, so
+	// only those tags get a suffix that forces a refetch.
+	embyVirtualPrimaryTagSuffix  = "-p2"
+	embyVirtualBackdropTagSuffix = "-bd2"
 )
 
 var (

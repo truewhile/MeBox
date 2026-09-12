@@ -32,17 +32,14 @@ func (e *EmbyService) ImageURL(ctx context.Context, id, imageType string) (strin
 		}
 		return backdrop
 	}
-	if strings.HasPrefix(id, embyVirtualSeasonPrefix) {
+	if strings.HasPrefix(id, embyVirtualSeasonPrefix) || strings.HasPrefix(id, embyVirtualSeriesPrefix) {
 		if raw, ok := e.cachedArtworkURL(id, imageType); ok {
 			return raw, nil
 		}
-		return "", nil
-	}
-	if strings.HasPrefix(id, embyVirtualSeriesPrefix) {
-		if raw, ok := e.cachedArtworkURL(id, imageType); ok {
-			return raw, nil
-		}
-		return "", nil
+		// Latest JSON can outlive (or be served after) the in-memory artwork
+		// map. Rebuild from the library instead of handing the client a 1x1
+		// placeholder that it then caches as a successful image.
+		return e.resolveVirtualArtwork(ctx, id, imageType, pick)
 	}
 	m, err := e.repo.Media.FindByID(ctx, id)
 	if err == nil && m != nil {
@@ -69,6 +66,21 @@ func (e *EmbyService) ImageURL(ctx context.Context, id, imageType string) (strin
 		return raw, nil
 	}
 	return "", nil
+}
+
+func (e *EmbyService) resolveVirtualArtwork(ctx context.Context, id, imageType string, pick func(primary, backdrop string) string) (string, error) {
+	if strings.HasPrefix(id, embyVirtualSeasonPrefix) {
+		season, ok, err := e.findSeasonGroup(ctx, id, "")
+		if err != nil || !ok {
+			return "", err
+		}
+		return pick(season.Series.PosterURL, season.Series.BackdropURL), nil
+	}
+	series, ok, err := e.findSeriesGroup(ctx, id, "")
+	if err != nil || !ok {
+		return "", err
+	}
+	return pick(series.PosterURL, series.BackdropURL), nil
 }
 
 // imageInfoTypes 是 GET /Items/{Id}/Images 会报告的图片类型。只列 MeBox

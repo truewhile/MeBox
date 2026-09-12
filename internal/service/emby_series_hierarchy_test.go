@@ -296,6 +296,71 @@ func TestEmbyVirtualSeriesArtworkUsesListCache(t *testing.T) {
 	}
 }
 
+func TestEmbyVirtualSeriesArtworkRebuildsAfterMemoryDrop(t *testing.T) {
+	svc := newTestEmbyService(t)
+	svc.cache = NewRuntimeCacheService(nil, nil)
+	lib := model.Library{Name: "番剧", Path: `/media/anime`, Type: "anime", Enabled: true}
+	if err := svc.repo.Library.Create(t.Context(), &lib); err != nil {
+		t.Fatalf("create library: %v", err)
+	}
+	media := model.Media{
+		Base:        model.Base{ID: "ep-hero"},
+		LibraryID:   lib.ID,
+		Title:       "树海之魔",
+		Path:        `/media/anime/树海之魔/Season 01/树海之魔 - S01E01.mkv`,
+		PosterURL:   `/poster.jpg`,
+		BackdropURL: `/backdrop.jpg`,
+		SeasonNum:   1,
+		EpisodeNum:  1,
+	}
+	if err := svc.repo.DB.Create(&media).Error; err != nil {
+		t.Fatalf("create media: %v", err)
+	}
+
+	items, err := svc.LatestItems(t.Context(), "", lib.ID, 5)
+	if err != nil {
+		t.Fatalf("latest items: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("latest len = %d, want 1", len(items))
+	}
+	seriesID, _ := items[0]["Id"].(string)
+	tags, _ := items[0]["BackdropImageTags"].([]string)
+	if seriesID == "" || len(tags) != 1 || tags[0] != seriesID+embyVirtualBackdropTagSuffix {
+		t.Fatalf("hero item should advertise a cache-busted backdrop tag, got id=%q tags=%#v", seriesID, items[0]["BackdropImageTags"])
+	}
+
+	svc.virtualMu.Lock()
+	svc.virtualArtwork = nil
+	svc.virtualSeries = nil
+	svc.virtualSeasons = nil
+	svc.virtualMu.Unlock()
+
+	backdrop, err := svc.ImageURL(t.Context(), seriesID, "Backdrop")
+	if err != nil {
+		t.Fatalf("backdrop after memory drop: %v", err)
+	}
+	if backdrop != "/backdrop.jpg" {
+		t.Fatalf("backdrop = %q, want rebuilt backdrop", backdrop)
+	}
+
+	svc.virtualMu.Lock()
+	svc.virtualArtwork = nil
+	svc.virtualMu.Unlock()
+	if _, err := svc.LatestItems(t.Context(), "", lib.ID, 5); err != nil {
+		t.Fatalf("cached latest: %v", err)
+	}
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	backdrop, err = svc.ImageURL(cancelled, seriesID, "Backdrop")
+	if err != nil {
+		t.Fatalf("backdrop from rewarmed cache: %v", err)
+	}
+	if backdrop != "/backdrop.jpg" {
+		t.Fatalf("rewarmed backdrop = %q, want cached backdrop", backdrop)
+	}
+}
+
 func TestEmbyCloudAnimeUsesSeriesNameFromChineseSeasonFolder(t *testing.T) {
 	svc := newTestEmbyService(t)
 	lib := model.Library{Name: "OpenList · 国漫", Path: `cloud://openlist/国漫`, Type: "anime", Enabled: true}
@@ -429,13 +494,13 @@ func TestInferSeriesNameFromPath(t *testing.T) {
 			want: "间谍过家家",
 		},
 	}
-			for _, tc := range tests {
-				got := inferSeriesNameFromPath(tc.path)
-				if got != tc.want {
-					t.Errorf("inferSeriesNameFromPath(%q) = %q, want %q", tc.path, got, tc.want)
-				}
-			}
+	for _, tc := range tests {
+		got := inferSeriesNameFromPath(tc.path)
+		if got != tc.want {
+			t.Errorf("inferSeriesNameFromPath(%q) = %q, want %q", tc.path, got, tc.want)
 		}
+	}
+}
 
 func TestEmbySeriesSortByDateLastMediaAdded(t *testing.T) {
 	svc := newTestEmbyService(t)
