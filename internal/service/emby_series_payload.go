@@ -5,28 +5,28 @@ func (e *EmbyService) seriesPayload(group embySeriesGroup) map[string]any {
 	imageTags := map[string]string{}
 	backdropTags := []string{}
 	if group.PosterURL != "" {
-		imageTags["Primary"] = group.ID
+		imageTags["Primary"] = embyVirtualImageTag(group.ID, embyVirtualPrimaryTagSuffix)
 	}
-	if group.BackdropURL != "" {
-		backdropTags = append(backdropTags, group.ID+"-bd")
+	if group.BackdropURL != "" || group.PosterURL != "" {
+		backdropTags = append(backdropTags, embyVirtualImageTag(group.ID, embyVirtualBackdropTagSuffix))
 	}
-		lastMediaAdded := group.DateLastMediaAdded
-		if lastMediaAdded.IsZero() {
-			lastMediaAdded = group.CreatedAt
-		}
-		item := map[string]any{
-			"Id":                 group.ID,
-			"Name":               group.Name,
-			"ServerId":           embyServerID,
-			"Type":               "Series",
-			"MediaType":          "Video",
-			"IsFolder":           true,
-			"ParentId":           group.LibraryID,
-			"ProductionYear":     group.Year,
-			"Overview":           group.Overview,
-			"CommunityRating":    group.Rating,
-			"RecursiveItemCount": len(group.Episodes),
-			"ChildCount":         len(e.seasonsForSeries(group)),
+	lastMediaAdded := group.DateLastMediaAdded
+	if lastMediaAdded.IsZero() {
+		lastMediaAdded = group.CreatedAt
+	}
+	item := map[string]any{
+		"Id":                 group.ID,
+		"Name":               group.Name,
+		"ServerId":           embyServerID,
+		"Type":               "Series",
+		"MediaType":          "Video",
+		"IsFolder":           true,
+		"ParentId":           group.LibraryID,
+		"ProductionYear":     group.Year,
+		"Overview":           group.Overview,
+		"CommunityRating":    group.Rating,
+		"RecursiveItemCount": len(group.Episodes),
+		"ChildCount":         len(e.seasonsForSeries(group)),
 		"DateCreated":        group.CreatedAt,
 		"DateLastMediaAdded": lastMediaAdded,
 		"ImageTags":          imageTags,
@@ -39,7 +39,7 @@ func (e *EmbyService) seriesPayload(group embySeriesGroup) map[string]any {
 		"UserData": emptyUserData(),
 	}
 	if group.PosterURL != "" {
-		item["PrimaryImageTag"] = group.ID
+		item["PrimaryImageTag"] = embyVirtualImageTag(group.ID, embyVirtualPrimaryTagSuffix)
 	}
 	if premiered, ok := embyPremiereDate(group.ReleaseDate); ok {
 		item["PremiereDate"] = premiered
@@ -52,10 +52,10 @@ func (e *EmbyService) seasonPayload(season embySeasonGroup) map[string]any {
 	imageTags := map[string]string{}
 	backdropTags := []string{}
 	if season.Series.PosterURL != "" {
-		imageTags["Primary"] = season.ID
+		imageTags["Primary"] = embyVirtualImageTag(season.ID, embyVirtualPrimaryTagSuffix)
 	}
-	if season.Series.BackdropURL != "" {
-		backdropTags = append(backdropTags, season.ID+"-bd")
+	if season.Series.BackdropURL != "" || season.Series.PosterURL != "" {
+		backdropTags = append(backdropTags, embyVirtualImageTag(season.ID, embyVirtualBackdropTagSuffix))
 	}
 	item := map[string]any{
 		"Id":                season.ID,
@@ -75,12 +75,12 @@ func (e *EmbyService) seasonPayload(season embySeasonGroup) map[string]any {
 		"UserData":          emptyUserData(),
 	}
 	if season.Series.PosterURL != "" {
-		item["PrimaryImageTag"] = season.ID
-		item["SeriesPrimaryImageTag"] = season.Series.ID
+		item["PrimaryImageTag"] = embyVirtualImageTag(season.ID, embyVirtualPrimaryTagSuffix)
+		item["SeriesPrimaryImageTag"] = embyVirtualImageTag(season.Series.ID, embyVirtualPrimaryTagSuffix)
 	}
-	if season.Series.BackdropURL != "" {
+	if season.Series.BackdropURL != "" || season.Series.PosterURL != "" {
 		item["ParentBackdropItemId"] = season.Series.ID
-		item["ParentBackdropImageTags"] = []string{season.Series.ID + "-bd"}
+		item["ParentBackdropImageTags"] = []string{embyVirtualImageTag(season.Series.ID, embyVirtualBackdropTagSuffix)}
 	}
 	return item
 }

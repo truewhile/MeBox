@@ -15,7 +15,8 @@ type embyItemsCacheValue struct {
 }
 
 type embyLatestCacheValue struct {
-	Items []map[string]any `json:"items"`
+	Items   []map[string]any          `json:"items"`
+	Artwork map[string]embyArtworkRef `json:"artwork,omitempty"`
 }
 
 func (e *EmbyService) embyItemsCacheKey(kind string, p ItemsParams) string {
@@ -43,7 +44,8 @@ func (e *EmbyService) embyItemsCacheKey(kind string, p ItemsParams) string {
 }
 
 func (e *EmbyService) embyLatestCacheKey(userID, parentID string, limit int) string {
-	sum := sha256.Sum256([]byte(strings.Join([]string{"latest", userID, parentID, strconv.Itoa(limit)}, "|")))
+	// v2: payload tags for virtual artwork changed so clients drop cached placeholders.
+	sum := sha256.Sum256([]byte(strings.Join([]string{"latest-v2", userID, parentID, strconv.Itoa(limit)}, "|")))
 	return "media:emby:" + hex.EncodeToString(sum[:])
 }
 
