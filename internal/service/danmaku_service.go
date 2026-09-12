@@ -20,6 +20,8 @@ import (
 	"time"
 	"unicode"
 
+	"golang.org/x/sync/singleflight"
+
 	"go.uber.org/zap"
 
 	"github.com/truewhile/MeBox/internal/model"
@@ -136,6 +138,12 @@ type DanmakuService struct {
 
 	hashCacheMu sync.Mutex
 	hashCache   map[string]string // stamp → 16MB-prefix MD5
+
+	// resultCache 缓存整条弹幕抓取结果，避免同一集重复播放时重走
+	// 「16MB 哈希 + 上游搜索 + 评论拉取」这条高延迟链路。
+	resultCacheMu sync.Mutex
+	resultCache   map[string]danmakuResultCacheEntry
+	fetchGroup    singleflight.Group
 }
 
 func danmakuHTTPClient() *http.Client {
@@ -147,10 +155,11 @@ func NewDanmakuService(log *zap.Logger, repo *repository.Container) *DanmakuServ
 		log = zap.NewNop()
 	}
 	return &DanmakuService{
-		log:       log,
-		repo:      repo,
-		client:    danmakuHTTPClient(),
-		hashCache: make(map[string]string),
+		log:         log,
+		repo:        repo,
+		client:      danmakuHTTPClient(),
+		hashCache:   make(map[string]string),
+		resultCache: make(map[string]danmakuResultCacheEntry),
 	}
 }
 
@@ -168,6 +177,121 @@ func (s *DanmakuService) SetRemoteMediaResolver(resolve DanmakuRemoteMediaResolv
 	if s != nil {
 		s.remoteResolve = resolve
 	}
+}
+
+// 弹幕抓取结果缓存：同一集在 TTL 内重复播放时直接返回，避免重复执行
+// 「16MB 前置哈希 → 上游搜索 → 评论拉取」这条高延迟链路。弹幕库内容变化
+// 很慢，而用户通常会在短时间内反复切集/回看，因此 TTL 取 6 小时。
+const (
+	danmakuResultCacheTTL        = 6 * time.Hour
+	danmakuResultCacheMaxEntries = 64
+	// 候选列表由上游搜索决定，相对稳定但可能随源更新，缓存 10 分钟。
+	danmakuResultCacheCandidateTTL = 10 * time.Minute
+	// 空结果可能只是上游临时抖动，只短暂缓存，避免长时间看不到弹幕。
+	danmakuResultCacheEmptyTTL = time.Minute
+)
+
+type danmakuResultCacheEntry struct {
+	result    *DanmakuFetchResult
+	expiresAt time.Time
+	storedAt  time.Time
+}
+
+func danmakuResultCacheKey(source, mediaID, keyword, episodeID string, merge bool) string {
+	return strings.Join([]string{
+		strings.TrimSpace(source),
+		mediaID,
+		strings.TrimSpace(keyword),
+		strings.TrimSpace(episodeID),
+		strconv.FormatBool(merge),
+	}, "\x00")
+}
+
+func (s *DanmakuService) resultCacheGet(key string) (*DanmakuFetchResult, bool) {
+	if s == nil || key == "" {
+		return nil, false
+	}
+	now := time.Now()
+	s.resultCacheMu.Lock()
+	defer s.resultCacheMu.Unlock()
+	entry, ok := s.resultCache[key]
+	if !ok {
+		return nil, false
+	}
+	if now.After(entry.expiresAt) {
+		delete(s.resultCache, key)
+		return nil, false
+	}
+	return cloneDanmakuFetchResult(entry.result), true
+}
+
+func (s *DanmakuService) resultCachePut(key string, result *DanmakuFetchResult) {
+	if s == nil || key == "" || result == nil {
+		return
+	}
+	now := time.Now()
+	s.resultCacheMu.Lock()
+	defer s.resultCacheMu.Unlock()
+	if s.resultCache == nil {
+		s.resultCache = make(map[string]danmakuResultCacheEntry)
+	}
+	ttl := danmakuResultCacheTTLFor(result)
+	if ttl <= 0 {
+		return
+	}
+	if _, exists := s.resultCache[key]; !exists && len(s.resultCache) >= danmakuResultCacheMaxEntries {
+		oldestKey := ""
+		var oldest time.Time
+		for k, entry := range s.resultCache {
+			if oldestKey == "" || entry.storedAt.Before(oldest) {
+				oldestKey, oldest = k, entry.storedAt
+			}
+		}
+		delete(s.resultCache, oldestKey)
+	}
+	s.resultCache[key] = danmakuResultCacheEntry{
+		result:    cloneDanmakuFetchResult(result),
+		expiresAt: now.Add(ttl),
+		storedAt:  now,
+	}
+}
+
+// danmakuResultCacheTTLFor 按结果完整性选择缓存时长：拿到弹幕正文才值得
+// 长缓存；只有候选列表时短缓存；空结果只缓存一分钟。
+func danmakuResultCacheTTLFor(result *DanmakuFetchResult) time.Duration {
+	if result == nil {
+		return 0
+	}
+	if strings.TrimSpace(result.Raw) != "" {
+		return danmakuResultCacheTTL
+	}
+	if len(result.Candidates) > 0 {
+		return danmakuResultCacheCandidateTTL
+	}
+	return danmakuResultCacheEmptyTTL
+}
+
+// cloneDanmakuFetchResult 深拷贝切片字段，避免缓存命中后调用方修改共享数据。
+func cloneDanmakuFetchResult(in *DanmakuFetchResult) *DanmakuFetchResult {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Candidates = cloneDanmakuAnimeList(in.Candidates)
+	out.Alternatives = cloneDanmakuAnimeList(in.Alternatives)
+	return &out
+}
+
+func cloneDanmakuAnimeList(in []DanmakuAnime) []DanmakuAnime {
+	if in == nil {
+		return nil
+	}
+	out := make([]DanmakuAnime, len(in))
+	for i, anime := range in {
+		out[i] = anime
+		out[i].Episodes = append([]DanmakuEpisode(nil), anime.Episodes...)
+	}
+	return out
 }
 
 // Config reads danmaku settings from the runtime settings table.
@@ -257,8 +381,42 @@ func (s *DanmakuService) Fetch(ctx context.Context, mediaID, keyword, episodeID 
 	return s.FetchWithOptions(ctx, mediaID, keyword, episodeID, DanmakuFetchOptions{})
 }
 
-// FetchWithOptions 是 Fetch 的带偏好版本。
+// FetchWithOptions 是 Fetch 的带偏好版本。结果按「配置源 + 媒体 + 关键词 +
+// 指定集 + 合并开关」缓存，并用 singleflight 合并并发请求，避免同一集被重复抓取。
 func (s *DanmakuService) FetchWithOptions(ctx context.Context, mediaID, keyword, episodeID string, opts DanmakuFetchOptions) (*DanmakuFetchResult, error) {
+	if s == nil {
+		return nil, errors.New("danmaku service unavailable")
+	}
+	cfg := s.Config(ctx)
+	if !cfg.Enabled {
+		return &DanmakuFetchResult{DanmakuRenderConfig: cfg, SourceType: "auto"}, nil
+	}
+	key := danmakuResultCacheKey(cfg.Source, mediaID, keyword, episodeID, opts.MergeSources)
+	if cached, ok := s.resultCacheGet(key); ok {
+		return cached, nil
+	}
+	value, err, _ := s.fetchGroup.Do(key, func() (any, error) {
+		// 等待期间可能已有同一 key 的请求写入缓存。
+		if cached, ok := s.resultCacheGet(key); ok {
+			return cached, nil
+		}
+		res, err := s.fetchWithOptionsUncached(ctx, mediaID, keyword, episodeID, opts)
+		if err != nil {
+			// 与原实现一致：失败时仍把已填充的渲染配置/匹配信息交给调用方。
+			return res, err
+		}
+		s.resultCachePut(key, res)
+		return res, nil
+	})
+	res, _ := value.(*DanmakuFetchResult)
+	if err != nil {
+		return cloneDanmakuFetchResult(res), err
+	}
+	return cloneDanmakuFetchResult(res), nil
+}
+
+// fetchWithOptionsUncached 是未命中缓存时执行的原始抓取流程。
+func (s *DanmakuService) fetchWithOptionsUncached(ctx context.Context, mediaID, keyword, episodeID string, opts DanmakuFetchOptions) (*DanmakuFetchResult, error) {
 	res := &DanmakuFetchResult{DanmakuRenderConfig: s.Config(ctx), SourceType: "auto"}
 	if !res.Enabled {
 		return res, nil

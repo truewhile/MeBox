@@ -824,3 +824,38 @@ func TestDanmakuFetchEmbyRemoteStreamFailedFallsBackToSearch(t *testing.T) {
 	require.Equal(t, "降级搜索番剧", res.AnimeTitle)
 	require.Contains(t, res.Raw, "降级搜索弹幕")
 }
+
+// 即使刮削元数据完整，也应先走准确率最高的 hash 层。
+func TestDanmakuFetchPrefersHashOverCompleteMetadata(t *testing.T) {
+	videoPath, wantHash := writeDanmakuTestVideo(t, "测试动画.第01话.mkv")
+	var seen string
+	official := danmakuOfficialServer(t,
+		`{"success":true,"isMatched":true,"matches":[{"episodeId":25484,"animeId":1001,"animeTitle":"官方测试动画","episodeTitle":"第1话"}]}`,
+		`<?xml version="1.0"?><i><d p="0.5,1,16777215,user1">hash命中</d></i>`,
+		&seen)
+	overrideDanmakuOfficialBase(t, official.URL)
+
+	source := newDanmakuSourceServerWithSearch(t,
+		`{"hasMore":false,"animes":[{"animeId":2002,"animeTitle":"官方测试动画","episodes":[{"episodeId":25484,"episodeTitle":"第1话"}]}]}`)
+
+	svc := newDanmakuTestService(t)
+	ctx := context.Background()
+	require.NoError(t, svc.repo.Setting.Set(ctx, DanmakuSourceKey, source.URL()))
+
+	m := model.Media{
+		Title:        "测试动画",
+		Path:         videoPath,
+		SizeBytes:    123,
+		EpisodeNum:   1,
+		EpisodeTitle: "起始与终结的序章",
+		Year:         2011,
+	}
+	m.ID = "hash-first"
+	require.NoError(t, svc.repo.DB.Create(&m).Error)
+
+	res, err := svc.Fetch(ctx, "hash-first", "", "")
+	require.NoError(t, err)
+	require.Equal(t, "hash", res.MatchMode)
+	require.NotEmpty(t, res.Raw)
+	require.Contains(t, seen, wantHash)
+}
