@@ -75,9 +75,9 @@ func (e *EmbyService) mediaItems(ctx context.Context, p ItemsParams) (map[string
 		orderIncludesDirection = false
 	case "premieredate", "productionyear":
 		order = mediaReleaseOrderSQL(desc)
-		case "datecreated", "datelastmediaadded", "datelastcontentadded":
-			order = "media.created_at"
-			orderIncludesDirection = false
+	case "datecreated", "datelastmediaadded", "datelastcontentadded":
+		order = "media.created_at"
+		orderIncludesDirection = false
 	case "dateplayed":
 		order = "resume.watched_at"
 		orderIncludesDirection = false
@@ -225,6 +225,17 @@ func (e *EmbyService) collapseMediaVersionRows(ctx context.Context, rows []model
 }
 
 func (e *EmbyService) seriesItemsForLibrary(ctx context.Context, libraryID string, p ItemsParams) (map[string]any, error) {
+	cacheKey := e.embyItemsCacheKey("series-items-v1", p)
+	var cached embyItemsCacheValue
+	if e.cache != nil && e.cache.GetJSON(ctx, cacheKey, &cached) {
+		e.rememberArtworkRefs(cached.Artwork)
+		return map[string]any{
+			"Items":            cached.Items,
+			"TotalRecordCount": int(cached.TotalRecordCount),
+			"StartIndex":       cached.StartIndex,
+		}, nil
+	}
+
 	q := e.repo.DB.WithContext(ctx).Model(&model.Media{}).Where("season_num > 0 OR episode_num > 0")
 	q = e.applyUserMediaVisibility(ctx, q, p.UserID)
 	if libraryID != "" {
@@ -246,9 +257,19 @@ func (e *EmbyService) seriesItemsForLibrary(ctx context.Context, libraryID strin
 	groups := e.seriesGroupsFromMedia(ctx, rows)
 	sortSeriesGroups(groups, p)
 	total := len(groups)
-	items := make([]map[string]any, 0, minInt(p.Limit, len(groups)))
-	for _, group := range pageSlice(groups, p.StartIndex, p.Limit) {
+	pageGroups := pageSlice(groups, p.StartIndex, p.Limit)
+	items := make([]map[string]any, 0, len(pageGroups))
+	for _, group := range pageGroups {
 		items = append(items, e.seriesPayload(group))
 	}
-	return map[string]any{"Items": items, "TotalRecordCount": total, "StartIndex": p.StartIndex}, nil
+	out := map[string]any{"Items": items, "TotalRecordCount": total, "StartIndex": p.StartIndex}
+	if e.cache != nil {
+		e.cache.SetJSON(ctx, cacheKey, embyItemsCacheValue{
+			Items:            items,
+			TotalRecordCount: int64(total),
+			StartIndex:       p.StartIndex,
+			Artwork:          e.artworkRefsForSeriesGroups(pageGroups),
+		}, time.Duration(e.mediaCacheTTLSeconds())*time.Second)
+	}
+	return out, nil
 }

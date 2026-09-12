@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -203,6 +204,28 @@ func (p *ImageProxy) resizeCachePath(key string) string {
 	return filepath.Join(p.cacheDir, imageResizeCacheSubdir, key+".img")
 }
 
+// acquireResizeSlot bounds CPU-heavy decode/resize work. Returning false means
+// the caller should fall back to the original image instead of blocking after
+// the request has already been canceled.
+func (p *ImageProxy) acquireResizeSlot(ctx context.Context) (func(), bool) {
+	if p == nil {
+		return func() {}, true
+	}
+	p.resizeSemMu.Lock()
+	if p.resizeSem == nil {
+		p.resizeSem = make(chan struct{}, imageResizeConcurrency())
+	}
+	sem := p.resizeSem
+	p.resizeSemMu.Unlock()
+
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, true
+	case <-ctx.Done():
+		return nil, false
+	}
+}
+
 // serveResizedFromFile 从 srcPath 读取图片，按选项缩放后写出，并把结果缓存
 // 到磁盘以免每次请求都重新解码。原图已满足目标尺寸时直接输出原文件。
 // 返回 false 表示缩放不可用，调用方应回退到原图直出。
@@ -211,6 +234,25 @@ func (p *ImageProxy) serveResizedFromFile(w http.ResponseWriter, r *http.Request
 	if err != nil || stat.IsDir() || stat.Size() <= 0 {
 		return false
 	}
+	// 缓存命中必须发生在读原图和解码之前。否则电视端每次刷新海报墙都会
+	// 把已经是缩略图缓存的原图重新解码、缩放一遍，造成明显的 CPU 抖动。
+	key := o.resizeCacheKey(srcPath, stat)
+	cachePath := p.resizeCachePath(key)
+	if serveCachedImageFile(w, r, key, cachePath) {
+		return true
+	}
+
+	release, ok := p.acquireResizeSlot(r.Context())
+	if !ok {
+		return false
+	}
+	defer release()
+
+	// 等待并发槽期间，别的请求可能已经生成了同一张缩略图。
+	if serveCachedImageFile(w, r, key, cachePath) {
+		return true
+	}
+
 	data, err := os.ReadFile(srcPath) // #nosec G304 -- srcPath comes from an allowed local path or a SHA-derived cache path.
 	if err != nil {
 		return false
@@ -224,11 +266,6 @@ func (p *ImageProxy) serveResizedFromFile(w http.ResponseWriter, r *http.Request
 		return serveImageFile(w, r, filepath.Base(srcPath), srcPath, imageBrowserCacheControl)
 	}
 
-	key := o.resizeCacheKey(srcPath, stat)
-	cachePath := p.resizeCachePath(key)
-	if serveCachedImageFile(w, r, key, cachePath) {
-		return true
-	}
 	p.writeResizeCache(cachePath, out)
 	w.Header().Set("Content-Type", ctype)
 	w.Header().Set("Cache-Control", imageBrowserCacheControl)

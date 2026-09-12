@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -134,12 +135,38 @@ func (p *ImageProxy) serveCachedImage(w http.ResponseWriter, r *http.Request, ke
 }
 
 func (p *ImageProxy) removeUnusableImageCache(cachePath, failPath string) {
-	data, err := os.ReadFile(cachePath) // #nosec G304 -- cachePath is SHA-derived under cacheDir.
+	// 只读取文件头判断缓存是否可用。旧实现每次命中远程图片缓存都会把整个
+	// 原图读进内存再丢弃，电视端批量加载海报时会产生大量无意义的磁盘 I/O。
+	file, err := os.Open(cachePath) // #nosec G304 -- cachePath is SHA-derived under cacheDir.
 	if err != nil {
 		return
 	}
-	ctype := detectContentType(data)
-	if len(data) > 0 && isImageContentType(ctype) && !isTransparentPlaceholderData(data) {
+	stat, err := file.Stat()
+	if err != nil || stat.IsDir() || stat.Size() <= 0 {
+		_ = file.Close()
+		_ = os.Remove(cachePath)
+		_ = os.Remove(failPath)
+		return
+	}
+	headerSize := 512
+	if stat.Size() < int64(headerSize) {
+		headerSize = int(stat.Size())
+	}
+	header := make([]byte, headerSize)
+	n, readErr := io.ReadFull(file, header)
+	_ = file.Close()
+	if readErr != nil && readErr != io.ErrUnexpectedEOF {
+		_ = os.Remove(cachePath)
+		_ = os.Remove(failPath)
+		return
+	}
+	header = header[:n]
+	// A transparent placeholder is exactly 67 bytes; checking the header alone
+	// is enough for the normal image cache entries (they are much larger but
+	// detectContentType only inspects the same leading 512 bytes anyway).
+	// Close the handle before deleting: Windows refuses to delete an open file.
+	if n > 0 && isImageContentType(detectContentType(header)) &&
+		!(n == len(transparent1x1PNG) && bytes.Equal(header, transparent1x1PNG)) {
 		return
 	}
 	_ = os.Remove(cachePath)

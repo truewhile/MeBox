@@ -61,6 +61,9 @@ type EmbyService struct {
 
 	libraryCoverMu    sync.Mutex
 	libraryCoverCache map[string]embyArtworkCacheEntry
+
+	peopleMu    sync.RWMutex
+	peopleCache map[string]embyPeopleCacheEntry
 }
 
 // NewEmbyService is the constructor.
@@ -141,6 +144,13 @@ var (
 type embyVisibilityCacheEntry struct {
 	visibility MediaVisibility
 	expiresAt  time.Time
+}
+
+// embyPeopleCacheEntry avoids re-statting/decoding the same NFO for every
+// list refresh. TV clients commonly request the same posters/items repeatedly.
+type embyPeopleCacheEntry struct {
+	people    []map[string]any
+	expiresAt time.Time
 }
 
 // Items paginates media in Emby's hierarchy. Episodic libraries are exposed as

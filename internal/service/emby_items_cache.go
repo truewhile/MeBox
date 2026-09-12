@@ -9,14 +9,22 @@ import (
 )
 
 type embyItemsCacheValue struct {
-	Items            []map[string]any `json:"items"`
-	TotalRecordCount int64            `json:"total_record_count"`
-	StartIndex       int              `json:"start_index"`
+	Items            []map[string]any          `json:"items"`
+	TotalRecordCount int64                     `json:"total_record_count"`
+	StartIndex       int                       `json:"start_index"`
+	Artwork          map[string]embyArtworkRef `json:"artwork,omitempty"`
 }
 
 type embyLatestCacheValue struct {
 	Items   []map[string]any          `json:"items"`
 	Artwork map[string]embyArtworkRef `json:"artwork,omitempty"`
+}
+
+type embyCountsCacheValue struct {
+	MovieCount   int64 `json:"movie_count"`
+	SeriesCount  int64 `json:"series_count"`
+	EpisodeCount int64 `json:"episode_count"`
+	ItemCount    int64 `json:"item_count"`
 }
 
 func (e *EmbyService) embyItemsCacheKey(kind string, p ItemsParams) string {

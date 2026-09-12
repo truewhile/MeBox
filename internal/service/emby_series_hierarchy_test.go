@@ -578,3 +578,45 @@ func TestEmbySeriesSortByDateLastMediaAdded(t *testing.T) {
 		t.Fatalf("DateLastMediaAdded = %v, want %v", items[0]["DateLastMediaAdded"], tNew)
 	}
 }
+
+func TestEmbySeriesLibraryListUsesRuntimeCache(t *testing.T) {
+	svc := newTestEmbyService(t)
+	svc.cache = NewRuntimeCacheService(nil, nil)
+	lib := model.Library{Name: "番剧", Path: `/media/anime`, Type: "anime", Enabled: true}
+	if err := svc.repo.Library.Create(t.Context(), &lib); err != nil {
+		t.Fatalf("create library: %v", err)
+	}
+	for i := 1; i <= 2; i++ {
+		media := model.Media{
+			Base:       model.Base{ID: fmt.Sprintf("cache-ep-%d", i)},
+			LibraryID:  lib.ID,
+			Title:      "缓存测试番",
+			Path:       fmt.Sprintf(`/media/anime/缓存测试番/Season 01/缓存测试番.S01E%02d.mkv`, i),
+			SeasonNum:  1,
+			EpisodeNum: i,
+		}
+		if err := svc.repo.DB.Create(&media).Error; err != nil {
+			t.Fatalf("create media: %v", err)
+		}
+	}
+
+	first, err := svc.Items(t.Context(), ItemsParams{ParentID: lib.ID, Limit: 20})
+	if err != nil {
+		t.Fatalf("first items call: %v", err)
+	}
+	if first["TotalRecordCount"] != 1 {
+		t.Fatalf("first series total = %#v, want 1", first["TotalRecordCount"])
+	}
+	if err := svc.repo.DB.Unscoped().Where("library_id = ?", lib.ID).Delete(&model.Media{}).Error; err != nil {
+		t.Fatalf("delete media: %v", err)
+	}
+
+	second, err := svc.Items(t.Context(), ItemsParams{ParentID: lib.ID, Limit: 20})
+	if err != nil {
+		t.Fatalf("second items call: %v", err)
+	}
+	items, _ := second["Items"].([]map[string]any)
+	if second["TotalRecordCount"] != 1 || len(items) != 1 {
+		t.Fatalf("cached series list = %#v, want the first response", second)
+	}
+}

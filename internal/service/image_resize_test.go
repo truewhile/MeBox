@@ -230,3 +230,47 @@ func TestServeResizedFromFileCachesScaledResult(t *testing.T) {
 		t.Fatal("expected a non-empty body")
 	}
 }
+
+func TestServeResizedFromFileUsesCacheBeforeDecodingSource(t *testing.T) {
+	dir := t.TempDir()
+	mediaDir := dir + string(os.PathSeparator) + "media"
+	if err := os.MkdirAll(mediaDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	src := mediaDir + string(os.PathSeparator) + "poster.png"
+	original := encodeTestPNG(t, 529, 911, 255)
+	if err := os.WriteFile(src, original, 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	proxy := &ImageProxy{cacheDir: dir + string(os.PathSeparator) + "cache"}
+	opts := imageResizeOptions{MaxWidth: 400, Quality: 90}
+
+	first := httptest.NewRecorder()
+	if !proxy.serveResizedFromFile(first, httptest.NewRequest("GET", "/x?maxWidth=400", nil), src, opts) {
+		t.Fatal("expected first call to be served")
+	}
+
+	stat, err := os.Stat(src)
+	if err != nil {
+		t.Fatalf("stat source: %v", err)
+	}
+	// Same size and mtime keep the resize cache key stable, but the source is
+	// now invalid image data. A correct implementation serves the cached
+	// thumbnail before reading/decoding the source again.
+	broken := bytes.Repeat([]byte{0}, len(original))
+	if err := os.WriteFile(src, broken, 0o644); err != nil {
+		t.Fatalf("overwrite source: %v", err)
+	}
+	if err := os.Chtimes(src, stat.ModTime(), stat.ModTime()); err != nil {
+		t.Fatalf("restore mtime: %v", err)
+	}
+
+	second := httptest.NewRecorder()
+	if !proxy.serveResizedFromFile(second, httptest.NewRequest("GET", "/x?maxWidth=400", nil), src, opts) {
+		t.Fatal("expected second call to be served from resize cache")
+	}
+	if !bytes.Equal(first.Body.Bytes(), second.Body.Bytes()) {
+		t.Fatal("expected cached thumbnail to be reused without decoding the source")
+	}
+}

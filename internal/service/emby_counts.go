@@ -3,12 +3,24 @@ package service
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/truewhile/MeBox/internal/model"
 	"gorm.io/gorm"
 )
 
 func (e *EmbyService) ItemCounts(ctx context.Context, userID string) (map[string]any, error) {
+	cacheKey := e.embyItemsCacheKey("counts-v1", ItemsParams{UserID: userID})
+	var cached embyCountsCacheValue
+	if e.cache != nil && e.cache.GetJSON(ctx, cacheKey, &cached) {
+		return map[string]any{
+			"MovieCount":   cached.MovieCount,
+			"SeriesCount":  int(cached.SeriesCount),
+			"EpisodeCount": cached.EpisodeCount,
+			"ItemCount":    cached.ItemCount,
+		}, nil
+	}
+
 	base := func() *gorm.DB {
 		q := e.repo.DB.WithContext(ctx).Model(&model.Media{}).Where("deleted_at IS NULL")
 		return e.applyUserMediaVisibility(ctx, q, userID)
@@ -34,6 +46,14 @@ func (e *EmbyService) ItemCounts(ctx context.Context, userID string) (map[string
 		return nil, err
 	}
 
+	if e.cache != nil {
+		e.cache.SetJSON(ctx, cacheKey, embyCountsCacheValue{
+			MovieCount:   movieCount,
+			SeriesCount:  int64(seriesCount),
+			EpisodeCount: episodeCount,
+			ItemCount:    itemCount,
+		}, time.Duration(e.mediaCacheTTLSeconds())*time.Second)
+	}
 	return map[string]any{
 		"MovieCount":   movieCount,
 		"SeriesCount":  seriesCount,

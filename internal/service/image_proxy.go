@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -34,6 +35,12 @@ type ImageProxy struct {
 	client   *http.Client
 	cacheDir string
 	mu       sync.Mutex
+
+	// resizeSem bounds concurrent decode/resize jobs. Emby TV clients request
+	// poster grids in bursts; letting every request decode a source image at
+	// once causes CPU and memory spikes that make the whole UI feel sluggish.
+	resizeSemMu sync.Mutex
+	resizeSem   chan struct{}
 
 	// libraryRootsFn returns the configured media library roots so that
 	// sidecar poster/artwork files stored alongside media (under arbitrary
@@ -55,6 +62,7 @@ type ImageProxy struct {
 const (
 	imageBrowserCacheControl     = "public, max-age=2592000, immutable"
 	imagePlaceholderCacheControl = "no-store"
+	imageMaxResizeConcurrency    = 4
 )
 
 // NewImageProxy is the constructor.
@@ -64,6 +72,7 @@ func NewImageProxy(cfg *config.Config, log *zap.Logger) *ImageProxy {
 		log:      log,
 		cacheDir: filepath.Join(cfg.Cache.CacheDir, "images"),
 	}
+	proxy.resizeSem = make(chan struct{}, imageResizeConcurrency())
 
 	// Honor HTTP(S)_PROXY env vars so deployments behind GFW can pull
 	// from image.tmdb.org via their HTTP proxy without extra config. On
@@ -179,6 +188,20 @@ func (p *ImageProxy) isAllowedRemoteHost(host string) bool {
 		p.allowedHostsAt = time.Now()
 	}
 	return p.allowedHostsCache[host]
+}
+
+// imageResizeConcurrency keeps decode/resize concurrency within the number
+// of CPU threads the process is allowed to use, capped to avoid large
+// temporary RGBA buffers on tiny hosts.
+func imageResizeConcurrency() int {
+	n := runtime.GOMAXPROCS(0)
+	if n < 1 {
+		n = 1
+	}
+	if n > imageMaxResizeConcurrency {
+		n = imageMaxResizeConcurrency
+	}
+	return n
 }
 
 // Prune removes oldest cached images until disk usage is within the configured limit.

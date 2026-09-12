@@ -538,6 +538,14 @@ func (e *EmbyService) resolveMediaPeople(ctx context.Context, m *model.Media) []
 	if m == nil || strings.TrimSpace(m.Path) == "" {
 		return []map[string]any{}
 	}
+	cacheKey := strings.TrimSpace(m.ID)
+	if cacheKey == "" {
+		cacheKey = strings.ToLower(filepath.Clean(m.Path))
+	}
+	if people, ok := e.cachedMediaPeople(cacheKey); ok {
+		return people
+	}
+
 	dir := filepath.Dir(m.Path)
 	candidates := make([]string, 0, 6)
 	seenPath := map[string]struct{}{}
@@ -610,7 +618,46 @@ func (e *EmbyService) resolveMediaPeople(ctx context.Context, m *model.Media) []
 			}
 		}
 	}
+	e.rememberMediaPeople(cacheKey, people)
 	return people
+}
+
+func (e *EmbyService) cachedMediaPeople(key string) ([]map[string]any, bool) {
+	if e == nil || strings.TrimSpace(key) == "" {
+		return nil, false
+	}
+	now := time.Now()
+	e.peopleMu.RLock()
+	entry, ok := e.peopleCache[key]
+	e.peopleMu.RUnlock()
+	if !ok || now.After(entry.expiresAt) {
+		if ok {
+			e.peopleMu.Lock()
+			delete(e.peopleCache, key)
+			e.peopleMu.Unlock()
+		}
+		return nil, false
+	}
+	out := make([]map[string]any, len(entry.people))
+	copy(out, entry.people)
+	return out, true
+}
+
+func (e *EmbyService) rememberMediaPeople(key string, people []map[string]any) {
+	if e == nil || strings.TrimSpace(key) == "" {
+		return
+	}
+	e.peopleMu.Lock()
+	defer e.peopleMu.Unlock()
+	if e.peopleCache == nil || len(e.peopleCache) > 8000 {
+		e.peopleCache = make(map[string]embyPeopleCacheEntry, 128)
+	}
+	stored := make([]map[string]any, len(people))
+	copy(stored, people)
+	e.peopleCache[key] = embyPeopleCacheEntry{
+		people:    stored,
+		expiresAt: time.Now().Add(embyVirtualCacheTTL),
+	}
 }
 
 func embyPersonID(name, roleType string) string {
