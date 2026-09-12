@@ -13,6 +13,12 @@ type PlaybackHistory struct {
 	DurationMs int64     `json:"duration_ms"`
 	WatchedAt  time.Time `json:"watched_at"`
 	Completed  bool      `json:"completed"`
+
+	// 播放会话信息用于丢弃乱序到达的旧进度，避免旧请求把新的续播状态覆盖。
+	// 旧客户端不提供这些字段时保持 0，继续沿用无条件 upsert 语义。
+	SessionID          string `gorm:"size:128;index" json:"-"`
+	SessionStartedAtMs int64  `gorm:"not null;default:0" json:"-"`
+	Sequence           int64  `gorm:"not null;default:0" json:"-"`
 }
 
 // Favorite 将媒体项标记为给定用户的收藏。

@@ -15,9 +15,12 @@ import (
 // ─── History ────────────────────────────────────────────────────────────────
 
 type progressReq struct {
-	MediaID    string `json:"media_id" binding:"required"`
-	PositionMs int64  `json:"position_ms"`
-	DurationMs int64  `json:"duration_ms"`
+	MediaID            string `json:"media_id" binding:"required"`
+	PositionMs         int64  `json:"position_ms"`
+	DurationMs         int64  `json:"duration_ms"`
+	SessionID          string `json:"session_id"`
+	SessionStartedAtMs int64  `json:"session_started_at_ms"`
+	Sequence           int64  `json:"sequence"`
 }
 
 func recordProgressHandler(svc *service.Container) gin.HandlerFunc {
@@ -28,9 +31,15 @@ func recordProgressHandler(svc *service.Container) gin.HandlerFunc {
 			return
 		}
 		uid, _ := c.Get(middleware.CtxUserID)
-		if err := svc.Playback.RecordProgress(
-			c.Request.Context(), uid.(string), req.MediaID, req.PositionMs, req.DurationMs,
-		); err != nil {
+		if err := svc.Playback.RecordProgressUpdate(c.Request.Context(), service.ProgressUpdate{
+			UserID:             toString(uid),
+			MediaID:            req.MediaID,
+			PositionMs:         req.PositionMs,
+			DurationMs:         req.DurationMs,
+			SessionID:          req.SessionID,
+			SessionStartedAtMs: req.SessionStartedAtMs,
+			Sequence:           req.Sequence,
+		}); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}

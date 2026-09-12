@@ -19,6 +19,8 @@ type embyPlayingReq struct {
 	PositionLower int64  `json:"positionTicks"`
 	RunTimeTicks  int64  `json:"RunTimeTicks"`
 	RunTimeLower  int64  `json:"runTimeTicks"`
+	PlaySessionID string `json:"PlaySessionId"`
+	PlaySession   string `json:"playSessionId"`
 }
 
 func embyPlayingProgressHandler(svc *service.Container) gin.HandlerFunc {
@@ -48,6 +50,11 @@ func embyPlayingProgressHandler(svc *service.Container) gin.HandlerFunc {
 		if runTime == 0 {
 			runTime, _ = strconv.ParseInt(firstQueryValue(c, "RunTimeTicks", "runTimeTicks"), 10, 64)
 		}
+		playSessionID := embyFirstNonEmptyString(
+			req.PlaySessionID,
+			req.PlaySession,
+			firstQueryValue(c, "PlaySessionId", "playSessionId"),
+		)
 		if itemID == "" {
 			c.Status(http.StatusOK)
 			return
@@ -57,7 +64,7 @@ func embyPlayingProgressHandler(svc *service.Container) gin.HandlerFunc {
 			c.Status(http.StatusUnauthorized)
 			return
 		}
-		if err := svc.Emby.RecordProgress(c.Request.Context(), uid, itemID, pos, runTime); err != nil {
+		if err := svc.Emby.RecordProgressWithSession(c.Request.Context(), uid, itemID, pos, runTime, playSessionID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}

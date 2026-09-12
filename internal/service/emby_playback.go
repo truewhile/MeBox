@@ -37,7 +37,7 @@ func (e *EmbyService) PlaybackInfo(ctx context.Context, mediaID, userID string) 
 		if err := e.mergeRemoteUserData(ctx, userID, out); err != nil {
 			return nil, err
 		}
-		out["PlaySessionId"] = fmt.Sprintf("remote-%s-%d", mountID, time.Now().Unix())
+		out["PlaySessionId"] = fmt.Sprintf("remote-%s-%d", mountID, time.Now().UnixMilli())
 		return out, nil
 	}
 	m, err := e.playableMedia(ctx, mediaID, userID)
@@ -46,7 +46,7 @@ func (e *EmbyService) PlaybackInfo(ctx context.Context, mediaID, userID string) 
 	}
 	return map[string]any{
 		"MediaSources":  e.mediaSourcesForItem(ctx, m, false, e.directPlayOnly(ctx)),
-		"PlaySessionId": fmt.Sprintf("%s-%d", m.ID, time.Now().Unix()),
+		"PlaySessionId": fmt.Sprintf("%s-%d", m.ID, time.Now().UnixMilli()),
 	}, nil
 }
 

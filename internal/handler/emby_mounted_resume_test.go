@@ -68,7 +68,7 @@ func TestMountedEmbyPlayingProgressAndResumePipeline(t *testing.T) {
 	// 1. 测试上报进度：客户端使用小写 query 参数 itemId / positionTicks
 	progressReq := httptest.NewRequest(
 		http.MethodPost,
-		"/Sessions/Playing/Progress?itemId="+remoteMediaID+"&positionTicks=300000000&runTimeTicks=1000000000",
+		"/Sessions/Playing/Progress?itemId="+remoteMediaID+"&positionTicks=300000000&runTimeTicks=1000000000&playSessionId=remote-mount-1-2000000000000",
 		nil,
 	)
 	wProgress := httptest.NewRecorder()
@@ -84,6 +84,9 @@ func TestMountedEmbyPlayingProgressAndResumePipeline(t *testing.T) {
 	}
 	if hist.PositionMs != 30000 {
 		t.Fatalf("expected position_ms = 30000, got %d", hist.PositionMs)
+	}
+	if hist.SessionID != "remote-mount-1-2000000000000" || hist.SessionStartedAtMs != 2000000000000 {
+		t.Fatalf("unexpected playback session metadata: %#v", hist)
 	}
 
 	// 2. 测试 Filters=IsResumable 能够包含该远程条目

@@ -116,3 +116,34 @@ func TestRotatingFileWriterCapsFileSize(t *testing.T) {
 	}
 	_ = writer.Sync()
 }
+
+func TestEmbyCompatLoggerWritesDedicatedFile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{}
+	cfg.App.DataDir = dir
+	cfg.Logging.Format = "json"
+	cfg.Logging.OutputPath = filepath.Join(dir, "logs")
+	cfg.Logging.EnableRotation = true
+	cfg.Logging.MaxSizeMB = 1
+	cfg.Logging.MaxBackups = 2
+
+	log, closeFn, err := newEmbyCompatLogger(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log.Info("emby request", zap.String("client", "Infuse"))
+	_ = log.Sync()
+	closeFn()
+
+	path := filepath.Join(dir, "logs", "emby-compat.log")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "emby request") || !strings.Contains(string(data), "Infuse") {
+		t.Fatalf("dedicated Emby log missing request data: %s", data)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "logs", "app.log")); !os.IsNotExist(err) {
+		t.Fatalf("Emby logger must not write app.log, stat err=%v", err)
+	}
+}

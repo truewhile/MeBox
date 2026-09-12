@@ -4,7 +4,7 @@ import type Hls from 'hls.js'
 import toast from 'react-hot-toast'
 
 import { mediaAPI, libraryAPI } from '../api/library'
-import { hlsURL, stopHLSJob, streamURL } from '../api/client'
+import { hlsURL, postPlaybackProgressKeepalive, stopHLSJob, streamURL } from '../api/client'
 import { danmakuAPI, type DanmakuAnime, type DanmakuLoadedInfo } from '../api/danmaku'
 import { playbackAPI } from '../api/playback'
 import { subtitlesAPI, type SubtitleTrack } from '../api/subtitles'
@@ -48,6 +48,26 @@ import { mediaVersionsOf } from '../utils/mediaVersion'
 //
 // External subtitles next to the source file are auto-discovered and
 // attached as <track> elements.
+type PlaybackProgressSession = {
+  mediaId: string
+  id: string
+  startedAtMs: number
+  sequence: number
+}
+
+function newPlaybackProgressSession(mediaId: string): PlaybackProgressSession {
+  const randomID =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  return {
+    mediaId,
+    id: `${mediaId}:${randomID}`,
+    startedAtMs: Date.now(),
+    sequence: 0,
+  }
+}
+
 export function PlayerPage() {
   const { id = '' } = useParams()
   const [params, setParams] = useSearchParams()
@@ -57,6 +77,7 @@ export function PlayerPage() {
   const ref = useRef<HTMLVideoElement>(null)
   const hlsRef = useRef<Hls | null>(null)
   const lastSentRef = useRef(0)
+  const progressSessionRef = useRef<PlaybackProgressSession | null>(null)
   const directRetryRef = useRef(false)
   const retryingDirectRef = useRef(false)
   const fallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -565,41 +586,73 @@ export function PlayerPage() {
     modeRef.current = mode
   }, [hlsStartSec, mode])
 
-  // Persist resume position every 10 seconds while playing, and immediately upon pause/unmount.
+  // Persist resume position every 10 seconds while playing, and immediately upon
+  // pause/page hide/unmount. Bind after mediaId is available because
+  // PlayerVideoStage does not render the <video> element until media is loaded.
   useEffect(() => {
-    if (!id || !ref.current) return
+    if (!id || !mediaId || !ref.current) return
     const video = ref.current
+    if (progressSessionRef.current?.mediaId !== mediaId) {
+      progressSessionRef.current = newPlaybackProgressSession(mediaId)
+      lastSentRef.current = 0
+    }
+
     const absolutePositionMs = () => {
       const currentStartSec = modeRef.current === 'hls' ? hlsStartSecRef.current : 0
-      return Math.floor((currentStartSec + (video.currentTime || 0)) * 1000)
+      const absolute = currentStartSec + (video.currentTime || 0)
+      return Number.isFinite(absolute) ? Math.max(0, Math.floor(absolute * 1000)) : 0
     }
     const absoluteDurationMs = () => {
       const currentStartSec = modeRef.current === 'hls' ? hlsStartSecRef.current : 0
       const mediaDur = mediaRef.current?.duration_sec || 0
-      return Math.floor(Math.max(mediaDur, currentStartSec + (video.duration || 0)) * 1000)
+      const streamDur = Number.isFinite(video.duration) ? video.duration : 0
+      const totalSec = Math.max(mediaDur, currentStartSec + streamDur)
+      return Number.isFinite(totalSec) && totalSec > 0 ? Math.floor(totalSec * 1000) : 0
     }
-    const handler = () => {
+    const send = (keepalive: boolean) => {
+      const currentMedia = mediaRef.current
+      if (!currentMedia || currentMedia.id !== mediaId) return
       const now = Date.now()
-      if (now - lastSentRef.current < 10_000) return
+      if (!keepalive && now - lastSentRef.current < 10_000) return
       lastSentRef.current = now
       const positionMs = absolutePositionMs()
+      if (positionMs <= 0) return
       const durationMs = absoluteDurationMs()
-      if (positionMs > 0 && mediaRef.current) {
-        playbackAPI.recordProgress(mediaRef.current.id, positionMs, durationMs).catch(() => undefined)
+      const session = progressSessionRef.current
+      if (!session || session.mediaId !== mediaId) return
+      session.sequence += 1
+      const payload = {
+        media_id: currentMedia.id,
+        position_ms: positionMs,
+        duration_ms: durationMs,
+        session_id: session.id,
+        session_started_at_ms: session.startedAtMs,
+        sequence: session.sequence,
       }
+      if (keepalive) {
+        postPlaybackProgressKeepalive(payload)
+        return
+      }
+      playbackAPI.recordProgress(payload).catch(() => undefined)
     }
-    video.addEventListener('timeupdate', handler)
-    video.addEventListener('pause', handler)
+    const onTimeUpdate = () => send(false)
+    const onPause = () => send(true)
+    const onPageHide = () => send(true)
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') send(true)
+    }
+    video.addEventListener('timeupdate', onTimeUpdate)
+    video.addEventListener('pause', onPause)
+    window.addEventListener('pagehide', onPageHide)
+    document.addEventListener('visibilitychange', onVisibilityChange)
     return () => {
-      video.removeEventListener('timeupdate', handler)
-      video.removeEventListener('pause', handler)
-      const positionMs = absolutePositionMs()
-      const durationMs = absoluteDurationMs()
-      if (positionMs > 0 && mediaRef.current) {
-        playbackAPI.recordProgress(mediaRef.current.id, positionMs, durationMs).catch(() => undefined)
-      }
+      video.removeEventListener('timeupdate', onTimeUpdate)
+      video.removeEventListener('pause', onPause)
+      window.removeEventListener('pagehide', onPageHide)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      send(true)
     }
-  }, [id])
+  }, [id, mediaId])
 
   // 加载剧集/播放列表
   useEffect(() => {

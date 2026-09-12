@@ -41,24 +41,62 @@ func (p *PlaybackService) SetEmbyRemote(remote *EmbyRemoteService) *PlaybackServ
 
 // ─── History ────────────────────────────────────────────────────────────────
 
-// RecordProgress upserts the resume position for a (user, media) pair. A
-// position within 30 seconds of the duration auto-flags the item as
-// completed so the home page can hide it from "Continue Watching".
+// ProgressUpdate is a playback-progress report. SessionID, SessionStartedAtMs
+// and Sequence are optional for compatibility with legacy callers.
+type ProgressUpdate struct {
+	UserID             string
+	MediaID            string
+	PositionMs         int64
+	DurationMs         int64
+	SessionID          string
+	SessionStartedAtMs int64
+	Sequence           int64
+}
+
+// RecordProgress records an unversioned progress report. It is retained for
+// older callers that do not provide playback-session metadata.
 func (p *PlaybackService) RecordProgress(ctx context.Context, userID, mediaID string, position, duration int64) error {
-	if userID == "" || mediaID == "" {
-		return errors.New("missing user or media")
-	}
-	dur := p.resolvePlaybackDuration(ctx, userID, mediaID, duration)
-	completed := dur > 0 && position >= dur-30_000
-	h := &model.PlaybackHistory{
+	return p.RecordProgressUpdate(ctx, ProgressUpdate{
 		UserID:     userID,
 		MediaID:    mediaID,
 		PositionMs: position,
-		DurationMs: dur,
-		WatchedAt:  time.Now(),
-		Completed:  completed,
+		DurationMs: duration,
+	})
+}
+
+// RecordProgressUpdate upserts the resume position for a (user, media) pair.
+// When session metadata is present, stale reports are ignored so a delayed
+// request cannot overwrite a newer position or completion state.
+func (p *PlaybackService) RecordProgressUpdate(ctx context.Context, update ProgressUpdate) error {
+	if update.UserID == "" || update.MediaID == "" {
+		return errors.New("missing user or media")
 	}
-	return p.repo.History.Upsert(ctx, h)
+	dur := p.resolvePlaybackDuration(ctx, update.UserID, update.MediaID, update.DurationMs)
+	h := &model.PlaybackHistory{
+		UserID:             update.UserID,
+		MediaID:            update.MediaID,
+		PositionMs:         update.PositionMs,
+		DurationMs:         dur,
+		WatchedAt:          time.Now(),
+		Completed:          playbackProgressCompleted(update.PositionMs, dur),
+		SessionID:          update.SessionID,
+		SessionStartedAtMs: update.SessionStartedAtMs,
+		Sequence:           update.Sequence,
+	}
+	return p.repo.History.UpsertProgress(ctx, h)
+}
+
+// playbackProgressCompleted deliberately requires a positive position. For
+// very short clips the 90% threshold avoids marking a zero-second sample as
+// finished; otherwise the last 30 seconds are treated as completed.
+func playbackProgressCompleted(position, duration int64) bool {
+	if position <= 0 || duration <= 0 {
+		return false
+	}
+	if duration <= 30_000 {
+		return position*10 >= duration*9
+	}
+	return position >= duration-30_000
 }
 
 // GetProgress returns the saved resume row for one media item, or nil when absent.

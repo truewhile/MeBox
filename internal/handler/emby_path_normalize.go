@@ -88,6 +88,92 @@ var embyStaticSegments = map[string]struct{}{
 	"embywebsocket":          {},
 }
 
+var embyRootSegments = map[string]struct{}{
+	"albums":             {},
+	"artists":            {},
+	"audio":              {},
+	"audiocodecs":        {},
+	"auth":               {},
+	"branding":           {},
+	"channels":           {},
+	"collections":        {},
+	"connect":            {},
+	"containers":         {},
+	"devices":            {},
+	"displaypreferences": {},
+	"dlna":               {},
+	"encoding":           {},
+	"environment":        {},
+	"gamegenres":         {},
+	"games":              {},
+	"genres":             {},
+	"images":             {},
+	"items":              {},
+	"libraries":          {},
+	"library":            {},
+	"livestreams":        {},
+	"livetv":             {},
+	"localization":       {},
+	"movies":             {},
+	"musicgenres":        {},
+	"news":               {},
+	"notification":       {},
+	"notifications":      {},
+	"officialratings":    {},
+	"packages":           {},
+	"persons":            {},
+	"playback":           {},
+	"playlists":          {},
+	"plugins":            {},
+	"providers":          {},
+	"reports":            {},
+	"scheduledtasks":     {},
+	"search":             {},
+	"sessions":           {},
+	"shows":              {},
+	"songs":              {},
+	"studios":            {},
+	"subtitlecodecs":     {},
+	"sync":               {},
+	"system":             {},
+	"tags":               {},
+	"trailers":           {},
+	"user_usage_stats":   {},
+	"users":              {},
+	"videocodecs":        {},
+	"videos":             {},
+	"years":              {},
+}
+
+func isEmbyRootSegment(segment string) bool {
+	if _, ok := embyRootSegments[segment]; ok {
+		return true
+	}
+	_, ok := embyStaticSegments[segment]
+	return ok
+}
+
+// IsEmbyPath 判断路径是否属于 Emby/Jellyfin 兼容面的命名空间。
+// 除显式 /emby 前缀外，Emby 客户端也会直接请求客户端协议的根路径，
+// 例如 /System/Info/Public、/Users/Public、/Sessions。
+func IsEmbyPath(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	path = multipleSlashesRE.ReplaceAllString(path, "/")
+	lower := strings.ToLower(path)
+	if lower == "/emby" || strings.HasPrefix(lower, "/emby/") {
+		return true
+	}
+
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	if len(segments) == 0 || segments[0] == "" {
+		return false
+	}
+	return isEmbyRootSegment(strings.ToLower(segments[0]))
+}
+
 // NormalizeEmbyPath 规范化 Emby 请求路径：
 // 1. 折叠重复斜杠（如 //emby/ -> /emby/）；
 // 2. 折叠重复前缀（如 /emby/emby/System/Info -> /emby/System/Info）；
@@ -132,7 +218,7 @@ func NormalizeEmbyPath(p string) (string, bool) {
 
 	// 检查第一段是否为 Emby 根路由关键字
 	firstLower := strings.ToLower(segments[0])
-	if _, ok := embyStaticSegments[firstLower]; !ok && firstLower != "api" {
+	if !isEmbyRootSegment(firstLower) && firstLower != "api" {
 		// 不是 Emby 相关路径，保持原样
 		return original, false
 	}

@@ -174,6 +174,35 @@ export function stopHLSJob(mediaId: string): void {
   }).catch(() => undefined)
 }
 
+// postPlaybackProgressKeepalive sends the final playback position without
+// relying on an axios request surviving page navigation or tab close.
+export function postPlaybackProgressKeepalive(payload: {
+  media_id: string
+  position_ms: number
+  duration_ms: number
+  session_id?: string
+  session_started_at_ms?: number
+  sequence?: number
+}): void {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const token = useAuthStore.getState().token
+  if (token) headers.Authorization = `Bearer ${token}`
+  const activeProfileId = getActivePlayProfileId()
+  if (activeProfileId) {
+    headers['X-Play-Profile-ID'] = activeProfileId
+    const pinToken = getActivePlayProfilePinToken()
+    if (pinToken) headers['X-Play-Profile-PIN-Token'] = pinToken
+  }
+  void fetch('/api/history', {
+    method: 'POST',
+    credentials: 'same-origin',
+    keepalive: true,
+    cache: 'no-store',
+    headers,
+    body: JSON.stringify(payload),
+  }).catch(() => undefined)
+}
+
 // imageURL converts a remote poster URL into a same-origin proxy URL so it
 // can never be blocked by CORS / GFW. Empty strings pass through unchanged.
 export type ImageURLOptions =

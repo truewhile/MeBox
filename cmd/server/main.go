@@ -59,11 +59,21 @@ func main() {
 	}
 	defer func() { _ = logger.Sync() }()
 
+	embyCompatLogger, closeEmbyCompatLogger, err := newEmbyCompatLogger(cfg)
+	if err != nil {
+		logger.Fatal("Emby compatibility logger init failed", zap.Error(err))
+	}
+	defer func() {
+		_ = embyCompatLogger.Sync()
+		closeEmbyCompatLogger()
+	}()
+
 	appVersion := effectiveVersion(version)
 	logger.Info("starting MeBox",
 		zap.String("version", appVersion),
 		zap.Int("port", cfg.App.Port),
 		zap.String("data_dir", cfg.App.DataDir),
+		zap.String("emby_compat_log", embyCompatLogPath(cfg)),
 	)
 
 	// Ensure data / cache / web dirs exist.
@@ -104,7 +114,7 @@ func main() {
 		logger.Warn("seed admin failed", zap.Error(err))
 	}
 
-	router := buildRouter(cfg, logger, services)
+	router := buildRouter(cfg, logger, embyCompatLogger, services)
 
 	serverMgr := newServerManager(cfg, logger, router)
 	services.ReloadHTTPServer = serverMgr.Reload

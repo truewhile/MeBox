@@ -98,3 +98,41 @@ func logFilePaths(cfg *config.Config) (string, string, string) {
 	}
 	return filepath.Join(out, "app.log"), filepath.Join(out, "warn.log"), filepath.Join(out, "error.log")
 }
+
+// newEmbyCompatLogger 构建只写入 Emby 兼容日志文件的独立 Zap 实例。
+// 它不参与 app.log 的日志级别过滤，始终记录 INFO 及以上，确保成功请求也能
+// 用于还原客户端的接口调用顺序；轮转参数沿用 logging 配置。
+func newEmbyCompatLogger(cfg *config.Config) (*zap.Logger, func(), error) {
+	encoderCfg := zap.NewProductionEncoderConfig()
+	encoderCfg.EncodeTime = zapcore.ISO8601TimeEncoder
+	var encoder zapcore.Encoder
+	if strings.EqualFold(strings.TrimSpace(cfg.Logging.Format), "console") {
+		encoder = zapcore.NewConsoleEncoder(encoderCfg)
+	} else {
+		encoder = zapcore.NewJSONEncoder(encoderCfg)
+	}
+
+	writer, err := newRotatingFileWriter(embyCompatLogPath(cfg), cfg.Logging)
+	if err != nil {
+		return nil, nil, err
+	}
+	log := zap.New(
+		zapcore.NewCore(encoder, writer, zap.InfoLevel),
+		zap.AddCaller(),
+		zap.AddStacktrace(zapcore.ErrorLevel),
+		zap.ErrorOutput(zapcore.Lock(os.Stderr)),
+	)
+	return log, func() { _ = writer.Close() }, nil
+}
+
+func embyCompatLogPath(cfg *config.Config) string {
+	out := strings.TrimSpace(cfg.Logging.OutputPath)
+	if out == "" || strings.EqualFold(out, "stdout") || strings.EqualFold(out, "stderr") {
+		return filepath.Join(cfg.App.DataDir, "logs", "emby-compat.log")
+	}
+	if ext := filepath.Ext(out); ext != "" {
+		base := strings.TrimSuffix(out, ext)
+		return base + ".emby-compat" + ext
+	}
+	return filepath.Join(out, "emby-compat.log")
+}

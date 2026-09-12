@@ -27,6 +27,15 @@ export interface ExternalPlayer {
   url: string
 }
 
+export interface PlaybackProgressRequest {
+  media_id: string
+  position_ms: number
+  duration_ms: number
+  session_id?: string
+  session_started_at_ms?: number
+  sequence?: number
+}
+
 function publicOriginHeader() {
   if (typeof window === 'undefined' || !window.location?.origin) return undefined
   return { 'X-MeBox-Public-Origin': window.location.origin }
@@ -38,14 +47,8 @@ export const playbackAPI = {
       .get<{ position_ms: number; duration_ms: number; completed: boolean }>(`/playback/${mediaId}/resume`)
       .then((r) => r.data),
 
-  recordProgress: (mediaId: string, positionMs: number, durationMs: number) =>
-    api
-      .post('/history', {
-        media_id: mediaId,
-        position_ms: positionMs,
-        duration_ms: durationMs,
-      })
-      .then((r) => r.data),
+  recordProgress: (payload: PlaybackProgressRequest) =>
+    api.post('/history', payload).then((r) => r.data),
 
   recentHistory: () =>
     api.get<{ items: HistoryItem[] }>('/history').then((r) => r.data.items),

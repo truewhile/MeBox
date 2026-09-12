@@ -63,7 +63,15 @@ func (e *EmbyService) MarkPlayed(ctx context.Context, userID, mediaID string, pl
 }
 
 // RecordProgress 记录播放进度（来自 Emby 客户端的 /Sessions/Playing/Progress）。
+// 不携带 PlaySessionId 的旧调用仍保持兼容。
 func (e *EmbyService) RecordProgress(ctx context.Context, userID, mediaID string, positionTicks, runtimeTicks int64) error {
+	return e.RecordProgressWithSession(ctx, userID, mediaID, positionTicks, runtimeTicks, "")
+}
+
+// RecordProgressWithSession records an Emby progress update together with its
+// PlaySessionId. The server-issued ID contains a millisecond timestamp, which
+// lets the repository reject reports from an older playback session.
+func (e *EmbyService) RecordProgressWithSession(ctx context.Context, userID, mediaID string, positionTicks, runtimeTicks int64, playSessionID string) error {
 	pos := positionTicks / 10_000
 	dur := runtimeTicks / 10_000
 	if dur <= 0 {
@@ -89,19 +97,45 @@ func (e *EmbyService) RecordProgress(ctx context.Context, userID, mediaID string
 			}
 		}
 	}
-	completed := dur > 0 && pos >= dur*9/10
-	err := e.repo.History.Upsert(ctx, &model.PlaybackHistory{
-		UserID:     userID,
-		MediaID:    mediaID,
-		PositionMs: pos,
-		DurationMs: dur,
-		WatchedAt:  time.Now(),
-		Completed:  completed,
+	playSessionID = strings.TrimSpace(playSessionID)
+	err := e.repo.History.UpsertProgress(ctx, &model.PlaybackHistory{
+		UserID:             userID,
+		MediaID:            mediaID,
+		PositionMs:         pos,
+		DurationMs:         dur,
+		WatchedAt:          time.Now(),
+		Completed:          playbackProgressCompleted(pos, dur),
+		SessionID:          playSessionID,
+		SessionStartedAtMs: embyPlaySessionStartedAtMs(playSessionID),
 	})
 	if err == nil {
 		e.invalidateEmbyItemsCache(ctx)
 	}
 	return err
+}
+
+// embyPlaySessionStartedAtMs extracts the millisecond timestamp embedded in a
+// MeBox-issued PlaySessionId. Older IDs used seconds, so normalize those too.
+func embyPlaySessionStartedAtMs(playSessionID string) int64 {
+	playSessionID = strings.TrimSpace(playSessionID)
+	if playSessionID == "" {
+		return 0
+	}
+	idx := strings.LastIndex(playSessionID, "-")
+	if idx < 0 || idx == len(playSessionID)-1 {
+		return 0
+	}
+	value, err := strconv.ParseInt(playSessionID[idx+1:], 10, 64)
+	if err != nil || value <= 0 {
+		return 0
+	}
+	if value >= 1_000_000_000 && value < 1_000_000_000_000 {
+		value *= 1000
+	}
+	if value < 1_000_000_000_000 {
+		return 0
+	}
+	return value
 }
 
 // mergeRemoteUserData applies the current MeBox user's locally recorded playback
