@@ -193,10 +193,18 @@ export const mediaAPI = {
   recent: (limit = 24) =>
     api.get<SeriesCard[]>('/media/recent', { params: { limit } }).then((r) => r.data),
 
-  search: (q: string, limit = 50) =>
-    api.get<MediaSearchPage>('/media', { params: { q, limit } }).then((r) => r.data),
+  search: (q: string, limit = 50, options?: { groupSeries?: boolean }) =>
+    api
+      .get<MediaSearchPage>('/media', {
+        params: {
+          q,
+          limit,
+          ...(options?.groupSeries ? { group_series: 1 } : {}),
+        },
+      })
+      .then((r) => r.data),
 
-  searchPage: (q: string, page = 1, pageSize = 50, options?: { groupVersions?: boolean }) =>
+  searchPage: (q: string, page = 1, pageSize = 50, options?: { groupVersions?: boolean; groupSeries?: boolean }) =>
     api
       .get<MediaSearchPage>('/media', {
         params: {
@@ -204,6 +212,7 @@ export const mediaAPI = {
           page,
           page_size: pageSize,
           group_versions: options?.groupVersions === false ? 0 : undefined,
+          ...(options?.groupSeries ? { group_series: 1 } : {}),
         },
         timeout: LONG_REQUEST_TIMEOUT,
       })

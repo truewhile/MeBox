@@ -83,6 +83,24 @@ func (e *EmbyService) resolveVirtualArtwork(ctx context.Context, id, imageType s
 	return pick(series.PosterURL, series.BackdropURL), nil
 }
 
+// PersonImageURL resolves a person avatar from either a disguised remote ID
+// or a person display name captured from a remote item's People field.
+func (e *EmbyService) PersonImageURL(ctx context.Context, idOrName, imageType string) (string, error) {
+	idOrName = strings.TrimSpace(idOrName)
+	if idOrName == "" || e == nil {
+		return "", nil
+	}
+	if IsEmbyRemoteID(idOrName) {
+		return e.ImageURL(ctx, idOrName, imageType)
+	}
+	if e.remote != nil {
+		if raw, ok := e.remote.ResolveRemotePersonImageURL(ctx, idOrName, imageType); ok {
+			return raw, nil
+		}
+	}
+	return e.ImageURL(ctx, idOrName, imageType)
+}
+
 // imageInfoTypes 是 GET /Items/{Id}/Images 会报告的图片类型。只列 MeBox
 // 真正存储的两类：ImageURL 对 Thumb / Logo / Banner 等其余类型会回退到
 // 主图，若一并列出会让客户端以为存在这些图并去请求，实际拿到的却是主图。

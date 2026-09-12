@@ -76,6 +76,14 @@ type EmbyRemoteService struct {
 	http   *http.Client
 	stream *http.Client // 流式代理专用（视频/字幕），无整体 Timeout
 	cache  *RuntimeCacheService
+
+	personMu     sync.RWMutex
+	personImages map[string]embyRemotePersonImageRef
+}
+
+type embyRemotePersonImageRef struct {
+	accountID string
+	remoteID  string
 }
 
 // NewEmbyRemoteService 构造远程 Emby 聚合服务。
@@ -802,10 +810,12 @@ func (r *EmbyRemoteService) RemoteItem(ctx context.Context, mount *model.EmbyMou
 		return nil, err
 	}
 	path := "/Users/" + url.PathEscape(r.remoteUserID(cfg)) + "/Items/" + url.PathEscape(remoteID)
+	q := url.Values{"Fields": {"Overview,Genres,ProviderIds,People,Studios,Path,MediaStreams,MediaSources,DateCreated,PremiereDate,ProductionYear,CommunityRating,CriticRating"}}
 	var out map[string]any
-	if err := r.doGet(ctx, acct, cfg, path, nil, &out); err != nil {
+	if err := r.doGet(ctx, acct, cfg, path, q, &out); err != nil {
 		return nil, err
 	}
+	r.rememberRemotePeople(mount, out)
 	RewriteEmbyRemoteIDs(out, mount.ID)
 	return out, nil
 }
@@ -957,6 +967,78 @@ func (r *EmbyRemoteService) RemoteImageURL(ctx context.Context, acct *model.Strm
 	}
 	return r.embyBase(cfg) + "/Items/" + url.PathEscape(remoteID) + "/Images/" + url.PathEscape(strings.ToLower(imageType)) +
 		"?api_key=" + url.QueryEscape(cfg.Token), nil
+}
+
+// rememberRemotePeople 记录远程人物名称到远程人物 ID 的映射，供旧式
+// /Persons/{Name}/Images/{Type} 图片请求回源。客户端详情页通常先取条目详情，
+// 此时 People 中的名称和 ID 已同时拿到，因此无需额外搜索远程人物。
+func (r *EmbyRemoteService) rememberRemotePeople(mount *model.EmbyMount, payload map[string]any) {
+	if r == nil || mount == nil || strings.TrimSpace(mount.AccountID) == "" || payload == nil {
+		return
+	}
+	people := remotePeopleMaps(payload["People"])
+	if len(people) == 0 {
+		return
+	}
+	r.personMu.Lock()
+	defer r.personMu.Unlock()
+	if r.personImages == nil || len(r.personImages) > 20000 {
+		r.personImages = make(map[string]embyRemotePersonImageRef, 256)
+	}
+	for _, person := range people {
+		name := strings.TrimSpace(remoteItemString(person, "Name"))
+		remoteID := strings.TrimSpace(remoteItemString(person, "Id"))
+		if name == "" || remoteID == "" || IsEmbyRemoteID(remoteID) {
+			continue
+		}
+		r.personImages[strings.ToLower(name)] = embyRemotePersonImageRef{
+			accountID: mount.AccountID,
+			remoteID:  remoteID,
+		}
+	}
+}
+
+// ResolveRemotePersonImageURL 按人物名称解析其远程头像地址。
+func (r *EmbyRemoteService) ResolveRemotePersonImageURL(ctx context.Context, name, imageType string) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	key := strings.ToLower(strings.TrimSpace(name))
+	if key == "" {
+		return "", false
+	}
+	r.personMu.RLock()
+	ref, ok := r.personImages[key]
+	r.personMu.RUnlock()
+	if !ok {
+		return "", false
+	}
+	acct := r.AccountByID(ctx, ref.accountID)
+	if acct == nil {
+		return "", false
+	}
+	raw, err := r.RemoteImageURL(ctx, acct, ref.remoteID, imageType)
+	if err != nil || strings.TrimSpace(raw) == "" {
+		return "", false
+	}
+	return raw, true
+}
+
+func remotePeopleMaps(value any) []map[string]any {
+	switch typed := value.(type) {
+	case []map[string]any:
+		return typed
+	case []any:
+		out := make([]map[string]any, 0, len(typed))
+		for _, item := range typed {
+			if person, ok := item.(map[string]any); ok {
+				out = append(out, person)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 // ─── 播放代理 ─────────────────────────────────────────────────────────────────

@@ -55,6 +55,14 @@ func TestRewriteEmbyRemoteIDs(t *testing.T) {
 		"Items": []any{
 			map[string]any{"Id": "item-2", "ParentId": "folder-2"},
 		},
+		"People": []any{
+			map[string]any{
+				"Id":              "person-1",
+				"Name":            "演员甲",
+				"Type":            "Actor",
+				"PrimaryImageTag": "person-tag-1",
+			},
+		},
 		// MediaSource 的 Id 保持原样（客户端仅作为 MediaSourceId 查询参数）。
 		"MediaSources": []any{
 			map[string]any{
@@ -89,6 +97,13 @@ func TestRewriteEmbyRemoteIDs(t *testing.T) {
 	nested := payload["Items"].([]any)[0].(map[string]any)
 	if nested["Id"] != "embyremote~acct-1~item-2" {
 		t.Fatalf("nested Id = %v", nested["Id"])
+	}
+	person := payload["People"].([]any)[0].(map[string]any)
+	if person["Id"] != "embyremote~acct-1~person-1" {
+		t.Fatalf("person Id = %v", person["Id"])
+	}
+	if person["Name"] != "演员甲" || person["PrimaryImageTag"] != "person-tag-1" {
+		t.Fatalf("person display fields changed: %#v", person)
 	}
 
 	// MediaSource.Id 与 URL 不被 ID 重写器触碰（URL 由代理模式函数改写）。

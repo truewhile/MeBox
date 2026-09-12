@@ -29,24 +29,44 @@ var embyPlaceholderPNG = []byte{
 // /api/img 会变成 401，所以这里复用 ImageProxy 但不再走 /api 路由。
 func embyItemImageHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		clearEmbyImageNoStoreHeaders(c)
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
-		defer cancel()
-		req := c.Request.WithContext(ctx)
-		id := c.Param("id")
-		imgType := strings.ToLower(c.Param("type"))
-		raw, err := svc.Emby.ImageURL(ctx, id, imgType)
-		if err != nil || raw == "" {
-			embyServePlaceholderImage(c)
-			return
-		}
-		if svc.ImageProxy == nil {
-			embyServePlaceholderImage(c)
-			return
-		}
-		if err := svc.ImageProxy.Serve(ctx, c.Writer, req, raw); err != nil {
-			embyServePlaceholderImage(c)
-		}
+		embyServeImage(c, svc, c.Param("id"), c.Param("type"), false)
+	}
+}
+
+// embyPersonImageHandler 兼容 Emby 官方的 /Persons/{Name}/Images/{Type}。
+// Name 可能是伪装后的远程人物 ID，也可能是电影详情 People 中的显示名称。
+func embyPersonImageHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		embyServeImage(c, svc, c.Param("name"), c.Param("type"), true)
+	}
+}
+
+func embyServeImage(c *gin.Context, svc *service.Container, id, imageType string, person bool) {
+	clearEmbyImageNoStoreHeaders(c)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
+	defer cancel()
+	req := c.Request.WithContext(ctx)
+	if svc == nil || svc.Emby == nil {
+		embyServePlaceholderImage(c)
+		return
+	}
+	var raw string
+	var err error
+	if person {
+		raw, err = svc.Emby.PersonImageURL(ctx, id, imageType)
+	} else {
+		raw, err = svc.Emby.ImageURL(ctx, id, imageType)
+	}
+	if err != nil || raw == "" {
+		embyServePlaceholderImage(c)
+		return
+	}
+	if svc.ImageProxy == nil {
+		embyServePlaceholderImage(c)
+		return
+	}
+	if err := svc.ImageProxy.Serve(ctx, c.Writer, req, raw); err != nil {
+		embyServePlaceholderImage(c)
 	}
 }
 

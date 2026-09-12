@@ -327,6 +327,22 @@ func groupMediaSeriesCards(items []model.Media) []SeriesCard {
 	return cards
 }
 
+// GroupMediaSeriesItems folds episode-level rows into one representative media
+// row per series. It is intended for search surfaces where applying a small
+// limit before series grouping would otherwise return several episodes from
+// the same show.
+func GroupMediaSeriesItems(items []model.Media) []model.Media {
+	cards := groupMediaSeriesCards(items)
+	if len(cards) == 0 {
+		return []model.Media{}
+	}
+	out := make([]model.Media, 0, len(cards))
+	for _, card := range cards {
+		out = append(out, card.Rep)
+	}
+	return out
+}
+
 func betterSeriesRepresentative(candidate, current model.Media) bool {
 	// A theatrical feature can have local poster.jpg/background.jpg files and
 	// therefore a higher artwork score than its TV episodes. Keep the TV row as

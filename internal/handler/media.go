@@ -563,6 +563,39 @@ func searchMediaHandler(svc *service.Container) gin.HandlerFunc {
 			return remoteItems
 		}
 
+		if c.DefaultQuery("group_series", "0") != "0" {
+			localItems, err := svc.Media.SearchMediaVisible(ctx, q, 50000, visibility)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			remoteItems := fetchRemote(50000)
+			all := service.GroupMediaSeriesItems(append(localItems, remoteItems...))
+
+			if c.Query("page") != "" || c.Query("page_size") != "" {
+				page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+				size, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
+				paged := paginateSlice(all, page, size)
+				c.JSON(http.StatusOK, gin.H{
+					"items":     paged,
+					"total":     len(all),
+					"page":      page,
+					"page_size": size,
+				})
+				return
+			}
+
+			limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+			if limit <= 0 {
+				limit = 50
+			}
+			if len(all) > limit {
+				all = all[:limit]
+			}
+			c.JSON(http.StatusOK, gin.H{"items": all})
+			return
+		}
+
 		if c.Query("page") != "" || c.Query("page_size") != "" {
 			page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 			size, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))

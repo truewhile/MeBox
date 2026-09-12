@@ -447,6 +447,89 @@ func TestEmptyLibraryListsReturnEmptyArraysNotNull(t *testing.T) {
 		}
 	}
 
+func TestSearchMediaGroupsSeriesBeforeLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.User{}, &model.Library{}, &model.Media{}, &model.Setting{}, &model.PlayProfile{}); err != nil {
+		t.Fatal(err)
+	}
+	repos := repository.New(db)
+	lib := model.Library{Name: "动漫", Path: "/media/anime", Type: "anime", Enabled: true}
+	if err := repos.Library.Create(t.Context(), &lib); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	rows := []model.Media{
+		{
+			Base:       model.Base{ID: "dbkai-ep-1", CreatedAt: now.Add(-2 * time.Minute), UpdatedAt: now.Add(-2 * time.Minute)},
+			LibraryID: lib.ID, Title: "龙珠改", Path: "/media/anime/龙珠改 (2009)/Season 1/龙珠改.S01E01.mkv",
+			SeasonNum: 1, EpisodeNum: 1, TMDbID: 61709,
+		},
+		{
+			Base:       model.Base{ID: "dbkai-ep-2", CreatedAt: now.Add(-time.Minute), UpdatedAt: now.Add(-time.Minute)},
+			LibraryID: lib.ID, Title: "龙珠改", Path: "/media/anime/龙珠改 (2009)/Season 1/龙珠改.S01E02.mkv",
+			SeasonNum: 1, EpisodeNum: 2, TMDbID: 61709,
+		},
+		{
+			Base:       model.Base{ID: "dbkai-ep-3", CreatedAt: now, UpdatedAt: now},
+			LibraryID: lib.ID, Title: "龙珠改", Path: "/media/anime/龙珠改 (2009)/Season 1/龙珠改.S01E03.mkv",
+			SeasonNum: 1, EpisodeNum: 3, TMDbID: 61709,
+		},
+		{
+			Base:       model.Base{ID: "db-movie", CreatedAt: now.Add(-3 * time.Minute), UpdatedAt: now.Add(-3 * time.Minute)},
+			LibraryID: lib.ID, Title: "龙珠超：布罗利", Path: "/media/anime/龙珠超：布罗利 (2018)/龙珠超：布罗利.mkv",
+			TMDbID: 503314,
+		},
+	}
+	if err := db.Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	svc := &service.Container{
+		Repo:  repos,
+		Media: service.NewMediaService(&config.Config{}, zap.NewNop(), repos),
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set(middleware.CtxUserID, "user-1")
+	c.Set(middleware.CtxUserRole, "user")
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/media?q=龙珠&limit=2&group_series=1", nil)
+	searchMediaHandler(svc)(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("search status=%d, body=%s", w.Code, w.Body.String())
+	}
+	var res struct {
+		Items []model.Media `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Items) != 2 {
+		t.Fatalf("expected one representative per series after limit, got %d: %#v", len(res.Items), res.Items)
+	}
+	seenSeries := false
+	seenMovie := false
+	for _, item := range res.Items {
+		switch item.TMDbID {
+		case 61709:
+			seenSeries = true
+			if item.EpisodeNum != 1 {
+				t.Fatalf("series representative episode=%d, want first episode", item.EpisodeNum)
+			}
+		case 503314:
+			seenMovie = true
+		}
+	}
+	if !seenSeries || !seenMovie {
+		t.Fatalf("expected one Dragon Ball series and one movie, got %#v", res.Items)
+	}
+}
+
 func TestSearchMediaHandlerIncludesEmbyRemote(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -128,6 +128,13 @@ func registerEmbyPublicImageRoutes(grp *gin.RouterGroup, svc *service.Container)
 	grp.GET("/items/:id/images/:type", embyItemImageHandler(svc))
 	grp.GET("/items/:id/images/:type/:index", embyItemImageHandler(svc))
 	grp.HEAD("/items/:id/images/:type", embyItemImageHandler(svc))
+	// 官方 Emby 客户端也可能使用 /Persons/{Name}/Images/{Type} 获取演职人员头像。
+	grp.GET("/Persons/:name/Images/:type", embyPersonImageHandler(svc))
+	grp.GET("/Persons/:name/Images/:type/:index", embyPersonImageHandler(svc))
+	grp.HEAD("/Persons/:name/Images/:type", embyPersonImageHandler(svc))
+	grp.GET("/persons/:name/images/:type", embyPersonImageHandler(svc))
+	grp.GET("/persons/:name/images/:type/:index", embyPersonImageHandler(svc))
+	grp.HEAD("/persons/:name/images/:type", embyPersonImageHandler(svc))
 	// 用户头像。没有头像时返回带缓存头的 404，避免客户端反复重试。
 	grp.GET("/Users/:userId/Images/:type", embyUserImageHandler(svc))
 	grp.HEAD("/Users/:userId/Images/:type", embyUserImageHandler(svc))

@@ -108,15 +108,23 @@ export function LayoutHeader({
   )
 }
 
+const SEARCH_PAGE_SIZE = 8
+
 function LayoutHeaderSearch() {
   const [query, setQuery] = useState('')
   const [isOpen, setIsOpen] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [results, setResults] = useState<Media[]>([])
+  const [hasMore, setHasMore] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const isOpenRef = useRef(false)
   // 递增序号守卫：快速连续输入时丢弃过期响应
   const searchSeqRef = useRef(0)
+  const pageRef = useRef(0)
+  const loadingMoreRef = useRef(false)
+  const resultsRef = useRef<Media[]>([])
+  const hasMoreRef = useRef(false)
   const navigate = useNavigate()
 
   const setSearchOpen = (open: boolean) => {
@@ -128,23 +136,43 @@ function LayoutHeaderSearch() {
     const trimmed = query.trim()
     if (!trimmed) {
       searchSeqRef.current += 1
+      pageRef.current = 0
+      loadingMoreRef.current = false
+      resultsRef.current = []
+      hasMoreRef.current = false
       setResults([])
       setLoading(false)
+      setLoadingMore(false)
+      setHasMore(false)
       isOpenRef.current = false
       setIsOpen(false)
       return
     }
 
     const seq = ++searchSeqRef.current
+    pageRef.current = 0
+    loadingMoreRef.current = false
+    resultsRef.current = []
+    hasMoreRef.current = false
+    setResults([])
+    setHasMore(false)
     setLoading(true)
+    setLoadingMore(false)
     const timer = setTimeout(async () => {
       try {
-        const res = await mediaAPI.search(trimmed, 8)
+        const res = await mediaAPI.searchPage(trimmed, 1, SEARCH_PAGE_SIZE, { groupSeries: true })
         if (seq !== searchSeqRef.current) return
-        setResults(res.items || [])
+        const items = res.items || []
+        const total = res.total ?? items.length
+        const more = items.length < total
+        pageRef.current = 1
+        resultsRef.current = items
+        hasMoreRef.current = more
+        setResults(items)
+        setHasMore(more)
         if (isOpenRef.current) setIsOpen(true)
       } catch {
-        // 请求失败时保留旧结果，避免网络抖动清空下拉
+        // 请求失败时保持空结果，用户继续输入或滚动时会重新请求
       } finally {
         if (seq === searchSeqRef.current) setLoading(false)
       }
@@ -163,6 +191,40 @@ function LayoutHeaderSearch() {
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
+
+  const loadMore = async () => {
+    const trimmed = query.trim()
+    if (!trimmed || loading || loadingMoreRef.current || !hasMoreRef.current) return
+
+    const seq = searchSeqRef.current
+    const nextPage = pageRef.current + 1
+    loadingMoreRef.current = true
+    setLoadingMore(true)
+
+    try {
+      const res = await mediaAPI.searchPage(trimmed, nextPage, SEARCH_PAGE_SIZE, { groupSeries: true })
+      if (seq !== searchSeqRef.current) return
+
+      const incoming = res.items || []
+      const currentResults = resultsRef.current
+      const known = new Set(currentResults.map((item) => item.id))
+      const nextResults = [...currentResults, ...incoming.filter((item) => !known.has(item.id))]
+      const total = res.total ?? nextResults.length
+      const more = nextPage * SEARCH_PAGE_SIZE < total
+      pageRef.current = nextPage
+      resultsRef.current = nextResults
+      hasMoreRef.current = more
+      setResults(nextResults)
+      setHasMore(more)
+    } catch {
+      // 请求失败时保留当前结果，继续滚动可重试
+    } finally {
+      if (seq === searchSeqRef.current) {
+        loadingMoreRef.current = false
+        setLoadingMore(false)
+      }
+    }
+  }
 
   const handleSelect = (item: Media) => {
     setSearchOpen(false)
@@ -225,9 +287,20 @@ function LayoutHeaderSearch() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 6 }}
             transition={{ duration: 0.15 }}
-            className="absolute top-full left-0 right-0 mt-2 max-h-96 overflow-y-auto rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel)] p-2 shadow-2xl z-50 backdrop-blur-xl"
+            onScroll={(e) => {
+              const target = e.currentTarget
+              if (target.scrollHeight - target.scrollTop - target.clientHeight < 80) {
+                void loadMore()
+              }
+            }}
+            className="absolute top-full left-0 right-0 mt-2 max-h-96 overflow-y-auto overscroll-contain rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel)] p-2 shadow-2xl z-50 backdrop-blur-xl"
           >
-            {results.length === 0 && !loading ? (
+            {results.length === 0 && loading ? (
+              <div className="flex items-center justify-center gap-2 py-8 text-xs text-[var(--app-muted)]">
+                <LoaderCircle size={14} className="text-brand-500 animate-spin" />
+                正在搜索…
+              </div>
+            ) : results.length === 0 ? (
               <div className="py-8 text-center text-xs text-[var(--app-muted)]">
                 未搜索到与 “{query}” 相关的媒体内容
               </div>
@@ -282,6 +355,17 @@ function LayoutHeaderSearch() {
                     </div>
                   </button>
                 ))}
+                {loadingMore && (
+                  <div className="flex items-center justify-center gap-2 py-3 text-[10px] text-[var(--app-muted)]">
+                    <LoaderCircle size={12} className="text-brand-500 animate-spin" />
+                    正在加载更多…
+                  </div>
+                )}
+                {!loadingMore && !hasMore && results.length > 0 && (
+                  <div className="py-2 text-center text-[10px] text-[var(--app-muted)]">
+                    已显示全部 {results.length} 条结果
+                  </div>
+                )}
               </div>
             )}
           </motion.div>
