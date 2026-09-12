@@ -10,9 +10,10 @@ import (
 )
 
 const (
-	tmdbPersonIDPrefix   = "person~tmdb~"
-	tmdbProfileTagPrefix = "tmdb:"
-	tmdbPeopleMax        = 80
+	tmdbPersonIDPrefix    = "person~tmdb~"
+	tmdbProfileTagPrefix  = "tmdb:"
+	tmdbProfileTagVersion = "p2"
+	tmdbPeopleMax         = 80
 )
 
 var tmdbProfilePathRE = regexp.MustCompile(`^/[A-Za-z0-9._-]+$`)
@@ -220,7 +221,7 @@ func tmdbProfileTag(profilePath string) string {
 	if !tmdbProfilePathRE.MatchString(profilePath) {
 		return ""
 	}
-	return tmdbProfileTagPrefix + profilePath
+	return tmdbProfileTagPrefix + profilePath + "?" + tmdbProfileTagVersion
 }
 
 func tmdbProfilePathFromTag(tag string) string {
@@ -229,6 +230,9 @@ func tmdbProfilePathFromTag(tag string) string {
 		return ""
 	}
 	profilePath := strings.TrimPrefix(tag, tmdbProfileTagPrefix)
+	if idx := strings.IndexByte(profilePath, '?'); idx >= 0 {
+		profilePath = profilePath[:idx]
+	}
 	if !tmdbProfilePathRE.MatchString(profilePath) {
 		return ""
 	}

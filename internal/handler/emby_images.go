@@ -29,7 +29,7 @@ var embyPlaceholderPNG = []byte{
 // /api/img 会变成 401，所以这里复用 ImageProxy 但不再走 /api 路由。
 func embyItemImageHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		embyServeImage(c, svc, c.Param("id"), c.Param("type"), c.Query("tag"), false)
+		embyServeImage(c, svc, c.Param("id"), c.Param("type"), c.Query("tag"))
 	}
 }
 
@@ -37,11 +37,11 @@ func embyItemImageHandler(svc *service.Container) gin.HandlerFunc {
 // Name 可能是伪装后的远程人物 ID，也可能是电影详情 People 中的显示名称。
 func embyPersonImageHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		embyServeImage(c, svc, c.Param("name"), c.Param("type"), c.Query("tag"), true)
+		embyServeImage(c, svc, c.Param("name"), c.Param("type"), c.Query("tag"))
 	}
 }
 
-func embyServeImage(c *gin.Context, svc *service.Container, id, imageType, tag string, person bool) {
+func embyServeImage(c *gin.Context, svc *service.Container, id, imageType, tag string) {
 	clearEmbyImageNoStoreHeaders(c)
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
 	defer cancel()
@@ -50,13 +50,10 @@ func embyServeImage(c *gin.Context, svc *service.Container, id, imageType, tag s
 		embyServePlaceholderImage(c)
 		return
 	}
-	var raw string
-	var err error
-	if person {
-		raw, err = svc.Emby.PersonImageURL(ctx, id, imageType, tag)
-	} else {
-		raw, err = svc.Emby.ImageURL(ctx, id, imageType)
-	}
+	// PersonImageURL handles TMDb/remote people first and falls back to regular
+	// media/library artwork, so the official /Items/{personId}/Images route
+	// works for synthetic person IDs as well as normal item IDs.
+	raw, err := svc.Emby.PersonImageURL(ctx, id, imageType, tag)
 	if err != nil || raw == "" {
 		embyServePlaceholderImage(c)
 		return

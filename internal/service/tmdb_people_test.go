@@ -47,7 +47,7 @@ func TestTMDbGetPeopleAndProfileImage(t *testing.T) {
 	if people[0]["Id"] != "person~tmdb~101" || people[0]["Role"] != "主角" {
 		t.Fatalf("unexpected actor: %#v", people[0])
 	}
-	if people[0]["PrimaryImageTag"] != "tmdb:/actor.jpg" {
+	if people[0]["PrimaryImageTag"] != "tmdb:/actor.jpg?p2" {
 		t.Fatalf("unexpected actor image tag: %#v", people[0])
 	}
 	if got := provider.ProfileImageURL("/actor.jpg"); got != "https://image.example/t/p/w300/actor.jpg" {

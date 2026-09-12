@@ -96,10 +96,10 @@ func TestResolveMediaPeopleFetchesTMDbAndCaches(t *testing.T) {
 	if hits.Load() != 1 {
 		t.Fatalf("TMDb credits hits=%d want 1", hits.Load())
 	}
-	if people[0]["Id"] != "person~tmdb~101" || people[0]["PrimaryImageTag"] != "tmdb:/actor.jpg" {
+	if people[0]["Id"] != "person~tmdb~101" || people[0]["PrimaryImageTag"] != "tmdb:/actor.jpg?p2" {
 		t.Fatalf("unexpected person: %#v", people[0])
 	}
-	raw, err := svc.PersonImageURL(t.Context(), "person~tmdb~101", "Primary", "tmdb:/actor.jpg")
+	raw, err := svc.PersonImageURL(t.Context(), "person~tmdb~101", "Primary", "tmdb:/actor.jpg?p2")
 	if err != nil {
 		t.Fatal(err)
 	}

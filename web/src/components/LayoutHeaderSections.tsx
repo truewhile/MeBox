@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { AnimatePresence, motion } from 'framer-motion'
 import { ArrowLeft, Film, LoaderCircle, Menu, Search, Star, X } from 'lucide-react'
 
 import { imageURL } from '../api/client'
@@ -320,13 +320,18 @@ function LayoutHeaderSearch() {
       </div>
 
       {/* Search Dropdown Results */}
-      <AnimatePresence>
-        {isOpen && query.trim() && (
-          <motion.div
-            initial={{ opacity: 0, y: 6 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 6 }}
-            transition={{ duration: 0.15 }}
+      {isOpen && query.trim() && typeof document !== 'undefined'
+        ? createPortal(
+            <div
+              aria-hidden="true"
+              className="fixed inset-0 z-[25]"
+              onPointerDown={() => dismissSearch(false)}
+            />,
+            document.body,
+          )
+        : null}
+      {isOpen && query.trim() ? (
+          <div
             onScroll={(e) => {
               const target = e.currentTarget
               if (target.scrollHeight - target.scrollTop - target.clientHeight < 80) {
@@ -414,9 +419,8 @@ function LayoutHeaderSearch() {
                 )}
               </div>
             )}
-          </motion.div>
-        )}
-      </AnimatePresence>
+          </div>
+        ) : null}
     </div>
   )
 }
