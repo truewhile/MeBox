@@ -55,7 +55,7 @@ func TestReadAdultLocalMetadataAndArtwork(t *testing.T) {
 	if got.PosterURL != poster || got.BackdropURL != fanart {
 		t.Fatalf("artwork poster=%q fanart=%q", got.PosterURL, got.BackdropURL)
 	}
-	if got.Genres != "剧情,中文字幕,测试片商,演员A" {
+	if got.Genres != "剧情,中文字幕,测试片商" {
 		t.Fatalf("genres = %q", got.Genres)
 	}
 }

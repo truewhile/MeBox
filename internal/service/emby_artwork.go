@@ -85,13 +85,33 @@ func (e *EmbyService) resolveVirtualArtwork(ctx context.Context, id, imageType s
 
 // PersonImageURL resolves a person avatar from either a disguised remote ID
 // or a person display name captured from a remote item's People field.
-func (e *EmbyService) PersonImageURL(ctx context.Context, idOrName, imageType string) (string, error) {
+func (e *EmbyService) PersonImageURL(ctx context.Context, idOrName, imageType, tag string) (string, error) {
 	idOrName = strings.TrimSpace(idOrName)
 	if idOrName == "" || e == nil {
 		return "", nil
 	}
 	if IsEmbyRemoteID(idOrName) {
 		return e.ImageURL(ctx, idOrName, imageType)
+	}
+	if personID, ok := parseTMDbPersonID(idOrName); ok && e.tmdb != nil {
+		profilePath := tmdbProfilePathFromTag(tag)
+		if profilePath == "" {
+			profilePath = e.cachedPersonImage(idOrName)
+		}
+		if profilePath != "" {
+			if raw := e.tmdb.ProfileImageURL(profilePath); raw != "" {
+				e.rememberPersonImage(idOrName, profilePath)
+				return raw, nil
+			}
+		}
+		profilePath, err := e.tmdb.PersonProfilePathByID(ctx, personID)
+		if err != nil {
+			return "", err
+		}
+		if raw := e.tmdb.ProfileImageURL(profilePath); raw != "" {
+			e.rememberPersonImage(idOrName, profilePath)
+			return raw, nil
+		}
 	}
 	if e.remote != nil {
 		if raw, ok := e.remote.ResolveRemotePersonImageURL(ctx, idOrName, imageType); ok {

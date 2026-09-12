@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/truewhile/MeBox/internal/model"
 )
 
@@ -62,14 +64,22 @@ func (e *EmbyService) Item(ctx context.Context, mediaID, userID string) (map[str
 		if season, ok, err := e.findSeasonGroup(ctx, mediaID, userID); err != nil {
 			return nil, err
 		} else if ok {
-			return e.seasonPayload(season), nil
+			item := e.seasonPayload(season)
+			if media := seriesPeopleMedia(season.Series); media != nil {
+				item["People"] = e.resolveMediaPeople(ctx, media)
+			}
+			return item, nil
 		}
 	}
 	if strings.HasPrefix(mediaID, embyVirtualSeriesPrefix) {
 		if series, ok, err := e.findSeriesGroup(ctx, mediaID, userID); err != nil {
 			return nil, err
 		} else if ok {
-			return e.seriesPayload(series), nil
+			item := e.seriesPayload(series)
+			if media := seriesPeopleMedia(series); media != nil {
+				item["People"] = e.resolveMediaPeople(ctx, media)
+			}
+			return item, nil
 		}
 	}
 	m, err := e.repo.Media.FindByID(ctx, mediaID)
@@ -80,7 +90,11 @@ func (e *EmbyService) Item(ctx context.Context, mediaID, userID string) (map[str
 		if series, ok, err := e.findSeriesGroup(ctx, mediaID, userID); err != nil {
 			return nil, err
 		} else if ok {
-			return e.seriesPayload(series), nil
+			item := e.seriesPayload(series)
+			if media := seriesPeopleMedia(series); media != nil {
+				item["People"] = e.resolveMediaPeople(ctx, media)
+			}
+			return item, nil
 		}
 		return nil, nil
 	}
@@ -103,7 +117,7 @@ func (e *EmbyService) Item(ctx context.Context, mediaID, userID string) (map[str
 		}
 	}
 	// 单条目 payload 内部对库类型/series 标题有多次查找，挂请求级缓存合并。
-	return e.itemPayload(e.withPayloadCache(ctx), m, fav, pos), nil
+	return e.itemPayload(e.withPayloadCache(ctx), m, fav, pos, true), nil
 }
 
 // LatestItems 最近添加，全库或指定库。远程媒体库(parentID 带前缀)直接透传远程。
@@ -256,7 +270,7 @@ func (e *EmbyService) favoriteItems(ctx context.Context, p ItemsParams) (map[str
 					continue
 				}
 			}
-			items = append(items, e.itemPayload(ctx, m, true, 0))
+			items = append(items, e.itemPayload(ctx, m, true, 0, false))
 			continue
 		}
 		if e.remote == nil || !IsEmbyRemoteID(fav.MediaID) {
@@ -388,7 +402,7 @@ func (e *EmbyService) resumableItems(ctx context.Context, p ItemsParams) (map[st
 			}
 			localTotal++
 			if produced := len(items); produced < needed {
-				items = append(items, e.itemPayload(ctx, m, false, h.PositionMs))
+				items = append(items, e.itemPayload(ctx, m, false, h.PositionMs, false))
 			}
 			continue
 		}
@@ -427,7 +441,7 @@ func (e *EmbyService) resumableItems(ctx context.Context, p ItemsParams) (map[st
 	return map[string]any{"Items": items[p.StartIndex:end], "TotalRecordCount": total, "StartIndex": p.StartIndex}, nil
 }
 
-func (e *EmbyService) itemPayload(ctx context.Context, m *model.Media, fav bool, posMs int64) map[string]any {
+func (e *EmbyService) itemPayload(ctx context.Context, m *model.Media, fav bool, posMs int64, includePeople bool) map[string]any {
 	itemType := "Movie"
 	name := m.Title
 	parentID := m.LibraryID
@@ -500,7 +514,7 @@ func (e *EmbyService) itemPayload(ctx context.Context, m *model.Media, fav bool,
 		"ImageTags":         imageTags,
 		"BackdropImageTags": backdropTags,
 		"Genres":            splitCSV(m.Genres),
-		"People":            e.resolveMediaPeople(ctx, m),
+		"People":            []map[string]any{},
 		"ProviderIds": map[string]string{
 			"Tmdb":    intToStr(m.TMDbID),
 			"Bangumi": intToStr(m.BangumiID),
@@ -531,21 +545,93 @@ func (e *EmbyService) itemPayload(ctx context.Context, m *model.Media, fav bool,
 	if premiered, ok := embyPremiereDate(m.ReleaseDate); ok {
 		item["PremiereDate"] = premiered
 	}
+	if includePeople {
+		item["People"] = e.resolveMediaPeople(ctx, m)
+	}
 	return item
 }
 
 func (e *EmbyService) resolveMediaPeople(ctx context.Context, m *model.Media) []map[string]any {
-	if m == nil || strings.TrimSpace(m.Path) == "" {
+	if m == nil {
 		return []map[string]any{}
 	}
-	cacheKey := strings.TrimSpace(m.ID)
+	cacheKey := embyMediaPeopleCacheKey(m)
 	if cacheKey == "" {
-		cacheKey = strings.ToLower(filepath.Clean(m.Path))
+		return []map[string]any{}
 	}
 	if people, ok := e.cachedMediaPeople(cacheKey); ok {
 		return people
 	}
+	people := e.fetchTMDbPeople(ctx, m)
+	if len(people) == 0 {
+		people = e.resolveNFOMediaPeople(m)
+	}
+	e.rememberMediaPeople(cacheKey, people)
+	return people
+}
 
+func seriesPeopleMedia(group embySeriesGroup) *model.Media {
+	if group.TMDbID <= 0 {
+		return nil
+	}
+	if len(group.Episodes) > 0 {
+		media := group.Episodes[0]
+		media.TMDbID = group.TMDbID
+		return &media
+	}
+	return &model.Media{Title: group.Name, TMDbID: group.TMDbID, SeasonNum: 1}
+}
+
+func (e *EmbyService) fetchTMDbPeople(ctx context.Context, m *model.Media) []map[string]any {
+	if e == nil || m == nil {
+		return nil
+	}
+	var people []map[string]any
+	if e.tmdb != nil && m.TMDbID > 0 {
+		mediaType := "movie"
+		if m.SeasonNum > 0 || m.EpisodeNum > 0 {
+			mediaType = "tv"
+		}
+		people, err := e.tmdb.GetPeople(ctx, m.TMDbID, mediaType)
+		if err != nil {
+			if e.log != nil {
+				e.log.Debug("tmdb: detail people lookup failed", zap.Int("tmdb_id", m.TMDbID), zap.String("type", mediaType), zap.Error(err))
+			}
+		} else if len(people) > 0 {
+			e.rememberPersonImages(people)
+			return people
+		}
+	}
+	if m.NSFW && e.adult != nil {
+		people = e.adult.GetPeople(ctx, m)
+	}
+	return people
+}
+
+func embyMediaPeopleCacheKey(m *model.Media) string {
+	if m == nil {
+		return ""
+	}
+	if m.TMDbID > 0 {
+		mediaType := "movie"
+		if m.SeasonNum > 0 || m.EpisodeNum > 0 {
+			mediaType = "tv"
+		}
+		return fmt.Sprintf("tmdb:%d:%s", m.TMDbID, mediaType)
+	}
+	if strings.TrimSpace(m.ID) != "" {
+		return "media:" + strings.TrimSpace(m.ID)
+	}
+	if strings.TrimSpace(m.Path) != "" {
+		return "path:" + strings.ToLower(filepath.Clean(m.Path))
+	}
+	return ""
+}
+
+func (e *EmbyService) resolveNFOMediaPeople(m *model.Media) []map[string]any {
+	if m == nil || strings.TrimSpace(m.Path) == "" {
+		return []map[string]any{}
+	}
 	dir := filepath.Dir(m.Path)
 	candidates := make([]string, 0, 6)
 	seenPath := map[string]struct{}{}
@@ -571,7 +657,6 @@ func (e *EmbyService) resolveMediaPeople(ctx context.Context, m *model.Media) []
 
 	people := make([]map[string]any, 0)
 	seen := make(map[string]bool)
-
 	for _, p := range candidates {
 		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
 			doc, _, err := decodeNFOFile(p)
@@ -618,7 +703,6 @@ func (e *EmbyService) resolveMediaPeople(ctx context.Context, m *model.Media) []
 			}
 		}
 	}
-	e.rememberMediaPeople(cacheKey, people)
 	return people
 }
 
@@ -654,10 +738,55 @@ func (e *EmbyService) rememberMediaPeople(key string, people []map[string]any) {
 	}
 	stored := make([]map[string]any, len(people))
 	copy(stored, people)
+	ttl := embyPeopleCacheTTL
+	if len(stored) == 0 {
+		ttl = embyPeopleEmptyCacheTTL
+	}
 	e.peopleCache[key] = embyPeopleCacheEntry{
 		people:    stored,
-		expiresAt: time.Now().Add(embyVirtualCacheTTL),
+		expiresAt: time.Now().Add(ttl),
 	}
+}
+
+func (e *EmbyService) rememberPersonImages(people []map[string]any) {
+	if e == nil || len(people) == 0 {
+		return
+	}
+	e.personImageMu.Lock()
+	defer e.personImageMu.Unlock()
+	if e.personImages == nil || len(e.personImages) > 20000 {
+		e.personImages = make(map[string]string, 128)
+	}
+	for _, person := range people {
+		id := strings.TrimSpace(fmt.Sprint(person["Id"]))
+		profilePath := tmdbProfilePathFromTag(fmt.Sprint(person["PrimaryImageTag"]))
+		if _, ok := parseTMDbPersonID(id); ok && profilePath != "" {
+			e.personImages[id] = profilePath
+		}
+	}
+}
+
+func (e *EmbyService) cachedPersonImage(id string) string {
+	if e == nil {
+		return ""
+	}
+	e.personImageMu.RLock()
+	profilePath := e.personImages[strings.TrimSpace(id)]
+	e.personImageMu.RUnlock()
+	return profilePath
+}
+
+func (e *EmbyService) rememberPersonImage(id, profilePath string) {
+	profilePath = strings.TrimSpace(profilePath)
+	if e == nil || strings.TrimSpace(id) == "" || !tmdbProfilePathRE.MatchString(profilePath) {
+		return
+	}
+	e.personImageMu.Lock()
+	if e.personImages == nil {
+		e.personImages = make(map[string]string, 128)
+	}
+	e.personImages[strings.TrimSpace(id)] = profilePath
+	e.personImageMu.Unlock()
 }
 
 func embyPersonID(name, roleType string) string {

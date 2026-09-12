@@ -64,6 +64,11 @@ type EmbyService struct {
 
 	peopleMu    sync.RWMutex
 	peopleCache map[string]embyPeopleCacheEntry
+
+	tmdb          *TMDbProvider
+	adult         *AdultProvider
+	personImageMu sync.RWMutex
+	personImages  map[string]string
 }
 
 // NewEmbyService is the constructor.
@@ -75,6 +80,23 @@ func NewEmbyService(cfg *config.Config, log *zap.Logger, repo *repository.Contai
 func (e *EmbyService) SetEmbyRemote(remote *EmbyRemoteService) *EmbyService {
 	if e != nil {
 		e.remote = remote
+	}
+	return e
+}
+
+// SetTMDbProvider wires the TMDb client used for detail-time cast/crew lookup.
+func (e *EmbyService) SetTMDbProvider(tmdb *TMDbProvider) *EmbyService {
+	if e != nil {
+		e.tmdb = tmdb
+	}
+	return e
+}
+
+// SetAdultProvider wires the on-demand adult-metadata provider used when a
+// detail request needs cast/crew not stored in the database.
+func (e *EmbyService) SetAdultProvider(adult *AdultProvider) *EmbyService {
+	if e != nil {
+		e.adult = adult
 	}
 	return e
 }
@@ -118,6 +140,8 @@ const (
 	embyVirtualSeriesPrefix = "msgo-series-"
 	embyVirtualSeasonPrefix = "msgo-season-"
 	embyVirtualCacheTTL     = 10 * time.Minute
+	embyPeopleCacheTTL      = 6 * time.Hour
+	embyPeopleEmptyCacheTTL = 15 * time.Minute
 	embyVisibilityCacheTTL  = 30 * time.Second
 	embySeriesGroupingLimit = maxMediaSearchLimit
 	// Virtual artwork used to be wiped entirely once the in-memory map crossed

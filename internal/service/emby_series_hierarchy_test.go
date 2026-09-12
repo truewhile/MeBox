@@ -229,7 +229,7 @@ func TestEmbyEpisodeStillIsPrimaryImageNotArt(t *testing.T) {
 		t.Fatalf("create media: %v", err)
 	}
 
-	item := svc.itemPayload(t.Context(), &media, false, 0)
+	item := svc.itemPayload(t.Context(), &media, false, 0, false)
 	if tags, ok := item["ImageTags"].(map[string]string); !ok || tags["Primary"] != "ep-still" {
 		t.Fatalf("episode should expose a primary image tag: %#v", item["ImageTags"])
 	}

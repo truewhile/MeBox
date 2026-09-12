@@ -61,7 +61,7 @@ func adultAwareGenres(doc *nfoDocument) []string {
 	if doc == nil {
 		return nil
 	}
-	values := make([]string, 0, len(doc.Genres)+len(doc.Tags)+len(doc.Actors)+4)
+	values := make([]string, 0, len(doc.Genres)+len(doc.Tags)+4)
 	values = append(values, doc.Genres...)
 	values = append(values, doc.Tags...)
 	for _, value := range []string{doc.Studio, doc.Maker, doc.Publisher, doc.Label} {
@@ -69,18 +69,8 @@ func adultAwareGenres(doc *nfoDocument) []string {
 			values = append(values, cleanXMLText(value))
 		}
 	}
-	for _, value := range doc.Directors {
-		if cleanXMLText(value) != "" {
-			values = append(values, cleanXMLText(value))
-		}
-	}
-	for _, actor := range doc.Actors {
-		if cleanXMLText(actor.Name) != "" {
-			values = append(values, cleanXMLText(actor.Name))
-		} else if cleanXMLText(actor.Role) != "" {
-			values = append(values, cleanXMLText(actor.Role))
-		}
-	}
+	// Cast and crew are intentionally not folded into genres. They are read
+	// from NFO/TMDb on detail requests and kept only in the in-memory cache.
 	return values
 }
 

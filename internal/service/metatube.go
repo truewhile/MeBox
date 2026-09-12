@@ -276,6 +276,64 @@ func (p *MetaTubeProvider) applyAuthHeader(req *http.Request, token string) {
 	req.Header.Set("User-Agent", "MeBox/1.0 (MetaTube Client)")
 }
 
+func metaTubePeople(movie *MetaTubeMovieInfo, enableActor bool) []map[string]any {
+	if movie == nil {
+		return nil
+	}
+	people := make([]map[string]any, 0, len(movie.Actors)+len(movie.Directors)+1)
+	add := func(name, personType string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		personID := embyPersonID(name, personType)
+		for _, existing := range people {
+			if existing["Id"] == personID {
+				return
+			}
+		}
+		people = append(people, map[string]any{
+			"Id":   personID,
+			"Name": name,
+			"Type": personType,
+			"Role": personType,
+		})
+	}
+	if enableActor {
+		for _, actor := range movie.Actors {
+			add(actor, "Actor")
+		}
+	}
+	add(movie.Director, "Director")
+	for _, director := range movie.Directors {
+		add(director, "Director")
+	}
+	return people
+}
+
+func metaTubePeopleFromActors(actors []string) []map[string]any {
+	people := make([]map[string]any, 0, len(actors))
+	seen := map[string]bool{}
+	for _, actor := range actors {
+		actor = strings.TrimSpace(actor)
+		if actor == "" {
+			continue
+		}
+		personID := embyPersonID(actor, "Actor")
+		if seen[personID] {
+			continue
+		}
+		seen[personID] = true
+		people = append(people, map[string]any{
+			"Id":   personID,
+			"Name": actor,
+			"Type": "Actor",
+			"Role": "Actor",
+		})
+	}
+	return people
+}
+
 func (p *MetaTubeProvider) convertSearchResultToMatch(cfg MetaTubeConfig, query string, res *MetaTubeSearchResult) *Match {
 	if res == nil {
 		return nil
@@ -292,13 +350,6 @@ func (p *MetaTubeProvider) convertSearchResultToMatch(cfg MetaTubeConfig, query 
 	formattedTitle := FormatAdultTitle(code, title)
 
 	year := parseYearFromDate(res.ReleaseDate)
-
-	genres := make([]string, 0, len(res.Actors))
-	for _, a := range res.Actors {
-		if strings.TrimSpace(a) != "" {
-			genres = append(genres, strings.TrimSpace(a))
-		}
-	}
 
 	posterSource := firstNonEmpty(res.BigCoverURL, res.CoverURL, res.BigThumbURL, res.ThumbURL)
 	posterURL, backdropURL := metaTubeArtworkURLs(cfg, res.Provider, res.ID, posterSource)
@@ -319,8 +370,8 @@ func (p *MetaTubeProvider) convertSearchResultToMatch(cfg MetaTubeConfig, query 
 		Year:         year,
 		ReleaseDate:  cleanDateString(res.ReleaseDate),
 		Rating:       res.Score,
-		Genres:       genres,
 		NSFW:         true,
+		People:       metaTubePeopleFromActors(res.Actors),
 		DoubanID:     res.ID,       // 借用字段存储原始 ID 便于详情反查
 		TheTVDBID:    res.Provider, // 借用字段存储 Provider
 	}
@@ -357,7 +408,7 @@ func (p *MetaTubeProvider) convertMovieInfoToMatch(cfg MetaTubeConfig, movie *Me
 		}
 	}
 
-	genres := make([]string, 0, len(movie.Genres)+len(movie.Actors)+4)
+	genres := make([]string, 0, len(movie.Genres)+2)
 	for _, g := range movie.Genres {
 		if strings.TrimSpace(g) != "" {
 			genres = append(genres, strings.TrimSpace(g))
@@ -368,19 +419,6 @@ func (p *MetaTubeProvider) convertMovieInfoToMatch(cfg MetaTubeConfig, movie *Me
 	}
 	if strings.TrimSpace(movie.Label) != "" && movie.Label != movie.Maker {
 		genres = append(genres, strings.TrimSpace(movie.Label))
-	}
-	for _, a := range movie.Actors {
-		if strings.TrimSpace(a) != "" {
-			genres = append(genres, strings.TrimSpace(a))
-		}
-	}
-	if strings.TrimSpace(movie.Director) != "" {
-		genres = append(genres, strings.TrimSpace(movie.Director))
-	}
-	for _, d := range movie.Directors {
-		if strings.TrimSpace(d) != "" {
-			genres = append(genres, strings.TrimSpace(d))
-		}
 	}
 
 	return &Match{
@@ -396,6 +434,7 @@ func (p *MetaTubeProvider) convertMovieInfoToMatch(cfg MetaTubeConfig, movie *Me
 		Rating:       movie.Score,
 		Genres:       dedupeStrings(genres),
 		NSFW:         true,
+		People:       metaTubePeople(movie, cfg.EnableActor),
 		DoubanID:     movie.ID,
 		TheTVDBID:    movie.Provider,
 	}

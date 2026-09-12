@@ -106,7 +106,7 @@ func (b *serviceContainerBuilder) initContentServices() {
 	b.c.FileManager = NewFileManagerService(b.cfg, b.log, b.repos)
 	b.c.DLNA = NewDLNAService(b.log)
 	b.c.Storage = NewStorageService(b.log, b.repos)
-	b.c.Emby = NewEmbyService(b.cfg, b.log, b.repos)
+	b.c.Emby = NewEmbyService(b.cfg, b.log, b.repos).SetTMDbProvider(b.c.TMDb).SetAdultProvider(b.c.Scraper.adult)
 	b.c.EmbyRemote = NewEmbyRemoteService(b.cfg, b.log, b.repos, b.c.Crypto).SetRuntimeCache(b.c.Cache)
 	b.c.Emby.SetEmbyRemote(b.c.EmbyRemote)
 	b.c.Backup = NewBackupService(b.cfg, b.log, b.repos.DB)

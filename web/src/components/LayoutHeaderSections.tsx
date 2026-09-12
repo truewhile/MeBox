@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { ArrowLeft, Film, LoaderCircle, Menu, Search, Star, X } from 'lucide-react'
 
@@ -118,7 +118,9 @@ function LayoutHeaderSearch() {
   const [results, setResults] = useState<Media[]>([])
   const [hasMore, setHasMore] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
   const isOpenRef = useRef(false)
+  const suppressInputRef = useRef(false)
   // 递增序号守卫：快速连续输入时丢弃过期响应
   const searchSeqRef = useRef(0)
   const pageRef = useRef(0)
@@ -126,11 +128,37 @@ function LayoutHeaderSearch() {
   const resultsRef = useRef<Media[]>([])
   const hasMoreRef = useRef(false)
   const navigate = useNavigate()
+  const location = useLocation()
+  const locationKey = `${location.pathname}${location.search}`
+  const prevLocationKeyRef = useRef(locationKey)
 
   const setSearchOpen = (open: boolean) => {
     isOpenRef.current = open
     setIsOpen(open)
   }
+
+  const dismissSearch = (clearQuery: boolean) => {
+    suppressInputRef.current = true
+    setSearchOpen(false)
+    if (clearQuery) {
+      searchSeqRef.current += 1
+      pageRef.current = 0
+      loadingMoreRef.current = false
+      resultsRef.current = []
+      hasMoreRef.current = false
+      setQuery('')
+      setResults([])
+      setLoading(false)
+      setLoadingMore(false)
+      setHasMore(false)
+    }
+    inputRef.current?.blur()
+    window.setTimeout(() => {
+      suppressInputRef.current = false
+    }, 0)
+  }
+  const dismissSearchRef = useRef(dismissSearch)
+  dismissSearchRef.current = dismissSearch
 
   useEffect(() => {
     const trimmed = query.trim()
@@ -170,7 +198,7 @@ function LayoutHeaderSearch() {
         hasMoreRef.current = more
         setResults(items)
         setHasMore(more)
-        if (isOpenRef.current) setIsOpen(true)
+        if (isOpenRef.current && !suppressInputRef.current) setIsOpen(true)
       } catch {
         // 请求失败时保持空结果，用户继续输入或滚动时会重新请求
       } finally {
@@ -181,15 +209,21 @@ function LayoutHeaderSearch() {
     return () => clearTimeout(timer)
   }, [query])
 
+  useLayoutEffect(() => {
+    if (prevLocationKeyRef.current === locationKey) return
+    prevLocationKeyRef.current = locationKey
+    dismissSearchRef.current(true)
+  }, [locationKey])
+
   useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        isOpenRef.current = false
-        setIsOpen(false)
-      }
+    function handlePointerDown(e: PointerEvent) {
+      if (!isOpenRef.current) return
+      const root = containerRef.current
+      if (root && e.composedPath().includes(root)) return
+      dismissSearchRef.current(false)
     }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
+    document.addEventListener('pointerdown', handlePointerDown, true)
+    return () => document.removeEventListener('pointerdown', handlePointerDown, true)
   }, [])
 
   const loadMore = async () => {
@@ -227,14 +261,15 @@ function LayoutHeaderSearch() {
   }
 
   const handleSelect = (item: Media) => {
-    setSearchOpen(false)
-    setQuery('')
-    navigate(favouriteMediaLink(item))
+    if (suppressInputRef.current) return
+    const to = favouriteMediaLink(item)
+    dismissSearch(true)
+    navigate(to)
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
-      setSearchOpen(false)
+      dismissSearch(false)
     } else if (e.key === 'Enter' && results.length > 0) {
       handleSelect(results[0])
     }
@@ -248,14 +283,21 @@ function LayoutHeaderSearch() {
           className="absolute left-3 text-[var(--app-muted)] pointer-events-none transition-colors group-focus-within:text-brand-500 sm:left-3.5 sm:text-[16px]"
         />
         <input
+          ref={inputRef}
           type="text"
           value={query}
           onChange={(e) => {
+            if (suppressInputRef.current) return
             const nextQuery = e.target.value
             setQuery(nextQuery)
-            setSearchOpen(Boolean(nextQuery.trim()))
+            if (nextQuery.trim() && document.activeElement === inputRef.current) {
+              setSearchOpen(true)
+            } else if (!nextQuery.trim()) {
+              setSearchOpen(false)
+            }
           }}
           onFocus={() => {
+            if (suppressInputRef.current) return
             if (query.trim()) setSearchOpen(true)
           }}
           onKeyDown={handleKeyDown}
@@ -268,9 +310,7 @@ function LayoutHeaderSearch() {
           <button
             type="button"
             onClick={() => {
-              setQuery('')
-              setResults([])
-              setSearchOpen(false)
+              dismissSearch(true)
             }}
             className="absolute right-3 text-[var(--app-muted)] hover:text-[var(--app-text)] p-0.5 rounded-lg"
           >
@@ -309,6 +349,12 @@ function LayoutHeaderSearch() {
                 {results.map((item) => (
                   <button
                     key={item.id}
+                    type="button"
+                    onPointerDown={(e) => {
+                      if (e.button !== 0) return
+                      e.preventDefault()
+                      handleSelect(item)
+                    }}
                     onClick={() => handleSelect(item)}
                     className="flex w-full items-center gap-3 rounded-xl p-2 text-left transition-colors hover:bg-[var(--app-hover)] group"
                   >

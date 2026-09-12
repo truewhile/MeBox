@@ -22,6 +22,7 @@ type Match struct {
 	Countries     []string `json:"countries,omitempty"`
 	Genres        []string `json:"genres,omitempty"`
 	Aliases       []string `json:"aliases,omitempty"`
+	People        []map[string]any `json:"-"`
 	NSFW          bool     `json:"nsfw,omitempty"`
 	SearchKeyword string   `json:"-"`
 }

@@ -181,7 +181,7 @@ func (e *EmbyService) payloadsForMedia(ctx context.Context, rows []model.Media, 
 
 	items := make([]map[string]any, 0, len(rows))
 	for _, m := range rows {
-		items = append(items, e.itemPayload(ctx, &m, userFavs[m.ID], userPos[m.ID]))
+		items = append(items, e.itemPayload(ctx, &m, userFavs[m.ID], userPos[m.ID], false))
 	}
 	return items, nil
 }
