@@ -59,6 +59,13 @@ func serveSPA(r *gin.Engine, root fs.FS) {
 		c.Next()
 	})
 	assets.GET("/*filepath", serveFSDir(root, "assets"))
+	fonts := r.Group("/fonts")
+	fonts.Use(middleware.GzipStatic())
+	fonts.Use(func(c *gin.Context) {
+		c.Header("Cache-Control", "public, max-age=86400")
+		c.Next()
+	})
+	fonts.GET("/*filepath", serveFSDir(root, "fonts"))
 	brand := r.Group("/brand")
 	brand.Use(func(c *gin.Context) {
 		setNoCacheHeaders(c)
@@ -70,11 +77,11 @@ func serveSPA(r *gin.Engine, root fs.FS) {
 		r.GET(rootFile, serveFSFile(root, name))
 		r.HEAD(rootFile, serveFSFile(root, name))
 	}
-		r.NoRoute(middleware.GzipStatic(), func(c *gin.Context) {
-			if handler.TryHandleEmbyNormalizedRoute(c, r) {
-				return
-			}
-			path := c.Request.URL.Path
+	r.NoRoute(middleware.GzipStatic(), func(c *gin.Context) {
+		if handler.TryHandleEmbyNormalizedRoute(c, r) {
+			return
+		}
+		path := c.Request.URL.Path
 		if shouldBypassSPAFallback(path) {
 			c.Status(http.StatusNotFound)
 			return
