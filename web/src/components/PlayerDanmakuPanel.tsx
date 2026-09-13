@@ -196,7 +196,7 @@ export function PlayerDanmakuPanel({
     // 面板悬浮于视频上方：阻止点击冒泡，避免触发视频区域的播放/暂停切换。
     <div
       onClick={(e) => e.stopPropagation()}
-      className="absolute inset-x-3 top-12 bottom-3 z-30 w-auto overflow-y-auto rounded-2xl border border-white/15 bg-black/85 p-4 text-white shadow-2xl backdrop-blur-md sm:inset-x-auto sm:right-4 sm:top-16 sm:bottom-auto sm:w-80"
+      className="absolute inset-x-3 top-12 bottom-3 z-30 w-auto overflow-y-auto overscroll-contain rounded-2xl border border-white/15 bg-black/85 p-4 text-white shadow-2xl backdrop-blur-md sm:inset-x-auto sm:bottom-auto sm:right-4 sm:top-16 sm:w-80 sm:max-h-[calc(100%-5rem)]"
     >
       <div className="mb-3 flex items-center justify-between">
         <div className="flex items-center gap-2 text-sm font-semibold">
