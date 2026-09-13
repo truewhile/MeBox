@@ -192,6 +192,14 @@ export function LibrariesContent({
     return previews.slice(start, start + ENTRY_PAGE_SIZE)
   }, [previews, effectiveEntryPage])
 
+  // 入口网格首屏展示前 20 个库；没有自定义封面的库需要立即拉预览，否则卡片会先渲染占位图标再补图。
+  useEffect(() => {
+    const ids = pagedPreviews.filter((preview) => !preview.library.cover_url).map((preview) => preview.library.id)
+    if (ids.length > 0) {
+      onNeedPreviews?.(ids)
+    }
+  }, [pagedPreviews, onNeedPreviews])
+
 
   return (
     <>
@@ -342,7 +350,11 @@ function LibraryEntryCard({
           artwork.map(({ src, version }, index) => (
             <img
               key={`${src}-${index}`}
-              src={imageURL(src, version, { maxWidth: 400, maxHeight: 300, quality: 78 })}
+              src={imageURL(
+                src,
+                version,
+                library.cover_url ? undefined : { maxWidth: 400, maxHeight: 300, quality: 78 },
+              )}
               alt=""
               loading="lazy"
               referrerPolicy="no-referrer"

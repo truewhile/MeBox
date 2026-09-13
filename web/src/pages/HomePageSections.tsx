@@ -482,7 +482,11 @@ function HomeLibraryCard({
           artwork.map(({ src, version }, index) => (
             <img
               key={`${src}-${index}`}
-              src={imageURL(src, version, { maxWidth: 480, maxHeight: 320, quality: 78 })}
+              src={imageURL(
+                src,
+                version,
+                library.cover_url ? undefined : { maxWidth: 480, maxHeight: 320, quality: 78 },
+              )}
               alt=""
               loading="lazy"
               referrerPolicy="no-referrer"

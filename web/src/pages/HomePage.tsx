@@ -151,7 +151,13 @@ export function HomePage() {
       .filter((l) => l.carousel_enabled === true)
       .map((l) => l.id)
     const topRowLibIds = sortedLibraries.slice(0, 3).map((l) => l.id)
-    const initialTargets = Array.from(new Set([...carouselLibIds, ...topRowLibIds]))
+    // 入口网格仍然是一次展示 20 个库；没有自定义封面的库必须在首屏
+    // 立即拉预览，否则会先出现占位图标再补图，体感反而更慢。
+    const topGridLibIds = sortedLibraries
+      .slice(0, 20)
+      .filter((l) => !l.cover_url)
+      .map((l) => l.id)
+    const initialTargets = Array.from(new Set([...carouselLibIds, ...topRowLibIds, ...topGridLibIds]))
     void fetchPreviews(initialTargets, 10)
   }, [sortedLibraries, fetchPreviews])
 
