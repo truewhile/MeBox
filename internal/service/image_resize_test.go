@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 )
 
 // encodeTestPNG 生成一张结构规则、易于压缩的测试用 PNG。
@@ -297,5 +299,38 @@ func TestServeResizedFromFileSkipsDecodeForCompactJPEG(t *testing.T) {
 	}
 	if !bytes.Equal(rec.Body.Bytes(), buf.Bytes()) {
 		t.Fatal("expected the original jpeg, not a decoded thumbnail")
+	}
+}
+
+func TestServeResizedFromFileDoesNotQueueWhenResizeBusy(t *testing.T) {
+	dir := t.TempDir()
+	src := dir + string(os.PathSeparator) + "backdrop.jpg"
+	data := make([]byte, compactImageSkipBytes+1024)
+	data[0], data[1], data[2] = 0xff, 0xd8, 0xff
+	if err := os.WriteFile(src, data, 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	proxy := &ImageProxy{cacheDir: dir + string(os.PathSeparator) + "cache"}
+	var releases []func()
+	for i := 0; i < imageResizeConcurrency(); i++ {
+		release, ok := proxy.acquireResizeSlot(context.Background())
+		if !ok {
+			t.Fatal("expected a resize slot")
+		}
+		releases = append(releases, release)
+	}
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+
+	start := time.Now()
+	handled := proxy.serveResizedFromFile(httptest.NewRecorder(), httptest.NewRequest("GET", "/x?maxWidth=480", nil), src, imageResizeOptions{MaxWidth: 480})
+	if time.Since(start) > 200*time.Millisecond {
+		t.Fatal("resize slot was busy but the request still waited in the queue")
+	}
+	if handled {
+		t.Fatal("expected a busy resize slot to fall back so the caller can serve the original")
 	}
 }

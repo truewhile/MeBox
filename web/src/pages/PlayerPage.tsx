@@ -783,7 +783,8 @@ export function PlayerPage() {
     }
   }, [nextEpisode, nextEpisodeTitle, playEpisode])
 
-  // ESC = back 或关闭浮层，[ / ] 或 Shift+P / Shift+N 切换上一集/下一集
+  // ESC = back 或关闭浮层，[ / ] 或 Shift+P / Shift+N 切换上一集/下一集。
+  // 左右方向键的回退/快进在播放器控制栏里处理。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null

@@ -156,6 +156,12 @@ func TestEmbySeriesGroupingPaginatesAfterFullLibraryGrouping(t *testing.T) {
 	}
 }
 
+func TestEmbyLatestSeriesRowLimitCoversGroupedFixture(t *testing.T) {
+	if got := embyLatestSeriesRowLimit(25); got < 25*40 {
+		t.Fatalf("latest window %d is smaller than the 25x40 fixture", got)
+	}
+}
+
 func TestEmbyItemsKeepSpecialsInSeasonZero(t *testing.T) {
 	svc := newTestEmbyService(t)
 	lib := model.Library{Name: "番剧", Path: `F:\downloads\日番`, Type: "anime", Enabled: true}

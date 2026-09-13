@@ -805,6 +805,15 @@ func (r *EmbyRemoteService) RemoteSearchMount(ctx context.Context, mount *model.
 
 // RemoteItem 拉取远程单条目详情（含响应的重写）。
 func (r *EmbyRemoteService) RemoteItem(ctx context.Context, mount *model.EmbyMount, acct *model.StrmAccount, remoteID string) (map[string]any, error) {
+	cacheKey := ""
+	if r != nil && r.cache != nil && mount != nil && remoteID != "" {
+		cacheKey = r.remoteCacheKey("item", mount.ID, remoteID)
+		var cached map[string]any
+		if r.cache.GetJSON(ctx, cacheKey, &cached) && len(cached) > 0 {
+			r.rememberRemotePeople(mount, cached)
+			return cached, nil
+		}
+	}
 	cfg, err := r.remoteConfigWithToken(ctx, acct)
 	if err != nil {
 		return nil, err
@@ -817,6 +826,9 @@ func (r *EmbyRemoteService) RemoteItem(ctx context.Context, mount *model.EmbyMou
 	}
 	r.rememberRemotePeople(mount, out)
 	RewriteEmbyRemoteIDs(out, mount.ID)
+	if cacheKey != "" && len(out) > 0 {
+		r.cache.SetJSON(ctx, cacheKey, out, r.remoteMediaCacheTTL())
+	}
 	return out, nil
 }
 

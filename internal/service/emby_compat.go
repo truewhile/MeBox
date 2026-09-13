@@ -21,6 +21,7 @@ import (
 	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/repository"
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 )
 
 // 用一个固定的 ServerId 字符串。Emby 客户端会缓存这个 id，第一次见到
@@ -64,6 +65,11 @@ type EmbyService struct {
 
 	peopleMu    sync.RWMutex
 	peopleCache map[string]embyPeopleCacheEntry
+
+	// latestFlight collapses the homepage stampede: clients request Latest
+	// for every library at once, and a shared expiry used to rebuild each
+	// library in parallel.
+	latestFlight singleflight.Group
 
 	tmdb          *TMDbProvider
 	adult         *AdultProvider

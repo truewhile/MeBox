@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   Captions,
   CaptionsOff,
+  FastForward,
   ListVideo,
   Maximize,
   MessageSquareText,
@@ -9,6 +11,7 @@ import {
   Pause,
   PictureInPicture,
   Play,
+  Rewind,
   SkipBack,
   SkipForward,
   Volume2,
@@ -33,6 +36,24 @@ function formatTime(s: number): string {
   const m = Math.floor(s / 60)
   const sec = Math.floor(s % 60)
   return `${m}:${String(sec).padStart(2, '0')}`
+}
+
+const SEEK_STEP_SEC = 10
+const SEEK_REPEAT_MS = 160
+const SEEK_APPLY_MS = 220
+const SEEK_HINT_MS = 700
+
+type SeekHint = {
+  dir: 'back' | 'forward'
+  seconds: number
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  return Boolean(
+    target.closest('input, textarea, select, [contenteditable="true"]') ||
+      target.isContentEditable,
+  )
 }
 
 type PlayerControlsProps = {
@@ -123,6 +144,14 @@ export function PlayerControls({
   const danmakuOpenRef = useRef(false)
   const playlistOpenRef = useRef(false)
   const pendingSeekRef = useRef<number | null>(null)
+  const applySeekRef = useRef<(absolute: number) => void>(() => undefined)
+  const durationRef = useRef(0)
+  const seekBurstRef = useRef<{ base: number; delta: number } | null>(null)
+  const seekApplyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const seekHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastSeekAtRef = useRef(0)
+  const [seekHint, setSeekHint] = useState<SeekHint | null>(null)
+  const [stageEl, setStageEl] = useState<HTMLElement | null>(null)
 
   useEffect(() => {
     controlsHoveredRef.current = controlsHovered
@@ -143,6 +172,14 @@ export function PlayerControls({
   useEffect(() => {
     playlistOpenRef.current = playlistOpen
   }, [playlistOpen])
+
+  useEffect(() => {
+    durationRef.current = duration
+  }, [duration])
+
+  useEffect(() => {
+    setStageEl(container())
+  }, [container])
 
   // 点击控制栏外部时关闭字幕菜单
   useEffect(() => {
@@ -311,6 +348,7 @@ export function PlayerControls({
     el.currentTime = local
     setCurrentTime(streamOffset + local)
   }
+  applySeekRef.current = applyAbsoluteSeek
 
   const handleSeekChange = (v: number) => {
     setScrubValue(v)
@@ -321,6 +359,11 @@ export function PlayerControls({
   }
 
   const handleSeekStart = () => {
+    if (seekApplyTimerRef.current) {
+      clearTimeout(seekApplyTimerRef.current)
+      seekApplyTimerRef.current = null
+    }
+    seekBurstRef.current = null
     setIsScrubbing(true)
     onUiVisibleChange(true)
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
@@ -331,6 +374,102 @@ export function PlayerControls({
     setIsScrubbing(false)
     setScrubValue(null)
   }
+
+  const revealControls = useCallback(() => {
+    onUiVisibleChange(true)
+    if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
+    const el = video()
+    if (
+      !el ||
+      el.paused ||
+      controlsHoveredRef.current ||
+      isScrubbingRef.current ||
+      subtitleMenuOpenRef.current ||
+      danmakuOpenRef.current ||
+      playlistOpenRef.current
+    ) {
+      return
+    }
+    hideTimerRef.current = setTimeout(() => {
+      if (
+        !controlsHoveredRef.current &&
+        !isScrubbingRef.current &&
+        !subtitleMenuOpenRef.current &&
+        !danmakuOpenRef.current &&
+        !playlistOpenRef.current
+      ) {
+        onUiVisibleChange(false)
+      }
+    }, 3000)
+  }, [onUiVisibleChange, video])
+
+  const queueRelativeSeek = useCallback((delta: number) => {
+    const el = video()
+    if (!el) return
+    if (!seekBurstRef.current) {
+      const base = pendingSeekRef.current ?? streamOffset + (el.currentTime || 0)
+      seekBurstRef.current = { base, delta: 0 }
+    }
+    seekBurstRef.current.delta += delta
+    const max = durationRef.current > 0 ? durationRef.current : Number.POSITIVE_INFINITY
+    const target = Math.min(max, Math.max(0, seekBurstRef.current.base + seekBurstRef.current.delta))
+    const applied = target - seekBurstRef.current.base
+    seekBurstRef.current.delta = applied
+    if (applied === 0) {
+      if (!seekApplyTimerRef.current) {
+        seekBurstRef.current = null
+        setSeekHint({
+          dir: delta < 0 ? 'back' : 'forward',
+          seconds: 0,
+        })
+        if (seekHintTimerRef.current) clearTimeout(seekHintTimerRef.current)
+        seekHintTimerRef.current = setTimeout(() => setSeekHint(null), SEEK_HINT_MS)
+      }
+      return
+    }
+
+    pendingSeekRef.current = target
+    setCurrentTime(target)
+    setSeekHint({
+      dir: applied < 0 ? 'back' : 'forward',
+      seconds: Math.abs(Math.round(applied)),
+    })
+    revealControls()
+
+    if (seekHintTimerRef.current) clearTimeout(seekHintTimerRef.current)
+    seekHintTimerRef.current = setTimeout(() => setSeekHint(null), SEEK_HINT_MS)
+    if (seekApplyTimerRef.current) clearTimeout(seekApplyTimerRef.current)
+    seekApplyTimerRef.current = setTimeout(() => {
+      const burst = seekBurstRef.current
+      seekBurstRef.current = null
+      seekApplyTimerRef.current = null
+      if (!burst) return
+      applySeekRef.current(burst.base + burst.delta)
+    }, SEEK_APPLY_MS)
+  }, [revealControls, streamOffset, video])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return
+      if (isEditableTarget(e.target)) return
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+      e.preventDefault()
+      const now = Date.now()
+      if (e.repeat && now - lastSeekAtRef.current < SEEK_REPEAT_MS) return
+      lastSeekAtRef.current = now
+      e.preventDefault()
+      queueRelativeSeek(e.key === 'ArrowLeft' ? -SEEK_STEP_SEC : SEEK_STEP_SEC)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [queueRelativeSeek])
+
+  useEffect(() => {
+    return () => {
+      if (seekApplyTimerRef.current) clearTimeout(seekApplyTimerRef.current)
+      if (seekHintTimerRef.current) clearTimeout(seekHintTimerRef.current)
+    }
+  }, [])
 
   const changeVolume = (v: number) => {
     const el = video()
@@ -380,7 +519,39 @@ export function PlayerControls({
   const canAdjustSelectedSubtitle = selectedSubtitle?.delivery === 'webvtt'
   const usesOriginalASS = selectedSubtitle?.delivery === 'ass'
 
+  const seekOverlay = seekHint && stageEl
+    ? createPortal(
+        <div className="pointer-events-none absolute inset-0 z-30">
+          <div
+            className={`absolute top-1/2 flex w-36 -translate-y-1/2 flex-col items-center justify-center rounded-full bg-black/55 px-3 py-5 text-white shadow-lg backdrop-blur-sm ${
+              seekHint.dir === 'back' ? 'left-[8%] sm:left-[12%]' : 'right-[8%] sm:right-[12%]'
+            }`}
+          >
+            {seekHint.dir === 'back' ? <Rewind size={28} /> : <FastForward size={28} />}
+            <span className="mt-1 text-center text-sm font-medium leading-tight">
+              {seekHint.seconds > 0
+                ? seekHint.dir === 'back'
+                  ? '回退'
+                  : '快进'
+                : seekHint.dir === 'back'
+                  ? '已到开头'
+                  : '已到结尾'}
+              {seekHint.seconds > 0 && (
+                <>
+                  <br />
+                  <span className="tabular-nums">{seekHint.seconds} 秒</span>
+                </>
+              )}
+            </span>
+          </div>
+        </div>,
+        stageEl,
+      )
+    : null
+
   return (
+    <>
+    {seekOverlay}
     <div
       className={`pointer-events-auto absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-black/80 via-black/40 to-transparent px-3 pb-3 pt-14 transition-opacity duration-300 ${
         uiVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
@@ -645,5 +816,6 @@ export function PlayerControls({
         </button>
       </div>
     </div>
+    </>
   )
 }

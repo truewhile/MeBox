@@ -226,6 +226,34 @@ func (p *ImageProxy) acquireResizeSlot(ctx context.Context) (func(), bool) {
 	}
 }
 
+// tryAcquireResizeSlot 不等待。槽位忙时返回 false，调用方应改出原图。
+func (p *ImageProxy) tryAcquireResizeSlot() (func(), bool) {
+	if p == nil {
+		return func() {}, true
+	}
+	p.resizeSemMu.Lock()
+	if p.resizeSem == nil {
+		p.resizeSem = make(chan struct{}, imageResizeConcurrency())
+	}
+	sem := p.resizeSem
+	p.resizeSemMu.Unlock()
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, true
+	default:
+		return nil, false
+	}
+}
+
+// acquireResizeSlotFor 对中等体积的图只尝试一次槽位。忙则放弃缩放，
+// 避免背景图墙在 2 核机器上排成数秒。超大原图仍等待，以免直出多兆字节。
+func (p *ImageProxy) acquireResizeSlotFor(ctx context.Context, size int64) (func(), bool) {
+	if size > 0 && size <= resizeQueueBypassBytes {
+		return p.tryAcquireResizeSlot()
+	}
+	return p.acquireResizeSlot(ctx)
+}
+
 // serveResizedFromFile 从 srcPath 读取图片，按选项缩放后写出，并把结果缓存
 // 到磁盘以免每次请求都重新解码。原图已满足目标尺寸时直接输出原文件。
 // 返回 false 表示缩放不可用，调用方应回退到原图直出。
@@ -247,7 +275,7 @@ func (p *ImageProxy) serveResizedFromFile(w http.ResponseWriter, r *http.Request
 		return true
 	}
 
-	release, ok := p.acquireResizeSlot(r.Context())
+	release, ok := p.acquireResizeSlotFor(r.Context(), stat.Size())
 	if !ok {
 		return false
 	}
@@ -280,8 +308,12 @@ func (p *ImageProxy) serveResizedFromFile(w http.ResponseWriter, r *http.Request
 
 // compactImageSkipBytes 是“直接出原图”的体积上限。超过它的原图（多兆字节
 // 的剧照、未压缩 sidecar）仍然走缩放，避免把大文件直接塞给电视端。
-// ponytail: 200KB 覆盖这台机器上的典型海报（平均约 100KB）；更大的图仍排队缩放。
+// ponytail: 200KB 覆盖这台机器上的典型海报（平均约 100KB）；更大的图仍尝试缩放。
 const compactImageSkipBytes = 200 * 1024
+
+// resizeQueueBypassBytes 是“槽位忙就放弃缩放”的上限。超过它的原图继续排队，
+// 以免把未压缩的剧照直接发给客户端。
+const resizeQueueBypassBytes = 1536 * 1024
 
 // serveCompactOriginal 在源文件已经很小且是浏览器可直接显示的 JPEG/WebP 时
 // 跳过解码。返回 false 表示仍应走缩放路径。

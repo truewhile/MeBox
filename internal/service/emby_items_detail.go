@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -120,44 +121,87 @@ func (e *EmbyService) Item(ctx context.Context, mediaID, userID string) (map[str
 	return e.itemPayload(e.withPayloadCache(ctx), m, fav, pos, true), nil
 }
 
-// LatestItems 最近添加，全库或指定库。远程媒体库(parentID 带前缀)直接透传远程。
+// LatestItems 最近添加，全库或指定库。远程媒体库(parentID 带前缀)走远程并缓存。
 func (e *EmbyService) LatestItems(ctx context.Context, userID, parentID string, limit int) ([]map[string]any, error) {
+	if e == nil {
+		return nil, nil
+	}
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	if e.remote != nil && IsEmbyRemoteID(parentID) {
-		mountID, remoteParent, _ := DecodeEmbyRemoteID(parentID)
-		mount, acct, _ := e.remote.ResolveMount(ctx, mountID)
-		if mount == nil || acct == nil {
-			return nil, nil
+	cacheKey := e.embyLatestCacheKey(userID, parentID, limit)
+	if items, ok := e.cachedLatestItems(ctx, cacheKey); ok {
+		return items, nil
+	}
+	// 一个客户端断开不应取消正在为其他客户端填充的共享重建。
+	loadCtx := context.WithoutCancel(ctx)
+	v, err, _ := e.latestFlight.Do(cacheKey, func() (any, error) {
+		if items, ok := e.cachedLatestItems(loadCtx, cacheKey); ok {
+			return embyLatestCacheValue{Items: items}, nil
 		}
-		if !EmbyMountLibraryAllowed(e.mediaVisibility(ctx, userID), mount) {
-			return nil, nil
-		}
-		out, err := e.remote.RemoteLatest(ctx, mount, acct, remoteParent, limit)
+		value, err := e.loadLatestItems(loadCtx, userID, parentID, limit)
 		if err != nil {
 			return nil, err
 		}
-		if err := e.mergeRemoteUserData(ctx, userID, out); err != nil {
-			return nil, err
+		if e.cache != nil {
+			e.cache.SetJSON(loadCtx, cacheKey, value, time.Duration(e.embyLatestCacheTTLSeconds())*time.Second)
 		}
-		return out, nil
+		e.rememberArtworkRefs(value.Artwork)
+		return value, nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	cacheKey := e.embyLatestCacheKey(userID, parentID, limit)
+	cached, _ := v.(embyLatestCacheValue)
+	if cached.Items == nil {
+		return []map[string]any{}, nil
+	}
+	return cached.Items, nil
+}
+
+func (e *EmbyService) cachedLatestItems(ctx context.Context, cacheKey string) ([]map[string]any, bool) {
+	if e == nil || e.cache == nil {
+		return nil, false
+	}
 	var cached embyLatestCacheValue
-	if e.cache != nil && e.cache.GetJSON(ctx, cacheKey, &cached) {
-		e.rememberArtworkRefs(cached.Artwork)
-		return cached.Items, nil
+	if !e.cache.GetJSON(ctx, cacheKey, &cached) {
+		return nil, false
+	}
+	e.rememberArtworkRefs(cached.Artwork)
+	if cached.Items == nil {
+		return []map[string]any{}, true
+	}
+	return cached.Items, true
+}
+
+func (e *EmbyService) loadLatestItems(ctx context.Context, userID, parentID string, limit int) (embyLatestCacheValue, error) {
+	if e.remote != nil && IsEmbyRemoteID(parentID) {
+		mountID, remoteParent, _ := DecodeEmbyRemoteID(parentID)
+		mount, acct, _ := e.remote.ResolveMount(ctx, mountID)
+		if mount == nil || acct == nil || !EmbyMountLibraryAllowed(e.mediaVisibility(ctx, userID), mount) {
+			return embyLatestCacheValue{Items: []map[string]any{}}, nil
+		}
+		out, err := e.remote.RemoteLatest(ctx, mount, acct, remoteParent, limit)
+		if err != nil {
+			return embyLatestCacheValue{}, err
+		}
+		if out == nil {
+			out = []map[string]any{}
+		}
+		if err := e.mergeRemoteUserData(ctx, userID, out); err != nil {
+			return embyLatestCacheValue{}, err
+		}
+		return embyLatestCacheValue{Items: out}, nil
 	}
 	q := e.repo.DB.WithContext(ctx).Model(&model.Media{}).Where("deleted_at IS NULL")
 	q = e.applyUserMediaVisibility(ctx, q, userID)
 	if parentID != "" {
 		if episodic, err := e.libraryIsEpisodic(ctx, parentID); err == nil && episodic {
 			out, artwork, err := e.latestSeriesItemsForLibrary(ctx, userID, parentID, limit)
-			if err == nil && e.cache != nil {
-				e.cache.SetJSON(ctx, cacheKey, embyLatestCacheValue{Items: out, Artwork: artwork}, time.Duration(e.embyLatestCacheTTLSeconds())*time.Second)
+			if err != nil {
+				return embyLatestCacheValue{}, err
 			}
-			return out, err
+			return embyLatestCacheValue{Items: out, Artwork: artwork}, nil
 		}
 		q = q.Where("library_id IN ?", e.mergedLibraryIDs(ctx, parentID))
 	}
@@ -170,7 +214,7 @@ func (e *EmbyService) LatestItems(ctx context.Context, userID, parentID string, 
 	}
 	var rows []model.Media
 	if err := q.Order(mediaReleaseOrderSQL(true)).Limit(rowLimit).Find(&rows).Error; err != nil {
-		return nil, err
+		return embyLatestCacheValue{}, err
 	}
 	rows = e.collapseMediaVersionRows(ctx, rows)
 	if len(rows) > limit {
@@ -178,12 +222,9 @@ func (e *EmbyService) LatestItems(ctx context.Context, userID, parentID string, 
 	}
 	out, err := e.payloadsForMedia(ctx, rows, userID)
 	if err != nil {
-		return nil, err
+		return embyLatestCacheValue{}, err
 	}
-	if e.cache != nil {
-		e.cache.SetJSON(ctx, cacheKey, embyLatestCacheValue{Items: out}, time.Duration(e.embyLatestCacheTTLSeconds())*time.Second)
-	}
-	return out, nil
+	return embyLatestCacheValue{Items: out}, nil
 }
 
 func (e *EmbyService) latestSeriesItemsForLibrary(ctx context.Context, userID, libraryID string, limit int) ([]map[string]any, map[string]embyArtworkRef, error) {
@@ -194,7 +235,8 @@ func (e *EmbyService) latestSeriesItemsForLibrary(ctx context.Context, userID, l
 		Where("library_id IN ? AND (season_num > 0 OR episode_num > 0)", e.mergedLibraryIDs(ctx, libraryID))
 	q = e.applyUserMediaVisibility(ctx, q, userID)
 	var rows []model.Media
-	if err := q.Order(mediaReleaseOrderSQL(true)).Limit(embySeriesGroupingLimit).Find(&rows).Error; err != nil {
+	// 只要最近几部剧的卡片，不要把整库 5 万行拉进内存再丢掉。
+	if err := q.Order(mediaReleaseOrderSQL(true)).Limit(embyLatestSeriesRowLimit(limit)).Find(&rows).Error; err != nil {
 		return nil, nil, err
 	}
 	groups := e.seriesGroupsFromMedia(ctx, rows)
@@ -207,6 +249,24 @@ func (e *EmbyService) latestSeriesItemsForLibrary(ctx context.Context, userID, l
 		items = append(items, e.seriesPayload(group))
 	}
 	return items, e.artworkRefsForSeriesGroups(groups), nil
+}
+
+// embyLatestSeriesRowLimit 是 Latest 剧集卡片的候选窗口。按「每部剧最近约 40
+// 集」估，刚好覆盖现有 25 部 × 40 集的分组测试，又不会为了 16 张海报去扫整库。
+// ponytail: 一部长剧如果占满窗口，更老的剧不会出现在 Latest 行；点进媒体库
+// 仍走完整分组。上限 2000 行。
+func embyLatestSeriesRowLimit(limit int) int {
+	if limit < 1 {
+		limit = 20
+	}
+	n := limit * 40
+	if n < 200 {
+		n = 200
+	}
+	if n > 2000 {
+		n = 2000
+	}
+	return n
 }
 
 // ResumeItems 列出有未完成播放进度的媒体。
@@ -393,7 +453,7 @@ func (e *EmbyService) resumableItems(ctx context.Context, p ItemsParams) (map[st
 	// 总数用候选行数（本地过滤后 + 远程候选），对继续观看行的翻页语义
 	// 足够准确。
 	needed := p.StartIndex + p.Limit
-	items := make([]map[string]any, 0, p.Limit)
+	slots := make([]resumeSlot, 0, len(hist))
 	localTotal, remoteTotal := 0, 0
 	for _, h := range hist {
 		if m, ok := byID[h.MediaID]; ok {
@@ -401,36 +461,77 @@ func (e *EmbyService) resumableItems(ctx context.Context, p ItemsParams) (map[st
 				continue
 			}
 			localTotal++
-			if produced := len(items); produced < needed {
-				items = append(items, e.itemPayload(ctx, m, false, h.PositionMs, false))
-			}
+			slots = append(slots, resumeSlot{item: e.itemPayload(ctx, m, false, h.PositionMs, false)})
 			continue
 		}
 		if e.remote == nil || !IsEmbyRemoteID(h.MediaID) {
 			continue
 		}
 		remoteTotal++
-		if len(items) >= needed {
-			continue
-		}
-		mountID, remoteID, _ := DecodeEmbyRemoteID(h.MediaID)
-		mount, acct, err := e.remote.ResolveMount(ctx, mountID)
-		if err != nil || mount == nil || acct == nil {
-			continue
-		}
-		item, err := e.remote.RemoteItem(ctx, mount, acct, remoteID)
-		if err != nil || item == nil {
-			continue
-		}
-		if p.ParentID != "" {
-			parentID, _ := item["ParentId"].(string)
-			seriesID, _ := item["SeriesId"].(string)
-			if parentID != p.ParentID && seriesID != p.ParentID && mountID != p.ParentID {
+		slots = append(slots, resumeSlot{fetch: &resumeRemoteFetch{hist: h}})
+	}
+	for {
+		filled := 0
+		pending := make([]*resumeRemoteFetch, 0)
+		for i := range slots {
+			if slots[i].item != nil {
+				filled++
+				if filled >= needed {
+					break
+				}
 				continue
 			}
+			f := slots[i].fetch
+			if f == nil || f.done {
+				continue
+			}
+			if f.mount == nil {
+				mountID, remoteID, _ := DecodeEmbyRemoteID(f.hist.MediaID)
+				mount, acct, err := e.remote.ResolveMount(ctx, mountID)
+				if err != nil || mount == nil || acct == nil {
+					f.done = true
+					continue
+				}
+				f.mount, f.acct, f.remoteID = mount, acct, remoteID
+			}
+			pending = append(pending, f)
+			if filled+len(pending) >= needed {
+				break
+			}
 		}
-		item["UserData"] = mergedRemoteUserData(item["UserData"], &h)
-		items = append(items, item)
+		if len(pending) == 0 {
+			break
+		}
+		e.fillResumeRemotes(ctx, pending)
+		for i := range slots {
+			f := slots[i].fetch
+			if f == nil || !pendingContains(pending, f) {
+				continue
+			}
+			f.done = true
+			item := f.item
+			f.item = nil
+			if item == nil {
+				continue
+			}
+			if p.ParentID != "" {
+				parentID, _ := item["ParentId"].(string)
+				seriesID, _ := item["SeriesId"].(string)
+				mountID, _, _ := DecodeEmbyRemoteID(f.hist.MediaID)
+				if parentID != p.ParentID && seriesID != p.ParentID && mountID != p.ParentID {
+					continue
+				}
+			}
+			item["UserData"] = mergedRemoteUserData(item["UserData"], &f.hist)
+			slots[i].item = item
+		}
+	}
+	items := make([]map[string]any, 0, p.Limit)
+	for i := range slots {
+		if slots[i].item == nil {
+			continue
+		}
+		items = append(items, slots[i].item)
 	}
 
 	total := int64(localTotal + remoteTotal)
@@ -439,6 +540,57 @@ func (e *EmbyService) resumableItems(ctx context.Context, p ItemsParams) (map[st
 	}
 	end := minInt(p.StartIndex+p.Limit, len(items))
 	return map[string]any{"Items": items[p.StartIndex:end], "TotalRecordCount": total, "StartIndex": p.StartIndex}, nil
+}
+
+type resumeSlot struct {
+	item  map[string]any
+	fetch *resumeRemoteFetch
+}
+
+type resumeRemoteFetch struct {
+	hist     model.PlaybackHistory
+	mount    *model.EmbyMount
+	acct     *model.StrmAccount
+	remoteID string
+	item     map[string]any
+	done     bool
+}
+
+func pendingContains(rows []*resumeRemoteFetch, target *resumeRemoteFetch) bool {
+	for _, row := range rows {
+		if row == target {
+			return true
+		}
+	}
+	return false
+}
+
+// fillResumeRemotes 并行补齐继续观看里的远程条目。同一页以前是串行 GET，
+// 远程一慢就把整个 Resume 拖到数秒。结果按原播放历史顺序回填。
+func (e *EmbyService) fillResumeRemotes(ctx context.Context, rows []*resumeRemoteFetch) {
+	if e == nil || e.remote == nil || len(rows) == 0 {
+		return
+	}
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4)
+	for i := range rows {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+			item, err := e.remote.RemoteItem(ctx, rows[i].mount, rows[i].acct, rows[i].remoteID)
+			if err != nil || item == nil {
+				return
+			}
+			rows[i].item = item
+		}(i)
+	}
+	wg.Wait()
 }
 
 func (e *EmbyService) itemPayload(ctx context.Context, m *model.Media, fav bool, posMs int64, includePeople bool) map[string]any {
