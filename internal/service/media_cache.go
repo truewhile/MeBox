@@ -69,6 +69,23 @@ func (s *MediaService) seriesCardsCacheKey(libraryID string, visibility MediaVis
 	return "media:series-cards:" + hex.EncodeToString(sum[:])
 }
 
+func (s *MediaService) libraryCountCacheKey(libraryIDs []string, filter repository.MediaQueryFilter) string {
+	ids := append([]string(nil), libraryIDs...)
+	allowed := append([]string(nil), filter.AllowedLibraryIDs...)
+	hidden := append([]string(nil), filter.HiddenLibraryIDs...)
+	sort.Strings(ids)
+	sort.Strings(allowed)
+	sort.Strings(hidden)
+	sum := sha1.Sum([]byte(strings.Join([]string{
+		"counts",
+		strings.Join(ids, ","),
+		fmt.Sprintf("%t", filter.IncludeNSFW),
+		strings.Join(allowed, ","),
+		strings.Join(hidden, ","),
+	}, "|")))
+	return "media:lib-counts:" + hex.EncodeToString(sum[:])
+}
+
 func (s *MediaService) mediaCacheTTLSeconds() int {
 	if s == nil || s.cfg == nil || s.cfg.Cache.MediaTTLSeconds < 1 {
 		return 90
@@ -80,6 +97,18 @@ func (s *MediaService) mediaCacheTTLSeconds() int {
 // 的 DeletePrefix("media:")（对象存储一并清除）。
 func (s *MediaService) mediaObjectTTL() time.Duration {
 	return time.Duration(s.mediaCacheTTLSeconds()) * time.Second
+}
+
+// derivedReadCacheTTL 给首页预览、剧集分组、库计数这类派生读缓存一个更长的
+// 下限。扫描/刮削/删改都会走 invalidateMediaCache 清掉 media: 前缀，所以
+// 拉长 TTL 不会在写入后继续吐旧卡片。配置里的 TTL 更长时仍以配置为准。
+func (s *MediaService) derivedReadCacheTTL() time.Duration {
+	ttl := s.mediaObjectTTL()
+	const floor = 10 * time.Minute
+	if ttl < floor {
+		return floor
+	}
+	return ttl
 }
 
 func hashObjectCacheKey(parts []string) string {

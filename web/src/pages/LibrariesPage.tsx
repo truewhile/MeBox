@@ -15,6 +15,7 @@ import type { Library } from '../types'
 import type { SeriesCard } from '../utils/groupSeries'
 import { fetchLibraries, invalidateLibraries, peekLibraries } from '../utils/libraryCache'
 import { sortLibraryPreviews } from '../utils/pinnedLibraries'
+import { partitionPreviewIDs } from '../utils/remoteEmby'
 
 export function LibrariesPage() {
   const [libraries, setLibraries] = useState<Library[]>([])
@@ -33,30 +34,33 @@ export function LibrariesPage() {
     if (targets.length === 0) return
     targets.forEach((id) => fetchingRef.current.add(id))
 
-    let loaded = false
-    try {
-      const rows = await libraryAPI.listPreviews(targets, 10)
-      loaded = true
-      setLibraryData((prev) => {
-        const next = { ...prev }
-        for (const row of rows) {
-          next[row.id] = {
-            cards: row.cards ?? [],
-            total: row.total ?? 0,
-          }
+    const batches = partitionPreviewIDs(targets)
+    await Promise.allSettled(
+      batches.map(async (batch) => {
+        let loaded = false
+        try {
+          const rows = await libraryAPI.listPreviews(batch, 10)
+          loaded = true
+          setLibraryData((prev) => {
+            const next = { ...prev }
+            for (const row of rows) {
+              next[row.id] = {
+                cards: row.cards ?? [],
+                total: row.total ?? 0,
+              }
+            }
+            return next
+          })
+        } catch {
+          // 单个批次失败不影响其他批次。
+        } finally {
+          batch.forEach((id) => {
+            if (loaded) fetchedLibIdsRef.current.add(id)
+            fetchingRef.current.delete(id)
+          })
         }
-        return next
-      })
-    } catch {
-      // 容错
-    } finally {
-      targets.forEach((id) => {
-        if (loaded) {
-          fetchedLibIdsRef.current.add(id)
-        }
-        fetchingRef.current.delete(id)
-      })
-    }
+      }),
+    )
   }, [])
 
   const loadLibraries = useCallback(async (options?: { force?: boolean }) => {

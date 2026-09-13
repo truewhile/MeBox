@@ -8,6 +8,7 @@ import type { SeriesCard } from '../utils/groupSeries'
 import { fetchLibraries, peekLibraries } from '../utils/libraryCache'
 import { usePinnedLibraries } from '../hooks/usePinnedLibraries'
 import { sortByPinnedIds } from '../utils/pinnedLibraries'
+import { partitionPreviewIDs } from '../utils/remoteEmby'
 import {
   ContinueWatchingSection,
   ContinueWatchingSkeleton,
@@ -18,7 +19,6 @@ import {
   HomeLoadingState,
 } from './HomePageSections'
 
-const PREVIEW_BATCH_SIZE = 4
 const hasArtwork = (media?: Media | null) => !!(media?.poster_url || media?.backdrop_url)
 
 export function HomePage() {
@@ -102,12 +102,10 @@ export function HomePage() {
     if (targets.length === 0) return
     targets.forEach((id) => fetchingPreviewLimitsRef.current.set(id, limit))
 
-    const batches: string[][] = []
-    for (let i = 0; i < targets.length; i += PREVIEW_BATCH_SIZE) {
-      batches.push(targets.slice(i, i + PREVIEW_BATCH_SIZE))
-    }
+    // 本地库一次拉完（同一条窗口查询、缓存键稳定）。远程库单独一批，
+    // 避免一个慢的 Emby 挂载拖住整页预览。
+    const batches = partitionPreviewIDs(targets)
 
-    // 分批并发：一个慢库不再阻塞整页预览，先返回的批次立即渲染。
     await Promise.allSettled(
       batches.map(async (batch) => {
         let loaded = false

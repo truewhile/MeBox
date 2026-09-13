@@ -388,6 +388,17 @@ func (r *EmbyRemoteService) RemoteMediaDetail(ctx context.Context, mount *model.
 // remoteMediaDetailRaw 拉取远程条目详情，同时返回原始载荷（ID 已伪装），
 // 供调用方免二次请求读取 Type / SeriesId 等字段。
 func (r *EmbyRemoteService) remoteMediaDetailRaw(ctx context.Context, mount *model.EmbyMount, acct *model.StrmAccount, remoteID string) (*model.Media, map[string]any, error) {
+	cacheKey := ""
+	if r != nil && r.cache != nil && mount != nil && remoteID != "" {
+		cacheKey = r.remoteCacheKey("detail", mount.ID, remoteID)
+		var cached struct {
+			Media *model.Media   `json:"media"`
+			Raw   map[string]any `json:"raw"`
+		}
+		if r.cache.GetJSON(ctx, cacheKey, &cached) && cached.Media != nil {
+			return cached.Media, cached.Raw, nil
+		}
+	}
 	cfg, err := r.remoteConfigWithToken(ctx, acct)
 	if err != nil {
 		return nil, nil, err
@@ -400,6 +411,12 @@ func (r *EmbyRemoteService) remoteMediaDetailRaw(ctx context.Context, mount *mod
 	}
 	RewriteEmbyRemoteIDs(out, mount.ID)
 	m := r.MapRemoteItemToMedia(ctx, mount, acct, cfg, out)
+	if cacheKey != "" {
+		r.cache.SetJSON(ctx, cacheKey, struct {
+			Media *model.Media   `json:"media"`
+			Raw   map[string]any `json:"raw"`
+		}{Media: &m, Raw: out}, r.remoteMediaCacheTTL())
+	}
 	return &m, out, nil
 }
 

@@ -10,10 +10,10 @@ export function useFavourites() {
   useEffect(() => {
     let cancelled = false
     playbackAPI
-      .listFavourites()
+      .listFavouriteIDs()
       .then((items) => {
         if (!cancelled) {
-          setFavouriteIDs(new Set((items ?? []).map((item) => item.id)))
+          setFavouriteIDs(new Set(items ?? []))
         }
       })
       .catch(() => {

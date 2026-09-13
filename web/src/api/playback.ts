@@ -61,6 +61,9 @@ export const playbackAPI = {
   listFavourites: () =>
     api.get<{ items: Media[] }>('/favourites').then((r) => r.data.items),
 
+  listFavouriteIDs: () =>
+    api.get<{ ids: string[] }>('/favourites', { params: { ids: 1 } }).then((r) => r.data.ids ?? []),
+
   listPlaylists: () =>
     api.get<{ items: Playlist[] }>('/playlists').then((r) => r.data.items),
 

@@ -85,6 +85,18 @@ func toggleFavouriteHandler(svc *service.Container) gin.HandlerFunc {
 func listFavouritesHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		uid, _ := c.Get(middleware.CtxUserID)
+		if c.Query("ids") == "1" {
+			ids, err := svc.Playback.ListFavouriteIDs(c.Request.Context(), uid.(string))
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			if ids == nil {
+				ids = []string{}
+			}
+			c.JSON(http.StatusOK, gin.H{"ids": ids})
+			return
+		}
 		items, err := svc.Playback.ListFavourites(c.Request.Context(), uid.(string))
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

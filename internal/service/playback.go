@@ -265,6 +265,23 @@ func (p *PlaybackService) ListFavourites(ctx context.Context, userID string) ([]
 	return out, nil
 }
 
+// ListFavouriteIDs returns the user's favourite media IDs without hydrating
+// remote Emby items. Heart-icon state only needs the IDs; fetching each remote
+// detail on every library open adds a few hundred milliseconds.
+func (p *PlaybackService) ListFavouriteIDs(ctx context.Context, userID string) ([]string, error) {
+	favs, err := p.repo.Favorite.ListByUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(favs))
+	for _, fav := range favs {
+		if fav.MediaID != "" {
+			ids = append(ids, fav.MediaID)
+		}
+	}
+	return ids, nil
+}
+
 // ─── Playlists ──────────────────────────────────────────────────────────────
 
 // CreatePlaylist persists a new playlist owned by userID.

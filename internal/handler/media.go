@@ -123,7 +123,7 @@ func listLibrariesHandler(svc *service.Container) gin.HandlerFunc {
 			for i, l := range libs {
 				libIDs[i] = l.ID
 			}
-			counts, _ := svc.Repo.Media.CountByLibraries(ctx, libIDs, repository.MediaQueryFilter{
+			counts, _ := svc.Media.CountLibrariesCached(ctx, libIDs, repository.MediaQueryFilter{
 				IncludeNSFW:       visibility.IncludeNSFW,
 				AllowedLibraryIDs: visibility.AllowedLibraryIDs,
 				HiddenLibraryIDs:  visibility.HiddenLibraryIDs,

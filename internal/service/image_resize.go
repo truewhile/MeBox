@@ -241,6 +241,11 @@ func (p *ImageProxy) serveResizedFromFile(w http.ResponseWriter, r *http.Request
 	if serveCachedImageFile(w, r, key, cachePath) {
 		return true
 	}
+	// 本地海报大多已经是一百多 KB 的 JPEG。先解码再缩放会把 2 核机器的
+	// 并发槽（2）堵成数秒队列。体积已经适合直接下发时，不要排队。
+	if serveCompactOriginal(w, r, srcPath, stat) {
+		return true
+	}
 
 	release, ok := p.acquireResizeSlot(r.Context())
 	if !ok {
@@ -271,6 +276,39 @@ func (p *ImageProxy) serveResizedFromFile(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Cache-Control", imageBrowserCacheControl)
 	http.ServeContent(w, r, key, stat.ModTime(), bytes.NewReader(out))
 	return true
+}
+
+// compactImageSkipBytes 是“直接出原图”的体积上限。超过它的原图（多兆字节
+// 的剧照、未压缩 sidecar）仍然走缩放，避免把大文件直接塞给电视端。
+// ponytail: 200KB 覆盖这台机器上的典型海报（平均约 100KB）；更大的图仍排队缩放。
+const compactImageSkipBytes = 200 * 1024
+
+// serveCompactOriginal 在源文件已经很小且是浏览器可直接显示的 JPEG/WebP 时
+// 跳过解码。返回 false 表示仍应走缩放路径。
+func serveCompactOriginal(w http.ResponseWriter, r *http.Request, srcPath string, stat os.FileInfo) bool {
+	if stat == nil || stat.Size() <= 0 || stat.Size() > compactImageSkipBytes {
+		return false
+	}
+	file, err := os.Open(srcPath) // #nosec G304 -- srcPath is an allowed local path or a SHA-derived cache path.
+	if err != nil {
+		return false
+	}
+	var header [12]byte
+	n, _ := file.Read(header[:])
+	_ = file.Close()
+	if !isCompactWebImage(header[:n]) {
+		return false
+	}
+	return serveImageFile(w, r, filepath.Base(srcPath), srcPath, imageBrowserCacheControl)
+}
+
+func isCompactWebImage(header []byte) bool {
+	if len(header) >= 3 && header[0] == 0xff && header[1] == 0xd8 && header[2] == 0xff {
+		return true
+	}
+	return len(header) >= 12 &&
+		string(header[0:4]) == "RIFF" &&
+		string(header[8:12]) == "WEBP"
 }
 
 // writeResizeCache 原子写入缩放结果；失败只记日志，不影响本次响应。

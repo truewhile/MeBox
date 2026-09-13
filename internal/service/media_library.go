@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"time"
 
 	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/repository"
@@ -22,6 +21,31 @@ type libraryPreviewCacheValue struct {
 // ListLibraries returns every library configured on the server.
 func (s *MediaService) ListLibraries(ctx context.Context) ([]model.Library, error) {
 	return s.repo.Library.List(ctx)
+}
+
+// CountLibrariesCached returns per-library media totals. The homepage metadata
+// request asks for every library, and the underlying COUNT is repeated on each
+// refresh. Writes already drop the media: prefix, so a longer TTL is safe.
+func (s *MediaService) CountLibrariesCached(ctx context.Context, libraryIDs []string, filter repository.MediaQueryFilter) (map[string]int64, error) {
+	if len(libraryIDs) == 0 {
+		return map[string]int64{}, nil
+	}
+	cacheKey := s.libraryCountCacheKey(libraryIDs, filter)
+	var cached map[string]int64
+	if s.cache != nil && s.cache.GetJSON(ctx, cacheKey, &cached) && cached != nil {
+		return cached, nil
+	}
+	counts, err := s.repo.Media.CountByLibraries(ctx, libraryIDs, filter)
+	if err != nil {
+		return nil, err
+	}
+	if counts == nil {
+		counts = map[string]int64{}
+	}
+	if s.cache != nil {
+		s.cache.SetJSON(ctx, cacheKey, counts, s.derivedReadCacheTTL())
+	}
+	return counts, nil
 }
 
 // ListLibrariesWithPreview returns libraries populated with item counts and latest preview cards.
@@ -120,7 +144,7 @@ func (s *MediaService) listLibrariesWithPreview(ctx context.Context, libraries [
 	}
 
 	if s.cache != nil {
-		s.cache.SetJSON(ctx, cacheKey, libraryPreviewCacheValue{Items: out}, time.Duration(s.mediaCacheTTLSeconds())*time.Second)
+		s.cache.SetJSON(ctx, cacheKey, libraryPreviewCacheValue{Items: out}, s.derivedReadCacheTTL())
 	}
 
 	return out, nil

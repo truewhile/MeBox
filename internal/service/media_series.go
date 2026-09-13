@@ -70,7 +70,7 @@ func (s *MediaService) libraryRowsWithIndex(ctx context.Context, libraryID strin
 	cards := groupMediaSeriesCardsByKeys(rows, keys)
 	value := &libraryRowsCacheValue{Rows: rows, Resolver: resolver, Episodes: episodes, Cards: cards}
 	if s.cache != nil {
-		s.cache.SetObject(cacheKey, value, s.mediaObjectTTL())
+		s.cache.SetObject(cacheKey, value, s.derivedReadCacheTTL())
 	}
 	return value, nil
 }
@@ -99,7 +99,7 @@ func (s *MediaService) ListLibrarySeriesCards(ctx context.Context, libraryID str
 	}
 	total := int64(len(cards))
 	if s.cache != nil {
-		s.cache.SetObject(cacheKey, &seriesCardsCacheValue{Cards: cards, Total: total}, s.mediaObjectTTL())
+		s.cache.SetObject(cacheKey, &seriesCardsCacheValue{Cards: cards, Total: total}, s.derivedReadCacheTTL())
 	}
 	return cards, total, nil
 }

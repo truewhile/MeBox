@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"net/http/httptest"
 	"os"
@@ -272,5 +273,29 @@ func TestServeResizedFromFileUsesCacheBeforeDecodingSource(t *testing.T) {
 	}
 	if !bytes.Equal(first.Body.Bytes(), second.Body.Bytes()) {
 		t.Fatal("expected cached thumbnail to be reused without decoding the source")
+	}
+}
+
+func TestServeResizedFromFileSkipsDecodeForCompactJPEG(t *testing.T) {
+	dir := t.TempDir()
+	src := dir + string(os.PathSeparator) + "poster.jpg"
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 800, 1200)), &jpeg.Options{Quality: 40}); err != nil {
+		t.Fatalf("encode jpeg: %v", err)
+	}
+	if buf.Len() == 0 || buf.Len() > compactImageSkipBytes {
+		t.Fatalf("test jpeg is %d bytes, want a compact poster", buf.Len())
+	}
+	if err := os.WriteFile(src, buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	proxy := &ImageProxy{cacheDir: dir + string(os.PathSeparator) + "cache"}
+	rec := httptest.NewRecorder()
+	if !proxy.serveResizedFromFile(rec, httptest.NewRequest("GET", "/x?maxWidth=120", nil), src, imageResizeOptions{MaxWidth: 120}) {
+		t.Fatal("expected compact jpeg to be served")
+	}
+	if !bytes.Equal(rec.Body.Bytes(), buf.Bytes()) {
+		t.Fatal("expected the original jpeg, not a decoded thumbnail")
 	}
 }
