@@ -101,7 +101,21 @@ func localBackdropCandidates(mediaPath string) []string {
 		seen[key] = struct{}{}
 		names = append(names, name)
 	}
+	_, episode := ParseEpisode(mediaPath)
 	for _, base := range mediaSidecarBaseVariants(mediaPath) {
+		// Jellyfin/Emby commonly stores an episode still beside the video as
+		// "<episode>-thumb.jpg" or "<episode>.jpg". Episode-specific artwork
+		// must win over a series-level fanart.jpg in the parent folder,
+		// otherwise a rescan flattens every episode to the same backdrop.
+		add(base + "-thumb")
+		add(base + ".thumb")
+		if episode > 0 {
+			add(base + "-still")
+			add(base + ".still")
+			add(base + "-scene")
+			add(base + ".scene")
+			add(base)
+		}
 		add(base + "-fanart")
 		add(base + ".fanart")
 		add(base + "-backdrop")

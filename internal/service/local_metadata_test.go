@@ -236,8 +236,8 @@ func TestReadLocalVarietyMetadataUsesLocalArtwork(t *testing.T) {
 	if got.PosterURL != showPoster {
 		t.Fatalf("PosterURL = %q, want show poster %q, not episode thumb %q", got.PosterURL, showPoster, episodeThumb)
 	}
-	if got.BackdropURL != backdrop {
-		t.Fatalf("BackdropURL = %q, want %q", got.BackdropURL, backdrop)
+	if got.BackdropURL != episodeThumb {
+		t.Fatalf("BackdropURL = %q, want episode thumb %q, not series backdrop %q", got.BackdropURL, episodeThumb, backdrop)
 	}
 }
 
