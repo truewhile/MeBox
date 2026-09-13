@@ -210,20 +210,34 @@ export type ImageURLOptions =
   | {
       refreshCache?: boolean
       retryFailed?: boolean
+      maxWidth?: number
+      maxHeight?: number
+      quality?: number
     }
 
 export function imageURL(remote?: string, version?: string, options: ImageURLOptions = false): string {
   if (!remote) return ''
   const versionQuery = version ? `v=${encodeURIComponent(version)}` : ''
-  const retryFailed = typeof options === 'boolean' ? options : Boolean(options.retryFailed)
-  const refreshCache = typeof options === 'boolean' ? false : Boolean(options.refreshCache)
+  const opts: Exclude<ImageURLOptions, boolean> = typeof options === 'boolean' ? {} : options
+  const retryFailed = typeof options === 'boolean' ? options : Boolean(opts.retryFailed)
+  const refreshCache = typeof options === 'boolean' ? false : Boolean(opts.refreshCache)
   const retryQuery = retryFailed ? 'retry=1' : ''
   const refreshQuery = refreshCache ? 'refresh=1' : ''
-  const imageQuery = [versionQuery, retryQuery, refreshQuery].filter(Boolean).join('&')
+  const resizeQuery = [
+    positiveDimensionQuery('maxWidth', opts.maxWidth),
+    positiveDimensionQuery('maxHeight', opts.maxHeight),
+    positiveDimensionQuery('quality', opts.quality, 100),
+  ].filter(Boolean).join('&')
+  const imageQuery = [versionQuery, retryQuery, refreshQuery, resizeQuery].filter(Boolean).join('&')
   if (remote.startsWith('/api/img')) return withQuery(withoutAuthQuery(remote), imageQuery)
   if (remote.startsWith('/api/cloud/play/')) return withQuery(withoutAuthQuery(remote), imageQuery)
   if (remote.startsWith('/api/')) return withQuery(withQuery(remote, tokenQuery()), imageQuery)
   return withQuery(`/api/img?url=${encodeURIComponent(remote)}`, imageQuery)
+}
+
+function positiveDimensionQuery(name: string, value?: number, max = 10_000): string {
+  if (!Number.isFinite(value) || !value || value <= 0) return ''
+  return `${name}=${Math.min(Math.round(value), max)}`
 }
 
 function withQuery(url: string, query: string): string {

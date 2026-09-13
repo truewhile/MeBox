@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useMemo, useState, Fragment, type ReactNode } from 'react'
+import { useCallback, useMemo, useState, Fragment, type ReactNode } from 'react'
 import { useLocation, useParams, useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
 
-import { historyAPI } from '../api/history'
 import type { Media } from '../types'
 import { useAuthStore } from '../stores/auth'
 import { isTheatricalFeature, type SeriesCard } from '../utils/groupSeries'
@@ -49,48 +48,10 @@ export function LibraryPage() {
     return (saved as SortOrder) || 'asc'
   })
   const [randomSeed, setRandomSeed] = useState(() => Date.now())
-  const [historyMap, setHistoryMap] = useState<Map<string, string>>(new Map())
-
-  useEffect(() => {
-    if (sortField !== 'last_played') return
-    let cancelled = false
-    historyAPI
-      .list(1000)
-      .then((historyItems) => {
-        if (cancelled) return
-        const map = new Map<string, string>()
-        for (const item of historyItems ?? []) {
-          if (item.media_id && item.watched_at) {
-            if (!map.has(item.media_id) || new Date(item.watched_at) > new Date(map.get(item.media_id)!)) {
-              map.set(item.media_id, item.watched_at)
-            }
-          }
-        }
-        setHistoryMap(map)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [sortField])
-
-  const handleSortChange = (field: SortField, order: SortOrder) => {
-    setSortField(field)
-    setSortOrder(order)
-    if (id) {
-      localStorage.setItem(`mebox_lib_sort_field_${id}`, field)
-      localStorage.setItem(`mebox_lib_sort_order_${id}`, order)
-    }
-    localStorage.setItem('mebox_lib_sort_field', field)
-    localStorage.setItem('mebox_lib_sort_order', order)
-    if (field === 'random') {
-      setRandomSeed(Date.now())
-    }
-  }
-
-  const handleReshuffle = () => {
-    setRandomSeed(Date.now())
-  }
+  const [lastNonRandomSort, setLastNonRandomSort] = useState<SortField>(sortField === 'random' ? 'release_date' : sortField)
+  const [lastNonRandomOrder, setLastNonRandomOrder] = useState<SortOrder>(sortOrder)
+  const serverSortField = sortField === 'random' ? lastNonRandomSort : sortField
+  const serverSortOrder = sortField === 'random' ? lastNonRandomOrder : sortOrder
 
   // 剧集模式：选中某个剧集后展开详情
   const [selectedSeries, setSelectedSeries] = useState<SeriesCard | null>(null)
@@ -102,22 +63,56 @@ export function LibraryPage() {
     seriesEpisodeItems,
     total,
     loading,
+    loadingMore,
+    hasMore,
+    loadMore,
+    loadAll,
     loadingSeriesEpisodes,
     isSeriesLibrary,
     isSeries,
     seriesCards,
     loadingAllText,
     reloadCurrentLibrary,
-  } = useLibraryData(id, selectedSeries)
+  } = useLibraryData(id, selectedSeries, serverSortField, serverSortOrder)
 
-  const sortedItems = useMemo(() => {
-    return sortMediaList(items, sortField, sortOrder, randomSeed, historyMap)
-  }, [items, sortField, sortOrder, randomSeed, historyMap])
+  // 常规排序由服务端全局完成；只有 random 模式才在客户端洗牌。
+  const displayedItems = useMemo(() => {
+    return sortField === 'random' ? sortMediaList(items, 'random', sortOrder, randomSeed) : items
+  }, [items, sortField, sortOrder, randomSeed])
 
-  const sortedSeriesCards = useMemo(() => {
-    return sortSeriesList(seriesCards, sortField, sortOrder, randomSeed, historyMap)
-  }, [seriesCards, sortField, sortOrder, randomSeed, historyMap])
+  const displayedSeriesCards = useMemo(() => {
+    return sortField === 'random' ? sortSeriesList(seriesCards, 'random', sortOrder, randomSeed) : seriesCards
+  }, [seriesCards, sortField, sortOrder, randomSeed])
 
+  const handleSortChange = useCallback(async (field: SortField, order: SortOrder) => {
+    if (field === 'random') {
+      if (sortField !== 'random') {
+        setLastNonRandomSort(sortField)
+        setLastNonRandomOrder(sortOrder)
+        await loadAll()
+      }
+      setRandomSeed(Date.now())
+    } else {
+      setLastNonRandomSort(field)
+      setLastNonRandomOrder(order)
+    }
+    setSortField(field)
+    setSortOrder(order)
+    if (id) {
+      localStorage.setItem(`mebox_lib_sort_field_${id}`, field)
+      localStorage.setItem(`mebox_lib_sort_order_${id}`, order)
+    }
+    localStorage.setItem('mebox_lib_sort_field', field)
+    localStorage.setItem('mebox_lib_sort_order', order)
+  }, [id, loadAll, sortField, sortOrder])
+
+  const handleLoadMore = useCallback(() => {
+    void loadMore()
+  }, [loadMore])
+
+  const handleReshuffle = () => {
+    setRandomSeed(Date.now())
+  }
   const {
     scanning,
     scanProgress,
@@ -142,7 +137,7 @@ export function LibraryPage() {
     isSeriesLibrary,
     isSeries,
     loading,
-    seriesCards: sortedSeriesCards,
+    seriesCards: displayedSeriesCards,
     searchParams,
     setSearchParams,
     selectedSeries,
@@ -236,7 +231,7 @@ export function LibraryPage() {
       {!selectedSeries && (
         <LibraryPageHeader
           library={library}
-          itemCount={isSeries ? sortedSeriesCards.length : total}
+          itemCount={isSeries ? displayedSeriesCards.length : total}
           loadingAllText={loadingAllText}
           scanProgress={scanProgress}
           isAdmin={role === 'admin'}
@@ -257,10 +252,13 @@ export function LibraryPage() {
 
       <LibraryMediaSections
         isSeries={isSeries}
-        items={sortedItems}
-        seriesCards={sortedSeriesCards}
+        items={displayedItems}
+        seriesCards={displayedSeriesCards}
         selectedSeries={selectedSeries}
         loading={loading}
+        hasMore={hasMore}
+        loadingMore={loadingMore}
+        onLoadMore={handleLoadMore}
         cardActions={cardActions}
         onSeriesClick={handleSeriesClick}
       />

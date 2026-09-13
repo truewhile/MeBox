@@ -1,10 +1,10 @@
-import { Component, Suspense, type ErrorInfo, type ReactNode } from 'react'
+import { Component, Suspense, lazy, type ErrorInfo, type ReactNode } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 
 import { appRoutes, type AppRoute } from './appRoutes'
 import { Layout } from './components/Layout'
 import { RequireAdmin, RequireAuth } from './components/RequireAuth'
-import { LoginPage } from './pages/LoginPage'
+const LoginPage = lazy(() => import('./pages/LoginPage').then((m) => ({ default: m.LoginPage })))
 
 const Loading = () => <p className="px-6 py-8 text-sand-500">加载中…</p>
 

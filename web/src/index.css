@@ -418,3 +418,42 @@ video::cue(*) {
     0 0 8px rgba(0, 0, 0, 0.8),
     0 0 16px rgba(0, 0, 0, 0.6) !important;
 }
+
+
+/* ── Entrance animations (replaces framer-motion on the critical shell) ── */
+@keyframes overlay-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes drawer-in { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+@keyframes page-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes accordion-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes fade-slide-in { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes menu-in { from { opacity: 0; transform: translateY(10px) scale(0.95); } to { opacity: 1; transform: translateY(0) scale(1); } }
+
+.animate-overlay-in { animation: overlay-in 0.15s ease-out both; }
+.animate-drawer-in { animation: drawer-in 0.22s ease-out both; }
+.animate-page-in { animation: page-in 0.25s ease-out both; }
+.animate-accordion-in { animation: accordion-in 0.18s ease-out both; }
+.animate-fade-slide-in { animation: fade-slide-in 0.2s ease-out both; }
+.animate-menu-in { animation: menu-in 0.15s ease-out both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-overlay-in,
+  .animate-drawer-in,
+  .animate-page-in,
+  .animate-accordion-in,
+  .animate-fade-slide-in,
+  .animate-menu-in { animation: none !important; }
+}
+
+
+@keyframes pulse-soft { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+@keyframes hero-in { from { opacity: 0; transform: scale(1.08); } to { opacity: 0.38; transform: scale(1.02); } }
+@keyframes title-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.animate-pulse-soft { animation: pulse-soft 1.5s ease-in-out infinite; }
+.animate-hero-in { animation: hero-in 0.8s ease-out both; }
+.animate-title-in { animation: title-in 0.3s ease-out both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse-soft,
+  .animate-hero-in,
+  .animate-title-in { animation: none !important; }
+}

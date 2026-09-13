@@ -593,3 +593,47 @@ func TestListMediaEpisodesKeepsIndependentMoviesSeparate(t *testing.T) {
 		t.Fatalf("ListMediaEpisodes got %#v, want exactly m1", eps)
 	}
 }
+
+func TestListLibrarySeriesCardsCachesPrecomputedCards(t *testing.T) {
+	db := newServiceTestDB(t, &model.Library{}, &model.Media{})
+	repos := repository.New(db)
+	lib := model.Library{Name: "动画", Path: "/media/anime", Type: "anime", Enabled: true}
+	if err := repos.Library.Create(t.Context(), &lib); err != nil {
+		t.Fatal(err)
+	}
+	rows := []model.Media{
+		{LibraryID: lib.ID, Title: "示例动画", Path: "/media/anime/示例动画/S01E01.mkv", SeasonNum: 1, EpisodeNum: 1},
+		{LibraryID: lib.ID, Title: "示例动画", Path: "/media/anime/示例动画/S01E02.mkv", SeasonNum: 1, EpisodeNum: 2},
+	}
+	if err := repos.DB.Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewMediaService(&config.Config{}, zap.NewNop(), repos).
+		SetRuntimeCache(NewRuntimeCacheService(&config.Config{}, zap.NewNop()))
+	visibility := MediaVisibility{IncludeNSFW: true}
+	cards, total, err := svc.ListLibrarySeriesCards(t.Context(), lib.ID, visibility)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(cards) != 1 || cards[0].Count != 2 {
+		t.Fatalf("cold series cards = %#v, total = %d; want one two-episode card", cards, total)
+	}
+
+	cachedObj, ok := svc.cache.GetObject(svc.libraryRowsCacheKey(lib.ID, visibility))
+	if !ok {
+		t.Fatal("expected full library rows and precomputed cards to be cached")
+	}
+	cached, ok := cachedObj.(*libraryRowsCacheValue)
+	if !ok || cached.Cards == nil || len(cached.Cards) != 1 {
+		t.Fatalf("cached rows value = %#v, want one precomputed card", cachedObj)
+	}
+
+	cards, total, err = svc.ListLibrarySeriesCards(t.Context(), lib.ID, visibility)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(cards) != 1 || cards[0].Count != 2 {
+		t.Fatalf("warm series cards = %#v, total = %d; want cached result", cards, total)
+	}
+}

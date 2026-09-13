@@ -100,6 +100,26 @@ func (r *MediaRepository) ListByLibrariesFilteredNoCount(ctx context.Context, li
 	return items, err
 }
 
+// ListAllByLibrariesFilteredNoCount loads every matching row without issuing a
+// COUNT query. Full-library consumers such as series grouping must scan the
+// whole library anyway, so calling it once is both cheaper and more consistent
+// than issuing paginated queries with repeated counts.
+func (r *MediaRepository) ListAllByLibrariesFilteredNoCount(ctx context.Context, libraryIDs []string, filter MediaQueryFilter) ([]model.Media, error) {
+	items := make([]model.Media, 0)
+	if len(libraryIDs) == 0 {
+		return items, nil
+	}
+	q := r.db.WithContext(ctx).Model(&model.Media{})
+	if len(libraryIDs) == 1 {
+		q = q.Where("library_id = ?", libraryIDs[0])
+	} else {
+		q = q.Where("library_id IN ?", libraryIDs)
+	}
+	q = applyMediaQueryFilter(q, filter)
+	err := q.Order("release_date DESC, year DESC, updated_at DESC, created_at DESC, id DESC").Find(&items).Error
+	return items, err
+}
+
 func (r *MediaRepository) listByLibrariesFiltered(ctx context.Context, libraryIDs []string, offset, limit int, filter MediaQueryFilter, withCount bool) ([]model.Media, int64, error) {
 	var items []model.Media
 	var total int64

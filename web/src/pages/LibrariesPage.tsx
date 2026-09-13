@@ -33,8 +33,10 @@ export function LibrariesPage() {
     if (targets.length === 0) return
     targets.forEach((id) => fetchingRef.current.add(id))
 
+    let loaded = false
     try {
       const rows = await libraryAPI.listPreviews(targets, 10)
+      loaded = true
       setLibraryData((prev) => {
         const next = { ...prev }
         for (const row of rows) {
@@ -49,7 +51,9 @@ export function LibrariesPage() {
       // 容错
     } finally {
       targets.forEach((id) => {
-        fetchedLibIdsRef.current.add(id)
+        if (loaded) {
+          fetchedLibIdsRef.current.add(id)
+        }
         fetchingRef.current.delete(id)
       })
     }
@@ -68,13 +72,10 @@ export function LibrariesPage() {
     try {
       const libs = await fetchLibraries()
       setLibraries(libs)
-      // 优先拉取入口卡片网格当前页（前 20 个库）的预览
-      const topIds = libs.slice(0, 20).map((l) => l.id)
-      void fetchPreviews(topIds)
     } finally {
       setLoading(false)
     }
-  }, [fetchPreviews])
+  }, [])
 
   async function handleRepairRescrape() {
     if (repairing) return
@@ -105,7 +106,7 @@ export function LibrariesPage() {
       return {
         library,
         items: [],
-        total: data?.total ?? 0,
+        total: library.total ?? data?.total ?? 0,
         cards: data?.cards ?? [],
       }
     })

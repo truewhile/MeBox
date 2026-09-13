@@ -1,5 +1,4 @@
 import { Outlet } from 'react-router-dom'
-import { AnimatePresence, motion } from 'framer-motion'
 import clsx from 'clsx'
 
 import { LayoutSidebarContent, type LayoutSidebarContentProps } from './LayoutSidebarContent'
@@ -50,29 +49,18 @@ export function LayoutDesktopSidebar({ children, isSidebarOpen }: LayoutSidebarP
 }
 
 export function LayoutMobileSidebar({ children, isOpen, onClose }: LayoutMobileSidebarProps) {
+  if (!isOpen) return null
+
   return (
-    <AnimatePresence>
-      {isOpen && (
-        <div className="fixed inset-0 z-50 flex lg:hidden">
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            onClick={onClose}
-            className="fixed inset-0 bg-black/15 backdrop-blur-sm"
-          />
-          <motion.div
-            initial={{ x: '-100%' }}
-            animate={{ x: 0 }}
-            exit={{ x: '-100%' }}
-            transition={{ type: 'spring', damping: 25, stiffness: 220 }}
-            className="relative z-10 flex h-full min-h-0 w-64 max-w-xs flex-col overflow-hidden shadow-xl"
-          >
-            {children}
-          </motion.div>
-        </div>
-      )}
-    </AnimatePresence>
+    <div className="fixed inset-0 z-50 flex lg:hidden">
+      <div
+        onClick={onClose}
+        className="fixed inset-0 bg-black/15 backdrop-blur-sm animate-overlay-in"
+      />
+      <div className="relative z-10 flex h-full min-h-0 w-64 max-w-xs flex-col overflow-hidden shadow-xl animate-drawer-in">
+        {children}
+      </div>
+    </div>
   )
 }
 
@@ -139,19 +127,11 @@ export function LayoutWorkspace({ routeKey, showMobileBottomNav = false }: Layou
   return (
     <main id="app-main-scroll" className={clsx('flex-1 overflow-y-auto [overflow-anchor:none] px-4 py-6 md:px-8 md:py-10', bottomPad)}>
       <div className="max-w-7xl mx-auto">
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={routeKey}
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -6 }}
-            transition={{ duration: 0.25, ease: 'easeOut' }}
-          >
-            <RouteErrorBoundary>
-              <Outlet />
-            </RouteErrorBoundary>
-          </motion.div>
-        </AnimatePresence>
+        <div key={routeKey} className="animate-page-in">
+          <RouteErrorBoundary>
+            <Outlet />
+          </RouteErrorBoundary>
+        </div>
       </div>
     </main>
   )

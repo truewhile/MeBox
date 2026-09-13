@@ -24,6 +24,8 @@ export interface Library {
   /** 远程 Emby 挂载库（只读，不支持扫描/刮削/编辑） */
   is_remote_emby?: boolean
   remote_source?: string
+  /** 媒体条目总数；`/api/libraries` 已在元数据请求中一并返回。 */
+  total?: number
 }
 
 export interface ScanResult {

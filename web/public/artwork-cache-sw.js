@@ -102,11 +102,21 @@ async function deleteOldArtworkVariants(cache, currentRequest) {
 }
 
 function artworkIdentity(url) {
+  // 尺寸/质量属于同一源图的不同派生资源，必须参与身份计算；
+  // 否则 400px 卡片图会删掉 1600px Hero 图的缓存。
+  const variant = ['maxWidth', 'maxHeight', 'quality']
+    .map((key) => {
+      const value = url.searchParams.get(key)
+      return value ? `${key}=${value}` : ''
+    })
+    .filter(Boolean)
+    .join('&')
+  const variantSuffix = variant ? `&${variant}` : ''
   if (url.pathname === '/api/img') {
-    return `${url.origin}${url.pathname}?url=${url.searchParams.get('url') || ''}`
+    return `${url.origin}${url.pathname}?url=${url.searchParams.get('url') || ''}${variantSuffix}`
   }
   if (url.pathname.startsWith('/api/cloud/play/')) {
-    return `${url.origin}${url.pathname}?ref=${url.searchParams.get('ref') || ''}`
+    return `${url.origin}${url.pathname}?ref=${url.searchParams.get('ref') || ''}${variantSuffix}`
   }
   return ''
 }

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"sort"
 	"strings"
 
 	"github.com/truewhile/MeBox/internal/model"
@@ -12,14 +13,12 @@ func (s *MediaService) attachLibraryMetadata(ctx context.Context, items []model.
 	if s == nil || s.repo == nil || s.repo.Library == nil || len(items) == 0 {
 		return
 	}
-	libs, err := s.repo.Library.List(ctx)
+	libs, err := s.displayLibraries(ctx)
 	if err != nil {
 		return
 	}
 	byID := make(map[string]model.Library, len(libs))
-	for i := range libs {
-		libs[i] = normalizeLocalLibraryPathForDisplay(libs[i])
-		lib := libs[i]
+	for _, lib := range libs {
 		byID[lib.ID] = lib
 	}
 	resolver := newMediaDisplayLibraryResolver(ctx, s.repo, libs)
@@ -44,11 +43,39 @@ func (s *MediaService) attachLibraryMetadata(ctx context.Context, items []model.
 	}
 }
 
+func (s *MediaService) displayLibraries(ctx context.Context) ([]model.Library, error) {
+	const cacheKey = "media:obj:library-metadata"
+	if s.cache != nil {
+		if cachedObj, ok := s.cache.GetObject(cacheKey); ok {
+			if cached, ok := cachedObj.([]model.Library); ok {
+				return cached, nil
+			}
+		}
+	}
+	libs, err := s.repo.Library.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range libs {
+		libs[i] = normalizeLocalLibraryPathForDisplay(libs[i])
+	}
+	if s.cache != nil {
+		s.cache.SetObject(cacheKey, libs, s.mediaObjectTTL())
+	}
+	return libs, nil
+}
+
 type mediaDisplayLibraryResolver struct {
 	byID              map[string]model.Library
 	displayByID       map[string]model.Library
 	displayByMergeKey map[string]model.Library
 	displayLibraries  []model.Library
+	localDisplays     []mediaLocalDisplayLibrary
+}
+
+type mediaLocalDisplayLibrary struct {
+	library model.Library
+	path    string
 }
 
 func newMediaDisplayLibraryResolver(ctx context.Context, repo *repository.Container, libs []model.Library) mediaDisplayLibraryResolver {
@@ -58,6 +85,7 @@ func newMediaDisplayLibraryResolver(ctx context.Context, repo *repository.Contai
 		displayByID:       make(map[string]model.Library, len(displayLibraries)),
 		displayByMergeKey: make(map[string]model.Library, len(displayLibraries)),
 		displayLibraries:  displayLibraries,
+		localDisplays:     make([]mediaLocalDisplayLibrary, 0, len(displayLibraries)),
 	}
 	for _, lib := range libs {
 		normalized := normalizeLocalLibraryPathForDisplay(lib)
@@ -70,7 +98,23 @@ func newMediaDisplayLibraryResolver(ctx context.Context, repo *repository.Contai
 				resolver.displayByMergeKey[key] = lib
 			}
 		}
+		if _, ok := ParseCloudLibraryMount(lib.Path); ok || !lib.Enabled {
+			continue
+		}
+		displayPath := cleanPathForVolumeMapping(resolveMappedDestinationPath(lib.Path))
+		if displayPath == "" || displayPath == "." {
+			continue
+		}
+		resolver.localDisplays = append(resolver.localDisplays, mediaLocalDisplayLibrary{
+			library: lib,
+			path:    displayPath,
+		})
 	}
+	// 最长路径优先：一次命中就是原逻辑中最具体的媒体库，避免每条媒体都
+	// 重新规范化全部库路径并扫描整个库列表。
+	sort.SliceStable(resolver.localDisplays, func(i, j int) bool {
+		return len(resolver.localDisplays[i].path) > len(resolver.localDisplays[j].path)
+	})
 	return resolver
 }
 
@@ -172,26 +216,10 @@ func (r mediaDisplayLibraryResolver) bestPathDisplayLibrary(media model.Media) (
 	if isRelativeVolumeMarkerPath(media.Path) {
 		mediaPath = cleanPathForVolumeMapping(resolveMappedDestinationPath(media.Path))
 	}
-	var best model.Library
-	bestLen := 0
-	for _, lib := range r.displayLibraries {
-		if _, ok := ParseCloudLibraryMount(lib.Path); ok || !lib.Enabled {
-			continue
+	for _, display := range r.localDisplays {
+		if mediaPath == display.path || strings.HasPrefix(mediaPath, strings.TrimRight(display.path, "/")+"/") {
+			return display.library, true
 		}
-		libPath := cleanPathForVolumeMapping(resolveMappedDestinationPath(lib.Path))
-		if libPath == "" || libPath == "." {
-			continue
-		}
-		if mediaPath != libPath && !strings.HasPrefix(mediaPath, strings.TrimRight(libPath, "/")+"/") {
-			continue
-		}
-		if len(libPath) > bestLen {
-			best = lib
-			bestLen = len(libPath)
-		}
-	}
-	if bestLen > 0 {
-		return best, true
 	}
 	return model.Library{}, false
 }

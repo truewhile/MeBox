@@ -105,6 +105,7 @@ export const libraryAPI = {
       .get<LibraryWithPreview[]>('/libraries', {
         params: {
           with_preview: 1,
+          include_total: 0,
           preview_limit: previewLimit,
           ids: ids.join(','),
         },
@@ -160,22 +161,34 @@ export const libraryAPI = {
   scrape: (id: string, options?: ScrapeOptions) =>
     api.post(`/libraries/${id}/scrape`, options ?? null, { timeout: BATCH_REQUEST_TIMEOUT }).then((r) => r.data),
 
-  listMedia: (id: string, page = 1, pageSize = 50, options?: { groupVersions?: boolean }) =>
+  listMedia: (
+    id: string,
+    page = 1,
+    pageSize = 50,
+    options?: { groupVersions?: boolean; sort?: string; order?: 'asc' | 'desc' },
+  ) =>
     api
       .get<MediaPage>(`/libraries/${id}/media`, {
         params: {
           page,
           page_size: pageSize,
           group_versions: options?.groupVersions === false ? 0 : undefined,
+          sort: options?.sort,
+          order: options?.order,
         },
         timeout: LONG_REQUEST_TIMEOUT,
       })
       .then((r) => r.data),
 
-  listSeries: (id: string, page = 1, pageSize = 500) =>
+  listSeries: (
+    id: string,
+    page = 1,
+    pageSize = 500,
+    options?: { sort?: string; order?: 'asc' | 'desc' },
+  ) =>
     api
       .get<SeriesPage>(`/libraries/${id}/series`, {
-        params: { page, page_size: pageSize },
+        params: { page, page_size: pageSize, sort: options?.sort, order: options?.order },
         timeout: LONG_REQUEST_TIMEOUT,
       })
       .then((r) => r.data),

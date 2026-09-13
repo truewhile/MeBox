@@ -281,7 +281,8 @@ func TestListMediaVisibleGroupedPaginatesAfterVersionGrouping(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc := NewMediaService(&config.Config{}, zap.NewNop(), repos)
+	svc := NewMediaService(&config.Config{}, zap.NewNop(), repos).
+		SetRuntimeCache(NewRuntimeCacheService(&config.Config{}, zap.NewNop()))
 	page, total, err := svc.ListMediaVisibleGrouped(t.Context(), lib.ID, 1, 1, MediaVisibility{IncludeNSFW: true})
 	if err != nil {
 		t.Fatal(err)
@@ -294,6 +295,17 @@ func TestListMediaVisibleGroupedPaginatesAfterVersionGrouping(t *testing.T) {
 	}
 	if page[0].Media.Path != rows[0].Path {
 		t.Fatalf("primary version = %q, want %q", page[0].Media.Path, rows[0].Path)
+	}
+	cacheKey := svc.groupedItemsCacheKey(lib.ID, []string{lib.ID}, repository.MediaQueryFilter{IncludeNSFW: true})
+	if _, ok := svc.cache.GetObject(cacheKey); !ok {
+		t.Fatal("expected grouped media items to be cached after the first page request")
+	}
+	secondPage, secondTotal, err := svc.ListMediaVisibleGrouped(t.Context(), lib.ID, 2, 1, MediaVisibility{IncludeNSFW: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondTotal != total || len(secondPage) != 1 || secondPage[0].Media.Path != rows[2].Path {
+		t.Fatalf("cached second page = %#v, total = %d; want Matrix item and total %d", secondPage, secondTotal, total)
 	}
 }
 

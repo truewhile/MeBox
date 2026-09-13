@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Film, LoaderCircle, Menu, Search, Star, X } from 'lucide-react'
@@ -132,12 +132,12 @@ function LayoutHeaderSearch() {
   const locationKey = `${location.pathname}${location.search}`
   const prevLocationKeyRef = useRef(locationKey)
 
-  const setSearchOpen = (open: boolean) => {
+  const setSearchOpen = useCallback((open: boolean) => {
     isOpenRef.current = open
     setIsOpen(open)
-  }
+  }, [])
 
-  const dismissSearch = (clearQuery: boolean) => {
+  const dismissSearch = useCallback((clearQuery: boolean) => {
     suppressInputRef.current = true
     setSearchOpen(false)
     if (clearQuery) {
@@ -156,9 +156,11 @@ function LayoutHeaderSearch() {
     window.setTimeout(() => {
       suppressInputRef.current = false
     }, 0)
-  }
+  }, [setSearchOpen])
   const dismissSearchRef = useRef(dismissSearch)
-  dismissSearchRef.current = dismissSearch
+  useEffect(() => {
+    dismissSearchRef.current = dismissSearch
+  }, [dismissSearch])
 
   useEffect(() => {
     const trimmed = query.trim()

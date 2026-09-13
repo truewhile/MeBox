@@ -18,6 +18,7 @@ import {
   HomeLoadingState,
 } from './HomePageSections'
 
+const PREVIEW_BATCH_SIZE = 4
 const hasArtwork = (media?: Media | null) => !!(media?.poster_url || media?.backdrop_url)
 
 export function HomePage() {
@@ -86,48 +87,72 @@ export function HomePage() {
 
   const sortedLibraries = useMemo(() => sortByPinnedIds(libraries, pinnedIds), [libraries, pinnedIds])
 
-  // 按需拉取卡片预览管理
-  const fetchedLibIdsRef = useRef<Set<string>>(new Set())
-  const fetchingRef = useRef<Set<string>>(new Set())
+  // 按需拉取卡片预览管理。同一个库可能先以 4 张封面用于入口网格，
+  // 稍后需要 10 张用于内容横排，因此缓存的是已加载数量而不是简单布尔值。
+  const fetchedPreviewLimitsRef = useRef<Map<string, number>>(new Map())
+  const fetchingPreviewLimitsRef = useRef<Map<string, number>>(new Map())
 
-  const fetchPreviews = useCallback(async (ids: string[]) => {
-    const targets = ids.filter((id) => !fetchedLibIdsRef.current.has(id) && !fetchingRef.current.has(id))
+  const fetchPreviews = useCallback(async (ids: string[], limit = 10) => {
+    const uniqueIDs = Array.from(new Set(ids.filter(Boolean)))
+    const targets = uniqueIDs.filter(
+      (id) =>
+        (fetchedPreviewLimitsRef.current.get(id) ?? 0) < limit &&
+        (fetchingPreviewLimitsRef.current.get(id) ?? 0) < limit,
+    )
     if (targets.length === 0) return
-    targets.forEach((id) => fetchingRef.current.add(id))
+    targets.forEach((id) => fetchingPreviewLimitsRef.current.set(id, limit))
 
-    try {
-      const rows = await libraryAPI.listPreviews(targets, 10)
-      setLibraryData((prev) => {
-        const next = { ...prev }
-        for (const row of rows) {
-          next[row.id] = {
-            cards: row.cards ?? [],
-            items: [],
-            total: row.total ?? 0,
-          }
-        }
-        return next
-      })
-    } catch {
-      // 容错
-    } finally {
-      targets.forEach((id) => {
-        fetchedLibIdsRef.current.add(id)
-        fetchingRef.current.delete(id)
-      })
+    const batches: string[][] = []
+    for (let i = 0; i < targets.length; i += PREVIEW_BATCH_SIZE) {
+      batches.push(targets.slice(i, i + PREVIEW_BATCH_SIZE))
     }
+
+    // 分批并发：一个慢库不再阻塞整页预览，先返回的批次立即渲染。
+    await Promise.allSettled(
+      batches.map(async (batch) => {
+        let loaded = false
+        try {
+          const rows = await libraryAPI.listPreviews(batch, limit)
+          loaded = true
+          setLibraryData((prev) => {
+            const next = { ...prev }
+            for (const row of rows) {
+              next[row.id] = {
+                cards: row.cards ?? [],
+                items: [],
+                total: row.total ?? 0,
+              }
+            }
+            return next
+          })
+        } catch {
+          // 单个批次失败不影响其他批次；导航回来时会重试。
+        } finally {
+          batch.forEach((id) => {
+            if (loaded) {
+              fetchedPreviewLimitsRef.current.set(
+                id,
+                Math.max(fetchedPreviewLimitsRef.current.get(id) ?? 0, limit),
+              )
+            }
+            if (fetchingPreviewLimitsRef.current.get(id) === limit) {
+              fetchingPreviewLimitsRef.current.delete(id)
+            }
+          })
+        }
+      }),
+    )
   }, [])
 
-  // 3. 首屏优先加载：轮播图库 + 媒体库卡片区前 20 个库 + 首屏前 3 个内容行
+  // 3. 首屏只预取轮播和前三行所需的预览；入口卡片进入视口后再按批加载。
   useEffect(() => {
     if (sortedLibraries.length === 0) return
     const carouselLibIds = sortedLibraries
       .filter((l) => l.carousel_enabled === true)
       .map((l) => l.id)
-    const topGridLibIds = sortedLibraries.slice(0, 20).map((l) => l.id)
     const topRowLibIds = sortedLibraries.slice(0, 3).map((l) => l.id)
-    const initialTargets = Array.from(new Set([...carouselLibIds, ...topGridLibIds, ...topRowLibIds]))
-    void fetchPreviews(initialTargets)
+    const initialTargets = Array.from(new Set([...carouselLibIds, ...topRowLibIds]))
+    void fetchPreviews(initialTargets, 10)
   }, [sortedLibraries, fetchPreviews])
 
   // 4. 媒体库展示行渐进流式加载：默认先检视前 3 个库，随向下滚动逐步检视后续库
@@ -140,7 +165,7 @@ export function HomePage() {
   useEffect(() => {
     if (sortedLibraries.length === 0) return
     const currentTargets = sortedLibraries.slice(0, visibleTargetCount).map((l) => l.id)
-    void fetchPreviews(currentTargets)
+    void fetchPreviews(currentTargets, 10)
   }, [sortedLibraries, visibleTargetCount, fetchPreviews])
 
   // 当前已拉取并确认有内容的媒体库行
@@ -214,7 +239,7 @@ export function HomePage() {
   const libraryCounts = useMemo(() => {
     const counts: Record<string, number> = {}
     for (const lib of libraries) {
-      counts[lib.id] = libraryData[lib.id]?.total ?? 0
+      counts[lib.id] = lib.total ?? libraryData[lib.id]?.total ?? 0
     }
     return counts
   }, [libraries, libraryData])

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -60,37 +61,37 @@ func listLibrariesHandler(svc *service.Container) gin.HandlerFunc {
 		}
 		role, _ := c.Get(middleware.CtxUserRole)
 		includeHidden := role == "admin" && (c.Query("include_hidden") == "1" || c.Query("include_hidden") == "true" || c.Query("all") == "1")
-			if !includeHidden {
-				libs = service.FilterDisplayCloudLibraries(ctx, svc.Repo, libs)
-				visibility := mediaVisibilityForRequest(c, svc)
-				filtered := libs[:0]
-				for _, lib := range libs {
-					if service.LibraryVisibleForUser(ctx, svc.Repo, lib, visibility) {
-						filtered = append(filtered, lib)
-					}
-				}
-				libs = filtered
-			}
-			rawIDs := strings.TrimSpace(c.Query("ids"))
-			var targetSet map[string]struct{}
-			if rawIDs != "" {
-				targetSet = make(map[string]struct{})
-				for _, id := range strings.Split(rawIDs, ",") {
-					id = strings.TrimSpace(id)
-					if id != "" {
-						targetSet[id] = struct{}{}
-					}
+		if !includeHidden {
+			libs = service.FilterDisplayCloudLibraries(ctx, svc.Repo, libs)
+			visibility := mediaVisibilityForRequest(c, svc)
+			filtered := libs[:0]
+			for _, lib := range libs {
+				if service.LibraryVisibleForUser(ctx, svc.Repo, lib, visibility) {
+					filtered = append(filtered, lib)
 				}
 			}
-			if len(targetSet) > 0 {
-				filtered := libs[:0]
-				for _, lib := range libs {
-					if _, ok := targetSet[lib.ID]; ok {
-						filtered = append(filtered, lib)
-					}
+			libs = filtered
+		}
+		rawIDs := strings.TrimSpace(c.Query("ids"))
+		var targetSet map[string]struct{}
+		if rawIDs != "" {
+			targetSet = make(map[string]struct{})
+			for _, id := range strings.Split(rawIDs, ",") {
+				id = strings.TrimSpace(id)
+				if id != "" {
+					targetSet[id] = struct{}{}
 				}
-				libs = filtered
 			}
+		}
+		if len(targetSet) > 0 {
+			filtered := libs[:0]
+			for _, lib := range libs {
+				if _, ok := targetSet[lib.ID]; ok {
+					filtered = append(filtered, lib)
+				}
+			}
+			libs = filtered
+		}
 		withPreview := c.Query("with_preview") == "1" || c.Query("with_preview") == "true"
 		limit := 10
 		if withPreview {
@@ -103,7 +104,12 @@ func listLibrariesHandler(svc *service.Container) gin.HandlerFunc {
 		}
 		out := make([]webLibraryPayload, 0, len(libs)+8)
 		if withPreview {
-			previews, err := svc.Media.ListLibrariesWithPreview(ctx, libs, mediaVisibilityForRequest(c, svc), limit)
+			var previews []service.LibraryPreviewItem
+			if c.Query("include_total") == "0" {
+				previews, err = svc.Media.ListLibraryPreviews(ctx, libs, mediaVisibilityForRequest(c, svc), limit)
+			} else {
+				previews, err = svc.Media.ListLibrariesWithPreview(ctx, libs, mediaVisibilityForRequest(c, svc), limit)
+			}
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
@@ -111,41 +117,55 @@ func listLibrariesHandler(svc *service.Container) gin.HandlerFunc {
 			for _, p := range previews {
 				out = append(out, webLibraryPayload{Library: p.Library, Total: p.Total, Cards: p.Cards})
 			}
-			} else {
-				visibility := mediaVisibilityForRequest(c, svc)
-				libIDs := make([]string, len(libs))
-				for i, l := range libs {
-					libIDs[i] = l.ID
+		} else {
+			visibility := mediaVisibilityForRequest(c, svc)
+			libIDs := make([]string, len(libs))
+			for i, l := range libs {
+				libIDs[i] = l.ID
+			}
+			counts, _ := svc.Repo.Media.CountByLibraries(ctx, libIDs, repository.MediaQueryFilter{
+				IncludeNSFW:       visibility.IncludeNSFW,
+				AllowedLibraryIDs: visibility.AllowedLibraryIDs,
+				HiddenLibraryIDs:  visibility.HiddenLibraryIDs,
+			})
+			for _, l := range libs {
+				var total int64
+				if counts != nil {
+					total = counts[l.ID]
 				}
-				counts, _ := svc.Repo.Media.CountByLibraries(ctx, libIDs, repository.MediaQueryFilter{
-					IncludeNSFW:       visibility.IncludeNSFW,
-					AllowedLibraryIDs: visibility.AllowedLibraryIDs,
-					HiddenLibraryIDs:  visibility.HiddenLibraryIDs,
-				})
-				for _, l := range libs {
-					var total int64
-					if counts != nil {
-						total = counts[l.ID]
-					}
-					out = append(out, webLibraryPayload{Library: l, Total: total})
+				out = append(out, webLibraryPayload{Library: l, Total: total})
+			}
+		}
+		// 精确指定目标库时，如果目标全是本地库，就不必枚举远程挂载。
+		// 首页预览会拆成多个小批次请求，跳过无关远程调用可以明显缩短
+		// 每批次的尾延迟；未指定 ids 的完整库列表仍保持原行为。
+		includeRemote := true
+		if len(targetSet) > 0 {
+			includeRemote = false
+			for id := range targetSet {
+				if service.IsEmbyRemoteID(id) {
+					includeRemote = true
+					break
 				}
 			}
+		}
+
 		// 远程 Emby 挂载库追加在本地库之后（非管理员视图仍受 allowed_library_ids 约束）。
-		if svc.EmbyRemote != nil {
+		if includeRemote && svc.EmbyRemote != nil {
 			if views, err := svc.EmbyRemote.RemoteLibraries(ctx); err == nil {
-					visibility := mediaVisibilityForRequest(c, svc)
-					allowedViews := make([]service.RemoteLibraryView, 0, len(views))
-					for _, v := range views {
-						if !includeHidden && !service.LibraryVisibleForUser(ctx, svc.Repo, v.Library, visibility) {
+				visibility := mediaVisibilityForRequest(c, svc)
+				allowedViews := make([]service.RemoteLibraryView, 0, len(views))
+				for _, v := range views {
+					if !includeHidden && !service.LibraryVisibleForUser(ctx, svc.Repo, v.Library, visibility) {
+						continue
+					}
+					if len(targetSet) > 0 {
+						if _, ok := targetSet[v.Library.ID]; !ok {
 							continue
 						}
-						if len(targetSet) > 0 {
-							if _, ok := targetSet[v.Library.ID]; !ok {
-								continue
-							}
-						}
-						allowedViews = append(allowedViews, v)
 					}
+					allowedViews = append(allowedViews, v)
+				}
 				remotePayloads := make([]webLibraryPayload, len(allowedViews))
 				for i, v := range allowedViews {
 					remotePayloads[i] = webLibraryPayload{Library: v.Library, IsRemoteEmby: true, RemoteSource: v.AccountName}
@@ -170,13 +190,13 @@ func listLibrariesHandler(svc *service.Container) gin.HandlerFunc {
 								if acct == nil {
 									return
 								}
-									tmpMount := &model.EmbyMount{
-										Base:           model.Base{ID: v.MountID},
-										AccountID:      v.AccountID,
-										RemoteViewID:   v.RemoteID,
-										CollectionType: v.CollectionType,
-										Name:           v.Library.Name,
-									}
+								tmpMount := &model.EmbyMount{
+									Base:           model.Base{ID: v.MountID},
+									AccountID:      v.AccountID,
+									RemoteViewID:   v.RemoteID,
+									CollectionType: v.CollectionType,
+									Name:           v.Library.Name,
+								}
 								itemTypes := remoteLibraryItemTypes(v.CollectionType)
 								if _, total, err := svc.EmbyRemote.RemoteLibraryMedia(ctx, tmpMount, acct, v.RemoteID, itemTypes, 0, 1); err == nil {
 									remotePayloads[i].Total = total
@@ -421,9 +441,14 @@ func listMediaHandler(svc *service.Container) gin.HandlerFunc {
 			})
 			return
 		}
+		sortSpec := parseMediaSort(c)
+		var history map[string]time.Time
+		if sortSpec.Field == "last_played" {
+			history = mediaHistoryMap(c, svc)
+		}
 		groupVersions := c.DefaultQuery("group_versions", "1") != "0"
 		if !groupVersions {
-			items, total, err := svc.Media.ListMediaVisible(c.Request.Context(), id, page, size, mediaVisibilityForRequest(c, svc))
+			items, total, err := svc.Media.ListMediaVisible(ctx, id, page, size, mediaVisibilityForRequest(c, svc))
 			if err != nil {
 				writeInternalOrCanceled(c, err)
 				return
@@ -439,17 +464,19 @@ func listMediaHandler(svc *service.Container) gin.HandlerFunc {
 			})
 			return
 		}
-		items, total, err := svc.Media.ListMediaVisibleGrouped(c.Request.Context(), id, page, size, mediaVisibilityForRequest(c, svc))
+		grouped, err := svc.Media.GroupedMediaVisible(ctx, id, mediaVisibilityForRequest(c, svc))
 		if err != nil {
 			writeInternalOrCanceled(c, err)
 			return
 		}
+		grouped = service.SortMediaItems(grouped, sortSpec.Field, sortSpec.Order, history)
+		items := service.PaginateMediaItems(grouped, page, size)
 		if items == nil {
 			items = []service.MediaItem{}
 		}
 		c.JSON(http.StatusOK, gin.H{
 			"items":     items,
-			"total":     total,
+			"total":     len(grouped),
 			"page":      page,
 			"page_size": size,
 		})
@@ -699,25 +726,25 @@ func streamHandler(svc *service.Container) gin.HandlerFunc {
 				}
 				return
 			}
-				target, err := svc.EmbyRemote.WebStreamURL(ctx, acct, remoteID)
-				if err != nil {
-					c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-					return
-				}
-				// 现代浏览器在 HTTPS 页面中请求不安全源（HTTP 视频流）会直接报 Mixed Content 拦截导致播放失败。
-				// 仅当当前前端请求为 HTTPS 且远程直连目标为 HTTP 时，自动降级通过本机反向代理传输流，避免播放被浏览器阻断；
-				// 其它场景（HTTP 页面访问 HTTP/HTTPS，或 HTTPS 访问 HTTPS）继续 302 直连，最大化节省服务器带宽与流量。
-				if requestIsHTTPS(c) && strings.HasPrefix(strings.ToLower(target), "http://") {
-					if err := svc.Emby.ProxyRemoteVideoStream(ctx, c.Writer, c.Request, mountID, remoteID); err != nil {
-						if !c.Writer.Written() {
-							c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-						}
-					}
-					return
-				}
-				setRedirectNoStoreHeaders(c)
-				c.Redirect(http.StatusFound, target)
+			target, err := svc.EmbyRemote.WebStreamURL(ctx, acct, remoteID)
+			if err != nil {
+				c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 				return
+			}
+			// 现代浏览器在 HTTPS 页面中请求不安全源（HTTP 视频流）会直接报 Mixed Content 拦截导致播放失败。
+			// 仅当当前前端请求为 HTTPS 且远程直连目标为 HTTP 时，自动降级通过本机反向代理传输流，避免播放被浏览器阻断；
+			// 其它场景（HTTP 页面访问 HTTP/HTTPS，或 HTTPS 访问 HTTPS）继续 302 直连，最大化节省服务器带宽与流量。
+			if requestIsHTTPS(c) && strings.HasPrefix(strings.ToLower(target), "http://") {
+				if err := svc.Emby.ProxyRemoteVideoStream(ctx, c.Writer, c.Request, mountID, remoteID); err != nil {
+					if !c.Writer.Written() {
+						c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+					}
+				}
+				return
+			}
+			setRedirectNoStoreHeaders(c)
+			c.Redirect(http.StatusFound, target)
+			return
 		}
 		m, err := svc.Media.GetMedia(ctx, id)
 		if err != nil || m == nil || !mediaVisibleForRequest(c, svc, m) {

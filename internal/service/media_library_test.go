@@ -155,3 +155,28 @@ func TestListLibrariesWithPreviewLongSeriesCompletion(t *testing.T) {
 		t.Fatalf("previews[0].Cards count = %d, want 2", len(previews[0].Cards))
 	}
 }
+
+func TestListLibraryPreviewsSkipsTotals(t *testing.T) {
+	db := newServiceTestDB(t, &model.Library{}, &model.Media{})
+	repos := repository.New(db)
+	lib := model.Library{Name: "电影", Path: "/media/movies", Type: "movie", Enabled: true}
+	if err := repos.Library.Create(t.Context(), &lib); err != nil {
+		t.Fatal(err)
+	}
+	if err := repos.DB.Create(&model.Media{
+		LibraryID: lib.ID,
+		Title:     "预览电影",
+		Path:      "/media/movies/预览电影.mkv",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewMediaService(&config.Config{}, zap.NewNop(), repos)
+	previews, err := svc.ListLibraryPreviews(t.Context(), []model.Library{lib}, MediaVisibility{IncludeNSFW: true}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(previews) != 1 || previews[0].Total != 0 || len(previews[0].Cards) != 1 {
+		t.Fatalf("preview-only result = %#v, want one card and no count", previews)
+	}
+}

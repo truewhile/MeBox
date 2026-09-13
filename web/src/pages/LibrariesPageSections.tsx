@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { motion } from 'framer-motion'
 import { ArrowRight, ChevronLeft, ChevronRight, Film, FolderOpen, Library as LibraryIcon, Music, Pin, PlayCircle, RefreshCw, Sparkles, Tv } from 'lucide-react'
 
 import { imageURL } from '../api/client'
 import { EpisodeArtworkToggle } from '../components/EpisodeArtworkToggle'
 import { MediaCard } from '../components/MediaCard'
+import { useInViewOnce } from '../hooks/useInViewOnce'
+import { useLazyPreviewBatch } from '../hooks/useLazyPreviewBatch'
 import { seriesCardLink } from '../utils/groupSeries'
 import { libraryDisplayPath } from './libraryDisplayModel'
 import { libraryArtworkItems, type LibraryPreview } from './librariesPageModel'
@@ -19,7 +20,6 @@ const TYPE_ICONS: Record<string, ReactNode> = {
   music: <Music size={18} />,
   adult: <Film size={18} />,
 }
-
 const TYPE_LABELS: Record<string, string> = {
   movie: '电影',
   tv: '剧集',
@@ -115,6 +115,7 @@ export function LibrariesContent({
   onNeedPreviews?: (ids: string[]) => void
 }) {
   const pinnedCount = previews.filter((preview) => isLibraryPinned(preview.library.id, pinnedIds)).length
+  const queuePreview = useLazyPreviewBatch(onNeedPreviews)
 
   // 下方媒体库货架支持向下滑动渐进流式加载：默认先展示前 3 个库货架，
   // 随着用户向下滑动接近底部，通过 IntersectionObserver 动态解锁后续媒体库货架。
@@ -185,15 +186,12 @@ export function LibrariesContent({
   const [entryPage, setEntryPage] = useState(1)
   const totalEntryPages = Math.max(1, Math.ceil(previews.length / ENTRY_PAGE_SIZE))
   const effectiveEntryPage = Math.min(entryPage, totalEntryPages)
+
   const pagedPreviews = useMemo<LibraryPreview[]>(() => {
     const start = (effectiveEntryPage - 1) * ENTRY_PAGE_SIZE
     return previews.slice(start, start + ENTRY_PAGE_SIZE)
   }, [previews, effectiveEntryPage])
 
-  useEffect(() => {
-    const ids = pagedPreviews.map((p) => p.library.id)
-    onNeedPreviews?.(ids)
-  }, [pagedPreviews, onNeedPreviews])
 
   return (
     <>
@@ -241,37 +239,38 @@ export function LibrariesContent({
           )}
         </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 xl:grid-cols-3">
-          {pagedPreviews.map((preview, index) => (
-            <motion.div
+          {pagedPreviews.map((preview) => (
+            <div
               key={preview.library.id}
-              initial={{ opacity: 0, y: 12 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: index * 0.03 }}
+              className="animate-page-in"
             >
               <LibraryEntryCard
                 preview={preview}
                 pinned={isLibraryPinned(preview.library.id, pinnedIds)}
                 onTogglePin={() => onTogglePin(preview.library.id)}
+                onVisible={() => {
+                  if (!preview.library.cover_url) {
+                    queuePreview(preview.library.id)
+                  }
+                }}
               />
-            </motion.div>
+            </div>
           ))}
         </div>
       </section>
 
       {visiblePreviews.length > 0 && (
         <section className="space-y-6">
-          {visiblePreviews.map((preview, index) => (
-            <motion.div
+          {visiblePreviews.map((preview) => (
+            <div
               key={preview.library.id}
-              initial={{ opacity: 0, y: 12 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: Math.min(index, 3) * 0.03 }}
+              className="animate-page-in"
             >
               <LibraryShelf
                 preview={preview}
                 pinned={isLibraryPinned(preview.library.id, pinnedIds)}
               />
-            </motion.div>
+            </div>
           ))}
 
           {visibleCount < previews.length && (
@@ -292,12 +291,15 @@ function LibraryEntryCard({
   preview,
   pinned,
   onTogglePin,
+  onVisible,
 }: {
   preview: LibraryPreview
   pinned: boolean
   onTogglePin: () => void
+  onVisible?: () => void
 }) {
   const library = preview.library
+  const ref = useInViewOnce<HTMLDivElement>(onVisible ?? (() => {}))
   const artwork = library.cover_url
     ? [{ src: library.cover_url, version: library.updated_at }]
     : libraryArtworkItems(preview.cards)
@@ -305,6 +307,7 @@ function LibraryEntryCard({
 
   return (
     <div
+      ref={ref}
       className={
         'group relative flex overflow-hidden rounded-2xl sm:rounded-3xl border bg-white p-2.5 sm:p-3 shadow-card transition-all hover:-translate-y-0.5 hover:shadow-card-hover ' +
         (pinned ? 'border-brand-300 ring-1 ring-brand-100' : 'border-sand-200 hover:border-brand-200')
@@ -339,7 +342,7 @@ function LibraryEntryCard({
           artwork.map(({ src, version }, index) => (
             <img
               key={`${src}-${index}`}
-              src={imageURL(src, version)}
+              src={imageURL(src, version, { maxWidth: 400, maxHeight: 300, quality: 78 })}
               alt=""
               loading="lazy"
               referrerPolicy="no-referrer"

@@ -26,6 +26,17 @@ func (s *MediaService) ListLibraries(ctx context.Context) ([]model.Library, erro
 
 // ListLibrariesWithPreview returns libraries populated with item counts and latest preview cards.
 func (s *MediaService) ListLibrariesWithPreview(ctx context.Context, libraries []model.Library, visibility MediaVisibility, cardLimit int) ([]LibraryPreviewItem, error) {
+	return s.listLibrariesWithPreview(ctx, libraries, visibility, cardLimit, true)
+}
+
+// ListLibraryPreviews returns only the latest preview cards. The metadata
+// endpoint already returns totals, so preview batches used by the home and
+// library pages can skip an otherwise repeated COUNT(*) over every library.
+func (s *MediaService) ListLibraryPreviews(ctx context.Context, libraries []model.Library, visibility MediaVisibility, cardLimit int) ([]LibraryPreviewItem, error) {
+	return s.listLibrariesWithPreview(ctx, libraries, visibility, cardLimit, false)
+}
+
+func (s *MediaService) listLibrariesWithPreview(ctx context.Context, libraries []model.Library, visibility MediaVisibility, cardLimit int, includeCounts bool) ([]LibraryPreviewItem, error) {
 	if cardLimit <= 0 {
 		cardLimit = 10
 	}
@@ -40,7 +51,7 @@ func (s *MediaService) ListLibrariesWithPreview(ctx context.Context, libraries [
 		AllowedLibraryIDs: visibility.AllowedLibraryIDs,
 		HiddenLibraryIDs:  visibility.HiddenLibraryIDs,
 	}
-	cacheKey := s.libraryPreviewCacheKey(libraries, cardLimit, filter)
+	cacheKey := s.libraryPreviewCacheKey(libraries, cardLimit, filter, includeCounts)
 	var cached libraryPreviewCacheValue
 	if s.cache != nil && s.cache.GetJSON(ctx, cacheKey, &cached) {
 		return cached.Items, nil
@@ -56,22 +67,26 @@ func (s *MediaService) ListLibrariesWithPreview(ctx context.Context, libraries [
 		libIDs = append(libIDs, lib.ID)
 	}
 
-	counts, err := s.repo.Media.CountByLibraries(ctx, libIDs, filter)
-	if err != nil {
-		return nil, err
-	}
-
-	for i := range out {
-		if total, ok := counts[out[i].ID]; ok {
-			out[i].Total = total
+	if includeCounts {
+		counts, err := s.repo.Media.CountByLibraries(ctx, libIDs, filter)
+		if err != nil {
+			return nil, err
+		}
+		for i := range out {
+			if total, ok := counts[out[i].ID]; ok {
+				out[i].Total = total
+			}
 		}
 	}
 
-	fetchCount := cardLimit * 4
-	if fetchCount < 60 {
-		fetchCount = 60
-	} else if fetchCount > 200 {
-		fetchCount = 200
+	// Preview rows are only an internal candidate window. Keep it bounded so a
+	// library with a very long series cannot turn a homepage request into a full
+	// 50k-row scan merely to find another distinct card.
+	fetchCount := cardLimit * 12
+	if fetchCount < 120 {
+		fetchCount = 120
+	} else if fetchCount > 400 {
+		fetchCount = 400
 	}
 
 	recentByLibrary, err := s.repo.Media.ListRecentByLibraries(ctx, libIDs, fetchCount, filter)
@@ -81,9 +96,6 @@ func (s *MediaService) ListLibrariesWithPreview(ctx context.Context, libraries [
 
 	allPreviewItems := make([]model.Media, 0, len(libIDs)*fetchCount)
 	for i := range out {
-		if out[i].Total == 0 {
-			continue
-		}
 		items := recentByLibrary[out[i].ID]
 		if len(items) == 0 {
 			continue
@@ -93,28 +105,18 @@ func (s *MediaService) ListLibrariesWithPreview(ctx context.Context, libraries [
 	s.attachLibraryMetadata(ctx, allPreviewItems)
 
 	for i := range out {
-		if out[i].Total == 0 {
-			continue
-		}
 		items := recentByLibrary[out[i].ID]
 		if len(items) == 0 {
 			continue
 		}
-			cards := groupMediaSeriesCards(items)
-			// 如果折叠后的作品部数不足 cardLimit，且该库总记录数大于当前提取的条目数，
-			// 说明多集剧集折叠占满了提取窗口，调用 ListLibrarySeriesCards 补齐完整的影视部数。
-			if len(cards) < cardLimit && out[i].Total > int64(len(items)) {
-				if fullCards, _, err := s.ListLibrarySeriesCards(ctx, out[i].ID, visibility); err == nil && len(fullCards) > 0 {
-					cards = fullCards
-				}
-			}
-			if len(cards) > cardLimit {
-				cards = cards[:cardLimit]
-			}
-			if cards == nil {
-				cards = []SeriesCard{}
-			}
-			out[i].Cards = cards
+		cards := groupMediaSeriesCards(items)
+		if len(cards) > cardLimit {
+			cards = cards[:cardLimit]
+		}
+		if cards == nil {
+			cards = []SeriesCard{}
+		}
+		out[i].Cards = cards
 	}
 
 	if s.cache != nil {

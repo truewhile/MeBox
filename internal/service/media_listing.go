@@ -56,12 +56,43 @@ func (s *MediaService) ListMediaVisible(ctx context.Context, libraryID string, p
 
 func (s *MediaService) ListMediaVisibleGrouped(ctx context.Context, libraryID string, page, pageSize int, visibility MediaVisibility) ([]MediaItem, int64, error) {
 	page, pageSize = normalizeGroupedMediaPage(page, pageSize)
-	items, err := s.listMediaVisibleForGrouping(ctx, libraryID, visibility)
+	grouped, err := s.GroupedMediaVisible(ctx, libraryID, visibility)
 	if err != nil {
 		return nil, 0, err
 	}
-	grouped := groupMediaVersions(items)
 	return paginateMediaItems(grouped, page, pageSize), int64(len(grouped)), nil
+}
+
+// GroupedMediaVisible returns the complete version-grouped media list before pagination.
+// The result is cached as an immutable slice; sort/pagination callers must copy it before mutating.
+func (s *MediaService) GroupedMediaVisible(ctx context.Context, libraryID string, visibility MediaVisibility) ([]MediaItem, error) {
+	visibility = ExpandMediaVisibilityForMergedCloudLibraries(ctx, s.repo, visibility)
+	libraryIDs, err := MergedLibraryIDsForLibrary(ctx, s.repo, libraryID)
+	if err != nil {
+		return nil, err
+	}
+	filter := repository.MediaQueryFilter{
+		IncludeNSFW:       visibility.IncludeNSFW,
+		AllowedLibraryIDs: visibility.AllowedLibraryIDs,
+		HiddenLibraryIDs:  visibility.HiddenLibraryIDs,
+	}
+	itemsCacheKey := s.groupedItemsCacheKey(libraryID, libraryIDs, filter)
+	if s.cache != nil {
+		if cachedObj, ok := s.cache.GetObject(itemsCacheKey); ok {
+			if cached, ok := cachedObj.([]MediaItem); ok {
+				return cached, nil
+			}
+		}
+	}
+	items, err := s.listMediaVisibleForGrouping(ctx, libraryID, visibility)
+	if err != nil {
+		return nil, err
+	}
+	grouped := groupMediaVersions(items)
+	if s.cache != nil && len(grouped) > 0 {
+		s.cache.SetObject(itemsCacheKey, grouped, s.mediaObjectTTL())
+	}
+	return grouped, nil
 }
 
 func (s *MediaService) listMediaVisibleForGrouping(ctx context.Context, libraryID string, visibility MediaVisibility) ([]model.Media, error) {
@@ -75,30 +106,19 @@ func (s *MediaService) listMediaVisibleForGrouping(ctx context.Context, libraryI
 		AllowedLibraryIDs: visibility.AllowedLibraryIDs,
 		HiddenLibraryIDs:  visibility.HiddenLibraryIDs,
 	}
-	cacheKey := s.mediaGroupedRowsCacheKey(libraryID, libraryIDs, filter)
-	if s.cache != nil {
-		if cachedObj, ok := s.cache.GetObject(cacheKey); ok {
-			if cached, ok := cachedObj.([]model.Media); ok {
-				// 对象缓存中的切片视为不可变；attachLibraryMetadata 会在填充时
-				// 执行过，命中路径直接返回副本即可（调用方只读）。
-				return cached, nil
-			}
-		}
-	}
-	items, total, err := s.repo.Media.ListByLibrariesFiltered(ctx, libraryIDs, 0, maxMediaSearchLimit, filter)
+	// 版本分组的 URL 分页发生在 Go 进程内，响应里的 total 是分组后的数量，
+	// 不需要数据库再为原始行做一次 COUNT(*)。全量 COUNT 在超大媒体库上
+	// 会重复扫描整个 library_id 范围，而这里只关心是否存在截断风险。
+	items, err := s.repo.Media.ListByLibrariesFilteredNoCount(ctx, libraryIDs, 0, maxMediaSearchLimit, filter)
 	if err != nil {
 		return nil, err
 	}
-	if total > int64(len(items)) && s.log != nil {
-		s.log.Warn("media version grouping truncated by safety limit",
+	if len(items) >= maxMediaSearchLimit && s.log != nil {
+		s.log.Warn("media version grouping may be truncated by safety limit",
 			zap.String("library_id", libraryID),
-			zap.Int64("total", total),
 			zap.Int("limit", maxMediaSearchLimit))
 	}
 	s.attachLibraryMetadata(ctx, items)
-	if s.cache != nil {
-		s.cache.SetObject(cacheKey, items, s.mediaObjectTTL())
-	}
 	return items, nil
 }
 

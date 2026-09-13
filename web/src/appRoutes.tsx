@@ -47,17 +47,29 @@ const ScraperQueuePage = lazy(() => import('./pages/ScraperQueuePage').then((m) 
 const TaskQueuePage = lazy(() => import('./pages/TaskQueuePage').then((m) => ({ default: m.TaskQueuePage })))
 
 // 常用页面的路由 chunk 空闲预取：应用加载完成后浏览器一空闲就把浏览路径
-// （库列表/库详情/媒体详情/播放/收藏/历史等）的 chunk 拉下来，
+// （库列表/库详情/媒体详情/收藏/历史等）的 chunk 拉下来，
 // 首次点击进入时不再出现"加载中…"等 chunk 下载。失败静默（导航时会重试）。
 let prefetchStarted = false
 export function prefetchCommonRouteChunks() {
   if (prefetchStarted || typeof window === 'undefined') return
+
+  // 弱网/省流模式不做空闲预取：首屏预览和海报加载优先占用带宽。
+  const connection = (navigator as Navigator & {
+    connection?: { saveData?: boolean; effectiveType?: string }
+  }).connection
+  if (
+    connection?.saveData ||
+    connection?.effectiveType === 'slow-2g' ||
+    connection?.effectiveType === '2g'
+  ) {
+    return
+  }
+
   prefetchStarted = true
   const loaders = [
     LibrariesPageLoader,
     LibraryPageLoader,
     MediaDetailPageLoader,
-    PlayerPageLoader,
     FavouritesPageLoader,
     WatchHistoryPageLoader,
     PlaylistsPageLoader,
@@ -68,9 +80,9 @@ export function prefetchCommonRouteChunks() {
     }
   }
   if (typeof requestIdleCallback !== 'undefined') {
-    requestIdleCallback(run, { timeout: 5000 })
+    requestIdleCallback(run, { timeout: 8000 })
   } else {
-    window.setTimeout(run, 2000)
+    window.setTimeout(run, 2500)
   }
 }
 

@@ -14,75 +14,123 @@ type mediaSeriesKeyResolver struct {
 	pathTitles     map[string]string
 }
 
+// mediaSeriesKeyInputs 保存单条媒体解析剧集 key 所需的派生字段。剧集卡片、
+// 剧集索引和分页分组需要反复读取同一批行；提前计算一次可以避免对每行执行
+// 多轮正则匹配、路径解析和标题规范化。
+type mediaSeriesKeyInputs struct {
+	episodic    bool
+	pathKey     string
+	externalKey string
+	titleKey    string
+}
+
+func analyzeMediaSeriesKey(item model.Media) mediaSeriesKeyInputs {
+	if !mediaLooksEpisodicForGrouping(item) {
+		return mediaSeriesKeyInputs{}
+	}
+	return mediaSeriesKeyInputs{
+		episodic:    true,
+		pathKey:     mediaSeriesRawKey(item),
+		externalKey: repeatedSeriesExternalKey(item),
+		titleKey:    repeatedSeriesTitleKey(item),
+	}
+}
+
+func analyzeMediaSeriesKeys(items []model.Media) []mediaSeriesKeyInputs {
+	inputs := make([]mediaSeriesKeyInputs, len(items))
+	for i := range items {
+		inputs[i] = analyzeMediaSeriesKey(items[i])
+	}
+	return inputs
+}
+
 func newMediaSeriesKeyResolver(items []model.Media) mediaSeriesKeyResolver {
+	return newMediaSeriesKeyResolverFromInputs(analyzeMediaSeriesKeys(items))
+}
+
+func newMediaSeriesKeyResolverFromInputs(inputs []mediaSeriesKeyInputs) mediaSeriesKeyResolver {
 	resolver := mediaSeriesKeyResolver{
 		pathCounts:     make(map[string]int),
 		externalCounts: make(map[string]int),
 		titleCounts:    make(map[string]int),
 		pathTitles:     make(map[string]string),
 	}
-	for _, item := range items {
-		if !mediaLooksEpisodicForGrouping(item) {
+	pathTitleCandidates := make(map[string]map[string]struct{})
+	for _, input := range inputs {
+		if !input.episodic {
 			continue
 		}
-		if key := mediaSeriesRawKey(item); strings.HasPrefix(key, "library-path") {
-			resolver.pathCounts[key]++
+		if strings.HasPrefix(input.pathKey, "library-path") {
+			resolver.pathCounts[input.pathKey]++
+			if input.titleKey != "" {
+				if pathTitleCandidates[input.pathKey] == nil {
+					pathTitleCandidates[input.pathKey] = make(map[string]struct{})
+				}
+				pathTitleCandidates[input.pathKey][input.titleKey] = struct{}{}
+			}
 		}
-		if key := repeatedSeriesExternalKey(item); key != "" {
-			resolver.externalCounts[key]++
+		if input.externalKey != "" {
+			resolver.externalCounts[input.externalKey]++
 		}
-		if key := repeatedSeriesTitleKey(item); key != "" {
-			resolver.titleCounts[key]++
+		if input.titleKey != "" {
+			resolver.titleCounts[input.titleKey]++
 		}
 	}
 	// A scraper can normalize the same show to one title while the source
 	// release folders still contain different tags (1080p/2160p, uploader
 	// names, etc.). Remember an unambiguous title alias for each path group so
 	// those folders are bridged instead of rendered as separate collections.
-	pathTitleCandidates := make(map[string]map[string]struct{})
-	for _, item := range items {
-		if !mediaLooksEpisodicForGrouping(item) {
-			continue
-		}
-		pathKey := mediaSeriesRawKey(item)
-		titleKey := repeatedSeriesTitleKey(item)
-		if !strings.HasPrefix(pathKey, "library-path") || titleKey == "" || resolver.titleCounts[titleKey] < 2 {
-			continue
-		}
-		if pathTitleCandidates[pathKey] == nil {
-			pathTitleCandidates[pathKey] = make(map[string]struct{})
-		}
-		pathTitleCandidates[pathKey][titleKey] = struct{}{}
-	}
 	for pathKey, candidates := range pathTitleCandidates {
-		if len(candidates) != 1 {
-			continue
-		}
+		repeatedTitle := ""
+		repeatedCount := 0
 		for titleKey := range candidates {
-			resolver.pathTitles[pathKey] = titleKey
+			if resolver.titleCounts[titleKey] < 2 {
+				continue
+			}
+			repeatedTitle = titleKey
+			repeatedCount++
+		}
+		if repeatedCount == 1 {
+			resolver.pathTitles[pathKey] = repeatedTitle
 		}
 	}
 	return resolver
 }
 
+// resolveMediaSeriesKeys 对输入只做一轮派生字段计算，返回可供后续 O(1) 解析的
+// resolver 以及每条记录对应的 key。这是整库剧集加载的快速路径。
+func resolveMediaSeriesKeys(items []model.Media) (mediaSeriesKeyResolver, []string) {
+	inputs := analyzeMediaSeriesKeys(items)
+	resolver := newMediaSeriesKeyResolverFromInputs(inputs)
+	keys := make([]string, len(items))
+	for i := range items {
+		keys[i] = resolver.keyFromInputs(items[i], inputs[i])
+	}
+	return resolver, keys
+}
+
 func (r mediaSeriesKeyResolver) key(media model.Media) string {
-	if mediaLooksEpisodicForGrouping(media) {
-		if pathKey := mediaSeriesRawKey(media); strings.HasPrefix(pathKey, "library-path") {
-			if titleKey := r.pathTitles[pathKey]; titleKey != "" {
+	return r.keyFromInputs(media, analyzeMediaSeriesKey(media))
+}
+
+func (r mediaSeriesKeyResolver) keyFromInputs(media model.Media, input mediaSeriesKeyInputs) string {
+	if input.episodic {
+		if strings.HasPrefix(input.pathKey, "library-path") {
+			if titleKey := r.pathTitles[input.pathKey]; titleKey != "" {
 				return compactSeriesKey(titleKey)
 			}
 			// A series directory is the strongest identity for mixed rows:
 			// main episodes and specials (CM/NCOP/PV/OVA) may be scraped to
 			// slightly different titles, but they still belong to one show.
-			if r.pathCounts[pathKey] > 1 {
-				return compactSeriesKey(pathKey)
+			if r.pathCounts[input.pathKey] > 1 {
+				return compactSeriesKey(input.pathKey)
 			}
 		}
-		if key := repeatedSeriesTitleKey(media); key != "" && r.titleCounts[key] > 1 {
-			return compactSeriesKey(key)
+		if input.titleKey != "" && r.titleCounts[input.titleKey] > 1 {
+			return compactSeriesKey(input.titleKey)
 		}
-		if key := repeatedSeriesExternalKey(media); key != "" && r.externalCounts[key] > 1 {
-			return compactSeriesKey(key)
+		if input.externalKey != "" && r.externalCounts[input.externalKey] > 1 {
+			return compactSeriesKey(input.externalKey)
 		}
 	}
 	return mediaSeriesKey(media)

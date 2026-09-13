@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { AnimatePresence, motion } from 'framer-motion'
 import {
   ArrowRight,
   ChevronLeft,
@@ -18,6 +17,8 @@ import {
 } from 'lucide-react'
 
 import { imageURL } from '../api/client'
+import { useInViewOnce } from '../hooks/useInViewOnce'
+import { useLazyPreviewBatch } from '../hooks/useLazyPreviewBatch'
 import { MediaCard } from '../components/MediaCard'
 import type { HistoryItem } from '../api/playback'
 import type { Library, Media } from '../types'
@@ -37,7 +38,6 @@ const TYPE_ICONS: Record<string, ReactNode> = {
   music: <Music size={18} />,
   adult: <Film size={18} />,
 }
-
 const TYPE_LABELS: Record<string, string> = {
   movie: '电影',
   movies: '电影',
@@ -53,11 +53,7 @@ const TYPE_LABELS: Record<string, string> = {
 export function HomeLoadingState() {
   return (
     <div className="flex items-center justify-center py-48">
-      <motion.div
-        animate={{ opacity: [0.4, 1, 0.4] }}
-        transition={{ repeat: Infinity, duration: 1.5 }}
-        className="flex flex-col items-center gap-4"
-      >
+      <div className="flex flex-col items-center gap-4 animate-pulse-soft">
         <div className="relative flex items-center justify-center">
           <div className="h-10 w-10 animate-spin rounded-full border-2 border-[var(--app-border)] border-t-[var(--app-active-bg)]" />
           <Film className="absolute h-4 w-4 text-brand-500" />
@@ -65,7 +61,7 @@ export function HomeLoadingState() {
         <span className="text-sm font-semibold uppercase tracking-widest text-[var(--app-muted)]">
           首页内容准备中…
         </span>
-      </motion.div>
+      </div>
     </div>
   )
 }
@@ -170,24 +166,20 @@ export function HomeCarouselSection({
       {/* Background Backdrop Image with Crossfade */}
       <div className="absolute inset-0 z-0">
         <div className="theme-hero-bg h-full w-full" />
-        <AnimatePresence mode="wait">
-          {visual && (
-            <motion.img
-              key={visual + currentItem.id}
-              initial={{ opacity: 0, scale: 1.08 }}
-              animate={{ opacity: 0.38, scale: 1.02 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.8, ease: 'easeOut' }}
-              src={imageURL(visual, currentItem.updated_at)}
-              alt=""
-              className="absolute inset-0 h-full w-full object-cover object-center blur-[1px]"
-              referrerPolicy="no-referrer"
-              onError={(e) => {
-                e.currentTarget.style.display = 'none'
-              }}
-            />
-          )}
-        </AnimatePresence>
+        {visual && (
+          <img
+            key={visual + currentItem.id}
+            src={imageURL(visual, currentItem.updated_at, { maxWidth: 1920, maxHeight: 1080, quality: 78 })}
+            alt=""
+            fetchPriority="high"
+            decoding="async"
+            className="absolute inset-0 h-full w-full object-cover object-center blur-[1px] animate-hero-in"
+            referrerPolicy="no-referrer"
+            onError={(e) => {
+              e.currentTarget.style.display = 'none'
+            }}
+          />
+        )}
         <div className="theme-hero-overlay absolute inset-0" />
         <div className="theme-hero-fade absolute inset-x-0 bottom-0 h-36" />
       </div>
@@ -212,18 +204,12 @@ export function HomeCarouselSection({
 
           {/* Title */}
           <div className="space-y-2">
-            <AnimatePresence mode="wait">
-              <motion.h1
-                key={currentItem.title + currentItem.id}
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -6 }}
-                transition={{ duration: 0.3 }}
-                className="font-display text-2xl font-extrabold leading-tight tracking-tight text-[var(--app-text)] sm:text-3xl md:text-4xl lg:text-5xl"
-              >
-                {currentItem.title}
-              </motion.h1>
-            </AnimatePresence>
+            <h1
+              key={currentItem.title + currentItem.id}
+              className="font-display text-2xl font-extrabold leading-tight tracking-tight text-[var(--app-text)] sm:text-3xl md:text-4xl lg:text-5xl animate-title-in"
+            >
+              {currentItem.title}
+            </h1>
             {currentItem.original_name && currentItem.original_name !== currentItem.title && (
               <p className="text-xs font-semibold text-[var(--app-muted)] tracking-wide">
                 {currentItem.original_name}
@@ -295,8 +281,10 @@ export function HomeCarouselSection({
             </div>
             {poster && (
               <img
-                src={imageURL(poster, currentItem.updated_at)}
+                src={imageURL(poster, currentItem.updated_at, { maxWidth: 560, quality: 84 })}
                 alt={currentItem.title}
+                fetchPriority="high"
+                decoding="async"
                 className="absolute inset-2 h-[calc(100%-1rem)] w-[calc(100%-1rem)] rounded-[1.25rem] object-cover"
                 referrerPolicy="no-referrer"
                 onError={(e) => {
@@ -377,16 +365,12 @@ export function HomeLibrariesSection({
   const [currentPage, setCurrentPage] = useState(1)
   const totalPages = Math.max(1, Math.ceil(libraries.length / PAGE_SIZE))
   const effectivePage = Math.min(currentPage, totalPages)
+  const queuePreview = useLazyPreviewBatch(onNeedPreviews)
 
   const pagedLibraries = useMemo<Library[]>(() => {
     const start = (effectivePage - 1) * PAGE_SIZE
     return libraries.slice(start, start + PAGE_SIZE)
   }, [libraries, effectivePage])
-
-  useEffect(() => {
-    const ids = pagedLibraries.map((l) => l.id)
-    onNeedPreviews?.(ids)
-  }, [pagedLibraries, onNeedPreviews])
 
   return (
     <section className="space-y-4">
@@ -449,69 +433,88 @@ export function HomeLibrariesSection({
         </div>
       </div>
 
-      {/* Libraries Grid */}
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-5 2xl:grid-cols-6">
-        {pagedLibraries.map((lib) => {
-          const count = libraryCounts[lib.id] ?? 0
-          const cards = libraryData?.[lib.id]?.cards || []
-          const artwork = getLibraryArtworks(lib, cards)
-
-          return (
-            <Link
-              key={lib.id}
-              to={`/library/${lib.id}`}
-              className="group relative flex flex-col justify-between overflow-hidden rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel)] p-3 transition-all duration-300 hover:-translate-y-1 hover:border-brand-500/50 hover:bg-[var(--app-hover)]/40 hover:shadow-lg hover:shadow-brand-500/10"
-              title={lib.name}
-            >
-              {/* 封面图片展示区：和媒体库页面一样，显示设置好的或生成的图片 */}
-              <div
-                className={`relative h-28 w-full overflow-hidden rounded-xl bg-[linear-gradient(135deg,var(--app-panel-soft),var(--app-panel))] shadow-inner ${
-                  artwork.length > 1 ? 'grid grid-cols-2 gap-0.5' : ''
-                }`}
-              >
-                {artwork.length > 0 ? (
-                  artwork.map(({ src, version }, index) => (
-                    <img
-                      key={`${src}-${index}`}
-                      src={imageURL(src, version)}
-                      alt=""
-                      loading="lazy"
-                      referrerPolicy="no-referrer"
-                      className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
-                      onError={(event) => {
-                        event.currentTarget.style.visibility = 'hidden'
-                      }}
-                    />
-                  ))
-                ) : (
-                  <div className="flex h-full w-full items-center justify-center text-brand-500">
-                    {TYPE_ICONS[lib.type] || <FolderOpen size={28} />}
-                  </div>
-                )}
-
-                {/* 浮动类型标签 */}
-                <div className="absolute top-2 right-2 rounded-lg border border-white/20 bg-black/60 px-2 py-0.5 text-[10px] font-bold text-white backdrop-blur-md shadow-sm">
-                  {TYPE_LABELS[lib.type] || '自定义'}
-                </div>
-              </div>
-
-              {/* 媒体库信息 */}
-              <div className="mt-3 flex flex-col justify-between">
-                <h3
-                  className="line-clamp-2 break-words font-display text-sm font-bold text-[var(--app-text)] group-hover:text-brand-500"
-                  title={lib.name}
-                >
-                  {lib.name}
-                </h3>
-                <p className="mt-0.5 text-xs text-[var(--app-muted)]">
-                  {count > 0 ? `${count} 部媒体` : '暂无条目'}
-                </p>
-              </div>
-            </Link>
-          )
-        })}
+        {pagedLibraries.map((lib) => (
+          <HomeLibraryCard
+            key={lib.id}
+            library={lib}
+            count={libraryCounts[lib.id] ?? 0}
+            cards={libraryData?.[lib.id]?.cards ?? []}
+            onVisible={() => {
+              if (!lib.cover_url) {
+                queuePreview(lib.id)
+              }
+            }}
+          />
+        ))}
       </div>
     </section>
+  )
+}
+
+function HomeLibraryCard({
+  library,
+  count,
+  cards,
+  onVisible,
+}: {
+  library: Library
+  count: number
+  cards: SeriesCard[]
+  onVisible: () => void
+}) {
+  const ref = useInViewOnce<HTMLAnchorElement>(onVisible)
+  const artwork = getLibraryArtworks(library, cards)
+
+  return (
+    <Link
+      ref={ref}
+      to={`/library/${library.id}`}
+      className="group relative flex flex-col justify-between overflow-hidden rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel)] p-3 transition-all duration-300 hover:-translate-y-1 hover:border-brand-500/50 hover:bg-[var(--app-hover)]/40 hover:shadow-lg hover:shadow-brand-500/10"
+      title={library.name}
+    >
+      <div
+        className={`relative h-28 w-full overflow-hidden rounded-xl bg-[linear-gradient(135deg,var(--app-panel-soft),var(--app-panel))] shadow-inner ${
+          artwork.length > 1 ? 'grid grid-cols-2 gap-0.5' : ''
+        }`}
+      >
+        {artwork.length > 0 ? (
+          artwork.map(({ src, version }, index) => (
+            <img
+              key={`${src}-${index}`}
+              src={imageURL(src, version, { maxWidth: 480, maxHeight: 320, quality: 78 })}
+              alt=""
+              loading="lazy"
+              referrerPolicy="no-referrer"
+              className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+              onError={(event) => {
+                event.currentTarget.style.visibility = 'hidden'
+              }}
+            />
+          ))
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-brand-500">
+            {TYPE_ICONS[library.type] || <FolderOpen size={28} />}
+          </div>
+        )}
+
+        <div className="absolute top-2 right-2 rounded-lg border border-white/20 bg-black/60 px-2 py-0.5 text-[10px] font-bold text-white backdrop-blur-md shadow-sm">
+          {TYPE_LABELS[library.type] || '自定义'}
+        </div>
+      </div>
+
+      <div className="mt-3 flex flex-col justify-between">
+        <h3
+          className="line-clamp-2 break-words font-display text-sm font-bold text-[var(--app-text)] group-hover:text-brand-500"
+          title={library.name}
+        >
+          {library.name}
+        </h3>
+        <p className="mt-0.5 text-xs text-[var(--app-muted)]">
+          {count > 0 ? `${count} 部媒体` : '暂无条目'}
+        </p>
+      </div>
+    </Link>
   )
 }
 
@@ -694,7 +697,7 @@ function ContinueCard({ media, progress }: { media: Media; progress: number }) {
       <div className="relative h-20 w-14 shrink-0 overflow-hidden rounded-xl bg-[var(--app-panel-soft)]">
         {media.poster_url ? (
           <img
-            src={imageURL(media.poster_url, media.updated_at)}
+            src={imageURL(media.poster_url, media.updated_at, { maxWidth: 180, maxHeight: 240, quality: 78 })}
             alt=""
             className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
             loading="lazy"

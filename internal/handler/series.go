@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -66,6 +67,11 @@ func listLibrarySeriesHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		libID := c.Param("id")
 		ctx := c.Request.Context()
+		sortSpec := parseMediaSort(c)
+		var history map[string]time.Time
+		if sortSpec.Field == "last_played" {
+			history = mediaHistoryMap(c, svc)
+		}
 		// 远程剧集库：远程 Series 映射为系列卡片。
 		if svc.EmbyRemote != nil && service.IsEmbyRemoteID(libID) {
 			mountID, remoteID, _ := service.DecodeEmbyRemoteID(libID)
@@ -83,6 +89,7 @@ func listLibrarySeriesHandler(svc *service.Container) gin.HandlerFunc {
 				writeInternalOrCanceled(c, err)
 				return
 			}
+			cards = service.SortSeriesCards(cards, sortSpec.Field, sortSpec.Order, history)
 			page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 			size, _ := strconv.Atoi(c.DefaultQuery("page_size", "500"))
 			if page < 1 {
@@ -122,6 +129,7 @@ func listLibrarySeriesHandler(svc *service.Container) gin.HandlerFunc {
 			writeInternalOrCanceled(c, err)
 			return
 		}
+		items = service.SortSeriesCards(items, sortSpec.Field, sortSpec.Order, history)
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 		size, _ := strconv.Atoi(c.DefaultQuery("page_size", "500"))
 		if page < 1 {

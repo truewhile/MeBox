@@ -1,6 +1,5 @@
 import type { ReactNode } from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { AnimatePresence, motion } from 'framer-motion'
 import { ChevronDown } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -52,21 +51,13 @@ export function SidebarGroup({ id, icon, label, children, collapsed, open, activ
           </div>
         )}
       </button>
-      <AnimatePresence initial={false}>
-        {!collapsed && open && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.18, ease: 'easeOut' }}
-            className="overflow-hidden"
-          >
-            <div className="space-y-1 pb-1 pl-3">
-              {children}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {!collapsed && open && (
+        <div className="overflow-hidden animate-accordion-in">
+          <div className="space-y-1 pb-1 pl-3">
+            {children}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -103,13 +94,9 @@ export function SidebarLink({ to, icon, label, end, collapsed, child }: SidebarL
         {icon}
       </span>
       {!collapsed && (
-        <motion.span
-          initial={{ opacity: 0, x: -5 }}
-          animate={{ opacity: 1, x: 0 }}
-          className="truncate whitespace-nowrap"
-        >
+        <span className="truncate whitespace-nowrap">
           {label}
-        </motion.span>
+        </span>
       )}
       {collapsed && (
         <div className="pointer-events-none absolute left-full z-50 ml-3 whitespace-nowrap rounded-xl bg-[var(--app-tooltip-bg)] px-2.5 py-1.5 text-xs font-semibold text-[var(--app-tooltip-text)] opacity-0 shadow-lg transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">

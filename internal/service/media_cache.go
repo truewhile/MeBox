@@ -35,7 +35,7 @@ func (s *MediaService) mediaListCacheKey(libraryID string, libraryIDs []string, 
 	return "media:list:" + hex.EncodeToString(sum[:])
 }
 
-func (s *MediaService) libraryPreviewCacheKey(libraries []model.Library, cardLimit int, filter repository.MediaQueryFilter) string {
+func (s *MediaService) libraryPreviewCacheKey(libraries []model.Library, cardLimit int, filter repository.MediaQueryFilter, includeCounts bool) string {
 	libIDs := make([]string, len(libraries))
 	for i, lib := range libraries {
 		libIDs[i] = lib.ID
@@ -48,7 +48,7 @@ func (s *MediaService) libraryPreviewCacheKey(libraries []model.Library, cardLim
 	sum := sha1.Sum([]byte(strings.Join([]string{
 		"preview",
 		strings.Join(libIDs, ","),
-		fmt.Sprintf("%d:%t", cardLimit, filter.IncludeNSFW),
+		fmt.Sprintf("%d:%t:%t", cardLimit, filter.IncludeNSFW, includeCounts),
 		strings.Join(allowed, ","),
 		strings.Join(hidden, ","),
 	}, "|")))
@@ -87,15 +87,19 @@ func hashObjectCacheKey(parts []string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// mediaGroupedRowsCacheKey 版本分组源行（已挂库元数据）的对象缓存。
-func (s *MediaService) mediaGroupedRowsCacheKey(libraryID string, libraryIDs []string, filter repository.MediaQueryFilter) string {
+// groupedItemsCacheKey caches the fully grouped version list. Version grouping
+// requires scanning every row in the library, so recomputing it for each page
+// request makes pagination O(pages × library size) instead of O(library size).
+// Only the grouped result is cached; caching the ungrouped rows as well would
+// duplicate large libraries in the process memory for no additional hit path.
+func (s *MediaService) groupedItemsCacheKey(libraryID string, libraryIDs []string, filter repository.MediaQueryFilter) string {
 	libs := append([]string(nil), libraryIDs...)
 	sort.Strings(libs)
 	allowed := append([]string(nil), filter.AllowedLibraryIDs...)
 	hidden := append([]string(nil), filter.HiddenLibraryIDs...)
 	sort.Strings(allowed)
 	sort.Strings(hidden)
-	return "media:obj:grouped-rows:" + hashObjectCacheKey([]string{
+	return "media:obj:grouped-items:" + hashObjectCacheKey([]string{
 		libraryID,
 		strings.Join(libs, ","),
 		fmt.Sprintf("%t", filter.IncludeNSFW),

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/truewhile/MeBox/internal/model"
+	"github.com/truewhile/MeBox/internal/repository"
 )
 
 type seriesCardsCacheValue struct {
@@ -24,6 +25,7 @@ type libraryRowsCacheValue struct {
 	Rows     []model.Media
 	Resolver mediaSeriesKeyResolver
 	Episodes map[string][]model.Media
+	Cards    []SeriesCard
 }
 
 type SeriesCard struct {
@@ -41,6 +43,7 @@ type seriesCardGroup struct {
 
 // libraryRowsWithIndex 返回整库行与预计算剧集索引（带对象缓存）。
 func (s *MediaService) libraryRowsWithIndex(ctx context.Context, libraryID string, visibility MediaVisibility) (*libraryRowsCacheValue, error) {
+	visibility = ExpandMediaVisibilityForMergedCloudLibraries(ctx, s.repo, visibility)
 	cacheKey := s.libraryRowsCacheKey(libraryID, visibility)
 	if s.cache != nil {
 		if obj, ok := s.cache.GetObject(cacheKey); ok {
@@ -55,16 +58,17 @@ func (s *MediaService) libraryRowsWithIndex(ctx context.Context, libraryID strin
 	}
 	// listAllMediaVisible 走 ListMediaVisible，行已带库元数据（resolver 的
 	// key 计算依赖 DisplayLibraryPath/ID）。
-	resolver := newMediaSeriesKeyResolver(rows)
+	resolver, keys := resolveMediaSeriesKeys(rows)
 	episodes := make(map[string][]model.Media, len(rows)/4+1)
-	for _, row := range rows {
-		k := resolver.key(row)
+	for i, row := range rows {
+		k := keys[i]
 		if k == "" {
 			continue
 		}
 		episodes[k] = append(episodes[k], row)
 	}
-	value := &libraryRowsCacheValue{Rows: rows, Resolver: resolver, Episodes: episodes}
+	cards := groupMediaSeriesCardsByKeys(rows, keys)
+	value := &libraryRowsCacheValue{Rows: rows, Resolver: resolver, Episodes: episodes, Cards: cards}
 	if s.cache != nil {
 		s.cache.SetObject(cacheKey, value, s.mediaObjectTTL())
 	}
@@ -72,7 +76,6 @@ func (s *MediaService) libraryRowsWithIndex(ctx context.Context, libraryID strin
 }
 
 func (s *MediaService) ListLibrarySeriesCards(ctx context.Context, libraryID string, visibility MediaVisibility) ([]SeriesCard, int64, error) {
-	visibility = ExpandMediaVisibilityForMergedCloudLibraries(ctx, s.repo, visibility)
 	cacheKey := s.libraryCardsObjectKey(libraryID, visibility)
 	if s.cache != nil {
 		if obj, ok := s.cache.GetObject(cacheKey); ok {
@@ -85,7 +88,12 @@ func (s *MediaService) ListLibrarySeriesCards(ctx context.Context, libraryID str
 	if err != nil {
 		return nil, 0, err
 	}
-	cards := groupMediaSeriesCards(rows.Rows)
+	cards := rows.Cards
+	if cards == nil && len(rows.Rows) > 0 {
+		// Fallback keeps rolling-cache compatibility if an older runtime cache
+		// value was created before Cards was added.
+		cards = groupMediaSeriesCards(rows.Rows)
+	}
 	if cards == nil {
 		cards = []SeriesCard{}
 	}
@@ -190,40 +198,40 @@ func (s *MediaService) ListMediaEpisodes(ctx context.Context, mediaID string, vi
 		}
 	}
 
-		// 如果没有聚合到多集，尝试同父目录匹配（排除合集目录和公共分类目录，且同目录文件不能是互不相同的独立电影）
-		if len(out) <= 1 && target.Path != "" {
-			targetDir := filepath.Dir(strings.ReplaceAll(target.Path, "\\", "/"))
-			parentBase := filepath.Base(targetDir)
-			if !mediaParentLooksLikeCollection(target.Path) && !seriesTitleIsGenericContainer(parentBase, *target) {
-				targetTitleNorm := normalizeSeriesTitle(target.Title)
-				targetDirNorm := normalizeSeriesTitle(parentBase)
-				dirMatches := make([]model.Media, 0)
-				for _, row := range rows {
-					if row.Path == "" || filepath.Dir(strings.ReplaceAll(row.Path, "\\", "/")) != targetDir {
-						continue
-					}
-					if row.ID == target.ID {
-						dirMatches = append(dirMatches, row)
-						continue
-					}
-					rowTitleNorm := normalizeSeriesTitle(row.Title)
-					allowMatch := false
-					if isGenericMovieTitle(rowTitleNorm) || isGenericMovieTitle(targetTitleNorm) {
-						allowMatch = true
-					} else if rowTitleNorm != "" && rowTitleNorm == targetTitleNorm {
-						allowMatch = true
-					} else if rowTitleNorm != "" && targetDirNorm != "" && rowTitleNorm == targetDirNorm {
-						allowMatch = true
-					}
-					if allowMatch {
-						dirMatches = append(dirMatches, row)
-					}
+	// 如果没有聚合到多集，尝试同父目录匹配（排除合集目录和公共分类目录，且同目录文件不能是互不相同的独立电影）
+	if len(out) <= 1 && target.Path != "" {
+		targetDir := filepath.Dir(strings.ReplaceAll(target.Path, "\\", "/"))
+		parentBase := filepath.Base(targetDir)
+		if !mediaParentLooksLikeCollection(target.Path) && !seriesTitleIsGenericContainer(parentBase, *target) {
+			targetTitleNorm := normalizeSeriesTitle(target.Title)
+			targetDirNorm := normalizeSeriesTitle(parentBase)
+			dirMatches := make([]model.Media, 0)
+			for _, row := range rows {
+				if row.Path == "" || filepath.Dir(strings.ReplaceAll(row.Path, "\\", "/")) != targetDir {
+					continue
 				}
-				if len(dirMatches) > 1 {
-					out = dirMatches
+				if row.ID == target.ID {
+					dirMatches = append(dirMatches, row)
+					continue
+				}
+				rowTitleNorm := normalizeSeriesTitle(row.Title)
+				allowMatch := false
+				if isGenericMovieTitle(rowTitleNorm) || isGenericMovieTitle(targetTitleNorm) {
+					allowMatch = true
+				} else if rowTitleNorm != "" && rowTitleNorm == targetTitleNorm {
+					allowMatch = true
+				} else if rowTitleNorm != "" && targetDirNorm != "" && rowTitleNorm == targetDirNorm {
+					allowMatch = true
+				}
+				if allowMatch {
+					dirMatches = append(dirMatches, row)
 				}
 			}
+			if len(dirMatches) > 1 {
+				out = dirMatches
+			}
 		}
+	}
 
 	if len(out) == 0 {
 		out = []model.Media{*target}
@@ -246,35 +254,47 @@ func (s *MediaService) ListMediaEpisodes(ctx context.Context, mediaID string, vi
 }
 
 func (s *MediaService) listAllMediaVisible(ctx context.Context, libraryID string, visibility MediaVisibility) ([]model.Media, int64, error) {
-	const pageSize = 2000
-	var all []model.Media
-	var total int64
-	for page := 1; ; page++ {
-		rows, n, err := s.ListMediaVisible(ctx, libraryID, page, pageSize, visibility)
-		if err != nil {
-			return nil, 0, err
-		}
-		if page == 1 {
-			total = n
-			all = make([]model.Media, 0, minInt64(n, pageSize))
-		}
-		all = append(all, rows...)
-		if int64(len(all)) >= n || len(rows) < pageSize {
-			break
-		}
+	visibility = ExpandMediaVisibilityForMergedCloudLibraries(ctx, s.repo, visibility)
+	libraryIDs, err := MergedLibraryIDsForLibrary(ctx, s.repo, libraryID)
+	if err != nil {
+		return nil, 0, err
 	}
-	return all, total, nil
+	filter := repository.MediaQueryFilter{
+		IncludeNSFW:       visibility.IncludeNSFW,
+		AllowedLibraryIDs: visibility.AllowedLibraryIDs,
+		HiddenLibraryIDs:  visibility.HiddenLibraryIDs,
+	}
+	rows, err := s.repo.Media.ListAllByLibrariesFilteredNoCount(ctx, libraryIDs, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	s.attachLibraryMetadata(ctx, rows)
+	return rows, int64(len(rows)), nil
 }
 
 func groupMediaSeriesCards(items []model.Media) []SeriesCard {
 	if len(items) == 0 {
 		return nil
 	}
+	_, keys := resolveMediaSeriesKeys(items)
+	return groupMediaSeriesCardsByKeys(items, keys)
+}
+
+// groupMediaSeriesCardsByKeys performs the card fold using already-resolved
+// keys. Full-library caches need the same keys for the episode index and the
+// series-card list; resolving them once avoids several regex-heavy passes over
+// every episode row.
+func groupMediaSeriesCardsByKeys(items []model.Media, keys []string) []SeriesCard {
+	if len(items) == 0 {
+		return nil
+	}
+	if len(keys) != len(items) {
+		return groupMediaSeriesCards(items)
+	}
 	groups := make([]seriesCardGroup, 0)
 	byKey := make(map[string]int, len(items))
-	resolver := newMediaSeriesKeyResolver(items)
-	for _, item := range items {
-		key := resolver.key(item)
+	for i, item := range items {
+		key := keys[i]
 		if key == "" {
 			continue
 		}

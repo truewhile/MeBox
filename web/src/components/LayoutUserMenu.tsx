@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, useLocation } from 'react-router-dom'
-import { AnimatePresence, motion } from 'framer-motion'
 import { Cast, ChevronDown, Clock, Heart, ListMusic, LogOut, Settings, Tv, UserCog } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -103,26 +102,18 @@ export function LayoutUserMenu({
 
   const menuPortal = isOpen && menuPosition && typeof document !== 'undefined'
     ? createPortal(
-        <AnimatePresence>
-          <motion.div
+        <>
+          <div
             key="layout-user-menu-backdrop"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.12 }}
-            className="fixed inset-0 z-[120]"
+            className="fixed inset-0 z-[120] animate-overlay-in"
             aria-hidden="true"
             onPointerDown={onClose}
           />
-          <motion.div
+          <div
             key="layout-user-menu-panel"
-            initial={{ opacity: 0, y: 10, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 10, scale: 0.95 }}
-            transition={{ duration: 0.15 }}
             role="menu"
             style={{ top: menuPosition.top, right: menuPosition.right }}
-            className="fixed z-[121] w-56 origin-top-right rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel)] p-2 shadow-xl"
+            className="fixed z-[121] w-56 origin-top-right rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel)] p-2 shadow-xl animate-menu-in"
             onPointerDown={(event) => event.stopPropagation()}
           >
 	            <UserMenuLink to="/profile" icon={<Settings size={16} />} label="设置" onNavigate={onClose} />
@@ -191,8 +182,8 @@ export function LayoutUserMenu({
               <LogOut size={16} />
               <span>安全登出系统</span>
             </button>
-          </motion.div>
-        </AnimatePresence>,
+          </div>
+        </>,
         document.body,
       )
     : null
