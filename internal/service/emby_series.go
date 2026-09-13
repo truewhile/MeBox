@@ -276,7 +276,9 @@ func (e *EmbyService) seasonsForSeries(series embySeriesGroup) []embySeasonGroup
 		}
 		season.Episodes = append(season.Episodes, episode)
 	}
-	sort.Ints(order)
+	sort.SliceStable(order, func(i, j int) bool {
+		return embySeasonSortOrder(order[i]) < embySeasonSortOrder(order[j])
+	})
 	out := make([]embySeasonGroup, 0, len(order))
 	for _, seasonNum := range order {
 		out = append(out, *bySeason[seasonNum])

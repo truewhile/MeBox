@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -272,6 +273,11 @@ func TestEmbySeparatesOVAAndOADFromSeasonOne(t *testing.T) {
 	if len(seasonItems) != 3 {
 		t.Fatalf("expected season 1, OVA and OAD separately, got %#v", seasonItems)
 	}
+	for i, want := range []int{1, embySeasonOVA, embySeasonOAD} {
+		if seasonItems[i]["IndexNumber"] != want {
+			t.Fatalf("season order [%d] = %#v, want %d", i, seasonItems[i], want)
+		}
+	}
 
 	seasonByIndex := make(map[int]map[string]any, len(seasonItems))
 	for _, season := range seasonItems {
@@ -302,6 +308,35 @@ func TestEmbySeparatesOVAAndOADFromSeasonOne(t *testing.T) {
 		episodeItems := episodes["Items"].([]map[string]any)
 		if len(episodeItems) != 1 || episodeItems[0]["ParentIndexNumber"] != index {
 			t.Fatalf("season %d episodes = %#v", index, episodeItems)
+		}
+	}
+}
+
+func TestEmbySeasonSortOrderMatchesWeb(t *testing.T) {
+	seasons := []int{
+		embySeasonNCED,
+		embySeasonOAD,
+		2,
+		embySeasonTheatrical,
+		1,
+		embySeasonGenericSpecial,
+		embySeasonOVA,
+	}
+	sort.SliceStable(seasons, func(i, j int) bool {
+		return embySeasonSortOrder(seasons[i]) < embySeasonSortOrder(seasons[j])
+	})
+	want := []int{
+		1,
+		2,
+		embySeasonGenericSpecial,
+		embySeasonTheatrical,
+		embySeasonOVA,
+		embySeasonOAD,
+		embySeasonNCED,
+	}
+	for i := range want {
+		if seasons[i] != want[i] {
+			t.Fatalf("season order = %#v, want %#v", seasons, want)
 		}
 	}
 }

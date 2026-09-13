@@ -208,6 +208,42 @@ func seasonName(seasonNum int) string {
 	return fmt.Sprintf("第 %d 季", seasonNum)
 }
 
+// embySeasonSortOrder mirrors the web UI's seasonSortOrder: regular seasons
+// first in ascending order, followed by specials in a stable category order.
+func embySeasonSortOrder(seasonNum int) int {
+	if seasonNum > 0 {
+		return seasonNum
+	}
+	switch seasonNum {
+	case embySeasonGenericSpecial:
+		return 1000
+	case embySeasonTheatrical:
+		return 1001
+	case embySeasonOVA:
+		return 1002
+	case embySeasonOAD:
+		return 1003
+	case embySeasonOVD:
+		return 1004
+	case embySeasonONA:
+		return 1005
+	case embySeasonExtra:
+		return 1006
+	case embySeasonBonus:
+		return 1007
+	case embySeasonOmake:
+		return 1008
+	case embySeasonPictureDrama:
+		return 1009
+	case embySeasonNCOP:
+		return 1010
+	case embySeasonNCED:
+		return 1011
+	default:
+		return 2000
+	}
+}
+
 func sortSeriesGroups(groups []embySeriesGroup, p ItemsParams) {
 	switch primarySupportedEmbySort(p.SortBy, false) {
 	case "sortname", "name":
