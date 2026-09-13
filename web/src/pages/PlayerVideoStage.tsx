@@ -147,6 +147,9 @@ type PlayerVideoStageProps = {
   onSubtitleStyleChange: (style: SubtitleStylePreset) => void
   videoRef: RefObject<HTMLVideoElement>
   onVideoError: () => void
+  playerVolume: number
+  onPlayerVolumeChange: (volume: number) => void
+  onPlayerVolumeCommit: (volume: number) => void
   danmakuEnabled: boolean
   danmakuOpacity: number
   danmakuFontSize: number
@@ -192,6 +195,9 @@ export function PlayerVideoStage({
   onSubtitleStyleChange,
   videoRef,
   onVideoError,
+  playerVolume,
+  onPlayerVolumeChange,
+  onPlayerVolumeCommit,
   danmakuEnabled,
   danmakuOpacity,
   danmakuFontSize,
@@ -631,6 +637,9 @@ export function PlayerVideoStage({
           </div>
           <PlayerControls
             videoRef={videoRef}
+            volume={playerVolume}
+            onVolumeChange={onPlayerVolumeChange}
+            onVolumeCommit={onPlayerVolumeCommit}
             uiVisible={controlsVisible}
             onUiVisibleChange={setControlsVisible}
             subs={subs}

@@ -10,6 +10,7 @@ import {
   type SubtitleChineseMode,
 } from '../utils/subtitleChinese'
 import { convertASSContent } from '../utils/subtitleASS'
+import { runWithoutGlobalVideoFrame } from '../utils/withoutVideoFrame'
 
 type AssSubtitleStageProps = {
   videoRef: React.RefObject<HTMLVideoElement>
@@ -60,18 +61,21 @@ export function AssSubtitleStage({
         if (!body.trim()) throw new Error('empty subtitle payload')
         if (cancelled) return
 
-        instance = new JASSUB({
-          video,
-          subContent: convertASSContent(body, converter),
-          timeOffset: timeOffsetRef.current,
-          workerUrl: jassubWorkerUrl,
-          wasmUrl: jassubWasmUrl,
-          modernWasmUrl: jassubModernWasmUrl,
-          fonts: [notoSansSCUrl],
-          defaultFont: 'Noto Sans SC',
-          queryFonts: 'local',
-          prescaleFactor: 1,
-        })
+        instance = runWithoutGlobalVideoFrame(
+          () =>
+            new JASSUB({
+              video,
+              subContent: convertASSContent(body, converter),
+              timeOffset: timeOffsetRef.current,
+              workerUrl: jassubWorkerUrl,
+              wasmUrl: jassubWasmUrl,
+              modernWasmUrl: jassubModernWasmUrl,
+              fonts: [notoSansSCUrl],
+              defaultFont: 'Noto Sans SC',
+              queryFonts: 'local',
+              prescaleFactor: 1,
+            }),
+        )
         instanceRef.current = instance
         await instance.ready
         if (cancelled) {

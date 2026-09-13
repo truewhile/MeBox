@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Check, ChevronRight, Film, Hash, Loader2, MessageSquareText, RefreshCw, Search, Sparkles, Tag, X } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, Eye, EyeOff, Film, Hash, KeyRound, Loader2, MessageSquareText, RefreshCw, Search, Server, Settings2, Sparkles, Tag, X } from 'lucide-react'
 
 import type { DanmakuAnime, DanmakuEpisode, DanmakuLoadedInfo } from '../api/danmaku'
 
@@ -17,10 +17,24 @@ type PlayerDanmakuPanelProps = {
   searching: boolean
   area: number
   onAreaChange: (v: number) => void
+  onAreaCommit: (v: number) => void
   opacity: number
   onOpacityChange: (v: number) => void
+  onOpacityCommit: (v: number) => void
   fontSize: number
   onFontSizeChange: (v: number) => void
+  onFontSizeCommit: (v: number) => void
+  /** Per-user danmaku service endpoint and optional application credentials. */
+  source: string
+  appId: string
+  appKeyConfigured: boolean
+  settingsSaving?: boolean
+  onSaveAdvanced: (values: {
+    source: string
+    appId: string
+    appKey: string
+    clearAppKey: boolean
+  }) => Promise<void>
   /** Multiple anime matched — user must pick one. */
   candidates: DanmakuAnime[]
   /**
@@ -53,10 +67,18 @@ export function PlayerDanmakuPanel({
   searching,
   area,
   onAreaChange,
+  onAreaCommit,
   opacity,
   onOpacityChange,
+  onOpacityCommit,
   fontSize,
   onFontSizeChange,
+  onFontSizeCommit,
+  source,
+  appId,
+  appKeyConfigured,
+  settingsSaving = false,
+  onSaveAdvanced,
   candidates,
   alternatives,
   mergeSources,
@@ -69,6 +91,13 @@ export function PlayerDanmakuPanel({
   onResetAuto,
 }: PlayerDanmakuPanelProps) {
   const [draft, setDraft] = useState(search)
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [sourceDraft, setSourceDraft] = useState(source)
+  const [appIdDraft, setAppIdDraft] = useState(appId)
+  const [appKeyDraft, setAppKeyDraft] = useState('')
+  const [showAppKey, setShowAppKey] = useState(false)
+  const [clearAppKey, setClearAppKey] = useState(false)
+  const [advancedSaving, setAdvancedSaving] = useState(false)
   // 展开的番剧（动画 → 集数两级树），默认全展开便于选择。
   const [openAnime, setOpenAnime] = useState<Set<number>>(new Set())
 
@@ -77,8 +106,32 @@ export function PlayerDanmakuPanel({
     if (open) {
       setDraft(search)
       setOpenAnime(new Set(candidates.map((c) => c.animeId)))
+      setSourceDraft(source)
+      setAppIdDraft(appId)
+      setAppKeyDraft('')
+      setShowAppKey(false)
+      setClearAppKey(false)
     }
-  }, [open, search, candidates])
+  }, [open, search, candidates, source, appId])
+
+  const saveAdvanced = async () => {
+    setAdvancedSaving(true)
+    try {
+      await onSaveAdvanced({
+        source: sourceDraft,
+        appId: appIdDraft,
+        appKey: appKeyDraft,
+        clearAppKey,
+      })
+      setAppKeyDraft('')
+      setShowAppKey(false)
+      setClearAppKey(false)
+    } catch {
+      // 父组件已展示错误提示，这里保持面板打开以便修正后重试。
+    } finally {
+      setAdvancedSaving(false)
+    }
+  }
 
   if (!open) return null
 
@@ -148,6 +201,7 @@ export function PlayerDanmakuPanel({
       <div className="mb-3 flex items-center justify-between">
         <div className="flex items-center gap-2 text-sm font-semibold">
           <MessageSquareText size={16} className="text-rose-400" /> 弹幕设置
+          {settingsSaving && <Loader2 size={12} className="animate-spin text-rose-300" />}
         </div>
         <button
           onClick={onClose}
@@ -397,6 +451,7 @@ export function PlayerDanmakuPanel({
         step={0.05}
         format={(v) => `${Math.round(v * 100)}%`}
         onChange={onAreaChange}
+        onCommit={onAreaCommit}
       />
       {/* 透明度 */}
       <SliderRow
@@ -407,6 +462,7 @@ export function PlayerDanmakuPanel({
         step={0.05}
         format={(v) => `${Math.round(v * 100)}%`}
         onChange={onOpacityChange}
+        onCommit={onOpacityCommit}
       />
       {/* 字体大小 */}
       <SliderRow
@@ -417,7 +473,106 @@ export function PlayerDanmakuPanel({
         step={1}
         format={(v) => `${Math.round(v)}px`}
         onChange={onFontSizeChange}
+        onCommit={onFontSizeCommit}
       />
+      <div className="mt-3 border-t border-white/10 pt-3">
+        <button
+          type="button"
+          onClick={() => setAdvancedOpen((value) => !value)}
+          className="flex w-full items-center justify-between rounded-lg bg-white/5 px-2.5 py-2 text-xs font-medium text-white/75 transition hover:bg-white/10 hover:text-white"
+        >
+          <span className="flex items-center gap-1.5">
+            <Settings2 size={13} className="text-rose-300" /> 高级
+          </span>
+          <ChevronDown
+            size={14}
+            className={'transition-transform ' + (advancedOpen ? 'rotate-180' : '')}
+          />
+        </button>
+
+        {advancedOpen && (
+          <div className="mt-2 space-y-2.5 rounded-xl border border-white/10 bg-black/30 p-2.5">
+            <label className="block">
+              <span className="mb-1 flex items-center gap-1 text-[11px] text-white/55">
+                <Server size={11} /> 弹幕服务地址
+              </span>
+              <input
+                value={sourceDraft}
+                onChange={(e) => setSourceDraft(e.target.value)}
+                placeholder="留空使用 https://api.dandanplay.net"
+                className="w-full rounded-lg border border-white/15 bg-white/5 px-2.5 py-2 text-xs outline-none placeholder:text-white/30 focus:border-rose-400/60"
+              />
+            </label>
+
+            <label className="block">
+              <span className="mb-1 flex items-center gap-1 text-[11px] text-white/55">
+                <KeyRound size={11} /> 开放 API AppId
+              </span>
+              <input
+                value={appIdDraft}
+                onChange={(e) => setAppIdDraft(e.target.value)}
+                placeholder="官方源可留空；第三方源按需填写"
+                className="w-full rounded-lg border border-white/15 bg-white/5 px-2.5 py-2 text-xs outline-none placeholder:text-white/30 focus:border-rose-400/60"
+              />
+            </label>
+
+            <label className="block">
+              <span className="mb-1 flex items-center justify-between gap-2 text-[11px] text-white/55">
+                <span className="flex items-center gap-1">
+                  <KeyRound size={11} /> 应用密钥 AppSecret
+                </span>
+                {appKeyConfigured && !clearAppKey && (
+                  <span className="text-[10px] text-emerald-300">已保存</span>
+                )}
+              </span>
+              <span className="relative block">
+                <input
+                  type={showAppKey ? 'text' : 'password'}
+                  value={appKeyDraft}
+                  disabled={clearAppKey}
+                  onChange={(e) => setAppKeyDraft(e.target.value)}
+                  placeholder={appKeyConfigured ? '留空保持不变' : '仅保存在服务端'}
+                  className="w-full rounded-lg border border-white/15 bg-white/5 px-2.5 py-2 pr-8 text-xs outline-none placeholder:text-white/30 focus:border-rose-400/60 disabled:opacity-40"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowAppKey((value) => !value)}
+                  disabled={clearAppKey}
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-1 text-white/45 hover:text-white disabled:opacity-30"
+                  title={showAppKey ? '隐藏密钥' : '显示密钥'}
+                >
+                  {showAppKey ? <EyeOff size={12} /> : <Eye size={12} />}
+                </button>
+              </span>
+            </label>
+
+            {appKeyConfigured && (
+              <label className="flex cursor-pointer items-center gap-2 text-[10px] text-amber-200/75">
+                <input
+                  type="checkbox"
+                  checked={clearAppKey}
+                  onChange={(e) => setClearAppKey(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-amber-500"
+                />
+                清除已保存的应用密钥
+              </label>
+            )}
+
+            <button
+              type="button"
+              onClick={() => void saveAdvanced()}
+              disabled={advancedSaving || settingsSaving}
+              className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-rose-500 px-2.5 py-2 text-xs font-medium text-white transition hover:bg-rose-600 disabled:opacity-50"
+            >
+              {(advancedSaving || settingsSaving) && <Loader2 size={12} className="animate-spin" />}
+              保存服务设置
+            </button>
+            <p className="text-[10px] leading-relaxed text-white/35">
+              密钥不会回传到浏览器，留空时保持数据库中的原值；官方源留空凭据会使用内置回退，自定义源需自行提供。修改后仅对当前账号生效。
+            </p>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -430,6 +585,7 @@ function SliderRow({
   step,
   format,
   onChange,
+  onCommit,
 }: {
   label: string
   value: number
@@ -438,6 +594,7 @@ function SliderRow({
   step: number
   format: (v: number) => string
   onChange: (v: number) => void
+  onCommit: (v: number) => void
 }) {
   return (
     <div className="mb-2.5">
@@ -452,6 +609,8 @@ function SliderRow({
         step={step}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
+        onPointerUp={(e) => onCommit(Number(e.currentTarget.value))}
+        onKeyUp={(e) => onCommit(Number(e.currentTarget.value))}
         className="w-full accent-rose-500"
       />
     </div>

@@ -2,6 +2,7 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -16,10 +17,8 @@ import (
 func getDanmakuHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		uid := currentUserID(c)
-		// 弹幕合并偏好按用户存储：这里读取后作为本次抓取的选项传入。
-		opts := service.DanmakuFetchOptions{
-			MergeSources: svc.Danmaku.MergeSourcesEnabled(c.Request.Context(), uid),
-		}
+		// 按用户读取弹幕源、凭据、合并偏好和渲染参数。
+		opts := service.DanmakuFetchOptions{UserID: uid}
 		res, err := svc.Danmaku.FetchWithOptions(
 			c.Request.Context(), c.Param("id"), c.Query("kw"), c.Query("episodeId"), opts)
 		if err != nil {
@@ -30,17 +29,15 @@ func getDanmakuHandler(svc *service.Container) gin.HandlerFunc {
 	}
 }
 
-// getDanmakuConfigHandler exposes the danmaku renderer knobs (opacity, font
-// size, area, enabled) so the player can initialize its control panel without
-// admin privileges.
+// getDanmakuConfigHandler exposes the current user's player volume and danmaku
+// preferences so the player can initialize without admin privileges.
 func getDanmakuConfigHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.JSON(http.StatusOK, svc.Danmaku.ConfigForUser(c.Request.Context(), currentUserID(c)))
 	}
 }
 
-// updateDanmakuSettingsHandler 持久化当前用户的弹幕偏好。目前只有合并开关，
-// 落在 user 表上（与字幕简繁偏好同样按用户存储）。
+// updateDanmakuSettingsHandler 持久化当前用户的播放器音量与弹幕偏好。
 func updateDanmakuSettingsHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		uid := currentUserID(c)
@@ -48,21 +45,20 @@ func updateDanmakuSettingsHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "not authenticated"})
 			return
 		}
-		var req struct {
-			MergeSources *bool `json:"merge_sources"`
-		}
+		var req service.DanmakuSettingsPatch
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 			return
 		}
-		if req.MergeSources == nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "merge_sources is required"})
+		cfg, err := svc.Danmaku.UpdateUserSettings(c.Request.Context(), uid, req)
+		if errors.Is(err, service.ErrNoDanmakuSettings) || errors.Is(err, service.ErrInvalidDanmakuSettings) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		if err := svc.Danmaku.SetMergeSources(c.Request.Context(), uid, *req.MergeSources); err != nil {
+		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"merge_sources": *req.MergeSources})
+		c.JSON(http.StatusOK, cfg)
 	}
 }

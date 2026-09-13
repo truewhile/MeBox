@@ -58,6 +58,10 @@ function isEditableTarget(target: EventTarget | null): boolean {
 
 type PlayerControlsProps = {
   videoRef: React.RefObject<HTMLVideoElement>
+  /** 用户级播放器音量（0 ~ 1），由播放页从数据库读取。 */
+  volume?: number
+  onVolumeChange?: (volume: number) => void
+  onVolumeCommit?: (volume: number) => void
   uiVisible: boolean
   onUiVisibleChange: (visible: boolean) => void
   subs: SubtitleTrack[]
@@ -92,6 +96,9 @@ type PlayerControlsProps = {
 
 export function PlayerControls({
   videoRef,
+  volume: volumeProp = 1,
+  onVolumeChange,
+  onVolumeCommit,
   uiVisible,
   onUiVisibleChange,
   subs,
@@ -128,8 +135,8 @@ export function PlayerControls({
   const [playing, setPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
-  const [volume, setVolume] = useState(1)
-  const [muted, setMuted] = useState(false)
+  const [volume, setVolume] = useState(volumeProp)
+  const [muted, setMuted] = useState(volumeProp === 0)
   const [fullscreen, setFullscreen] = useState(false)
   const [pip, setPip] = useState(false)
   const [controlsHovered, setControlsHovered] = useState(false)
@@ -180,6 +187,17 @@ export function PlayerControls({
   useEffect(() => {
     setStageEl(container())
   }, [container])
+
+  // 音量由播放页按用户持久化；配置加载或切换对象后同步到当前 video。
+  useEffect(() => {
+    const el = video()
+    if (!el) return
+    const next = Math.min(1, Math.max(0, volumeProp))
+    el.volume = next
+    el.muted = next === 0
+    setVolume(next)
+    setMuted(next === 0)
+  }, [video, volumeProp])
 
   // 点击控制栏外部时关闭字幕菜单
   useEffect(() => {
@@ -336,19 +354,25 @@ export function PlayerControls({
     else el.pause()
   }
 
-  const applyAbsoluteSeek = (absolute: number) => {
-    const el = video()
-    if (!el) return
-    if (onSeekAbsolute?.(absolute)) {
-      pendingSeekRef.current = absolute
-      setCurrentTime(absolute)
-      return
-    }
-    const local = Math.max(0, absolute - streamOffset)
-    el.currentTime = local
-    setCurrentTime(streamOffset + local)
-  }
-  applySeekRef.current = applyAbsoluteSeek
+  const applyAbsoluteSeek = useCallback(
+    (absolute: number) => {
+      const el = video()
+      if (!el) return
+      if (onSeekAbsolute?.(absolute)) {
+        pendingSeekRef.current = absolute
+        setCurrentTime(absolute)
+        return
+      }
+      const local = Math.max(0, absolute - streamOffset)
+      el.currentTime = local
+      setCurrentTime(streamOffset + local)
+    },
+    [onSeekAbsolute, streamOffset, video],
+  )
+
+  useEffect(() => {
+    applySeekRef.current = applyAbsoluteSeek
+  }, [applyAbsoluteSeek])
 
   const handleSeekChange = (v: number) => {
     setScrubValue(v)
@@ -474,10 +498,17 @@ export function PlayerControls({
   const changeVolume = (v: number) => {
     const el = video()
     if (!el) return
-    el.volume = v
-    el.muted = v === 0
-    setVolume(v)
-    setMuted(v === 0)
+    const next = Math.min(1, Math.max(0, v))
+    el.volume = next
+    el.muted = next === 0
+    setVolume(next)
+    setMuted(next === 0)
+    onVolumeChange?.(next)
+  }
+
+  const commitVolume = () => {
+    const el = video()
+    onVolumeCommit?.(el?.volume ?? volume)
   }
 
   const toggleMute = () => {
@@ -803,6 +834,9 @@ export function PlayerControls({
           step={0.05}
           value={muted ? 0 : volume}
           onChange={(e) => changeVolume(Number(e.target.value))}
+          onPointerUp={commitVolume}
+          onKeyUp={commitVolume}
+          onTouchEnd={commitVolume}
           className="hidden w-16 accent-rose-500 sm:block"
           aria-label="音量"
         />

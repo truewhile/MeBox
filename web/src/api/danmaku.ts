@@ -62,6 +62,33 @@ export type DanmakuFetchOptions = {
   episodeId?: number | string
 }
 
+export interface DanmakuConfig {
+  enabled: boolean
+  source?: string
+  app_id?: string
+  app_key_configured: boolean
+  opacity: string
+  font_size: string
+  area: string
+  volume: number
+  /** Per-user preference: merge the same episode's multiple sources. */
+  merge_sources: boolean
+}
+
+export interface DanmakuSettingsPatch {
+  enabled?: boolean
+  source?: string
+  app_id?: string
+  /** 留空不会修改密钥；清空请使用 clear_app_key。 */
+  app_key?: string
+  clear_app_key?: boolean
+  opacity?: number
+  font_size?: number
+  area?: number
+  merge_sources?: boolean
+  volume?: number
+}
+
 // danmakuAPI fetches danmaku comments for a media item. The backend resolves
 // the configured dandanplay source by the video's name (search for episode,
 // then fetch its comment library) and returns the raw Bilibili-format XML;
@@ -75,26 +102,11 @@ export const danmakuAPI = {
       })
       .then((r) => r.data),
 
-  // config returns the renderer knobs so the player can initialize its
-  // danmaku control panel without admin privileges.
+  // config returns the current user's player volume and danmaku preferences.
   config: () =>
-    api
-      .get<{
-        enabled: boolean
-        source?: string
-        opacity: string
-        font_size: string
-        area: string
-        /** Per-user preference: merge the same episode's multiple sources. */
-        merge_sources: boolean
-      }>('/danmaku/config')
-      .then((r) => r.data),
+    api.get<DanmakuConfig>('/danmaku/config').then((r) => r.data),
 
-  // updateSettings persists per-user danmaku preferences (survives reload).
-  updateSettings: (settings: { mergeSources: boolean }) =>
-    api
-      .put<{ merge_sources: boolean }>('/danmaku/settings', {
-        merge_sources: settings.mergeSources,
-      })
-      .then((r) => r.data),
+  // updateSettings persists a partial per-user player/danmaku settings patch.
+  updateSettings: (settings: DanmakuSettingsPatch) =>
+    api.put<DanmakuConfig>('/danmaku/settings', settings).then((r) => r.data),
 }

@@ -60,6 +60,7 @@ func seedDanmakuMedia(t *testing.T, svc *DanmakuService, id, title, originalName
 type danmakuSourceServer struct {
 	server         *httptest.Server
 	lastSearch     string // full query (anime=...&episode=...)
+	lastHeaders    http.Header
 	searchResponse string // JSON body served for /api/v2/search/episodes
 }
 
@@ -76,6 +77,7 @@ func newDanmakuSourceServerWithSearch(t *testing.T, searchResponse string) *danm
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v2/search/episodes", func(w http.ResponseWriter, r *http.Request) {
 		ds.lastSearch = r.URL.RawQuery
+		ds.lastHeaders = r.Header.Clone()
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, ds.searchResponse)
 	})
@@ -403,4 +405,42 @@ func TestDanmakuFetchCoalescesConcurrentRequests(t *testing.T) {
 		require.NoError(t, err)
 	}
 	require.EqualValues(t, 1, atomic.LoadInt32(&searchCalls))
+}
+
+func TestDanmakuFetchUsesPerUserSourceAndCredentials(t *testing.T) {
+	srv := newDanmakuSourceServer(t)
+	svc := newDanmakuTestService(t)
+	ctx := context.Background()
+
+	user := model.User{Username: "danmaku-user", PasswordHash: "x", Role: "user", IsActive: true}
+	user.ID = "danmaku-user-1"
+	user.DanmakuEnabled = true
+	user.DanmakuSource = srv.URL()
+	user.DanmakuAppID = "user-app-id"
+	user.DanmakuAppKey = "user-app-secret"
+	user.DanmakuOpacity = 0.65
+	user.DanmakuFontSize = 30
+	user.DanmakuArea = 0.7
+	user.PlayerVolume = 0.42
+	require.NoError(t, svc.repo.User.Create(ctx, &user))
+	seedDanmakuMedia(t, svc, "per-user-media", "测试动画", "", 0)
+
+	res, err := svc.FetchWithOptions(ctx, "per-user-media", "", "", DanmakuFetchOptions{UserID: user.ID})
+	require.NoError(t, err)
+	require.Contains(t, res.Raw, "弹幕A")
+	require.Equal(t, srv.URL(), res.Source)
+	require.Equal(t, 0.42, res.Volume)
+	require.Equal(t, "0.65", res.Opacity)
+	require.Equal(t, "30", res.FontSize)
+	require.Equal(t, srv.lastHeaders.Get("X-AppId"), "user-app-id")
+	require.NotEmpty(t, srv.lastHeaders.Get("X-Signature"))
+
+	// Credential rotation must invalidate the cached fetch for the same user.
+	require.NoError(t, svc.repo.User.UpdateFields(ctx, user.ID, map[string]any{
+		"danmaku_app_id":  "user-app-id-2",
+		"danmaku_app_key": "user-app-secret-2",
+	}))
+	_, err = svc.FetchWithOptions(ctx, "per-user-media", "", "", DanmakuFetchOptions{UserID: user.ID})
+	require.NoError(t, err)
+	require.Equal(t, "user-app-id-2", srv.lastHeaders.Get("X-AppId"))
 }

@@ -5,7 +5,13 @@ import toast from 'react-hot-toast'
 
 import { mediaAPI, libraryAPI } from '../api/library'
 import { hlsURL, postPlaybackProgressKeepalive, stopHLSJob, streamURL } from '../api/client'
-import { danmakuAPI, type DanmakuAnime, type DanmakuLoadedInfo } from '../api/danmaku'
+import {
+  danmakuAPI,
+  type DanmakuAnime,
+  type DanmakuConfig,
+  type DanmakuLoadedInfo,
+  type DanmakuSettingsPatch,
+} from '../api/danmaku'
 import { playbackAPI } from '../api/playback'
 import { subtitlesAPI, type SubtitleTrack } from '../api/subtitles'
 import { systemAPI } from '../api/system'
@@ -55,6 +61,12 @@ type PlaybackProgressSession = {
   sequence: number
 }
 
+function normalizePlayerVolume(value: unknown): number {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return 1
+  return Math.min(1, Math.max(0, parsed))
+}
+
 function newPlaybackProgressSession(mediaId: string): PlaybackProgressSession {
   const randomID =
     typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
@@ -94,7 +106,11 @@ export function PlayerPage() {
     )
   const [subtitlePosition, setSubtitlePosition] = useState<SubtitlePosition>(loadSubtitlePosition)
   const [subtitleStyle, setSubtitleStyle] = useState<SubtitleStylePreset>(loadSubtitleStyle)
+  const [playerVolume, setPlayerVolume] = useState(() =>
+    normalizePlayerVolume(authUser?.player_volume),
+  )
   const persistedSubtitleChineseModeRef = useRef(subtitleChineseMode)
+  const playerVolumeTouchedRef = useRef(false)
   const subtitlePreferenceTouchedRef = useRef(false)
   const subtitlePreferenceSaveQueueRef = useRef<Promise<void>>(Promise.resolve())
   const [hlsUnavailable, setHlsUnavailable] = useState(false)
@@ -131,6 +147,10 @@ export function PlayerPage() {
   const [danmakuOpacity, setDanmakuOpacity] = useState(1)
   const [danmakuFontSize, setDanmakuFontSize] = useState(24)
   const [danmakuArea, setDanmakuArea] = useState(1)
+  const [danmakuSource, setDanmakuSource] = useState('')
+  const [danmakuAppID, setDanmakuAppID] = useState('')
+  const [danmakuAppKeyConfigured, setDanmakuAppKeyConfigured] = useState(false)
+  const [playerSettingsSaving, setPlayerSettingsSaving] = useState(false)
 
   // 选集 / 播放列表状态
   const [playlistEpisodes, setPlaylistEpisodes] = useState<Media[]>([])
@@ -181,51 +201,151 @@ export function PlayerPage() {
     }
   }, [setAuthUser])
 
-  // 读取宿主机已保存的弹幕参数作为面板初始值（无 admin 权限也可读）。
-  useEffect(() => {
-    danmakuAPI
-      .config()
-      .then((cfg) => {
-        setDanmakuEnabled(cfg.enabled)
-        setDanmakuOpacity(Number(cfg.opacity) || 1)
-        setDanmakuFontSize(Number(cfg.font_size) || 24)
-        setDanmakuArea(Number(cfg.area) || 1)
-      })
-      .catch(() => undefined)
+  const applyDanmakuConnectionConfig = useCallback((cfg: DanmakuConfig) => {
+    setDanmakuSource(cfg.source ?? '')
+    setDanmakuAppID(cfg.app_id ?? '')
+    setDanmakuAppKeyConfigured(Boolean(cfg.app_key_configured))
   }, [])
 
-  // 读取弹幕配置（含按用户存储的合并偏好），初始化面板。
+  const saveDanmakuSettings = useCallback(
+    async (patch: DanmakuSettingsPatch, failureMessage = '播放器设置保存失败，请重试') => {
+      setPlayerSettingsSaving(true)
+      try {
+        const cfg = await danmakuAPI.updateSettings(patch)
+        applyDanmakuConnectionConfig(cfg)
+        return cfg
+      } catch (error) {
+        toast.error(failureMessage)
+        throw error
+      } finally {
+        setPlayerSettingsSaving(false)
+      }
+    },
+    [applyDanmakuConnectionConfig],
+  )
+
+  // 一次读取当前用户的音量、弹幕渲染参数、服务地址和凭据配置状态。
   useEffect(() => {
     let cancelled = false
     danmakuAPI
       .config()
       .then((cfg) => {
         if (cancelled) return
+        const volume = normalizePlayerVolume(cfg.volume)
+        if (!playerVolumeTouchedRef.current) {
+          setPlayerVolume(volume)
+        }
+        setDanmakuEnabled(cfg.enabled)
+        setDanmakuOpacity(Number(cfg.opacity) || 1)
+        setDanmakuFontSize(Number(cfg.font_size) || 24)
+        setDanmakuArea(Number(cfg.area) || 1)
         setDanmakuMergeSources(Boolean(cfg.merge_sources))
+        applyDanmakuConnectionConfig(cfg)
+        if (!playerVolumeTouchedRef.current) {
+          const current = useAuthStore.getState().user
+          if (current) setAuthUser({ ...current, player_volume: volume })
+        }
       })
       .catch(() => {
-        // 配置读取失败时保持默认（不合并），不影响播放。
+        // 配置读取失败时保持本地默认值，不影响播放。
       })
     return () => {
       cancelled = true
     }
+  }, [applyDanmakuConnectionConfig, setAuthUser, authUser?.id])
+
+  const changePlayerVolume = useCallback((next: number) => {
+    playerVolumeTouchedRef.current = true
+    setPlayerVolume(normalizePlayerVolume(next))
   }, [])
 
+  const commitPlayerVolume = useCallback(
+    (next: number) => {
+      playerVolumeTouchedRef.current = true
+      const volume = normalizePlayerVolume(next)
+      setPlayerVolume(volume)
+      void danmakuAPI
+        .updateSettings({ volume })
+        .then((cfg) => {
+          const saved = normalizePlayerVolume(cfg.volume)
+          setPlayerVolume(saved)
+          const current = useAuthStore.getState().user
+          if (current) setAuthUser({ ...current, player_volume: saved })
+        })
+        .catch(() => {
+          toast.error('音量保存失败，请重试')
+        })
+    },
+    [setAuthUser],
+  )
+
+  const saveDanmakuAdvanced = useCallback(
+    async (values: { source: string; appId: string; appKey: string; clearAppKey: boolean }) => {
+      const patch: DanmakuSettingsPatch = {
+        source: values.source.trim(),
+        app_id: values.appId.trim(),
+      }
+      if (values.clearAppKey) {
+        patch.clear_app_key = true
+      } else if (values.appKey.trim()) {
+        patch.app_key = values.appKey.trim()
+      }
+      const cfg = await saveDanmakuSettings(patch, '弹幕服务设置保存失败，请重试')
+      setDanmakuSource(cfg.source ?? '')
+      setDanmakuAppID(cfg.app_id ?? '')
+      setDanmakuAppKeyConfigured(Boolean(cfg.app_key_configured))
+      // 地址或凭据变化后立即按新配置重新抓取当前对象的弹幕。
+      setDanmakuSearching(true)
+      setDanmakuSearchTrigger((prev) => prev + 1)
+      toast.success('弹幕服务设置已保存')
+    },
+    [saveDanmakuSettings],
+  )
+
   // 切换合并开关：先落库，成功后再重新抓取，避免与后端读到的偏好不一致。
-  const danmakuChangeMergeSources = useCallback((next: boolean) => {
-    setDanmakuMergeSaving(true)
-    danmakuAPI
-      .updateSettings({ mergeSources: next })
-      .then(() => {
-        setDanmakuMergeSources(next)
-        setDanmakuSearching(true)
-        setDanmakuSearchTrigger((prev) => prev + 1)
-      })
-      .catch(() => {
-        // 保存失败时保持原值，用户可重试。
-      })
-      .finally(() => setDanmakuMergeSaving(false))
-  }, [])
+  const danmakuChangeMergeSources = useCallback(
+    (next: boolean) => {
+      setDanmakuMergeSaving(true)
+      saveDanmakuSettings({ merge_sources: next })
+        .then(() => {
+          setDanmakuMergeSources(next)
+          setDanmakuSearching(true)
+          setDanmakuSearchTrigger((prev) => prev + 1)
+        })
+        .catch(() => undefined)
+        .finally(() => setDanmakuMergeSaving(false))
+    },
+    [saveDanmakuSettings],
+  )
+
+  const danmakuChangeEnabled = useCallback(
+    (next: boolean) => {
+      setDanmakuEnabled(next)
+      void saveDanmakuSettings({ enabled: next }).catch(() => undefined)
+    },
+    [saveDanmakuSettings],
+  )
+
+  const commitDanmakuArea = useCallback(
+    (next: number) => {
+      void saveDanmakuSettings({ area: next }).catch(() => undefined)
+    },
+    [saveDanmakuSettings],
+  )
+
+  const commitDanmakuOpacity = useCallback(
+    (next: number) => {
+      void saveDanmakuSettings({ opacity: next }).catch(() => undefined)
+    },
+    [saveDanmakuSettings],
+  )
+
+  const commitDanmakuFontSize = useCallback(
+    (next: number) => {
+      void saveDanmakuSettings({ font_size: next }).catch(() => undefined)
+    },
+    [saveDanmakuSettings],
+  )
 
   // 用户手动搜索：带关键词重新拉取（search=null 时按视频名）。
   // loading 状态由 DanmakuStage 拉取完成回调（onLoaded）驱动。
@@ -1038,6 +1158,9 @@ export function PlayerPage() {
         onSubtitleStyleChange={changeSubtitleStyle}
         videoRef={ref}
         onVideoError={handleVideoError}
+        playerVolume={playerVolume}
+        onPlayerVolumeChange={changePlayerVolume}
+        onPlayerVolumeCommit={commitPlayerVolume}
         danmakuEnabled={danmakuEnabled}
         danmakuOpacity={danmakuOpacity}
         danmakuFontSize={danmakuFontSize}
@@ -1076,16 +1199,24 @@ export function PlayerPage() {
             open={danmakuOpen}
             onClose={() => setDanmakuOpen(false)}
             enabled={danmakuEnabled}
-            onToggleEnabled={setDanmakuEnabled}
+            onToggleEnabled={danmakuChangeEnabled}
             search={danmakuSearch ?? ''}
             onSearch={searchDanmaku}
             searching={danmakuSearching}
             area={danmakuArea}
             onAreaChange={setDanmakuArea}
+            onAreaCommit={commitDanmakuArea}
             opacity={danmakuOpacity}
             onOpacityChange={setDanmakuOpacity}
+            onOpacityCommit={commitDanmakuOpacity}
             fontSize={danmakuFontSize}
             onFontSizeChange={setDanmakuFontSize}
+            onFontSizeCommit={commitDanmakuFontSize}
+            source={danmakuSource}
+            appId={danmakuAppID}
+            appKeyConfigured={danmakuAppKeyConfigured}
+            settingsSaving={playerSettingsSaving}
+            onSaveAdvanced={saveDanmakuAdvanced}
             candidates={danmakuCandidates}
             alternatives={danmakuAlternatives}
             mergeSources={danmakuMergeSources}

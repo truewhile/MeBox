@@ -133,3 +133,58 @@ func TestGetDanmakuConfigIncludesPerUserMergePreference(t *testing.T) {
 		t.Fatal("config should reflect the persisted merge preference")
 	}
 }
+
+func TestUpdateDanmakuSettingsPersistsAllPlayerPreferences(t *testing.T) {
+	svc := newDanmakuSettingsService(t)
+
+	body := "{\"enabled\":false,\"opacity\":0.6,\"font_size\":32,\"area\":0.7,\"merge_sources\":true,\"volume\":0.35,\"source\":\"https://dm.example/base/\",\"app_id\":\"my-app-id\",\"app_key\":\"my-app-secret\"}"
+	c, w := newDanmakuSettingsContext(t, svc, http.MethodPut, "/danmaku/settings", body, "user-1")
+	updateDanmakuSettingsHandler(svc)(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", w.Code, w.Body.String())
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte("my-app-secret")) {
+		t.Fatal("response must never expose the application secret")
+	}
+	var cfg service.DanmakuRenderConfig
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if cfg.Enabled || cfg.Opacity != "0.6" || cfg.FontSize != "32" || cfg.Area != "0.7" {
+		t.Fatalf("unexpected render config: %+v", cfg)
+	}
+	if !cfg.MergeSources || cfg.Volume != 0.35 {
+		t.Fatalf("unexpected user preferences: %+v", cfg)
+	}
+	if cfg.Source != "https://dm.example/base" || cfg.AppID != "my-app-id" || !cfg.AppKeyConfigured {
+		t.Fatalf("unexpected service config: %+v", cfg)
+	}
+
+	user, err := svc.Repo.User.FindByID(t.Context(), "user-1")
+	if err != nil || user == nil {
+		t.Fatalf("read persisted user: %v", err)
+	}
+	if user.DanmakuAppKey != "my-app-secret" || user.PlayerVolume != 0.35 || user.DanmakuSource != "https://dm.example/base" {
+		t.Fatalf("preferences not persisted: %+v", user)
+	}
+}
+
+func TestUpdateDanmakuSettingsRejectsInvalidSource(t *testing.T) {
+	svc := newDanmakuSettingsService(t)
+
+	c, w := newDanmakuSettingsContext(t, svc, http.MethodPut, "/danmaku/settings",
+		`{"source":"ftp://dm.example.com"}`, "user-1")
+	updateDanmakuSettingsHandler(svc)(c)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body=%s)", w.Code, w.Body.String())
+	}
+	user, err := svc.Repo.User.FindByID(t.Context(), "user-1")
+	if err != nil || user == nil {
+		t.Fatalf("read user: %v", err)
+	}
+	if user.DanmakuSource != "" {
+		t.Fatalf("invalid source was persisted: %q", user.DanmakuSource)
+	}
+}

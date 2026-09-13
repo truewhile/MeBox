@@ -28,9 +28,9 @@ import (
 	"github.com/truewhile/MeBox/internal/repository"
 )
 
-// Danmaku setting keys, managed through the admin settings UI (PUT
-// /admin/settings). They are stored in the Setting table so the playback
-// page can pull them without admin privileges.
+// Legacy instance-level danmaku settings. Playback preferences now live on
+// model.User; these keys remain only as a fallback for unauthenticated/legacy
+// service paths and tests.
 const (
 	DanmakuEnabledKey  = "danmaku.enabled"
 	DanmakuSourceKey   = "danmaku.source"
@@ -56,20 +56,54 @@ var danmakuOfficialBase = DanmakuDefaultSource
 
 // DanmakuRenderConfig carries the renderer knobs to the web player.
 type DanmakuRenderConfig struct {
-	Enabled  bool   `json:"enabled"`
-	Source   string `json:"source,omitempty"`
-	Opacity  string `json:"opacity"`
-	FontSize string `json:"font_size"`
-	Area     string `json:"area"`
+	Enabled  bool    `json:"enabled"`
+	Source   string  `json:"source,omitempty"`
+	AppID    string  `json:"app_id,omitempty"`
+	Opacity  string  `json:"opacity"`
+	FontSize string  `json:"font_size"`
+	Area     string  `json:"area"`
+	Volume   float64 `json:"volume"`
 	// MergeSources 是当前用户的弹幕合并偏好（按用户存储）。
 	MergeSources bool `json:"merge_sources"`
+	// AppKeyConfigured 只表明用户是否保存了应用密钥，不回传密钥明文。
+	AppKeyConfigured bool `json:"app_key_configured"`
 }
 
 // DanmakuFetchOptions 承载单次抓取的调用方偏好。
 type DanmakuFetchOptions struct {
 	// MergeSources 为真时，同一集的多个来源会被合并去重后一起返回。
 	MergeSources bool
+	// UserID 非空时使用该用户的弹幕源、凭据与渲染偏好。
+	UserID string
 }
+
+// DanmakuSettingsPatch 是播放器弹幕设置的局部更新。nil 字段保持不变。
+type DanmakuSettingsPatch struct {
+	Enabled      *bool    `json:"enabled"`
+	Source       *string  `json:"source"`
+	AppID        *string  `json:"app_id"`
+	AppKey       *string  `json:"app_key"`
+	ClearAppKey  bool     `json:"clear_app_key"`
+	Opacity      *float64 `json:"opacity"`
+	FontSize     *int     `json:"font_size"`
+	Area         *float64 `json:"area"`
+	MergeSources *bool    `json:"merge_sources"`
+	Volume       *float64 `json:"volume"`
+}
+
+type danmakuUserContextKey struct{}
+
+type danmakuUserContext struct {
+	source string
+	appID  string
+	appKey string
+}
+
+// ErrNoDanmakuSettings 表示更新请求没有包含任何可写字段。
+var ErrNoDanmakuSettings = errors.New("no settings to update")
+
+// ErrInvalidDanmakuSettings 表示更新请求包含非法值。
+var ErrInvalidDanmakuSettings = errors.New("invalid player settings")
 
 // DanmakuFetchResult is what /api/danmaku/:id returns. Raw holds the upstream
 // comment payload; parsing happens client-side. The dandanplay protocol has
@@ -197,14 +231,28 @@ type danmakuResultCacheEntry struct {
 	storedAt  time.Time
 }
 
-func danmakuResultCacheKey(source, mediaID, keyword, episodeID string, merge bool) string {
+func danmakuResultCacheKey(userID, source, credentialFingerprint, mediaID, keyword, episodeID string, merge bool) string {
 	return strings.Join([]string{
+		strings.TrimSpace(userID),
 		strings.TrimSpace(source),
+		strings.TrimSpace(credentialFingerprint),
 		mediaID,
 		strings.TrimSpace(keyword),
 		strings.TrimSpace(episodeID),
 		strconv.FormatBool(merge),
 	}, "\x00")
+}
+
+// danmakuCredentialFingerprint keeps credential changes in the result cache
+// key without persisting the AppSecret in plain text.
+func danmakuCredentialFingerprint(appID, appKey string) string {
+	appID = strings.TrimSpace(appID)
+	appKey = strings.TrimSpace(appKey)
+	if appID == "" && appKey == "" {
+		return ""
+	}
+	sum := md5.Sum([]byte(appID + "\x00" + appKey))
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *DanmakuService) resultCacheGet(key string) (*DanmakuFetchResult, bool) {
@@ -300,6 +348,7 @@ func (s *DanmakuService) Config(ctx context.Context) DanmakuRenderConfig {
 		Opacity:  "1",
 		FontSize: "24",
 		Area:     "1",
+		Volume:   1,
 	}
 	if s == nil || s.repo == nil || s.repo.Setting == nil {
 		return cfg
@@ -319,39 +368,164 @@ func (s *DanmakuService) Config(ctx context.Context) DanmakuRenderConfig {
 	return cfg
 }
 
-// ConfigForUser 在全局渲染设置之外附加当前用户的个性化偏好。
+// ConfigForUser 返回当前用户的播放器与弹幕偏好。用户不存在时回退到旧版
+// 全局配置，便于旧客户端和迁移期平滑工作。
 func (s *DanmakuService) ConfigForUser(ctx context.Context, userID string) DanmakuRenderConfig {
-	cfg := s.Config(ctx)
-	cfg.MergeSources = s.MergeSourcesEnabled(ctx, userID)
-	return cfg
+	if user, ok := s.findUser(ctx, userID); ok {
+		return danmakuConfigFromUser(user)
+	}
+	return s.Config(ctx)
 }
 
 // MergeSourcesEnabled 返回该用户的弹幕合并偏好，读取失败时回退为关闭。
 func (s *DanmakuService) MergeSourcesEnabled(ctx context.Context, userID string) bool {
-	if s == nil || s.repo == nil || s.repo.User == nil {
-		return false
+	if user, ok := s.findUser(ctx, userID); ok {
+		return user.DanmakuMergeSources
 	}
-	userID = strings.TrimSpace(userID)
-	if userID == "" {
-		return false
-	}
-	user, err := s.repo.User.FindByID(ctx, userID)
-	if err != nil || user == nil {
-		return false
-	}
-	return user.DanmakuMergeSources
+	return false
 }
 
-// SetMergeSources 持久化该用户的弹幕合并偏好。
-func (s *DanmakuService) SetMergeSources(ctx context.Context, userID string, enabled bool) error {
+func (s *DanmakuService) findUser(ctx context.Context, userID string) (*model.User, bool) {
 	if s == nil || s.repo == nil || s.repo.User == nil {
-		return errors.New("danmaku settings unavailable")
+		return nil, false
 	}
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
-		return errors.New("missing user")
+		return nil, false
 	}
-	return s.repo.User.UpdateFields(ctx, userID, map[string]any{"danmaku_merge_sources": enabled})
+	user, err := s.repo.User.FindByID(ctx, userID)
+	return user, err == nil && user != nil
+}
+
+func danmakuConfigFromUser(user *model.User) DanmakuRenderConfig {
+	if user == nil {
+		return DanmakuRenderConfig{Enabled: true, Opacity: "1", FontSize: "24", Area: "1", Volume: 1}
+	}
+	opacity := user.DanmakuOpacity
+	if opacity < 0.1 || opacity > 1 {
+		opacity = 1
+	}
+	fontSize := user.DanmakuFontSize
+	if fontSize < 10 || fontSize > 96 {
+		fontSize = 24
+	}
+	area := user.DanmakuArea
+	if area < 0.1 || area > 1 {
+		area = 1
+	}
+	volume := user.PlayerVolume
+	if volume < 0 || volume > 1 {
+		volume = 1
+	}
+	return DanmakuRenderConfig{
+		Enabled:          user.DanmakuEnabled,
+		Source:           strings.TrimSpace(user.DanmakuSource),
+		AppID:            strings.TrimSpace(user.DanmakuAppID),
+		Opacity:          strconv.FormatFloat(opacity, 'f', -1, 64),
+		FontSize:         strconv.Itoa(fontSize),
+		Area:             strconv.FormatFloat(area, 'f', -1, 64),
+		Volume:           volume,
+		MergeSources:     user.DanmakuMergeSources,
+		AppKeyConfigured: strings.TrimSpace(user.DanmakuAppKey) != "",
+	}
+}
+
+// UpdateUserSettings 持久化当前用户的播放器与弹幕设置，并返回脱敏后的完整配置。
+func (s *DanmakuService) UpdateUserSettings(ctx context.Context, userID string, patch DanmakuSettingsPatch) (DanmakuRenderConfig, error) {
+	if s == nil || s.repo == nil || s.repo.User == nil {
+		return DanmakuRenderConfig{}, errors.New("player settings unavailable")
+	}
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return DanmakuRenderConfig{}, errors.New("missing user")
+	}
+
+	updates := map[string]any{}
+	if patch.Enabled != nil {
+		updates["danmaku_enabled"] = *patch.Enabled
+	}
+	if patch.Source != nil {
+		source, err := normalizeDanmakuSource(*patch.Source)
+		if err != nil {
+			return DanmakuRenderConfig{}, err
+		}
+		updates["danmaku_source"] = source
+	}
+	if patch.AppID != nil {
+		appID := strings.TrimSpace(*patch.AppID)
+		if len(appID) > 128 {
+			return DanmakuRenderConfig{}, fmt.Errorf("%w: app_id is too long", ErrInvalidDanmakuSettings)
+		}
+		updates["danmaku_app_id"] = appID
+	}
+	if patch.ClearAppKey {
+		updates["danmaku_app_key"] = ""
+	} else if patch.AppKey != nil {
+		if key := strings.TrimSpace(*patch.AppKey); key != "" {
+			if len(key) > 256 {
+				return DanmakuRenderConfig{}, fmt.Errorf("%w: app_key is too long", ErrInvalidDanmakuSettings)
+			}
+			updates["danmaku_app_key"] = key
+		}
+	}
+	if patch.Opacity != nil {
+		if *patch.Opacity < 0.1 || *patch.Opacity > 1 {
+			return DanmakuRenderConfig{}, fmt.Errorf("%w: opacity must be between 0.1 and 1", ErrInvalidDanmakuSettings)
+		}
+		updates["danmaku_opacity"] = *patch.Opacity
+	}
+	if patch.FontSize != nil {
+		if *patch.FontSize < 10 || *patch.FontSize > 96 {
+			return DanmakuRenderConfig{}, fmt.Errorf("%w: font_size must be between 10 and 96", ErrInvalidDanmakuSettings)
+		}
+		updates["danmaku_font_size"] = *patch.FontSize
+	}
+	if patch.Area != nil {
+		if *patch.Area < 0.1 || *patch.Area > 1 {
+			return DanmakuRenderConfig{}, fmt.Errorf("%w: area must be between 0.1 and 1", ErrInvalidDanmakuSettings)
+		}
+		updates["danmaku_area"] = *patch.Area
+	}
+	if patch.MergeSources != nil {
+		updates["danmaku_merge_sources"] = *patch.MergeSources
+	}
+	if patch.Volume != nil {
+		if *patch.Volume < 0 || *patch.Volume > 1 {
+			return DanmakuRenderConfig{}, fmt.Errorf("%w: volume must be between 0 and 1", ErrInvalidDanmakuSettings)
+		}
+		updates["player_volume"] = *patch.Volume
+	}
+	if len(updates) == 0 {
+		return DanmakuRenderConfig{}, ErrNoDanmakuSettings
+	}
+	if err := s.repo.User.UpdateFields(ctx, userID, updates); err != nil {
+		return DanmakuRenderConfig{}, err
+	}
+	return s.ConfigForUser(ctx, userID), nil
+}
+
+// normalizeDanmakuSource validates a user-configured dandanplay endpoint. An
+// empty value means the official endpoint; only explicit HTTP(S) origins are
+// accepted so malformed values never reach the outbound request layer.
+func normalizeDanmakuSource(raw string) (string, error) {
+	source := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if source == "" {
+		return "", nil
+	}
+	if len(source) > 512 {
+		return "", fmt.Errorf("%w: source is too long", ErrInvalidDanmakuSettings)
+	}
+	u, err := url.Parse(source)
+	if err != nil || u.Host == "" || (!strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https")) || u.User != nil {
+		return "", fmt.Errorf("%w: source must be an http(s) URL", ErrInvalidDanmakuSettings)
+	}
+	return source, nil
+}
+
+// SetMergeSources 持久化该用户的弹幕合并偏好，保留旧调用点兼容性。
+func (s *DanmakuService) SetMergeSources(ctx context.Context, userID string, enabled bool) error {
+	_, err := s.UpdateUserSettings(ctx, userID, DanmakuSettingsPatch{MergeSources: &enabled})
+	return err
 }
 
 // Fetch retrieves danmaku for the given media. keyword overrides the
@@ -388,11 +562,23 @@ func (s *DanmakuService) FetchWithOptions(ctx context.Context, mediaID, keyword,
 		return nil, errors.New("danmaku service unavailable")
 	}
 	cfg := s.Config(ctx)
+	credentialFingerprint := ""
+	if user, ok := s.findUser(ctx, opts.UserID); ok {
+		cfg = danmakuConfigFromUser(user)
+		opts.MergeSources = cfg.MergeSources
+		credentialFingerprint = danmakuCredentialFingerprint(user.DanmakuAppID, user.DanmakuAppKey)
+		ctx = context.WithValue(ctx, danmakuUserContextKey{}, danmakuUserContext{
+			source: cfg.Source,
+			appID:  strings.TrimSpace(user.DanmakuAppID),
+			appKey: strings.TrimSpace(user.DanmakuAppKey),
+		})
+	}
 	if !cfg.Enabled {
 		return &DanmakuFetchResult{DanmakuRenderConfig: cfg, SourceType: "auto"}, nil
 	}
-	key := danmakuResultCacheKey(cfg.Source, mediaID, keyword, episodeID, opts.MergeSources)
+	key := danmakuResultCacheKey(opts.UserID, cfg.Source, credentialFingerprint, mediaID, keyword, episodeID, opts.MergeSources)
 	if cached, ok := s.resultCacheGet(key); ok {
+		cached.DanmakuRenderConfig = cfg
 		return cached, nil
 	}
 	value, err, _ := s.fetchGroup.Do(key, func() (any, error) {
@@ -400,7 +586,7 @@ func (s *DanmakuService) FetchWithOptions(ctx context.Context, mediaID, keyword,
 		if cached, ok := s.resultCacheGet(key); ok {
 			return cached, nil
 		}
-		res, err := s.fetchWithOptionsUncached(ctx, mediaID, keyword, episodeID, opts)
+		res, err := s.fetchWithOptionsUncached(ctx, cfg, mediaID, keyword, episodeID, opts)
 		if err != nil {
 			// 与原实现一致：失败时仍把已填充的渲染配置/匹配信息交给调用方。
 			return res, err
@@ -409,6 +595,9 @@ func (s *DanmakuService) FetchWithOptions(ctx context.Context, mediaID, keyword,
 		return res, nil
 	})
 	res, _ := value.(*DanmakuFetchResult)
+	if res != nil {
+		res.DanmakuRenderConfig = cfg
+	}
 	if err != nil {
 		return cloneDanmakuFetchResult(res), err
 	}
@@ -416,8 +605,8 @@ func (s *DanmakuService) FetchWithOptions(ctx context.Context, mediaID, keyword,
 }
 
 // fetchWithOptionsUncached 是未命中缓存时执行的原始抓取流程。
-func (s *DanmakuService) fetchWithOptionsUncached(ctx context.Context, mediaID, keyword, episodeID string, opts DanmakuFetchOptions) (*DanmakuFetchResult, error) {
-	res := &DanmakuFetchResult{DanmakuRenderConfig: s.Config(ctx), SourceType: "auto"}
+func (s *DanmakuService) fetchWithOptionsUncached(ctx context.Context, cfg DanmakuRenderConfig, mediaID, keyword, episodeID string, opts DanmakuFetchOptions) (*DanmakuFetchResult, error) {
+	res := &DanmakuFetchResult{DanmakuRenderConfig: cfg, SourceType: "auto"}
 	if !res.Enabled {
 		return res, nil
 	}
@@ -870,19 +1059,37 @@ func (s *DanmakuService) fetchBody(ctx context.Context, sourceURL string, follow
 	return string(body), nil
 }
 
-// danmakuCredentials resolves the application credentials for the official
-// dandanplay API. Admin-configured values (danmaku.app_id / danmaku.app_key)
-// win; otherwise the built-in obfuscated fallback pair is used. Returns
-// ok=false for any other host so credentials — including the built-in pair —
-// are never sent to third-party dandanplay protocol mirrors. The "official"
-// host follows danmakuOfficialBase (overridable in tests).
+// danmakuCredentials resolves application credentials. Per-user explicit
+// credentials are used for any configured source. Legacy global credentials
+// and the built-in fallback pair are only sent to the official host, never to
+// third-party dandanplay protocol mirrors.
 func (s *DanmakuService) danmakuCredentials(ctx context.Context, sourceURL string) (appID, appKey string, ok bool) {
 	u, err := url.Parse(sourceURL)
 	if err != nil {
 		return "", "", false
 	}
 	official, err := url.Parse(danmakuOfficialBase)
-	if err != nil || !strings.EqualFold(u.Hostname(), official.Hostname()) {
+	if err != nil {
+		return "", "", false
+	}
+	isOfficial := strings.EqualFold(u.Hostname(), official.Hostname())
+	if userCtx, ok := ctx.Value(danmakuUserContextKey{}).(danmakuUserContext); ok {
+		userSource := strings.TrimSpace(userCtx.source)
+		if userSource == "" {
+			userSource = danmakuOfficialBase
+		}
+		if sameDanmakuBase(sourceURL, userSource) {
+			id, key := strings.TrimSpace(userCtx.appID), strings.TrimSpace(userCtx.appKey)
+			if id != "" && key != "" {
+				return id, key, true
+			}
+			if id != "" || key != "" {
+				s.log.Warn("danmaku user credentials incomplete, ignoring them",
+					zap.Bool("has_app_id", id != ""), zap.Bool("has_app_key", key != ""))
+			}
+		}
+	}
+	if !isOfficial {
 		return "", "", false
 	}
 	var id, key string

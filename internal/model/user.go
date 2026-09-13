@@ -31,10 +31,17 @@ type User struct {
 	// SubtitleChineseMode 是网页播放器外挂字幕的简繁转换偏好：
 	// original / simplified / traditional。
 	SubtitleChineseMode string `gorm:"size:16;not null;default:original" json:"subtitle_chinese_mode"`
-	// DanmakuMergeSources 是网页播放器的弹幕偏好：开启后，同一集的多个弹幕
-	// 来源会被合并并按「时间 + 内容」去重后一起展示。按用户存储，避免一个
-	// 用户的开关影响其他人。
-	DanmakuMergeSources bool `gorm:"default:false" json:"danmaku_merge_sources"`
+	// 网页播放器偏好按用户存储，切换媒体对象后继续沿用。
+	PlayerVolume        float64 `gorm:"not null;default:1" json:"player_volume"`
+	DanmakuEnabled      bool    `gorm:"not null;default:true" json:"danmaku_enabled"`
+	DanmakuOpacity      float64 `gorm:"not null;default:1" json:"danmaku_opacity"`
+	DanmakuFontSize     int     `gorm:"not null;default:24" json:"danmaku_font_size"`
+	DanmakuArea         float64 `gorm:"not null;default:1" json:"danmaku_area"`
+	DanmakuMergeSources bool    `gorm:"not null;default:false" json:"danmaku_merge_sources"`
+	DanmakuSource       string  `gorm:"size:512" json:"danmaku_source,omitempty"`
+	DanmakuAppID        string  `gorm:"size:128" json:"danmaku_app_id,omitempty"`
+	// DanmakuAppKey 只在服务端读取并用于请求签名，绝不通过用户资料接口下发。
+	DanmakuAppKey string `gorm:"size:256" json:"-"`
 	// ExpiredAt is the account expiry time. Nil means the account never
 	// expires. When set and in the past, the account is treated as expired
 	// (login blocked) until an admin or a redemption code renews it.

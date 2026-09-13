@@ -264,7 +264,7 @@ export function DanmakuStage({
       managerRef.current = null
     }
     // search / episodeId / searchTrigger 变化时重新拉取弹幕（含媒体/开关切换）。
-  }, [media, videoRef, enabled, search, episodeId, searchTrigger, onLoaded, onCandidates])
+  }, [media, videoRef, enabled, search, episodeId, searchTrigger, onLoaded, onCandidates, onAlternatives])
 
   // Live renderer knobs: opacity / area / font size without recreating the
   // engine. font size additionally rescales currently visible comments.
