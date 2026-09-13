@@ -215,6 +215,113 @@ func TestEmbyItemsKeepSpecialsInSeasonZero(t *testing.T) {
 	}
 }
 
+func TestEmbySeparatesOVAAndOADFromSeasonOne(t *testing.T) {
+	svc := newTestEmbyService(t)
+	lib := model.Library{Name: "动漫", Path: `/media/影视库/动漫`, Type: "anime", Enabled: true}
+	if err := svc.repo.Library.Create(t.Context(), &lib); err != nil {
+		t.Fatalf("create library: %v", err)
+	}
+	for _, media := range []model.Media{
+		{
+			Base:       model.Base{ID: "tolove-s01e01"},
+			LibraryID:  lib.ID,
+			Title:      "出包王女",
+			Path:       `/media/影视库/动漫/出包王女/S01/To LOVE-Ru S01E01.mkv.strm`,
+			SeasonNum:  1,
+			EpisodeNum: 1,
+		},
+		{
+			Base:       model.Base{ID: "tolove-ova01"},
+			LibraryID:  lib.ID,
+			Title:      "出包王女",
+			Path:       `/media/影视库/动漫/出包王女/S01/To LOVE-Ru [OVA01].mkv.strm`,
+			SeasonNum:  0,
+			EpisodeNum: 1,
+		},
+		{
+			Base:       model.Base{ID: "tolove-oad01"},
+			LibraryID:  lib.ID,
+			Title:      "出包王女",
+			Path:       `/media/影视库/动漫/出包王女/OAD/To LOVE-Ru Darkness [OAD01].mkv.strm`,
+			SeasonNum:  -1,
+			EpisodeNum: 1,
+		},
+	} {
+		if err := svc.repo.DB.Create(&media).Error; err != nil {
+			t.Fatalf("create media: %v", err)
+		}
+	}
+
+	root, err := svc.Items(t.Context(), ItemsParams{ParentID: lib.ID, Limit: 50})
+	if err != nil {
+		t.Fatalf("library items: %v", err)
+	}
+	rootItems := root["Items"].([]map[string]any)
+	if len(rootItems) != 1 || rootItems[0]["Type"] != "Series" {
+		t.Fatalf("expected one series card, got %#v", rootItems)
+	}
+	if rootItems[0]["ChildCount"] != 3 {
+		t.Fatalf("series ChildCount = %#v, want 3", rootItems[0]["ChildCount"])
+	}
+
+	seasons, err := svc.Items(t.Context(), ItemsParams{ParentID: rootItems[0]["Id"].(string), Limit: 50})
+	if err != nil {
+		t.Fatalf("series seasons: %v", err)
+	}
+	seasonItems := seasons["Items"].([]map[string]any)
+	if len(seasonItems) != 3 {
+		t.Fatalf("expected season 1, OVA and OAD separately, got %#v", seasonItems)
+	}
+
+	seasonByIndex := make(map[int]map[string]any, len(seasonItems))
+	for _, season := range seasonItems {
+		index, ok := season["IndexNumber"].(int)
+		if !ok {
+			t.Fatalf("season index has unexpected type: %#v", season)
+		}
+		seasonByIndex[index] = season
+	}
+	for index, name := range map[int]string{
+		1:             "第 1 季",
+		embySeasonOVA: "OVA",
+		embySeasonOAD: "OAD",
+	} {
+		season := seasonByIndex[index]
+		if season == nil || season["Name"] != name || season["ChildCount"] != 1 {
+			t.Fatalf("season %d = %#v, want name=%q with one episode", index, season, name)
+		}
+		episodes, err := svc.Items(t.Context(), ItemsParams{
+			ParentID:         season["Id"].(string),
+			IncludeItemTypes: []string{"Episode"},
+			Recursive:        true,
+			Limit:            50,
+		})
+		if err != nil {
+			t.Fatalf("season %d episodes: %v", index, err)
+		}
+		episodeItems := episodes["Items"].([]map[string]any)
+		if len(episodeItems) != 1 || episodeItems[0]["ParentIndexNumber"] != index {
+			t.Fatalf("season %d episodes = %#v", index, episodeItems)
+		}
+	}
+}
+
+func TestEmbySeasonCandidatesCoverPersistedSpecialNumbers(t *testing.T) {
+	for _, persisted := range []int{0, -1} {
+		candidates := embySeasonCandidates(persisted)
+		found := map[int]bool{}
+		for _, seasonNum := range candidates {
+			found[seasonNum] = true
+		}
+		if !found[embySeasonOVA] || !found[embySeasonOAD] {
+			t.Fatalf("candidates for persisted season %d = %#v, want OVA and OAD", persisted, candidates)
+		}
+	}
+	if candidates := embySeasonCandidates(2); len(candidates) != 1 || candidates[0] != 2 {
+		t.Fatalf("regular season candidates = %#v, want [2]", candidates)
+	}
+}
+
 func TestEmbyEpisodeStillIsPrimaryImageNotArt(t *testing.T) {
 	svc := newTestEmbyService(t)
 	lib := model.Library{Name: "剧集", Path: `/media/tv`, Type: "tv", Enabled: true}

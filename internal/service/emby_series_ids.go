@@ -22,7 +22,7 @@ func (e *EmbyService) seriesIDForMedia(ctx context.Context, m *model.Media) stri
 }
 
 func (e *EmbyService) seasonIDForMedia(ctx context.Context, m *model.Media) string {
-	return seasonID(e.seriesIDForMedia(ctx, m), m.SeasonNum)
+	return seasonID(e.seriesIDForMedia(ctx, m), embySeasonNumForMedia(m))
 }
 
 func (e *EmbyService) seriesNameForMedia(ctx context.Context, m *model.Media) string {
@@ -100,19 +100,110 @@ func stableEmbyID(prefix string, parts ...string) string {
 	return prefix + hex.EncodeToString(h.Sum(nil))[:32]
 }
 
-func seasonID(seriesID string, seasonNum int) string {
-	if seasonNum < 0 {
-		seasonNum = 1
+const (
+	embySeasonTheatrical     = -1
+	embySeasonOVA            = -2
+	embySeasonOAD            = -3
+	embySeasonOVD            = -4
+	embySeasonONA            = -5
+	embySeasonExtra          = -6
+	embySeasonBonus          = -7
+	embySeasonOmake          = -8
+	embySeasonPictureDrama   = -9
+	embySeasonNCOP           = -10
+	embySeasonNCED           = -11
+	embySeasonGenericSpecial = 0
+)
+
+// embySeasonNumForMedia keeps MeBox's special categories distinct in the Emby
+// hierarchy. Databases may store every special as season 0 or -1, so the path
+// classification is authoritative when it identifies a special category.
+func embySeasonNumForMedia(m *model.Media) int {
+	if m == nil {
+		return 0
 	}
+	switch mediaSpecialKind(m.Path) {
+	case mediaSpecialTheatrical:
+		return embySeasonTheatrical
+	case mediaSpecialOVA:
+		return embySeasonOVA
+	case mediaSpecialOAD:
+		return embySeasonOAD
+	case mediaSpecialOVD:
+		return embySeasonOVD
+	case mediaSpecialONA:
+		return embySeasonONA
+	case mediaSpecialExtra:
+		return embySeasonExtra
+	case mediaSpecialBonus:
+		return embySeasonBonus
+	case mediaSpecialOmake:
+		return embySeasonOmake
+	case mediaSpecialPicture:
+		return embySeasonPictureDrama
+	case mediaSpecialNCOP:
+		return embySeasonNCOP
+	case mediaSpecialNCED:
+		return embySeasonNCED
+	case mediaSpecialGeneric:
+		return embySeasonGenericSpecial
+	}
+	if m.SeasonNum < 0 {
+		return embySeasonGenericSpecial
+	}
+	return m.SeasonNum
+}
+
+func embySeasonCandidates(seasonNum int) []int {
+	if seasonNum > 0 {
+		return []int{seasonNum}
+	}
+	return []int{
+		embySeasonGenericSpecial,
+		embySeasonTheatrical,
+		embySeasonOVA,
+		embySeasonOAD,
+		embySeasonOVD,
+		embySeasonONA,
+		embySeasonExtra,
+		embySeasonBonus,
+		embySeasonOmake,
+		embySeasonPictureDrama,
+		embySeasonNCOP,
+		embySeasonNCED,
+	}
+}
+
+func seasonID(seriesID string, seasonNum int) string {
 	return stableEmbyID(embyVirtualSeasonPrefix, seriesID, strconv.Itoa(seasonNum))
 }
 
 func seasonName(seasonNum int) string {
-	if seasonNum == 0 {
+	switch seasonNum {
+	case embySeasonGenericSpecial:
 		return "特别篇"
-	}
-	if seasonNum < 0 {
-		seasonNum = 1
+	case embySeasonTheatrical:
+		return "剧场版"
+	case embySeasonOVA:
+		return "OVA"
+	case embySeasonOAD:
+		return "OAD"
+	case embySeasonOVD:
+		return "OVD"
+	case embySeasonONA:
+		return "ONA"
+	case embySeasonExtra:
+		return "Extra"
+	case embySeasonBonus:
+		return "Bonus"
+	case embySeasonOmake:
+		return "Omake"
+	case embySeasonPictureDrama:
+		return "Picture Drama"
+	case embySeasonNCOP:
+		return "NCOP"
+	case embySeasonNCED:
+		return "NCED"
 	}
 	return fmt.Sprintf("第 %d 季", seasonNum)
 }

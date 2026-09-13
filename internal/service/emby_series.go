@@ -143,8 +143,11 @@ func (e *EmbyService) findSeasonGroupBySeriesCandidates(ctx context.Context, id,
 	}
 	matched := make([]string, 0, 1)
 	for _, cand := range candidates {
-		if seasonID(cand.SeriesID, cand.SeasonNum) == id {
-			matched = append(matched, cand.SeriesID)
+		for _, seasonNum := range embySeasonCandidates(cand.SeasonNum) {
+			if seasonID(cand.SeriesID, seasonNum) == id {
+				matched = append(matched, cand.SeriesID)
+				break
+			}
 		}
 	}
 	for _, matchedSeries := range matched {
@@ -257,10 +260,7 @@ func (e *EmbyService) seasonsForSeries(series embySeriesGroup) []embySeasonGroup
 	bySeason := map[int]*embySeasonGroup{}
 	order := []int{}
 	for _, episode := range series.Episodes {
-		seasonNum := episode.SeasonNum
-		if seasonNum < 0 {
-			seasonNum = 1
-		}
+		seasonNum := embySeasonNumForMedia(&episode)
 		season, ok := bySeason[seasonNum]
 		if !ok {
 			season = &embySeasonGroup{

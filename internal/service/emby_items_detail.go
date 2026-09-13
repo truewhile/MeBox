@@ -600,10 +600,12 @@ func (e *EmbyService) itemPayload(ctx context.Context, m *model.Media, fav bool,
 	seriesID := m.SeriesID
 	seriesName := ""
 	seasonID := ""
+	seasonNum := m.SeasonNum
 	if e.mediaShouldBeEpisode(ctx, m) {
 		itemType = "Episode"
 		seriesID = e.seriesIDForMedia(ctx, m)
 		seriesName = e.seriesNameForMedia(ctx, m)
+		seasonNum = embySeasonNumForMedia(m)
 		seasonID = e.seasonIDForMedia(ctx, m)
 		parentID = seasonID
 		episodeTitle := strings.TrimSpace(m.EpisodeTitle)
@@ -648,7 +650,7 @@ func (e *EmbyService) itemPayload(ctx context.Context, m *model.Media, fav bool,
 		"MediaType":         "Video",
 		"IsFolder":          false,
 		"ProductionYear":    m.Year,
-		"ParentIndexNumber": m.SeasonNum,
+		"ParentIndexNumber": seasonNum,
 		"IndexNumber":       m.EpisodeNum,
 		"Overview":          m.Overview,
 		"RunTimeTicks":      runTimeTicks,
@@ -660,7 +662,7 @@ func (e *EmbyService) itemPayload(ctx context.Context, m *model.Media, fav bool,
 		"Path":              m.Path,
 		"ParentId":          parentID,
 		"SeasonId":          seasonID,
-		"SeasonName":        seasonName(m.SeasonNum),
+		"SeasonName":        seasonName(seasonNum),
 		"SeriesId":          seriesID,
 		"SeriesName":        seriesName,
 		"ImageTags":         imageTags,
