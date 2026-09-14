@@ -31,6 +31,7 @@ func (s *MediaService) mediaListCacheKey(libraryID string, libraryIDs []string, 
 		fmt.Sprintf("%d:%d:%t", page, pageSize, filter.IncludeNSFW),
 		strings.Join(allowed, ","),
 		strings.Join(hidden, ","),
+		filter.SeriesID,
 	}, "|")))
 	return "media:list:" + hex.EncodeToString(sum[:])
 }
@@ -51,6 +52,7 @@ func (s *MediaService) libraryPreviewCacheKey(libraries []model.Library, cardLim
 		fmt.Sprintf("%d:%t:%t", cardLimit, filter.IncludeNSFW, includeCounts),
 		strings.Join(allowed, ","),
 		strings.Join(hidden, ","),
+		filter.SeriesID,
 	}, "|")))
 	return "media:preview:" + hex.EncodeToString(sum[:])
 }
@@ -82,6 +84,7 @@ func (s *MediaService) libraryCountCacheKey(libraryIDs []string, filter reposito
 		fmt.Sprintf("%t", filter.IncludeNSFW),
 		strings.Join(allowed, ","),
 		strings.Join(hidden, ","),
+		filter.SeriesID,
 	}, "|")))
 	return "media:lib-counts:" + hex.EncodeToString(sum[:])
 }
@@ -134,6 +137,7 @@ func (s *MediaService) groupedItemsCacheKey(libraryID string, libraryIDs []strin
 		fmt.Sprintf("%t", filter.IncludeNSFW),
 		strings.Join(allowed, ","),
 		strings.Join(hidden, ","),
+		filter.SeriesID,
 	})
 }
 

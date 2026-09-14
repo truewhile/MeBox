@@ -594,6 +594,89 @@ func TestListMediaEpisodesKeepsIndependentMoviesSeparate(t *testing.T) {
 	}
 }
 
+func TestListMediaEpisodesMovieTypeSkipsFullLibraryIndex(t *testing.T) {
+	db := newServiceTestDB(t, &model.Library{}, &model.Media{})
+	repos := repository.New(db)
+	lib := model.Library{Base: model.Base{ID: "lib-movie-fast"}, Name: "电影", Type: "movie", Enabled: true}
+	if err := repos.DB.Create(&lib).Error; err != nil {
+		t.Fatal(err)
+	}
+	movie := model.Media{
+		Base:      model.Base{ID: "movie-fast"},
+		LibraryID: lib.ID,
+		Title:     "电影",
+		Path:      "/media/movies/电影/电影.mkv",
+	}
+	if err := repos.DB.Create(&movie).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewMediaService(&config.Config{}, zap.NewNop(), repos).
+		SetRuntimeCache(NewRuntimeCacheService(&config.Config{}, zap.NewNop()))
+	eps, err := svc.ListMediaEpisodes(t.Context(), movie.ID, MediaVisibility{IncludeNSFW: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eps) != 1 || eps[0].ID != movie.ID {
+		t.Fatalf("ListMediaEpisodes got %#v, want the movie itself", eps)
+	}
+	if _, ok := svc.cache.GetObject(svc.libraryRowsCacheKey(lib.ID, MediaVisibility{IncludeNSFW: true})); ok {
+		t.Fatal("movie detail should not build a full-library episode index")
+	}
+}
+
+func TestListMediaEpisodesUsesSeriesIDFastPath(t *testing.T) {
+	db := newServiceTestDB(t, &model.Library{}, &model.Media{})
+	repos := repository.New(db)
+	lib := model.Library{Base: model.Base{ID: "lib-series-fast"}, Name: "剧集", Type: "tv", Enabled: true}
+	if err := repos.DB.Create(&lib).Error; err != nil {
+		t.Fatal(err)
+	}
+	rows := []model.Media{
+		{
+			Base:       model.Base{ID: "episode-2"},
+			LibraryID:  lib.ID,
+			SeriesID:   "series-fast",
+			Title:      "示例剧",
+			Path:       "/media/tv/示例剧/Season 1/示例剧.S01E02.mkv",
+			SeasonNum:  1,
+			EpisodeNum: 2,
+		},
+		{
+			Base:       model.Base{ID: "episode-1"},
+			LibraryID:  lib.ID,
+			SeriesID:   "series-fast",
+			Title:      "示例剧",
+			Path:       "/media/tv/示例剧/Season 1/示例剧.S01E01.mkv",
+			SeasonNum:  1,
+			EpisodeNum: 1,
+		},
+		{
+			Base:      model.Base{ID: "other-series"},
+			LibraryID: lib.ID,
+			SeriesID:  "other",
+			Title:     "其他剧",
+			Path:      "/media/tv/其他剧/Season 1/其他剧.S01E01.mkv",
+		},
+	}
+	if err := repos.DB.Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewMediaService(&config.Config{}, zap.NewNop(), repos).
+		SetRuntimeCache(NewRuntimeCacheService(&config.Config{}, zap.NewNop()))
+	eps, err := svc.ListMediaEpisodes(t.Context(), "episode-1", MediaVisibility{IncludeNSFW: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eps) != 2 || eps[0].ID != "episode-1" || eps[1].ID != "episode-2" {
+		t.Fatalf("SeriesID fast path got %#v, want both episodes in order", eps)
+	}
+	if _, ok := svc.cache.GetObject(svc.libraryRowsCacheKey(lib.ID, MediaVisibility{IncludeNSFW: true})); ok {
+		t.Fatal("SeriesID detail fast path should not build a full-library episode index")
+	}
+}
+
 func TestListLibrarySeriesCardsCachesPrecomputedCards(t *testing.T) {
 	db := newServiceTestDB(t, &model.Library{}, &model.Media{})
 	repos := repository.New(db)

@@ -95,7 +95,7 @@ func (p *ImageProxy) serveRemoteImage(ctx context.Context, w http.ResponseWriter
 	}
 	// No negative caching: a previously failed fetch is retried on every
 	// subsequent request, so the image recovers as soon as upstream does.
-	data, ctype, contentLength, err := p.fetchAndCacheRemoteImage(ctx, raw, host, cachePath, failPath)
+	data, ctype, contentLength, err := p.fetchAndCacheRemoteImageShared(ctx, raw, host, cachePath, failPath)
 	if err != nil {
 		if forceRefresh && p.serveCachedImage(w, r, key, cachePath, opts) {
 			return nil
@@ -204,6 +204,40 @@ func (p *ImageProxy) fetchAndCacheRemoteImage(ctx context.Context, raw, host, ca
 		lastErr = errors.New("upstream image fetch failed")
 	}
 	return nil, "", "", lastErr
+}
+
+type sharedRemoteImageResult struct {
+	data          []byte
+	contentType   string
+	contentLength string
+}
+
+// fetchAndCacheRemoteImageShared coalesces concurrent requests for the same
+// upstream image. A poster can appear in the hero, a shelf and the detail page
+// at the same time; without this guard every resize variant may fetch the same
+// original before the first cache write finishes.
+func (p *ImageProxy) fetchAndCacheRemoteImageShared(ctx context.Context, raw, host, cachePath, failPath string) ([]byte, string, string, error) {
+	value, err, _ := p.fetchGroup.Do(cachePath, func() (any, error) {
+		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
+		defer cancel()
+		data, contentType, contentLength, err := p.fetchAndCacheRemoteImage(loadCtx, raw, host, cachePath, failPath)
+		if err != nil {
+			return nil, err
+		}
+		return sharedRemoteImageResult{
+			data:          data,
+			contentType:   contentType,
+			contentLength: contentLength,
+		}, nil
+	})
+	if err != nil {
+		return nil, "", "", err
+	}
+	result, ok := value.(sharedRemoteImageResult)
+	if !ok {
+		return nil, "", "", errors.New("upstream image fetch failed")
+	}
+	return result.data, result.contentType, result.contentLength, nil
 }
 
 // Fetch pulls a remote image and returns bytes plus Content-Type using cache.

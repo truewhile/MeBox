@@ -14,10 +14,6 @@ type LibraryPreviewItem struct {
 	Cards []SeriesCard `json:"cards"`
 }
 
-type libraryPreviewCacheValue struct {
-	Items []LibraryPreviewItem `json:"items"`
-}
-
 // ListLibraries returns every library configured on the server.
 func (s *MediaService) ListLibraries(ctx context.Context) ([]model.Library, error) {
 	return s.repo.Library.List(ctx)
@@ -68,27 +64,34 @@ func (s *MediaService) listLibrariesWithPreview(ctx context.Context, libraries [
 	if len(libraries) == 0 {
 		return out, nil
 	}
-
 	visibility = ExpandMediaVisibilityForMergedCloudLibraries(ctx, s.repo, visibility)
 	filter := repository.MediaQueryFilter{
 		IncludeNSFW:       visibility.IncludeNSFW,
 		AllowedLibraryIDs: visibility.AllowedLibraryIDs,
 		HiddenLibraryIDs:  visibility.HiddenLibraryIDs,
 	}
-	cacheKey := s.libraryPreviewCacheKey(libraries, cardLimit, filter, includeCounts)
-	var cached libraryPreviewCacheValue
-	if s.cache != nil && s.cache.GetJSON(ctx, cacheKey, &cached) {
-		return cached.Items, nil
-	}
-
-	libIDs := make([]string, 0, len(libraries))
+	pending := make([]model.Library, 0, len(libraries))
+	pendingSet := make(map[string]struct{}, len(libraries))
 	for i, lib := range libraries {
 		out[i] = LibraryPreviewItem{
 			Library: lib,
 			Total:   0,
 			Cards:   []SeriesCard{},
 		}
-		libIDs = append(libIDs, lib.ID)
+		itemKey := s.libraryPreviewCacheKey([]model.Library{lib}, cardLimit, filter, includeCounts)
+		if s.cache != nil && s.cache.GetJSON(ctx, itemKey, &out[i]) {
+			continue
+		}
+		pending = append(pending, lib)
+		pendingSet[lib.ID] = struct{}{}
+	}
+	if len(pending) == 0 {
+		return out, nil
+	}
+
+	libIDs := make([]string, len(pending))
+	for i := range pending {
+		libIDs[i] = pending[i].ID
 	}
 
 	if includeCounts {
@@ -97,9 +100,10 @@ func (s *MediaService) listLibrariesWithPreview(ctx context.Context, libraries [
 			return nil, err
 		}
 		for i := range out {
-			if total, ok := counts[out[i].ID]; ok {
-				out[i].Total = total
+			if _, pendingItem := pendingSet[out[i].ID]; !pendingItem {
+				continue
 			}
+			out[i].Total = counts[out[i].ID]
 		}
 	}
 
@@ -107,8 +111,16 @@ func (s *MediaService) listLibrariesWithPreview(ctx context.Context, libraries [
 	// library with a very long series cannot turn a homepage request into a full
 	// 50k-row scan merely to find another distinct card.
 	fetchCount := cardLimit * 12
-	if fetchCount < 120 {
-		fetchCount = 120
+	minFetchCount := 120
+	if cardLimit <= 2 {
+		minFetchCount = 24
+	} else if cardLimit <= 4 {
+		// 首页/媒体库入口的马赛克只需要少量代表图，没必要为暂时不会
+		// 展示的横向货架扫描一整批 120 行候选。
+		minFetchCount = 48
+	}
+	if fetchCount < minFetchCount {
+		fetchCount = minFetchCount
 	} else if fetchCount > 400 {
 		fetchCount = 400
 	}
@@ -120,6 +132,9 @@ func (s *MediaService) listLibrariesWithPreview(ctx context.Context, libraries [
 
 	allPreviewItems := make([]model.Media, 0, len(libIDs)*fetchCount)
 	for i := range out {
+		if _, pendingItem := pendingSet[out[i].ID]; !pendingItem {
+			continue
+		}
 		items := recentByLibrary[out[i].ID]
 		if len(items) == 0 {
 			continue
@@ -129,8 +144,15 @@ func (s *MediaService) listLibrariesWithPreview(ctx context.Context, libraries [
 	s.attachLibraryMetadata(ctx, allPreviewItems)
 
 	for i := range out {
+		if _, pendingItem := pendingSet[out[i].ID]; !pendingItem {
+			continue
+		}
 		items := recentByLibrary[out[i].ID]
 		if len(items) == 0 {
+			if s.cache != nil {
+				itemKey := s.libraryPreviewCacheKey([]model.Library{out[i].Library}, cardLimit, filter, includeCounts)
+				s.cache.SetJSON(ctx, itemKey, out[i], s.derivedReadCacheTTL())
+			}
 			continue
 		}
 		cards := groupMediaSeriesCards(items)
@@ -141,10 +163,10 @@ func (s *MediaService) listLibrariesWithPreview(ctx context.Context, libraries [
 			cards = []SeriesCard{}
 		}
 		out[i].Cards = cards
-	}
-
-	if s.cache != nil {
-		s.cache.SetJSON(ctx, cacheKey, libraryPreviewCacheValue{Items: out}, s.derivedReadCacheTTL())
+		if s.cache != nil {
+			itemKey := s.libraryPreviewCacheKey([]model.Library{out[i].Library}, cardLimit, filter, includeCounts)
+			s.cache.SetJSON(ctx, itemKey, out[i], s.derivedReadCacheTTL())
+		}
 	}
 
 	return out, nil

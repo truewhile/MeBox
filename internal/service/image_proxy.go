@@ -24,17 +24,19 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/truewhile/MeBox/internal/config"
 )
 
 // ImageProxy fetches and caches remote images on behalf of the browser.
 type ImageProxy struct {
-	cfg      *config.Config
-	log      *zap.Logger
-	client   *http.Client
-	cacheDir string
-	mu       sync.Mutex
+	cfg        *config.Config
+	log        *zap.Logger
+	client     *http.Client
+	cacheDir   string
+	mu         sync.Mutex
+	fetchGroup singleflight.Group
 
 	// resizeSem bounds concurrent decode/resize jobs. Emby TV clients request
 	// poster grids in bursts; letting every request decode a source image at

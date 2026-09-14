@@ -146,6 +146,9 @@ func applyQualifiedMediaQueryFilter(q *gorm.DB, filter MediaQueryFilter) *gorm.D
 	if len(filter.AllowedLibraryIDs) > 0 {
 		q = q.Where("media.library_id IN ?", filter.AllowedLibraryIDs)
 	}
+	if seriesID := strings.TrimSpace(filter.SeriesID); seriesID != "" {
+		q = q.Where("media.series_id = ?", seriesID)
+	}
 	return q
 }
 

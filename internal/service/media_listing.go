@@ -77,22 +77,33 @@ func (s *MediaService) GroupedMediaVisible(ctx context.Context, libraryID string
 		HiddenLibraryIDs:  visibility.HiddenLibraryIDs,
 	}
 	itemsCacheKey := s.groupedItemsCacheKey(libraryID, libraryIDs, filter)
-	if s.cache != nil {
-		if cachedObj, ok := s.cache.GetObject(itemsCacheKey); ok {
-			if cached, ok := cachedObj.([]MediaItem); ok {
-				return cached, nil
+	value, err, _ := s.groupedMediaFlight.Do(itemsCacheKey, func() (any, error) {
+		if s.cache != nil {
+			if cachedObj, ok := s.cache.GetObject(itemsCacheKey); ok {
+				if cached, ok := cachedObj.([]MediaItem); ok {
+					return cached, nil
+				}
 			}
 		}
-	}
-	items, err := s.listMediaVisibleForGrouping(ctx, libraryID, visibility)
+		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer cancel()
+		items, err := s.listMediaVisibleForGrouping(loadCtx, libraryID, visibility)
+		if err != nil {
+			return nil, err
+		}
+		grouped := groupMediaVersions(items)
+		if s.cache != nil && len(grouped) > 0 {
+			s.cache.SetObject(itemsCacheKey, grouped, s.mediaObjectTTL())
+		}
+		return grouped, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	grouped := groupMediaVersions(items)
-	if s.cache != nil && len(grouped) > 0 {
-		s.cache.SetObject(itemsCacheKey, grouped, s.mediaObjectTTL())
+	if grouped, ok := value.([]MediaItem); ok {
+		return grouped, nil
 	}
-	return grouped, nil
+	return nil, nil
 }
 
 func (s *MediaService) listMediaVisibleForGrouping(ctx context.Context, libraryID string, visibility MediaVisibility) ([]model.Media, error) {
@@ -168,9 +179,15 @@ func (s *MediaService) listVersionSiblings(ctx context.Context, media *model.Med
 		libraryIDs = []string{media.LibraryID}
 	}
 	filter := repository.MediaQueryFilter{IncludeNSFW: true}
-	candidates, err := s.repo.Media.ListByLibrariesFilteredNoCount(ctx, libraryIDs, 0, 5000, filter)
+	candidates, narrowed, err := s.repo.Media.ListVersionCandidates(ctx, libraryIDs, *media, 5000)
 	if err != nil {
 		return nil, err
+	}
+	if !narrowed {
+		candidates, err = s.repo.Media.ListByLibrariesFilteredNoCount(ctx, libraryIDs, 0, 5000, filter)
+		if err != nil {
+			return nil, err
+		}
 	}
 	s.attachLibraryMetadata(ctx, candidates)
 	matched := make([]model.Media, 0, 4)

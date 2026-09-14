@@ -87,8 +87,14 @@ export function LibrarySeriesEpisodes({
                   >
                     {ep.backdrop_url || ep.poster_url ? (
                       <img
-                        src={imageURL(ep.backdrop_url || ep.poster_url || '', ep.updated_at)}
+                        src={imageURL(ep.backdrop_url || ep.poster_url || '', ep.updated_at, {
+                          maxWidth: 320,
+                          maxHeight: 180,
+                          quality: 76,
+                        })}
                         alt=""
+                        loading="lazy"
+                        decoding="async"
                         className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
                         referrerPolicy="no-referrer"
                       />

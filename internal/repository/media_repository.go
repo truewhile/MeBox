@@ -43,6 +43,7 @@ type MediaQueryFilter struct {
 	IncludeNSFW       bool
 	AllowedLibraryIDs []string
 	HiddenLibraryIDs  []string
+	SeriesID          string
 }
 
 func applyMediaQueryFilter(q *gorm.DB, filter MediaQueryFilter) *gorm.DB {
@@ -54,6 +55,9 @@ func applyMediaQueryFilter(q *gorm.DB, filter MediaQueryFilter) *gorm.DB {
 	}
 	if len(filter.AllowedLibraryIDs) > 0 {
 		q = q.Where("library_id IN ?", filter.AllowedLibraryIDs)
+	}
+	if seriesID := strings.TrimSpace(filter.SeriesID); seriesID != "" {
+		q = q.Where("series_id = ?", seriesID)
 	}
 	return q
 }
@@ -118,6 +122,47 @@ func (r *MediaRepository) ListAllByLibrariesFilteredNoCount(ctx context.Context,
 	q = applyMediaQueryFilter(q, filter)
 	err := q.Order("release_date DESC, year DESC, updated_at DESC, created_at DESC, id DESC").Find(&items).Error
 	return items, err
+}
+
+// ListVersionCandidates loads a bounded candidate set for version grouping
+// using the strongest identity stored on the row. Returning ok=false keeps the
+// caller's full-library fallback for rows without external IDs or SeriesID.
+func (r *MediaRepository) ListVersionCandidates(ctx context.Context, libraryIDs []string, media model.Media, limit int) ([]model.Media, bool, error) {
+	items := make([]model.Media, 0)
+	if len(libraryIDs) == 0 {
+		return items, false, nil
+	}
+	if limit <= 0 {
+		limit = 5000
+	}
+	q := r.db.WithContext(ctx).Model(&model.Media{})
+	if len(libraryIDs) == 1 {
+		q = q.Where("library_id = ?", libraryIDs[0])
+	} else {
+		q = q.Where("library_id IN ?", libraryIDs)
+	}
+	found := true
+	switch {
+	case strings.TrimSpace(media.SeriesID) != "":
+		q = q.Where("series_id = ?", strings.TrimSpace(media.SeriesID))
+	case media.TMDbID > 0:
+		q = q.Where("tm_db_id = ?", media.TMDbID)
+	case media.BangumiID > 0:
+		q = q.Where("bangumi_id = ?", media.BangumiID)
+	case strings.TrimSpace(media.DoubanID) != "":
+		q = q.Where("douban_id = ?", strings.TrimSpace(media.DoubanID))
+	case strings.TrimSpace(media.TheTVDBID) != "":
+		q = q.Where("thetvdb_id = ?", strings.TrimSpace(media.TheTVDBID))
+	default:
+		found = false
+	}
+	if !found {
+		return items, false, nil
+	}
+	err := q.Order("release_date DESC, year DESC, updated_at DESC, created_at DESC, id DESC").
+		Limit(limit).
+		Find(&items).Error
+	return items, true, err
 }
 
 func (r *MediaRepository) listByLibrariesFiltered(ctx context.Context, libraryIDs []string, offset, limit int, filter MediaQueryFilter, withCount bool) ([]model.Media, int64, error) {
@@ -215,6 +260,10 @@ func mediaQueryFilterSQL(filter MediaQueryFilter) (string, []interface{}) {
 	if len(filter.AllowedLibraryIDs) > 0 {
 		parts = append(parts, "library_id IN ?")
 		args = append(args, filter.AllowedLibraryIDs)
+	}
+	if seriesID := strings.TrimSpace(filter.SeriesID); seriesID != "" {
+		parts = append(parts, "series_id = ?")
+		args = append(args, seriesID)
 	}
 	return strings.Join(parts, " AND "), args
 }

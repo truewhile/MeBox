@@ -148,7 +148,7 @@ function useMediaDetailRefresh({
       // 三个请求并行发出；详情一到就解锁整页渲染，收藏状态与分集列表
       // 到达后各自补齐（原先完全串行，首屏要排队等满三个往返）。
       const nextMediaPromise = mediaAPI.get(id)
-      const favouritesPromise = playbackAPI.listFavourites().catch(() => [])
+      const favouritePromise = playbackAPI.favouriteStatus(id).catch(() => false)
       const episodesPromise = mediaAPI
         .getEpisodes(id)
         .then((r) => r.items ?? [])
@@ -158,8 +158,7 @@ function useMediaDetailRefresh({
       setMedia(nextMedia)
       setLoading(false)
 
-      const favourites = await favouritesPromise
-      setFavourite(favourites.some((item) => item.id === nextMedia.id))
+      setFavourite(await favouritePromise)
 
       const episodes = await episodesPromise
       setEpisodes(episodes)

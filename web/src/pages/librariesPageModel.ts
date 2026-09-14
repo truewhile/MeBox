@@ -33,7 +33,7 @@ export function libraryArtworkItems(cards: SeriesCard[] = []): Array<{ src: stri
       version: card.rep.updated_at,
     }))
     .filter((item) => Boolean(item.src))
-    .slice(0, 4)
+    .slice(0, 2)
 }
 
 export function getLibraryArtworks(

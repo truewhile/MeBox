@@ -112,10 +112,10 @@ export function LibrariesContent({
   previews: LibraryPreview[]
   pinnedIds: string[]
   onTogglePin: (libraryId: string) => void
-  onNeedPreviews?: (ids: string[]) => void
+  onNeedPreviews?: (ids: string[], limit?: number) => void
 }) {
   const pinnedCount = previews.filter((preview) => isLibraryPinned(preview.library.id, pinnedIds)).length
-  const queuePreview = useLazyPreviewBatch(onNeedPreviews)
+  const queuePreview = useLazyPreviewBatch((ids) => onNeedPreviews?.(ids, 2))
 
   // 下方媒体库货架支持向下滑动渐进流式加载：默认先展示前 3 个库货架，
   // 随着用户向下滑动接近底部，通过 IntersectionObserver 动态解锁后续媒体库货架。
@@ -126,7 +126,7 @@ export function LibrariesContent({
 
   useEffect(() => {
     const currentTargets = previews.slice(0, visibleCount).map((p) => p.library.id)
-    onNeedPreviews?.(currentTargets)
+    onNeedPreviews?.(currentTargets, 10)
   }, [previews, visibleCount, onNeedPreviews])
 
   // 底部哨兵监听与滚动双保险（触底解锁后续媒体库货架）
@@ -196,7 +196,7 @@ export function LibrariesContent({
   useEffect(() => {
     const ids = pagedPreviews.filter((preview) => !preview.library.cover_url).map((preview) => preview.library.id)
     if (ids.length > 0) {
-      onNeedPreviews?.(ids)
+      onNeedPreviews?.(ids, 2)
     }
   }, [pagedPreviews, onNeedPreviews])
 

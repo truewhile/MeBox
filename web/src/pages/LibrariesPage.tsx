@@ -26,37 +26,58 @@ export function LibrariesPage() {
   const [repairEpisodeArtwork, setRepairEpisodeArtwork] = useEpisodeArtworkPreference()
   const [repairMsg, setRepairMsg] = useState('')
 
-  const fetchedLibIdsRef = useRef<Set<string>>(new Set())
-  const fetchingRef = useRef<Set<string>>(new Set())
+  // 缓存每个库已加载到的预览数量：入口网格只需要 2 张，横向货架需要 10 张。
+  const fetchedPreviewLimitsRef = useRef<Map<string, number>>(new Map())
+  const fetchingPreviewLimitsRef = useRef<Map<string, number>>(new Map())
 
-  const fetchPreviews = useCallback(async (ids: string[]) => {
-    const targets = ids.filter((id) => !fetchedLibIdsRef.current.has(id) && !fetchingRef.current.has(id))
+  const fetchPreviews = useCallback(async (ids: string[], limit = 10) => {
+    const targets = ids.filter(
+      (id) =>
+        (fetchedPreviewLimitsRef.current.get(id) ?? 0) < limit &&
+        (fetchingPreviewLimitsRef.current.get(id) ?? 0) < limit,
+    )
     if (targets.length === 0) return
-    targets.forEach((id) => fetchingRef.current.add(id))
+    targets.forEach((id) => fetchingPreviewLimitsRef.current.set(id, limit))
 
     const batches = partitionPreviewIDs(targets)
     await Promise.allSettled(
       batches.map(async (batch) => {
         let loaded = false
         try {
-          const rows = await libraryAPI.listPreviews(batch, 10)
+          const rows = await libraryAPI.listPreviews(batch, limit)
           loaded = true
+          const accepted = rows.filter(
+            (row) => (fetchedPreviewLimitsRef.current.get(row.id) ?? 0) < limit,
+          )
+          accepted.forEach((row) => {
+            fetchedPreviewLimitsRef.current.set(
+              row.id,
+              Math.max(fetchedPreviewLimitsRef.current.get(row.id) ?? 0, limit),
+            )
+          })
           setLibraryData((prev) => {
             const next = { ...prev }
-            for (const row of rows) {
+            for (const row of accepted) {
               next[row.id] = {
                 cards: row.cards ?? [],
                 total: row.total ?? 0,
               }
             }
-            return next
+            return accepted.length > 0 ? next : prev
           })
         } catch {
           // 单个批次失败不影响其他批次。
         } finally {
           batch.forEach((id) => {
-            if (loaded) fetchedLibIdsRef.current.add(id)
-            fetchingRef.current.delete(id)
+            if (loaded) {
+              fetchedPreviewLimitsRef.current.set(
+                id,
+                Math.max(fetchedPreviewLimitsRef.current.get(id) ?? 0, limit),
+              )
+            }
+            if (fetchingPreviewLimitsRef.current.get(id) === limit) {
+              fetchingPreviewLimitsRef.current.delete(id)
+            }
           })
         }
       }),

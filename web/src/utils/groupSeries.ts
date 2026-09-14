@@ -33,7 +33,8 @@ import type { Media } from '../types'
 export type SeriesCard = {
   key: string
   rep: Media
-  linkMedia: Media
+  linkMedia?: Media
+  linkLibraryId?: string
   count: number
   last_added_at?: string
 }
@@ -220,12 +221,13 @@ export function seasonLabel(season: number): string {
 }
 
 export function isSeriesCard(card: SeriesCard): boolean {
+  const linkMedia = card.linkMedia ?? card.rep
   return (
     card.count > 1 ||
     isEpisodeLike(card.rep) ||
-    isEpisodeLike(card.linkMedia) ||
+    isEpisodeLike(linkMedia) ||
     pathLooksEpisodic(card.rep) ||
-    pathLooksEpisodic(card.linkMedia)
+    pathLooksEpisodic(linkMedia)
   )
 }
 
@@ -474,10 +476,11 @@ export function groupSeries(items: Media[] = []): SeriesCard[] {
       }
       // Repeated movie IDs represent alternate locations/encodes, not
       // episodes. Fold the versions but keep the card in movie mode.
-      if (isEpisodeLike(m) || pathLooksEpisodic(m) || isEpisodeLike(g.linkMedia) || pathLooksEpisodic(g.linkMedia)) {
+      const currentLinkMedia = g.linkMedia ?? g.rep
+      if (isEpisodeLike(m) || pathLooksEpisodic(m) || isEpisodeLike(currentLinkMedia) || pathLooksEpisodic(currentLinkMedia)) {
         g.count += 1
       }
-      if (betterSeriesLinkMedia(m, g.linkMedia)) {
+      if (betterSeriesLinkMedia(m, currentLinkMedia)) {
         g.linkMedia = m
       }
       if (betterSeriesRepresentative(m, g.rep)) {
@@ -534,7 +537,8 @@ function mediaParentLooksLikeCollection(path?: string): boolean {
 
 export function seriesCardLink(card: SeriesCard): string {
   if (isSeriesCard(card)) {
-    return `/library/${targetLibraryID(card.linkMedia)}?series=${encodeURIComponent(card.key)}`
+    const targetLibrary = card.linkLibraryId || targetLibraryID(card.linkMedia ?? card.rep)
+    return `/library/${targetLibrary}?series=${encodeURIComponent(card.key)}`
   }
   return `/media/${card.rep.id}`
 }

@@ -33,10 +33,10 @@ type createLibraryReq struct {
 // 统一结构（远程库附加 is_remote_emby / remote_source 只读标记）。
 type webLibraryPayload struct {
 	model.Library
-	IsRemoteEmby bool                 `json:"is_remote_emby,omitempty"`
-	RemoteSource string               `json:"remote_source,omitempty"`
-	Total        int64                `json:"total,omitempty"`
-	Cards        []service.SeriesCard `json:"cards,omitempty"`
+	IsRemoteEmby bool                     `json:"is_remote_emby,omitempty"`
+	RemoteSource string                   `json:"remote_source,omitempty"`
+	Total        int64                    `json:"total,omitempty"`
+	Cards        []service.SeriesCardView `json:"cards,omitempty"`
 }
 
 // remoteLibraryItemTypes 远程库内容拉取时按 CollectionType 过滤直属条目，
@@ -115,7 +115,11 @@ func listLibrariesHandler(svc *service.Container) gin.HandlerFunc {
 				return
 			}
 			for _, p := range previews {
-				out = append(out, webLibraryPayload{Library: p.Library, Total: p.Total, Cards: p.Cards})
+				out = append(out, webLibraryPayload{
+					Library: p.Library,
+					Total:   p.Total,
+					Cards:   service.NewSeriesCardViews(p.Cards),
+				})
 			}
 		} else {
 			visibility := mediaVisibilityForRequest(c, svc)
@@ -202,7 +206,7 @@ func listLibrariesHandler(svc *service.Container) gin.HandlerFunc {
 									remotePayloads[i].Total = total
 								}
 								if cards, err := svc.EmbyRemote.RemoteLatestCards(ctx, tmpMount, acct, v.RemoteID, limit); err == nil {
-									remotePayloads[i].Cards = cards
+									remotePayloads[i].Cards = service.NewSeriesCardViews(cards)
 								}
 							})
 						}()

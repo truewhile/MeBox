@@ -180,3 +180,32 @@ func TestListLibraryPreviewsSkipsTotals(t *testing.T) {
 		t.Fatalf("preview-only result = %#v, want one card and no count", previews)
 	}
 }
+
+func TestListLibraryPreviewsCachesEachLibraryIndependently(t *testing.T) {
+	db := newServiceTestDB(t, &model.Library{}, &model.Media{})
+	repos := repository.New(db)
+	lib := model.Library{Name: "电影", Path: "/media/movies", Type: "movie", Enabled: true}
+	if err := repos.Library.Create(t.Context(), &lib); err != nil {
+		t.Fatal(err)
+	}
+	if err := repos.DB.Create(&model.Media{
+		LibraryID: lib.ID,
+		Title:     "预览电影",
+		Path:      "/media/movies/预览电影.mkv",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewMediaService(&config.Config{}, zap.NewNop(), repos).
+		SetRuntimeCache(NewRuntimeCacheService(&config.Config{}, zap.NewNop()))
+	visibility := MediaVisibility{IncludeNSFW: true}
+	if _, err := svc.ListLibraryPreviews(t.Context(), []model.Library{lib}, visibility, 10); err != nil {
+		t.Fatal(err)
+	}
+	filter := repository.MediaQueryFilter{IncludeNSFW: true}
+	key := svc.libraryPreviewCacheKey([]model.Library{lib}, 10, filter, false)
+	var cached LibraryPreviewItem
+	if !svc.cache.GetJSON(t.Context(), key, &cached) || len(cached.Cards) != 1 {
+		t.Fatalf("per-library preview cache = %#v, want one cached card", cached)
+	}
+}

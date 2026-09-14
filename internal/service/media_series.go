@@ -36,6 +36,35 @@ type SeriesCard struct {
 	LastAddedAt *time.Time  `json:"last_added_at,omitempty"`
 }
 
+// SeriesCardView is the compact payload used by homepage and library preview
+// endpoints. LinkMedia is only needed to resolve the target library ID, so
+// sending the full media row twice roughly doubles the preview JSON for no UI
+// benefit.
+type SeriesCardView struct {
+	Key           string      `json:"key"`
+	Rep           model.Media `json:"rep"`
+	LinkLibraryID string      `json:"linkLibraryId,omitempty"`
+	Count         int         `json:"count"`
+	LastAddedAt   *time.Time  `json:"last_added_at,omitempty"`
+}
+
+func NewSeriesCardViews(cards []SeriesCard) []SeriesCardView {
+	if len(cards) == 0 {
+		return []SeriesCardView{}
+	}
+	out := make([]SeriesCardView, len(cards))
+	for i, card := range cards {
+		out[i] = SeriesCardView{
+			Key:           card.Key,
+			Rep:           card.Rep,
+			LinkLibraryID: mediaTargetLibraryID(card.LinkMedia),
+			Count:         card.Count,
+			LastAddedAt:   card.LastAddedAt,
+		}
+	}
+	return out
+}
+
 type seriesCardGroup struct {
 	card   SeriesCard
 	latest time.Time
@@ -45,34 +74,45 @@ type seriesCardGroup struct {
 func (s *MediaService) libraryRowsWithIndex(ctx context.Context, libraryID string, visibility MediaVisibility) (*libraryRowsCacheValue, error) {
 	visibility = ExpandMediaVisibilityForMergedCloudLibraries(ctx, s.repo, visibility)
 	cacheKey := s.libraryRowsCacheKey(libraryID, visibility)
-	if s.cache != nil {
-		if obj, ok := s.cache.GetObject(cacheKey); ok {
-			if cached, ok := obj.(*libraryRowsCacheValue); ok {
-				return cached, nil
+	value, err, _ := s.libraryRowsFlight.Do(cacheKey, func() (any, error) {
+		if s.cache != nil {
+			if obj, ok := s.cache.GetObject(cacheKey); ok {
+				if cached, ok := obj.(*libraryRowsCacheValue); ok {
+					return cached, nil
+				}
 			}
 		}
-	}
-	rows, _, err := s.listAllMediaVisible(ctx, libraryID, visibility)
+		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer cancel()
+		rows, _, err := s.listAllMediaVisible(loadCtx, libraryID, visibility)
+		if err != nil {
+			return nil, err
+		}
+		// listAllMediaVisible 走 ListMediaVisible，行已带库元数据（resolver 的
+		// key 计算依赖 DisplayLibraryPath/ID）。
+		resolver, keys := resolveMediaSeriesKeys(rows)
+		episodes := make(map[string][]model.Media, len(rows)/4+1)
+		for i, row := range rows {
+			k := keys[i]
+			if k == "" {
+				continue
+			}
+			episodes[k] = append(episodes[k], row)
+		}
+		cards := groupMediaSeriesCardsByKeys(rows, keys)
+		value := &libraryRowsCacheValue{Rows: rows, Resolver: resolver, Episodes: episodes, Cards: cards}
+		if s.cache != nil {
+			s.cache.SetObject(cacheKey, value, s.derivedReadCacheTTL())
+		}
+		return value, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	// listAllMediaVisible 走 ListMediaVisible，行已带库元数据（resolver 的
-	// key 计算依赖 DisplayLibraryPath/ID）。
-	resolver, keys := resolveMediaSeriesKeys(rows)
-	episodes := make(map[string][]model.Media, len(rows)/4+1)
-	for i, row := range rows {
-		k := keys[i]
-		if k == "" {
-			continue
-		}
-		episodes[k] = append(episodes[k], row)
+	if cached, ok := value.(*libraryRowsCacheValue); ok {
+		return cached, nil
 	}
-	cards := groupMediaSeriesCardsByKeys(rows, keys)
-	value := &libraryRowsCacheValue{Rows: rows, Resolver: resolver, Episodes: episodes, Cards: cards}
-	if s.cache != nil {
-		s.cache.SetObject(cacheKey, value, s.derivedReadCacheTTL())
-	}
-	return value, nil
+	return nil, nil
 }
 
 func (s *MediaService) ListLibrarySeriesCards(ctx context.Context, libraryID string, visibility MediaVisibility) ([]SeriesCard, int64, error) {
@@ -179,6 +219,30 @@ func (s *MediaService) ListMediaEpisodes(ctx context.Context, mediaID string, vi
 	if target.LibraryID == "" {
 		return []model.Media{*target}, nil
 	}
+	// 电影、音乐等单条目库不需要为了返回自身而加载整库。详情页会并行
+	// 请求 /media/:id/episodes，未短路时每次冷缓存都会触发一次全库分组。
+	if lib, err := s.repo.Library.FindByID(ctx, target.LibraryID); err == nil && lib != nil &&
+		libraryUsesSingleMediaRows(lib.Type) &&
+		strings.TrimSpace(target.SeriesID) == "" &&
+		!mediaLooksEpisodicForGrouping(*target) {
+		return []model.Media{*target}, nil
+	}
+	if seriesID := strings.TrimSpace(target.SeriesID); seriesID != "" {
+		libraryIDs, err := MergedLibraryIDsForLibrary(ctx, s.repo, target.LibraryID)
+		if err == nil && len(libraryIDs) > 0 {
+			rows, queryErr := s.repo.Media.ListByLibrariesFilteredNoCount(ctx, libraryIDs, 0, maxMediaSearchLimit, repository.MediaQueryFilter{
+				IncludeNSFW:       visibility.IncludeNSFW,
+				AllowedLibraryIDs: visibility.AllowedLibraryIDs,
+				HiddenLibraryIDs:  visibility.HiddenLibraryIDs,
+				SeriesID:          seriesID,
+			})
+			if queryErr == nil && len(rows) > 1 {
+				s.attachLibraryMetadata(ctx, rows)
+				sortEpisodesForDisplay(rows)
+				return rows, nil
+			}
+		}
+	}
 	cache, err := s.libraryRowsWithIndex(ctx, target.LibraryID, visibility)
 	if err != nil {
 		return nil, err
@@ -251,6 +315,15 @@ func (s *MediaService) ListMediaEpisodes(ctx context.Context, mediaID string, vi
 	})
 
 	return out, nil
+}
+
+func libraryUsesSingleMediaRows(libraryType string) bool {
+	switch strings.ToLower(strings.TrimSpace(libraryType)) {
+	case "movie", "movies", "music", "adult":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *MediaService) listAllMediaVisible(ctx context.Context, libraryID string, visibility MediaVisibility) ([]model.Media, int64, error) {

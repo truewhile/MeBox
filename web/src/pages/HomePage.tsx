@@ -112,16 +112,25 @@ export function HomePage() {
         try {
           const rows = await libraryAPI.listPreviews(batch, limit)
           loaded = true
+          const accepted = rows.filter(
+            (row) => (fetchedPreviewLimitsRef.current.get(row.id) ?? 0) < limit,
+          )
+          accepted.forEach((row) => {
+            fetchedPreviewLimitsRef.current.set(
+              row.id,
+              Math.max(fetchedPreviewLimitsRef.current.get(row.id) ?? 0, limit),
+            )
+          })
           setLibraryData((prev) => {
             const next = { ...prev }
-            for (const row of rows) {
+            for (const row of accepted) {
               next[row.id] = {
                 cards: row.cards ?? [],
                 items: [],
                 total: row.total ?? 0,
               }
             }
-            return next
+            return accepted.length > 0 ? next : prev
           })
         } catch {
           // 单个批次失败不影响其他批次；导航回来时会重试。
@@ -155,8 +164,13 @@ export function HomePage() {
       .slice(0, 20)
       .filter((l) => !l.cover_url)
       .map((l) => l.id)
-    const initialTargets = Array.from(new Set([...carouselLibIds, ...topRowLibIds, ...topGridLibIds]))
-    void fetchPreviews(initialTargets, 10)
+    const shelfTargets = Array.from(new Set([...carouselLibIds, ...topRowLibIds]))
+    const shelfTargetSet = new Set(shelfTargets)
+    const gridTargets = topGridLibIds.filter((id) => !shelfTargetSet.has(id))
+    // 入口网格只需要 2 张封面，横向货架才需要 10 张。分开请求可以避免
+    // 为暂时不会出现的货架预取完整卡片窗口。
+    void fetchPreviews(shelfTargets, 10)
+    void fetchPreviews(gridTargets, 2)
   }, [sortedLibraries, fetchPreviews])
 
   // 4. 媒体库展示行渐进流式加载：默认先检视前 3 个库，随向下滚动逐步检视后续库

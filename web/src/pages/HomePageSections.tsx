@@ -359,13 +359,13 @@ export function HomeLibrariesSection({
   libraries: Library[]
   libraryData?: Record<string, { cards: SeriesCard[]; items: Media[]; total: number }>
   libraryCounts: Record<string, number>
-  onNeedPreviews?: (ids: string[]) => void
+  onNeedPreviews?: (ids: string[], limit?: number) => void
 }) {
   const PAGE_SIZE = 20
   const [currentPage, setCurrentPage] = useState(1)
   const totalPages = Math.max(1, Math.ceil(libraries.length / PAGE_SIZE))
   const effectivePage = Math.min(currentPage, totalPages)
-  const queuePreview = useLazyPreviewBatch(onNeedPreviews)
+  const queuePreview = useLazyPreviewBatch((ids) => onNeedPreviews?.(ids, 2))
 
   const pagedLibraries = useMemo<Library[]>(() => {
     const start = (effectivePage - 1) * PAGE_SIZE
