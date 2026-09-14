@@ -28,13 +28,13 @@ func newServiceContainer(cfg *config.Config, log *zap.Logger, repos *repository.
 		cfg:     cfg,
 		log:     log,
 		repos:   repos,
-			version: normalizeSystemUpdateVersion(version),
-			c: &Container{
-				Version: normalizeSystemUpdateVersion(version),
-				Cfg:     cfg,
-				Log:     log,
-				Repo:    repos,
-			},
+		version: normalizeSystemUpdateVersion(version),
+		c: &Container{
+			Version: normalizeSystemUpdateVersion(version),
+			Cfg:     cfg,
+			Log:     log,
+			Repo:    repos,
+		},
 	}
 	builder.startRealtimeServices()
 	builder.initProviderServices()
@@ -119,6 +119,7 @@ func (b *serviceContainerBuilder) initContentServices() {
 	b.c.Profile = NewProfileService(b.log, b.repos)
 	b.c.Audit = NewAuditService(b.log, b.repos)
 	b.c.Strm = NewStrmService(b.cfg, b.log, b.repos, b.c.Crypto)
+	b.c.Cloud115 = NewCloud115PlaybackService(b.cfg, b.log, b.repos, b.c.Strm)
 	// ffmpeg/ffprobe 一键下载安装（data/tools/ffmpeg/）。
 	b.c.FFTools = NewFFmpegToolsService(b.cfg, b.log, b.repos)
 	// 弹幕 hash 识别需要把 strm 指向解析成可拉取的直链/本地路径。

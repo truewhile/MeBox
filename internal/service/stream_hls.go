@@ -26,7 +26,8 @@ func (s *StreamService) ServeHLSPlaylist(w http.ResponseWriter, r *http.Request,
 	startSec := parseHLSStartSec(r)
 	seekGen := parseHLSSeekGen(r)
 	subtitleStream := parseHLSSubtitleStream(r)
-	if _, err := s.transcoder.EnsureJobFromSubtitle(r.Context(), mediaID, startSec, seekGen, subtitleStream); err != nil {
+	quality := parseHLSQuality(r)
+	if _, err := s.transcoder.EnsureJobFromSubtitleQuality(r.Context(), mediaID, startSec, seekGen, subtitleStream, quality); err != nil {
 		return err
 	}
 	s.transcoder.TouchJob(mediaID)
@@ -74,6 +75,20 @@ func parseHLSSubtitleStream(r *http.Request) int {
 		return -1
 	}
 	return v
+}
+
+func parseHLSQuality(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	quality := strings.TrimSpace(r.URL.Query().Get("quality"))
+	if quality == "" {
+		return ""
+	}
+	if _, ok := LocalHLSQualityByID(quality); !ok {
+		return ""
+	}
+	return quality
 }
 
 func parseHLSStartSec(r *http.Request) float64 {

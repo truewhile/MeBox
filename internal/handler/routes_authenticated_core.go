@@ -44,6 +44,8 @@ func registerAuthedLibraryRoutes(authed *gin.RouterGroup, svc *service.Container
 func registerAuthedMediaRoutes(authed *gin.RouterGroup, svc *service.Container) {
 	authed.GET("/media/:id", getMediaHandler(svc))
 	authed.GET("/media/:id/episodes", listMediaEpisodesHandler(svc))
+	authed.GET("/media/:id/playback", mediaPlaybackInfoHandler(svc))
+	authed.POST("/media/:id/transcode", mediaTranscodeHandler(svc))
 	authed.GET("/media", searchMediaHandler(svc))
 	authed.PATCH("/media/:id/metadata", middleware.AdminRequired(), updateMediaMetadataHandler(svc))
 	authed.POST("/media/:id/scrape", middleware.AdminRequired(), scrapeOneHandler(svc))
@@ -65,6 +67,10 @@ func registerAuthedPlaybackAndProxyRoutes(authed *gin.RouterGroup, svc *service.
 	authed.GET("/hls/:id/index.m3u8", hlsPlaylistHandler(svc))
 	authed.GET("/hls/:id/:seg", hlsSegmentHandler(svc))
 	authed.DELETE("/hls/:id", stopTranscodeHandler(svc))
+	authed.GET("/cloud115/media/:id/master.m3u8", cloud115HLSMasterHandler(svc))
+	authed.HEAD("/cloud115/media/:id/master.m3u8", cloud115HLSMasterHandler(svc))
+	authed.GET("/cloud115/hls/:session/:key", cloud115HLSSessionHandler(svc))
+	authed.HEAD("/cloud115/hls/:session/:key", cloud115HLSSessionHandler(svc))
 
 	authed.GET("/img", imageProxyHandler(svc))
 }

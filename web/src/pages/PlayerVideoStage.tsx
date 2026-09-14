@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent, ReactNode, RefObject } from 'react'
+import { Loader2 } from 'lucide-react'
 
 import { subtitlesAPI, type SubtitleTrack } from '../api/subtitles'
 import { type DanmakuAnime, type DanmakuLoadedInfo } from '../api/danmaku'
-import type { Media } from '../types'
+import type { Media, PlaybackQuality } from '../types'
 import {
   loadSubtitleChineseConverter,
   type SubtitleChineseMode,
@@ -178,6 +179,12 @@ type PlayerVideoStageProps = {
   knownDuration?: number
   streamOffset?: number
   onSeekAbsolute?: (seconds: number) => boolean
+  qualities?: PlaybackQuality[]
+  selectedQuality?: string
+  onSelectQuality?: (quality: PlaybackQuality) => void
+  showQuality?: boolean
+  waiting?: boolean
+  waitingMessage?: string
 }
 
 export function PlayerVideoStage({
@@ -224,6 +231,12 @@ export function PlayerVideoStage({
   knownDuration,
   streamOffset,
   onSeekAbsolute,
+  qualities = [],
+  selectedQuality = '',
+  onSelectQuality,
+  showQuality = false,
+  waiting = false,
+  waitingMessage = '',
 }: PlayerVideoStageProps) {
   const stageRef = useRef<HTMLDivElement>(null)
   const [videoRatio, setVideoRatio] = useState<number | null>(null)
@@ -666,6 +679,10 @@ export function PlayerVideoStage({
             knownDuration={knownDuration}
             streamOffset={streamOffset}
             onSeekAbsolute={onSeekAbsolute}
+            qualities={qualities}
+            selectedQuality={selectedQuality}
+            onSelectQuality={onSelectQuality}
+            showQuality={showQuality}
           />
           {danmakuPanel}
           {playlistPanel}
@@ -678,6 +695,15 @@ export function PlayerVideoStage({
       {playerError ? (
         <div className="absolute bottom-20 left-1/2 w-[min(92vw,720px)] -translate-x-1/2 rounded-2xl border border-white/15 bg-black/75 px-5 py-4 text-sm text-white shadow-2xl backdrop-blur">
           {playerError}
+        </div>
+      ) : null}
+      {waiting ? (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/60 px-4 backdrop-blur-sm">
+          <div className="max-w-md rounded-xl border border-white/15 bg-black/85 px-6 py-5 text-center text-white shadow-2xl">
+            <Loader2 className="mx-auto mb-3 animate-spin text-rose-400" size={28} />
+            <p className="text-sm font-medium">{waitingMessage || '115 正在转码…'}</p>
+            <p className="mt-1 text-xs text-white/60">转码完成后会自动播放</p>
+          </div>
         </div>
       ) : null}
     </div>

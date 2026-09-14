@@ -3,8 +3,12 @@ import { createPortal } from 'react-dom'
 import {
   Captions,
   CaptionsOff,
+  Check,
   FastForward,
+  Gauge,
   ListVideo,
+  Loader2,
+  Lock,
   Maximize,
   MessageSquareText,
   Minimize,
@@ -18,6 +22,7 @@ import {
   VolumeX,
 } from 'lucide-react'
 import type { SubtitleTrack } from '../api/subtitles'
+import type { PlaybackQuality } from '../types'
 import type { SubtitleChineseMode } from '../utils/subtitleChinese'
 import {
   SUBTITLE_POSITION_OPTIONS,
@@ -86,6 +91,10 @@ type PlayerControlsProps = {
   playlistOpen?: boolean
   hasPlaylist?: boolean
   onTogglePlaylist?: () => void
+  qualities?: PlaybackQuality[]
+  selectedQuality?: string
+  onSelectQuality?: (quality: PlaybackQuality) => void
+  showQuality?: boolean
   /** Media metadata duration (seconds). Used when HLS only knows transcoded length. */
   knownDuration?: number
   /** Absolute source offset of the current HLS session (seconds). */
@@ -122,6 +131,10 @@ export function PlayerControls({
   playlistOpen = false,
   hasPlaylist = false,
   onTogglePlaylist,
+  qualities = [],
+  selectedQuality = '',
+  onSelectQuality,
+  showQuality = false,
   knownDuration = 0,
   streamOffset = 0,
   onSeekAbsolute,
@@ -144,10 +157,13 @@ export function PlayerControls({
   const [scrubValue, setScrubValue] = useState<number | null>(null)
   const [subtitleMenuOpen, setSubtitleMenuOpen] = useState(false)
   const subtitleMenuRef = useRef<HTMLDivElement | null>(null)
+  const [qualityMenuOpen, setQualityMenuOpen] = useState(false)
+  const qualityMenuRef = useRef<HTMLDivElement | null>(null)
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const controlsHoveredRef = useRef(false)
   const isScrubbingRef = useRef(false)
   const subtitleMenuOpenRef = useRef(false)
+  const qualityMenuOpenRef = useRef(false)
   const danmakuOpenRef = useRef(false)
   const playlistOpenRef = useRef(false)
   const pendingSeekRef = useRef<number | null>(null)
@@ -171,6 +187,10 @@ export function PlayerControls({
   useEffect(() => {
     subtitleMenuOpenRef.current = subtitleMenuOpen
   }, [subtitleMenuOpen])
+
+  useEffect(() => {
+    qualityMenuOpenRef.current = qualityMenuOpen
+  }, [qualityMenuOpen])
 
   useEffect(() => {
     danmakuOpenRef.current = danmakuOpen
@@ -199,17 +219,20 @@ export function PlayerControls({
     setMuted(next === 0)
   }, [video, volumeProp])
 
-  // 点击控制栏外部时关闭字幕菜单
+  // 点击控制栏外部时关闭字幕/画质菜单
   useEffect(() => {
-    if (!subtitleMenuOpen) return
+    if (!subtitleMenuOpen && !qualityMenuOpen) return
     const onDocClick = (e: MouseEvent) => {
       if (subtitleMenuRef.current && !subtitleMenuRef.current.contains(e.target as Node)) {
         setSubtitleMenuOpen(false)
       }
+      if (qualityMenuRef.current && !qualityMenuRef.current.contains(e.target as Node)) {
+        setQualityMenuOpen(false)
+      }
     }
     document.addEventListener('mousedown', onDocClick)
     return () => document.removeEventListener('mousedown', onDocClick)
-  }, [subtitleMenuOpen])
+  }, [subtitleMenuOpen, qualityMenuOpen])
 
   // 播放时 3 秒无操作自动隐藏控制栏；暂停/悬停/拖动进度条/打开菜单时保持显示。
   // 监听挂在整个播放器舞台容器（data-player-stage）上，避免光标移到控制栏时因离开视频画面而误触发 mouseleave。
@@ -225,6 +248,7 @@ export function PlayerControls({
         !controlsHoveredRef.current &&
         !isScrubbingRef.current &&
         !subtitleMenuOpenRef.current &&
+        !qualityMenuOpenRef.current &&
         !danmakuOpenRef.current &&
         !playlistOpenRef.current
       ) {
@@ -233,6 +257,7 @@ export function PlayerControls({
             !controlsHoveredRef.current &&
             !isScrubbingRef.current &&
             !subtitleMenuOpenRef.current &&
+            !qualityMenuOpenRef.current &&
             !danmakuOpenRef.current &&
             !playlistOpenRef.current
           ) {
@@ -335,7 +360,7 @@ export function PlayerControls({
 
   // 当悬停或菜单状态改变时，更新控制栏计时器
   useEffect(() => {
-    if (controlsHovered || isScrubbing || subtitleMenuOpen || danmakuOpen || playlistOpen) {
+    if (controlsHovered || isScrubbing || subtitleMenuOpen || qualityMenuOpen || danmakuOpen || playlistOpen) {
       onUiVisibleChange(true)
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
     } else {
@@ -345,7 +370,7 @@ export function PlayerControls({
         hideTimerRef.current = setTimeout(() => onUiVisibleChange(false), 3000)
       }
     }
-  }, [controlsHovered, isScrubbing, subtitleMenuOpen, danmakuOpen, playlistOpen, onUiVisibleChange, video])
+  }, [controlsHovered, isScrubbing, subtitleMenuOpen, qualityMenuOpen, danmakuOpen, playlistOpen, onUiVisibleChange, video])
 
   const togglePlay = () => {
     const el = video()
@@ -409,6 +434,7 @@ export function PlayerControls({
       controlsHoveredRef.current ||
       isScrubbingRef.current ||
       subtitleMenuOpenRef.current ||
+      qualityMenuOpenRef.current ||
       danmakuOpenRef.current ||
       playlistOpenRef.current
     ) {
@@ -419,6 +445,7 @@ export function PlayerControls({
         !controlsHoveredRef.current &&
         !isScrubbingRef.current &&
         !subtitleMenuOpenRef.current &&
+        !qualityMenuOpenRef.current &&
         !danmakuOpenRef.current &&
         !playlistOpenRef.current
       ) {
@@ -549,6 +576,11 @@ export function PlayerControls({
     (selectedSubtitle.delivery === 'webvtt' || selectedSubtitle.delivery === 'ass')
   const canAdjustSelectedSubtitle = selectedSubtitle?.delivery === 'webvtt'
   const usesOriginalASS = selectedSubtitle?.delivery === 'ass'
+  const selectedQualityLabel = qualities.find((quality) => quality.id === selectedQuality)?.label ?? ''
+  const qualityGroups = [
+    { key: 'cloud', label: '115 云端', items: qualities.filter((quality) => quality.source !== 'local') },
+    { key: 'local', label: '本地 HLS', items: qualities.filter((quality) => quality.source === 'local') },
+  ].filter((group) => group.items.length > 0)
 
   const seekOverlay = seekHint && stageEl
     ? createPortal(
@@ -660,10 +692,75 @@ export function PlayerControls({
           </button>
         )}
 
+        {showQuality && qualities.length > 0 && onSelectQuality && (
+          <div className="relative" ref={qualityMenuRef}>
+            <button
+              onClick={() => {
+                setSubtitleMenuOpen(false)
+                setQualityMenuOpen((v) => !v)
+              }}
+              className="flex items-center gap-1 rounded-full p-1.5 transition hover:bg-white/15"
+              title="画质"
+            >
+              <Gauge size={18} className={qualityMenuOpen ? 'text-rose-400' : 'text-white/80'} />
+              <span className="hidden text-[10px] font-medium text-white/80 sm:inline">
+                {selectedQualityLabel || '画质'}
+              </span>
+            </button>
+            {qualityMenuOpen && (
+              <div className="absolute bottom-11 right-0 z-30 min-w-48 overflow-hidden rounded-xl border border-white/15 bg-black/85 p-1 shadow-2xl backdrop-blur">
+                {qualityGroups.map((group) => (
+                  <div key={group.key}>
+                    <p className="px-3 pb-1 pt-2 text-[10px] uppercase tracking-wide text-white/40">
+                      {group.label}
+                    </p>
+                    {group.items.map((quality) => {
+                      const current = quality.id === selectedQuality
+                      return (
+                        <button
+                          key={`${quality.source}-${quality.id}`}
+                          type="button"
+                          onClick={() => {
+                            onSelectQuality(quality)
+                            setQualityMenuOpen(false)
+                          }}
+                          className={`flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-xs transition ${
+                            current
+                              ? 'text-rose-400 hover:bg-white/10'
+                              : quality.requires_vip
+                                ? 'text-white/55 hover:bg-white/10'
+                                : 'text-white/85 hover:bg-white/10'
+                          }`}
+                          title={quality.note || quality.label}
+                        >
+                          <span className="truncate">{quality.label}</span>
+                          {quality.requires_transcode && (
+                            <span className="ml-auto flex items-center gap-1 rounded bg-white/10 px-1.5 py-0.5 text-[9px] text-amber-300">
+                              <Loader2 size={10} />
+                              转码
+                            </span>
+                          )}
+                          {quality.requires_vip && <Lock size={11} className="ml-auto text-amber-300" />}
+                          {current && !quality.requires_transcode && (
+                            <Check size={13} className="ml-auto text-rose-400" />
+                          )}
+                        </button>
+                      )
+                    })}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {subs.length > 0 && (
           <div className="relative" ref={subtitleMenuRef}>
             <button
-              onClick={() => setSubtitleMenuOpen((v) => !v)}
+              onClick={() => {
+                setQualityMenuOpen(false)
+                setSubtitleMenuOpen((v) => !v)
+              }}
               className="rounded-full p-1.5 transition hover:bg-white/15"
               title="字幕"
             >

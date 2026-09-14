@@ -1,5 +1,5 @@
 import { api, BATCH_REQUEST_TIMEOUT, LONG_REQUEST_TIMEOUT } from './client'
-import type { Library, LibraryRoot, Media, ScanResult } from '../types'
+import type { Library, LibraryRoot, Media, PlaybackInfo, ScanResult } from '../types'
 import type { SeriesCard } from '../utils/groupSeries'
 
 export interface MediaPage {
@@ -232,6 +232,18 @@ export const mediaAPI = {
       .then((r) => r.data),
 
   get: (id: string) => api.get<Media>(`/media/${id}`).then((r) => r.data),
+
+  playbackInfo: (id: string, quality?: number) =>
+    api
+      .get<PlaybackInfo>(`/media/${id}/playback`, {
+        params: quality && quality > 0 ? { quality } : undefined,
+      })
+      .then((r) => r.data),
+
+  startCloudTranscode: (id: string, definition: number) =>
+    api
+      .post<PlaybackInfo>(`/media/${id}/transcode`, { definition })
+      .then((r) => r.data),
 
   getEpisodes: (id: string) =>
     api.get<{ items: Media[]; total: number }>(`/media/${id}/episodes`).then((r) => r.data),

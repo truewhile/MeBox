@@ -4,7 +4,7 @@ import type Hls from 'hls.js'
 import toast from 'react-hot-toast'
 
 import { mediaAPI, libraryAPI } from '../api/library'
-import { hlsURL, postPlaybackProgressKeepalive, stopHLSJob, streamURL } from '../api/client'
+import { cloudHlsURL, hlsURL, postPlaybackProgressKeepalive, stopHLSJob, streamURL } from '../api/client'
 import {
   danmakuAPI,
   type DanmakuAnime,
@@ -17,7 +17,7 @@ import { subtitlesAPI, type SubtitleTrack } from '../api/subtitles'
 import { systemAPI } from '../api/system'
 import { profileAPI } from '../api/profile'
 import { useAuthStore } from '../stores/auth'
-import type { Media } from '../types'
+import type { Media, PlaybackInfo, PlaybackQuality } from '../types'
 import { getSeriesKey, seriesTitleFromPath } from '../utils/groupSeries'
 import { isRemoteEmbyID } from '../utils/remoteEmby'
 import {
@@ -124,6 +124,16 @@ export function PlayerPage() {
   const [initialSeekDone, setInitialSeekDone] = useState(false)
   // HLS session source offset: playlist t=0 maps to this absolute second.
   const [hlsStartSec, setHlsStartSec] = useState(0)
+  // 统一播放能力：115 提供 direct → cloud_hls → local_hls，其它源 direct → local_hls。
+  const [playbackInfo, setPlaybackInfo] = useState<PlaybackInfo | null>(null)
+  const [hlsSource, setHlsSource] = useState<'cloud' | 'local'>('local')
+  const [selectedQuality, setSelectedQuality] = useState('')
+  const [cloudWaiting, setCloudWaiting] = useState(false)
+  const [cloudWaitMessage, setCloudWaitMessage] = useState('')
+  const [cloudWaitStartedAt, setCloudWaitStartedAt] = useState(0)
+  const cloudPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const cloudRetryRef = useRef(5)
+  const pendingSeekRef = useRef<number | null>(null)
 
   // 弹幕控制：状态来自 /api/danmaku/config 初始值，用户在面板里实时调整。
   const [danmakuOpen, setDanmakuOpen] = useState(false)
@@ -407,6 +417,17 @@ export function PlayerPage() {
     setMedia(null)
     setLoadError('')
     setHlsStartSec(0)
+    setPlaybackInfo(null)
+    setHlsSource('local')
+    setSelectedQuality('')
+    setCloudWaiting(false)
+    setCloudWaitMessage('')
+    setCloudWaitStartedAt(0)
+    pendingSeekRef.current = null
+    if (cloudPollTimerRef.current) {
+      clearTimeout(cloudPollTimerRef.current)
+      cloudPollTimerRef.current = null
+    }
     setDanmakuEpisodeId(null)
     setDanmakuCandidates([])
     setDanmakuAlternatives([])
@@ -478,6 +499,117 @@ export function PlayerPage() {
   // Depend on media.id (not the media object): refreshing duration after
   // MANIFEST_PARSED must not remount HLS or it storms EnsureJob / DELETE.
   const mediaId = media?.id
+  const playbackProvider = playbackInfo?.provider
+
+  // 加载统一播放能力：115 云端清晰度 + 本地 HLS 清晰度。
+  useEffect(() => {
+    if (!mediaId) return
+    let cancelled = false
+    mediaAPI
+      .playbackInfo(mediaId)
+      .then((info) => {
+        if (cancelled) return
+        setPlaybackInfo(info)
+        cloudRetryRef.current = Math.max(3, info.transcode.retry_after_sec || 5)
+        setSelectedQuality((prev) => {
+          if (prev && findPlaybackQualityById(info, prev)) return prev
+          return info.default_quality || info.local_qualities?.[0]?.id || ''
+        })
+      })
+      .catch(() => {
+        if (!cancelled) setPlaybackInfo(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [mediaId])
+
+  useEffect(() => {
+    cloudRetryRef.current = Math.max(3, playbackInfo?.transcode.retry_after_sec || 5)
+  }, [playbackInfo])
+
+  const switchToLocalHLS = useCallback(
+    (position = 0) => {
+      setHlsSource('local')
+      setCloudWaiting(false)
+      setSelectedQuality((prev) => {
+        if (playbackInfo?.local_qualities?.some((quality) => quality.id === prev)) return prev
+        return defaultLocalQualityId(playbackInfo)
+      })
+      if (position > 2) setHlsStartSec(position)
+      setPlaybackMode('hls')
+    },
+    [playbackInfo, setPlaybackMode],
+  )
+
+  const startCloudTranscode = useCallback(
+    async (definition: number) => {
+      if (!mediaId) return
+      try {
+        const info = await mediaAPI.startCloudTranscode(mediaId, definition)
+        setPlaybackInfo(info)
+        if (info.transcode.state === 'ready') {
+          setCloudWaiting(false)
+          setCloudWaitMessage('')
+          setHlsSource('cloud')
+          setPlaybackMode('hls')
+          return
+        }
+        setCloudWaiting(true)
+        setCloudWaitMessage(info.transcode.message || '115 正在转码…')
+        setCloudWaitStartedAt(Date.now())
+      } catch {
+        switchToLocalHLS()
+        toast.error('115 云端转码触发失败，已切换本地转码')
+      }
+    },
+    [mediaId, setPlaybackMode, switchToLocalHLS],
+  )
+
+  // 云端转码等待：按后端建议间隔轮询，完成后自动切到云 HLS。
+  useEffect(() => {
+    if (!cloudWaiting || !mediaId) return
+    let cancelled = false
+    const poll = async () => {
+      if (cancelled) return
+      if (cloudWaitStartedAt > 0 && Date.now() - cloudWaitStartedAt > 10 * 60 * 1000) {
+        switchToLocalHLS()
+        toast.error('115 云端转码等待超时，已切换本地转码')
+        return
+      }
+      try {
+        const definition = Number(selectedQuality) || undefined
+        const info = await mediaAPI.playbackInfo(mediaId, definition)
+        if (cancelled) return
+        setPlaybackInfo(info)
+        cloudRetryRef.current = Math.max(3, info.transcode.retry_after_sec || 5)
+        if (info.transcode.state === 'ready') {
+          setCloudWaiting(false)
+          setCloudWaitMessage('')
+          setHlsSource('cloud')
+          setPlaybackMode('hls')
+          return
+        }
+        if (info.transcode.state === 'unavailable') {
+          switchToLocalHLS()
+          toast.error(info.transcode.message || '115 云端转码不可用，已切换本地转码')
+          return
+        }
+        setCloudWaitMessage(info.transcode.message || '115 正在转码…')
+        cloudPollTimerRef.current = setTimeout(poll, cloudRetryRef.current * 1000)
+      } catch {
+        cloudPollTimerRef.current = setTimeout(poll, 5000)
+      }
+    }
+    cloudPollTimerRef.current = setTimeout(poll, cloudRetryRef.current * 1000)
+    return () => {
+      cancelled = true
+      if (cloudPollTimerRef.current) {
+        clearTimeout(cloudPollTimerRef.current)
+        cloudPollTimerRef.current = null
+      }
+    }
+  }, [cloudWaiting, cloudWaitStartedAt, mediaId, selectedQuality, setPlaybackMode, switchToLocalHLS])
 
   // 直连播放只发现外挂字幕；只有 HLS 模式需要探测可烧录的内嵌字幕。
   useEffect(() => {
@@ -524,7 +656,14 @@ export function PlayerPage() {
     const video = ref.current
     const durationSec = currentMedia.duration_sec || 0
     if (mode === 'hls') {
-      const url = hlsURL(mediaId, hlsStartSec, activeBurnedSubtitleStream)
+      if (hlsSource === 'cloud' && cloudWaiting) {
+        teardownHls()
+        return
+      }
+      const url =
+        hlsSource === 'cloud'
+          ? cloudHlsURL(mediaId, selectedQuality)
+          : hlsURL(mediaId, hlsStartSec, activeBurnedSubtitleStream, selectedQuality)
       void import('hls.js').then(({ default: HlsCtor }) => {
         if (cancelled || !ref.current) return
         if (HlsCtor.isSupported()) {
@@ -545,6 +684,15 @@ export function PlayerPage() {
           hls.loadSource(url)
           hls.attachMedia(video)
           hls.on(HlsCtor.Events.MANIFEST_PARSED, () => {
+            if (pendingSeekRef.current !== null) {
+              const target = pendingSeekRef.current
+              pendingSeekRef.current = null
+              try {
+                video.currentTime = target
+              } catch {
+                // ignore
+              }
+            }
             void video.play().catch(() => undefined)
             // .strm 入库时常缺 duration；转码启动时会补探测，这里刷新一次给进度条总时长。
             if (durationSec > 0) return
@@ -558,7 +706,19 @@ export function PlayerPage() {
           })
           hls.on(HlsCtor.Events.ERROR, (_, data) => {
             if (data.fatal) {
+              if (hlsSource === 'cloud') {
+                const position = ref.current?.currentTime || 0
+                setHlsUnavailable(false)
+                switchToLocalHLS(position)
+                toast.error('115 云端播放失败，切换本地转码')
+                return
+              }
               setHlsUnavailable(true)
+              if (playbackProvider === 'cloud115') {
+                setPlayerError('115 云端和本地转码均不可用，请检查账号授权或稍后重试。')
+                toast.error('115 云端和本地转码均不可用')
+                return
+              }
               setPlayerError('HLS 转码不可用，正在尝试直接播放原始文件。若出现有画面无声音，通常是 MKV/AC3/EAC3 音轨需要配置本机 ffmpeg 转码为 AAC。')
               toast.error('HLS 转码失败，尝试切换到直接播放')
               setPlaybackMode('direct')
@@ -614,31 +774,36 @@ export function PlayerPage() {
   }, [
     activeBurnedSubtitleStream,
     clearFallbackTimer,
+    cloudWaiting,
+    hlsSource,
     hlsUnavailable,
     hlsStartSec,
     mediaId,
     mode,
+    playbackProvider,
+    selectedQuality,
     setPlaybackMode,
+    switchToLocalHLS,
     teardownHls,
   ])
 
   // Stop host ffmpeg when leaving this HLS player. The keepalive request also
   // survives route navigation while the component is being torn down.
   useEffect(() => {
-    if (!mediaId || mode !== 'hls') return
+    if (!mediaId || mode !== 'hls' || hlsSource !== 'local') return
     return () => {
       stopHLSJob(mediaId)
     }
-  }, [mediaId, mode])
+  }, [hlsSource, mediaId, mode])
 
   // React cleanup is not guaranteed when a tab/window closes. pagehide fires
   // while the document can still dispatch a keepalive request.
   useEffect(() => {
-    if (!mediaId || mode !== 'hls') return
+    if (!mediaId || mode !== 'hls' || hlsSource !== 'local') return
     const stopOnPageExit = () => stopHLSJob(mediaId)
     window.addEventListener('pagehide', stopOnPageExit)
     return () => window.removeEventListener('pagehide', stopOnPageExit)
-  }, [mediaId, mode])
+  }, [hlsSource, mediaId, mode])
 
   // 自动拉取已有的播放进度并恢复播放位置
   useEffect(() => {
@@ -944,6 +1109,11 @@ export function PlayerPage() {
   }, [goBack, prevEpisode, nextEpisode, handlePrevEpisode, handleNextEpisode, playlistOpen, danmakuOpen])
 
   const isDirectStream = isDirectStreamMedia(media)
+  const qualityOptions =
+    playbackInfo?.provider === 'cloud115'
+      ? [...(playbackInfo.cloud_qualities ?? []), ...(playbackInfo.local_qualities ?? [])]
+      : (playbackInfo?.local_qualities ?? [])
+  const showQuality = mode !== 'direct' && qualityOptions.length > 0
 
   // 没有外挂字幕且第一条内嵌字幕是图片时，默认轨需要通过 HLS 烧录。
   useEffect(() => {
@@ -975,9 +1145,36 @@ export function PlayerPage() {
     const next = mode === 'hls' ? 'direct' : 'hls'
     if (next === 'hls') {
       setHlsStartSec(0)
+      const preferred =
+        playbackInfo?.provider === 'cloud115'
+          ? findPlaybackQualityById(playbackInfo, selectedQuality) ??
+            findPlaybackQualityById(playbackInfo, playbackInfo.default_quality)
+          : undefined
+      if (preferred?.source === 'cloud') {
+        setHlsSource('cloud')
+        if (preferred.available) {
+          setCloudWaiting(false)
+        } else {
+          setCloudWaiting(true)
+          setCloudWaitMessage(preferred.note || `正在等待 115 转码 ${preferred.label}…`)
+          void startCloudTranscode(Number(preferred.id) || 4)
+        }
+      } else {
+        switchToLocalHLS()
+      }
+    } else {
+      setCloudWaiting(false)
     }
     setPlaybackMode(next)
-  }, [isDirectStream, mode, setPlaybackMode])
+  }, [
+    isDirectStream,
+    mode,
+    playbackInfo,
+    selectedQuality,
+    setPlaybackMode,
+    startCloudTranscode,
+    switchToLocalHLS,
+  ])
 
   const handleSeekAbsolute = useCallback(
     (absoluteSec: number) => {
@@ -1019,6 +1216,10 @@ export function PlayerPage() {
       toast.error('图片字幕需要开启 HLS 转码后才能显示')
       return
     }
+    if (nextTrack?.delivery === 'burn') {
+      // PGS 等图片字幕必须走本地 FFmpeg 烧录，不能交给云端 HLS。
+      switchToLocalHLS(ref.current?.currentTime || 0)
+    }
     const burnChanged =
       oldTrack?.delivery === 'burn' || nextTrack?.delivery === 'burn'
     if (burnChanged && mode === 'hls' && ref.current) {
@@ -1029,7 +1230,42 @@ export function PlayerPage() {
       setHlsStartSec(ref.current?.currentTime || 0)
       setPlaybackMode('hls')
     }
-  }, [directOnly, hlsStartSec, isDirectStream, mode, setPlaybackMode, subs, subtitleIndex])
+  }, [directOnly, hlsStartSec, isDirectStream, mode, setPlaybackMode, subs, subtitleIndex, switchToLocalHLS])
+
+  const selectPlaybackQuality = useCallback(
+    (quality: PlaybackQuality) => {
+      const video = ref.current
+      const position = video?.currentTime || 0
+      if (quality.source === 'original') {
+        setCloudWaiting(false)
+        setHlsSource('local')
+        setPlaybackMode('direct')
+        return
+      }
+      if (quality.source === 'cloud') {
+        setSelectedQuality(quality.id)
+        setHlsSource('cloud')
+        if (quality.available) {
+          setCloudWaiting(false)
+          setCloudWaitMessage('')
+          if (position > 2) pendingSeekRef.current = position
+          setPlaybackMode('hls')
+        } else {
+          setCloudWaiting(true)
+          setCloudWaitMessage(quality.note || `正在等待 115 转码 ${quality.label}…`)
+          void startCloudTranscode(Number(quality.id) || 4)
+        }
+        return
+      }
+      setSelectedQuality(quality.id)
+      setHlsSource('local')
+      setCloudWaiting(false)
+      setCloudWaitMessage('')
+      if (position > 2) setHlsStartSec(position)
+      setPlaybackMode('hls')
+    },
+    [setPlaybackMode, startCloudTranscode],
+  )
 
   const changeSubtitleChineseMode = useCallback(
     (nextMode: SubtitleChineseMode) => {
@@ -1097,18 +1333,45 @@ export function PlayerPage() {
       } else if (directOnly) {
         setPlayerError('直接播放失败。当前为「客户端直连解码」模式，宿主机不转码；请使用支持该编码/封装的播放器（如 Infuse / VLC / Emby 客户端）播放，或关闭直连解码模式。')
         toast.error('直接播放失败（客户端直连解码模式）')
+      } else if (playbackInfo?.provider === 'cloud115') {
+        const preferred =
+          findPlaybackQualityById(playbackInfo, selectedQuality) ??
+          findPlaybackQualityById(playbackInfo, playbackInfo.default_quality)
+        if (preferred?.source === 'cloud' && preferred.available) {
+          setCloudWaiting(false)
+          setHlsSource('cloud')
+          setPlaybackMode('hls')
+        } else if (preferred?.source === 'cloud') {
+          setHlsSource('cloud')
+          setCloudWaiting(true)
+          setCloudWaitMessage(preferred.note || `正在等待 115 转码 ${preferred.label}…`)
+          void startCloudTranscode(Number(preferred.id) || 4)
+        } else {
+          switchToLocalHLS(current?.currentTime || 0)
+        }
       } else if (hlsUnavailable) {
         setPlayerError('直接播放失败，且 HLS 转码不可用。请检查文件是否存在，或配置本机 ffmpeg 后使用 HLS 转码播放。')
         toast.error('直接播放失败，HLS 转码不可用')
       } else {
         toast.error('直接播放失败，切换到 HLS 转码')
-        setPlaybackMode('hls')
+        switchToLocalHLS(current?.currentTime || 0)
       }
     }
 
     clearFallbackTimer()
     fallbackTimerRef.current = setTimeout(fallbackDirectPlay, 1500)
-  }, [clearFallbackTimer, directOnly, hlsUnavailable, mediaId, mode, setPlaybackMode])
+  }, [
+    clearFallbackTimer,
+    directOnly,
+    hlsUnavailable,
+    mediaId,
+    mode,
+    playbackInfo,
+    selectedQuality,
+    setPlaybackMode,
+    startCloudTranscode,
+    switchToLocalHLS,
+  ])
 
   const changeSubtitlePosition = useCallback((nextPosition: SubtitlePosition) => {
     setSubtitlePosition(nextPosition)
@@ -1183,8 +1446,14 @@ export function PlayerPage() {
         hasPlaylist={playlistEpisodes.length > 0}
         onTogglePlaylist={togglePlaylistOpen}
         knownDuration={media?.duration_sec || 0}
-        streamOffset={mode === 'hls' ? hlsStartSec : 0}
-        onSeekAbsolute={mode === 'hls' ? handleSeekAbsolute : undefined}
+        streamOffset={mode === 'hls' && hlsSource === 'local' ? hlsStartSec : 0}
+        onSeekAbsolute={mode === 'hls' && hlsSource === 'local' ? handleSeekAbsolute : undefined}
+        qualities={qualityOptions}
+        selectedQuality={selectedQuality}
+        onSelectQuality={selectPlaybackQuality}
+        showQuality={showQuality}
+        waiting={cloudWaiting}
+        waitingMessage={cloudWaitMessage}
         playlistPanel={
           <PlayerPlaylistPanel
             open={playlistOpen}
@@ -1246,6 +1515,21 @@ function formatEpisodeDisplay(ep: Media, siblings: Media[]): string {
   }
 
   return ep.episode_num > 0 ? `第 ${ep.episode_num} 集` : mediaTitle || title || '未命名'
+}
+
+function findPlaybackQualityById(info: PlaybackInfo | null, id: string): PlaybackQuality | undefined {
+  if (!info || !id) return undefined
+  return [...(info.cloud_qualities ?? []), ...(info.local_qualities ?? [])].find(
+    (quality) => quality.id === id,
+  )
+}
+
+function defaultLocalQualityId(info: PlaybackInfo | null): string {
+  const qualities = info?.local_qualities ?? []
+  for (const id of ['1080', '720', '480', 'source']) {
+    if (qualities.some((quality) => quality.id === id)) return id
+  }
+  return qualities[0]?.id ?? '720'
 }
 
 function looksLikeSeriesTitle(ep: Media, title: string, siblings: Media[]): boolean {

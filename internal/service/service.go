@@ -64,6 +64,7 @@ type Container struct {
 	RecognitionWords *RecognitionWordsService
 	Danmaku          *DanmakuService
 	Strm             *StrmService
+	Cloud115         *Cloud115PlaybackService
 	Database         *DatabaseAdminService
 	FFTools          *FFmpegToolsService
 

@@ -147,7 +147,7 @@ export function streamURL(mediaId: string): string {
 
 // hlsURL returns the m3u8 playlist URL fed into hls.js.
 // startSec > 0 asks the server to (re)start ffmpeg from that source offset.
-export function hlsURL(mediaId: string, startSec = 0, subtitleStream?: number): string {
+export function hlsURL(mediaId: string, startSec = 0, subtitleStream?: number, quality?: string): string {
   const safeStart = Math.max(0, Math.round(startSec * 1000) / 1000)
   // Always send start= (including 0) so the server can tell an intentional
   // restart-from-head apart from a missing query on a stale refresh.
@@ -159,7 +159,17 @@ export function hlsURL(mediaId: string, startSec = 0, subtitleStream?: number): 
     subtitleStream !== undefined && subtitleStream >= 0
       ? `&subtitle=${encodeURIComponent(String(subtitleStream))}`
       : ''
-  return `/api/hls/${encodeURIComponent(mediaId)}/index.m3u8?${tokenQuery()}${profileQuery()}${start}${subtitle}${bust}`
+  const qualityQuery = quality ? `&quality=${encodeURIComponent(quality)}` : ''
+  return `/api/hls/${encodeURIComponent(mediaId)}/index.m3u8?${tokenQuery()}${profileQuery()}${start}${subtitle}${qualityQuery}${bust}`
+}
+
+// cloudHlsURL returns the MeBox-proxied 115 cloud HLS master playlist URL.
+// A browser cannot fetch the 115 CDN directly because its CORS policy only
+// allows https://115.com; the backend rewrites all child URLs to this
+// same-origin proxy.
+export function cloudHlsURL(mediaId: string, definition: string): string {
+  const quality = definition ? `&definition=${encodeURIComponent(definition)}` : ''
+  return `/api/cloud115/media/${encodeURIComponent(mediaId)}/master.m3u8?${tokenQuery()}${profileQuery()}${quality}&media_id=${encodeURIComponent(mediaId)}`
 }
 
 // Stop an on-demand HLS job. keepalive makes the request survive page

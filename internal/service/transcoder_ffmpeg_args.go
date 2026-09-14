@@ -15,6 +15,7 @@ type transcodeInput struct {
 	Headers        map[string]string
 	StartSec       float64
 	SubtitleStream *int
+	Quality        *LocalHLSQuality
 }
 
 type ffmpegArgSettings struct {
@@ -28,6 +29,7 @@ type ffmpegArgSettings struct {
 	realtime       bool
 	threads        int
 	vaapiDevice    string
+	noScale        bool
 }
 
 type ffmpegVideoPlan struct {
@@ -45,7 +47,11 @@ func buildFFmpegArgs(cfg *config.Config, source, playlist, segments string) []st
 }
 
 func buildFFmpegArgsForInput(cfg *config.Config, input transcodeInput, playlist, segments string) []string {
-	settings := ffmpegArgSettingsFromConfig(cfg)
+	settings := ffmpegArgSettingsFromConfig(cfg, input.Quality)
+	if settings.noScale {
+		// 原画档位不做硬件缩放的兼容处理，直接走软件编码，保持源分辨率。
+		settings.encoder = ""
+	}
 	video := ffmpegVideoPlanForSettings(settings)
 	if input.SubtitleStream != nil {
 		// Bitmap subtitles must be composited in software. Keeping CUDA/QSV/
@@ -64,7 +70,7 @@ func buildFFmpegArgsForInput(cfg *config.Config, input transcodeInput, playlist,
 	return args
 }
 
-func ffmpegArgSettingsFromConfig(cfg *config.Config) ffmpegArgSettings {
+func ffmpegArgSettingsFromConfig(cfg *config.Config, quality *LocalHLSQuality) ffmpegArgSettings {
 	settings := ffmpegArgSettings{
 		bitrate:        ffmpegDefaultString(cfg.Transcoder.VideoBitrate, "1500k"),
 		maxrate:        ffmpegDefaultString(cfg.Transcoder.MaxRate, "1800k"),
@@ -79,7 +85,23 @@ func ffmpegArgSettingsFromConfig(cfg *config.Config) ffmpegArgSettings {
 	if cfg.Transcoder.HardwareAccel {
 		settings.encoder = normalizedHardwareEncoder(cfg.Transcoder.Encoder)
 	}
-	if settings.height <= 0 {
+	if quality != nil {
+		if strings.TrimSpace(quality.VideoBitrate) != "" {
+			settings.bitrate = strings.TrimSpace(quality.VideoBitrate)
+		}
+		if strings.TrimSpace(quality.MaxRate) != "" {
+			settings.maxrate = strings.TrimSpace(quality.MaxRate)
+		}
+		if strings.TrimSpace(quality.BufSize) != "" {
+			settings.bufsize = strings.TrimSpace(quality.BufSize)
+		}
+		if quality.Height > 0 {
+			settings.height = quality.Height
+		} else {
+			settings.noScale = true
+		}
+	}
+	if settings.height <= 0 && !settings.noScale {
 		settings.height = 720
 	}
 	if settings.segmentSeconds <= 0 {
@@ -118,8 +140,12 @@ func ffmpegVideoPlanForSettings(settings ffmpegArgSettings) ffmpegVideoPlan {
 			codec:    "h264_vaapi",
 		}
 	default:
+		filter := ""
+		if !settings.noScale {
+			filter = fmt.Sprintf("scale=-2:min(%d\\,ih)", settings.height)
+		}
 		return ffmpegVideoPlan{
-			filter: fmt.Sprintf("scale=-2:min(%d\\,ih)", settings.height),
+			filter: filter,
 			codec:  "libx264",
 			preset: settings.preset,
 		}
@@ -149,14 +175,18 @@ func appendInputAndVideoArgs(args []string, input transcodeInput, settings ffmpe
 	}
 	args = append(args, "-i", input.Source)
 	if input.SubtitleStream != nil {
-		filter := fmt.Sprintf(
-			"[0:v:0][0:%d]overlay=0:0:eof_action=pass,scale=-2:min(%d\\,ih)[v]",
-			*input.SubtitleStream,
-			settings.height,
-		)
+		filter := fmt.Sprintf("[0:v:0][0:%d]overlay=0:0:eof_action=pass", *input.SubtitleStream)
+		if !settings.noScale {
+			filter += fmt.Sprintf(",scale=-2:min(%d\\,ih)", settings.height)
+		}
+		filter += "[v]"
 		args = append(args, "-filter_complex", filter, "-map", "[v]", "-map", "0:a:0?", "-c:v", video.codec)
 	} else {
-		args = append(args, "-map", "0:v:0?", "-map", "0:a:0?", "-vf", video.filter, "-c:v", video.codec)
+		args = append(args, "-map", "0:v:0?", "-map", "0:a:0?")
+		if video.filter != "" {
+			args = append(args, "-vf", video.filter)
+		}
+		args = append(args, "-c:v", video.codec)
 	}
 	if settings.threads > 0 && video.codec == "libx264" {
 		args = append(args, "-threads", strconv.Itoa(settings.threads))

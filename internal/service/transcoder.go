@@ -47,8 +47,8 @@ type TranscoderService struct {
 	repo *repository.Container
 	hub  *Hub
 
-	mu          sync.Mutex
-	jobs        map[string]*hlsJob
+	mu   sync.Mutex
+	jobs map[string]*hlsJob
 	// startGates serializes EnsureJobFrom / StopJob per media so concurrent
 	// playlist hits cannot spawn multiple ffmpeg writers into one HLS dir.
 	startGates  sync.Map // mediaID -> *sync.Mutex
@@ -74,6 +74,8 @@ type hlsJob struct {
 	// subtitleStream is an absolute ffmpeg stream index to burn into the
 	// picture, or -1 when no bitmap subtitle is selected.
 	subtitleStream int
+	// quality is the requested local HLS quality profile ("" = global config).
+	quality string
 	// done is closed when the ffmpeg goroutine fully exits (after process death).
 	done chan struct{}
 }
@@ -130,11 +132,26 @@ func (t *TranscoderService) EnsureJobFrom(ctx context.Context, mediaID string, s
 // EnsureJobFromSubtitle is EnsureJobFrom with an optional bitmap subtitle
 // stream. Selecting or closing a burned subtitle creates a new HLS generation.
 func (t *TranscoderService) EnsureJobFromSubtitle(ctx context.Context, mediaID string, startSec float64, seekGen int64, subtitleStream int) (string, error) {
+	return t.EnsureJobFromSubtitleQuality(ctx, mediaID, startSec, seekGen, subtitleStream, "")
+}
+
+// EnsureJobFromSubtitleQuality is EnsureJobFromSubtitle with an explicit local
+// HLS quality profile. Empty qualityID keeps the global transcoder config.
+func (t *TranscoderService) EnsureJobFromSubtitleQuality(ctx context.Context, mediaID string, startSec float64, seekGen int64, subtitleStream int, qualityID string) (string, error) {
 	if !t.cfg.Transcoder.Enabled {
 		return "", ErrTranscodeDisabled
 	}
 	if startSec < 0 {
 		startSec = 0
+	}
+	var quality *LocalHLSQuality
+	if requested := strings.TrimSpace(qualityID); requested != "" {
+		profile, ok := LocalHLSQualityByID(requested)
+		if !ok {
+			return "", fmt.Errorf("未知的 HLS 画质：%s", requested)
+		}
+		quality = &profile
+		qualityID = profile.ID
 	}
 	m, err := t.repo.Media.FindByID(ctx, mediaID)
 	if err != nil {
@@ -150,12 +167,12 @@ func (t *TranscoderService) EnsureJobFromSubtitle(ctx context.Context, mediaID s
 
 	t.mu.Lock()
 	if existing, ok := t.jobs[mediaID]; ok {
-		if sameHLSConfiguration(existing, startSec, subtitleStream) {
+		if sameHLSConfiguration(existing, startSec, subtitleStream, qualityID) {
 			t.touchJobLocked(mediaID)
 			t.mu.Unlock()
 			return t.PlaylistPath(mediaID), nil
 		}
-		if !shouldReplaceHLSJobConfiguration(existing, startSec, seekGen, subtitleStream) {
+		if !shouldReplaceHLSJobConfigurationQuality(existing, startSec, seekGen, subtitleStream, qualityID) {
 			t.touchJobLocked(mediaID)
 			t.mu.Unlock()
 			return t.PlaylistPath(mediaID), nil
@@ -175,6 +192,7 @@ func (t *TranscoderService) EnsureJobFromSubtitle(ctx context.Context, mediaID s
 	if subtitleStream >= 0 {
 		input.SubtitleStream = &subtitleStream
 	}
+	input.Quality = quality
 	t.maybeFillDuration(ctx, m, input)
 	if _, err := t.resolveFFmpegPath(); err != nil {
 		return "", err
@@ -189,12 +207,12 @@ func (t *TranscoderService) EnsureJobFromSubtitle(ctx context.Context, mediaID s
 
 	t.mu.Lock()
 	if existing, ok := t.jobs[mediaID]; ok {
-		if sameHLSConfiguration(existing, startSec, subtitleStream) {
+		if sameHLSConfiguration(existing, startSec, subtitleStream, qualityID) {
 			t.touchJobLocked(mediaID)
 			t.mu.Unlock()
 			return t.PlaylistPath(mediaID), nil
 		}
-		if !shouldReplaceHLSJobConfiguration(existing, startSec, seekGen, subtitleStream) {
+		if !shouldReplaceHLSJobConfigurationQuality(existing, startSec, seekGen, subtitleStream, qualityID) {
 			t.touchJobLocked(mediaID)
 			t.mu.Unlock()
 			return t.PlaylistPath(mediaID), nil
@@ -224,6 +242,7 @@ func (t *TranscoderService) EnsureJobFromSubtitle(ctx context.Context, mediaID s
 		startSec:       startSec,
 		seekGen:        seekGen,
 		subtitleStream: subtitleStream,
+		quality:        qualityID,
 		done:           make(chan struct{}),
 	}
 	t.jobs[mediaID] = job
@@ -250,10 +269,14 @@ func shouldReplaceHLSJob(existing *hlsJob, startSec float64, seekGen int64) bool
 }
 
 func shouldReplaceHLSJobConfiguration(existing *hlsJob, startSec float64, seekGen int64, subtitleStream int) bool {
+	return shouldReplaceHLSJobConfigurationQuality(existing, startSec, seekGen, subtitleStream, "")
+}
+
+func shouldReplaceHLSJobConfigurationQuality(existing *hlsJob, startSec float64, seekGen int64, subtitleStream int, quality string) bool {
 	if existing == nil {
 		return true
 	}
-	if sameHLSConfiguration(existing, startSec, subtitleStream) {
+	if sameHLSConfiguration(existing, startSec, subtitleStream, quality) {
 		return false
 	}
 	return newerHLSGenerationMayReplace(existing, seekGen)
@@ -270,9 +293,10 @@ func newerHLSGenerationMayReplace(existing *hlsJob, seekGen int64) bool {
 	return true
 }
 
-func sameHLSConfiguration(existing *hlsJob, startSec float64, subtitleStream int) bool {
+func sameHLSConfiguration(existing *hlsJob, startSec float64, subtitleStream int, quality string) bool {
 	return existing != nil &&
 		existing.subtitleStream == subtitleStream &&
+		existing.quality == quality &&
 		sameHLSStart(existing.startSec, startSec)
 }
 
