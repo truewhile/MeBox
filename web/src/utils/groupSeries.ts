@@ -460,7 +460,7 @@ export function groupSeries(items: Media[] = []): SeriesCard[] {
             ? compactSeriesKey(externalKey)
             : getSeriesKey(m)
 
-    const mAddedAt = m.created_at || m.updated_at || ''
+    const mAddedAt = m.updated_at || m.created_at || ''
     const g = groups.get(key)
     if (!g) {
       groups.set(key, { key, rep: m, linkMedia: m, count: 1, last_added_at: mAddedAt })

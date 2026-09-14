@@ -2,6 +2,7 @@ package service
 
 import (
 	"testing"
+	"time"
 
 	"github.com/truewhile/MeBox/internal/model"
 )
@@ -37,6 +38,48 @@ func TestSortSeriesCardsTitleAsc(t *testing.T) {
 	}
 	got := SortSeriesCards(cards, "title", "asc", nil)
 	if got[0].Key != "a" || got[1].Key != "b" {
+		t.Fatalf("series order = %q, %q", got[0].Key, got[1].Key)
+	}
+}
+
+func TestSortSeriesCardsUpdatedAtDoesNotFallbackToMediaDate(t *testing.T) {
+	olderMediaDate := time.Date(2023, time.January, 1, 0, 0, 0, 0, time.UTC)
+	newerMediaDate := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
+	cards := []SeriesCard{
+		{
+			Key: "remote-first",
+			Rep: model.Media{Base: model.Base{
+				ID:        "remote-first",
+				CreatedAt: olderMediaDate,
+				UpdatedAt: olderMediaDate,
+			}},
+		},
+		{
+			Key: "remote-second",
+			Rep: model.Media{Base: model.Base{
+				ID:        "remote-second",
+				CreatedAt: newerMediaDate,
+				UpdatedAt: newerMediaDate,
+			}},
+		},
+	}
+
+	got := SortSeriesCards(cards, "updated_at", "desc", nil)
+	if got[0].Key != "remote-first" || got[1].Key != "remote-second" {
+		t.Fatalf("series order = %q, %q, want remote-provided order", got[0].Key, got[1].Key)
+	}
+}
+
+func TestSortSeriesCardsUpdatedAtSortsKnownLastEpisodeDates(t *testing.T) {
+	older := time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
+	cards := []SeriesCard{
+		{Key: "older", LastAddedAt: &older},
+		{Key: "newer", LastAddedAt: &newer},
+	}
+
+	got := SortSeriesCards(cards, "updated_at", "desc", nil)
+	if got[0].Key != "newer" || got[1].Key != "older" {
 		t.Fatalf("series order = %q, %q", got[0].Key, got[1].Key)
 	}
 }

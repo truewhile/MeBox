@@ -89,7 +89,7 @@ func listLibrarySeriesHandler(svc *service.Container) gin.HandlerFunc {
 				writeInternalOrCanceled(c, err)
 				return
 			}
-			cards = service.SortSeriesCards(cards, sortSpec.Field, sortSpec.Order, history)
+			cards = sortRemoteSeriesCards(cards, sortSpec, history)
 			page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 			size, _ := strconv.Atoi(c.DefaultQuery("page_size", "500"))
 			if page < 1 {

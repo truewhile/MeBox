@@ -70,7 +70,9 @@ func SortSeriesCards(cards []SeriesCard, field, order string, history map[string
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		cmp := compareSeriesByField(out[i], out[j], spec, history)
-		if cmp == 0 {
+		// updated_at 表示最后一集添加日期。远程卡片可能没有该字段，此时
+		// 保持调用方给定的顺序，不要用 ID 再次打乱。
+		if cmp == 0 && spec.Field != "updated_at" {
 			cmp = compareID(out[i].Key, out[j].Key)
 		}
 		return cmp < 0
@@ -173,7 +175,7 @@ func seriesUpdatedTime(card SeriesCard) (time.Time, bool) {
 	if card.LastAddedAt != nil && !card.LastAddedAt.IsZero() {
 		return *card.LastAddedAt, true
 	}
-	return mediaUpdatedTime(card.Rep)
+	return time.Time{}, false
 }
 
 func seriesLastPlayed(card SeriesCard, history map[string]time.Time) (time.Time, bool) {

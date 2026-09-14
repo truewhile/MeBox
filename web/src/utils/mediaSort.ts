@@ -114,7 +114,7 @@ export function sortMediaList(
       case 'created_at':
         return compareDates(a.created_at, b.created_at, order) || compareStrings(a.title, b.title, 'asc')
       case 'updated_at':
-        return compareDates(a.created_at || a.updated_at, b.created_at || b.updated_at, order) || compareStrings(a.title, b.title, 'asc')
+        return compareDates(a.updated_at || a.created_at, b.updated_at || b.created_at, order) || compareStrings(a.title, b.title, 'asc')
       case 'rating':
       case 'imdb_rating': {
         const cmp = compareNumbers(a.rating || 0, b.rating || 0, order)
