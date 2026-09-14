@@ -151,33 +151,30 @@ export function HomePage() {
     )
   }, [])
 
-  // 3. 首屏只预取轮播和前三行所需的预览；入口卡片进入视口后再按批加载。
+  // 3. 首屏只预取轮播和前三行所需的预览；入口卡片进入视口后自行按批加载。
   useEffect(() => {
     if (sortedLibraries.length === 0) return
     const carouselLibIds = sortedLibraries
       .filter((l) => l.carousel_enabled === true)
       .map((l) => l.id)
     const topRowLibIds = sortedLibraries.slice(0, 3).map((l) => l.id)
-    // 入口网格仍然是一次展示 20 个库；没有自定义封面的库必须在首屏
-    // 立即拉预览，否则会先出现占位图标再补图，体感反而更慢。
-    const topGridLibIds = sortedLibraries
-      .slice(0, 20)
-      .filter((l) => !l.cover_url)
-      .map((l) => l.id)
     const shelfTargets = Array.from(new Set([...carouselLibIds, ...topRowLibIds]))
-    const shelfTargetSet = new Set(shelfTargets)
-    const gridTargets = topGridLibIds.filter((id) => !shelfTargetSet.has(id))
-    // 入口网格只需要 2 张封面，横向货架才需要 10 张。分开请求可以避免
-    // 为暂时不会出现的货架预取完整卡片窗口。
     void fetchPreviews(shelfTargets, 10)
-    void fetchPreviews(gridTargets, 2)
   }, [sortedLibraries, fetchPreviews])
 
   // 4. 媒体库展示行渐进流式加载：默认先检视前 3 个库，随向下滚动逐步检视后续库
   const INITIAL_ROWS = 3
   const STEP_ROWS = 2
   const [visibleTargetCount, setVisibleTargetCount] = useState(INITIAL_ROWS)
-  const sentinelRef = useRef<HTMLDivElement | null>(null)
+  const sentinelRef = useRef<HTMLButtonElement | null>(null)
+  const userScrolledRef = useRef(false)
+
+  const revealMoreLibraries = useCallback(() => {
+    setVisibleTargetCount((prev) => {
+      if (prev >= sortedLibraries.length) return prev
+      return Math.min(prev + STEP_ROWS, sortedLibraries.length)
+    })
+  }, [sortedLibraries.length])
 
   // 随 visibleTargetCount 增加，按需触发后续库的预览加载
   useEffect(() => {
@@ -201,12 +198,11 @@ export function HomePage() {
     if (!scrollParent) return
 
     const handleCheckBottom = () => {
+      if (scrollParent.scrollTop <= 0) return
+      userScrolledRef.current = true
       const remaining = scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight
       if (remaining < 600) {
-        setVisibleTargetCount((prev) => {
-          if (prev >= sortedLibraries.length) return prev
-          return Math.min(prev + STEP_ROWS, sortedLibraries.length)
-        })
+        revealMoreLibraries()
       }
     }
 
@@ -218,11 +214,8 @@ export function HomePage() {
       observer = new IntersectionObserver(
         (entries) => {
           const [entry] = entries
-          if (entry?.isIntersecting) {
-            setVisibleTargetCount((prev) => {
-              if (prev >= sortedLibraries.length) return prev
-              return Math.min(prev + STEP_ROWS, sortedLibraries.length)
-            })
+          if (entry?.isIntersecting && userScrolledRef.current) {
+            revealMoreLibraries()
           }
         },
         {
@@ -234,15 +227,13 @@ export function HomePage() {
       observer.observe(sentinel)
     }
 
-    handleCheckBottom()
-
     return () => {
       scrollParent.removeEventListener('scroll', handleCheckBottom)
       if (observer) {
         observer.disconnect()
       }
     }
-  }, [visibleLibraries.length, hasMoreLibraries, sortedLibraries.length])
+  }, [hasMoreLibraries, revealMoreLibraries, visibleLibraries.length])
 
   // Quick lookup map for libraries
   const libraryMap = useMemo(() => {
@@ -333,7 +324,7 @@ export function HomePage() {
       )}
 
       {/* 4. 各媒体库内容展示行（向下滑动渐进流式加载，不受上方20个分页限制） */}
-      {visibleLibraries.length > 0 && (
+      {(visibleLibraries.length > 0 || hasMoreLibraries) && (
         <div className="space-y-10">
           {visibleLibraries.map((lib) => {
             const cards = libraryData[lib.id]?.cards || []
@@ -346,12 +337,17 @@ export function HomePage() {
             )
           })}
           {hasMoreLibraries && (
-            <div ref={sentinelRef} className="flex h-10 w-full items-center justify-center py-2 opacity-60">
+            <button
+              ref={sentinelRef}
+              type="button"
+              onClick={revealMoreLibraries}
+              className="flex h-10 w-full items-center justify-center py-2 opacity-60 transition-opacity hover:opacity-100"
+            >
               <div className="flex items-center gap-2 text-xs text-[var(--app-muted)]">
                 <div className="h-1.5 w-1.5 animate-ping rounded-full bg-brand-500" />
                 <span>加载更多媒体库…</span>
               </div>
-            </div>
+            </button>
           )}
         </div>
       )}

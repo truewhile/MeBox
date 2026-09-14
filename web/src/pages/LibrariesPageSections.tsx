@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Library as LibraryIcon, RefreshCw, Sparkles } from 'lucide-react'
 
@@ -95,7 +95,15 @@ export function LibrariesContent({
   const INITIAL_SHELVES = 3
   const STEP_SHELVES = 2
   const [visibleCount, setVisibleCount] = useState(INITIAL_SHELVES)
-  const sentinelRef = useRef<HTMLDivElement | null>(null)
+  const sentinelRef = useRef<HTMLButtonElement | null>(null)
+  const userScrolledRef = useRef(false)
+
+  const revealMoreShelves = useCallback(() => {
+    setVisibleCount((prev) => {
+      if (prev >= previews.length) return prev
+      return Math.min(prev + STEP_SHELVES, previews.length)
+    })
+  }, [previews.length])
 
   useEffect(() => {
     const currentTargets = previews.slice(0, visibleCount).map((preview) => preview.library.id)
@@ -107,12 +115,11 @@ export function LibrariesContent({
     if (!scrollParent) return
 
     const handleCheckBottom = () => {
+      if (scrollParent.scrollTop <= 0) return
+      userScrolledRef.current = true
       const remaining = scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight
       if (remaining < 600) {
-        setVisibleCount((prev) => {
-          if (prev >= previews.length) return prev
-          return Math.min(prev + STEP_SHELVES, previews.length)
-        })
+        revealMoreShelves()
       }
     }
 
@@ -124,11 +131,8 @@ export function LibrariesContent({
       observer = new IntersectionObserver(
         (entries) => {
           const [entry] = entries
-          if (entry?.isIntersecting) {
-            setVisibleCount((prev) => {
-              if (prev >= previews.length) return prev
-              return Math.min(prev + STEP_SHELVES, previews.length)
-            })
+          if (entry?.isIntersecting && userScrolledRef.current) {
+            revealMoreShelves()
           }
         },
         {
@@ -140,13 +144,11 @@ export function LibrariesContent({
       observer.observe(sentinel)
     }
 
-    handleCheckBottom()
-
     return () => {
       scrollParent.removeEventListener('scroll', handleCheckBottom)
       if (observer) observer.disconnect()
     }
-  }, [visibleCount, previews.length])
+  }, [revealMoreShelves, visibleCount, previews.length])
 
   const visiblePreviews = useMemo(
     () => previews.slice(0, visibleCount),
@@ -196,12 +198,17 @@ export function LibrariesContent({
           ))}
 
           {visibleCount < previews.length && (
-            <div ref={sentinelRef} className="flex h-10 w-full items-center justify-center py-2 opacity-60">
+            <button
+              ref={sentinelRef}
+              type="button"
+              onClick={revealMoreShelves}
+              className="flex h-10 w-full items-center justify-center py-2 opacity-60 transition-opacity hover:opacity-100"
+            >
               <div className="flex items-center gap-2 text-xs text-[var(--app-muted)]">
                 <div className="h-1.5 w-1.5 animate-ping rounded-full bg-brand-500" />
                 <span>加载更多媒体库货架…</span>
               </div>
-            </div>
+            </button>
           )}
         </section>
       )}

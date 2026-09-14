@@ -86,7 +86,7 @@ export function useLibraryData(
 
       const seriesMode = isSeriesLibraryType(lib.type)
       modeRef.current = seriesMode ? 'series' : 'media'
-      const pageSize = pageSizeFor(lib, seriesMode)
+      const pageSize = pageSizeFor(lib)
       try {
         if (seriesMode) {
           const data = await libraryAPI.listSeries(libraryID, 1, pageSize, { sort: sortField, order: sortOrder })
@@ -155,7 +155,7 @@ export function useLibraryData(
     try {
       const page = nextPageRef.current
       if (modeRef.current === 'series') {
-        const data = await libraryAPI.listSeries(libraryID, page, pageSizeFor(lib, true), {
+        const data = await libraryAPI.listSeries(libraryID, page, pageSizeFor(lib), {
           sort: sortField,
           order: sortOrder,
         })
@@ -167,7 +167,7 @@ export function useLibraryData(
         nextPageRef.current = page + 1
         hasMoreRef.current = pageItems.length > 0 && loadedCountRef.current < totalRef.current
       } else {
-        const data = await libraryAPI.listMedia(libraryID, page, pageSizeFor(lib, false), {
+        const data = await libraryAPI.listMedia(libraryID, page, pageSizeFor(lib), {
           sort: sortField,
           order: sortOrder,
         })
@@ -238,9 +238,11 @@ function isSeriesLibraryType(type?: string) {
   return type === 'tv' || type === 'anime' || type === 'variety'
 }
 
-function pageSizeFor(lib: Library, seriesMode: boolean): number {
-  if (lib.is_remote_emby) return 100
-  return seriesMode ? 500 : 2000
+function pageSizeFor(lib: Library): number {
+  // 首屏保持一屏多一点，后续统一由底部哨兵按页追加。此前沿用旧的
+  // 500/2000 批量值，会让中小型媒体库在第一次请求时就等于全量加载。
+  if (lib.is_remote_emby) return 50
+  return 60
 }
 
 function yieldToBrowser(): Promise<void> {

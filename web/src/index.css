@@ -430,7 +430,8 @@ video::cue(*) {
 
 .animate-overlay-in { animation: overlay-in 0.15s ease-out both; }
 .animate-drawer-in { animation: drawer-in 0.22s ease-out both; }
-.animate-page-in { animation: page-in 0.25s ease-out both; }
+/* 播放完成后不能保留 transform，否则长页面会成为 fixed 弹框的包含块。 */
+.animate-page-in { animation: page-in 0.25s ease-out backwards; }
 .animate-accordion-in { animation: accordion-in 0.18s ease-out both; }
 .animate-fade-slide-in { animation: fade-slide-in 0.2s ease-out both; }
 .animate-menu-in { animation: menu-in 0.15s ease-out both; }
