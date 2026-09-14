@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -465,6 +466,9 @@ func TestRemoteLatestCardsTvShowsYearAndPoster(t *testing.T) {
 	if cards[0].Count != 12 {
 		t.Fatalf("expected Count 12, got %d", cards[0].Count)
 	}
+	if !cards[0].IsSeries {
+		t.Fatalf("expected remote latest card to be marked as series")
+	}
 	if cards[0].Rep.PosterURL == "" {
 		t.Fatalf("expected PosterURL not empty")
 	}
@@ -473,6 +477,348 @@ func TestRemoteLatestCardsTvShowsYearAndPoster(t *testing.T) {
 	}
 	if !strings.Contains(requestedFields, "ProductionYear") {
 		t.Fatalf("expected Fields to contain ProductionYear, got %q", requestedFields)
+	}
+}
+
+func TestRemoteLatestCardsTvShowsGroupsEpisodeFallbackBySeries(t *testing.T) {
+	var seriesQueryCalled atomic.Bool
+	var latestCalled atomic.Bool
+	var requestedSeriesType atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch strings.TrimPrefix(r.URL.Path, "/emby") {
+		case "/Users/remote-user/Items":
+			seriesQueryCalled.Store(true)
+			requestedSeriesType.Store(r.URL.Query().Get("IncludeItemTypes"))
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Items":            []map[string]any{},
+				"TotalRecordCount": 0,
+			})
+		case "/Users/remote-user/Items/Latest":
+			latestCalled.Store(true)
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"Id":                    "episode-2",
+					"Name":                  "第二集",
+					"Type":                  "Episode",
+					"SeriesId":              "series-b",
+					"SeriesName":            "剧集 B",
+					"SeriesProductionYear":  2025,
+					"SeriesPrimaryImageTag": "poster-b",
+				},
+				{
+					"Id":                   "episode-1",
+					"Name":                 "第一集",
+					"Type":                 "Episode",
+					"SeriesId":             "series-a",
+					"SeriesName":           "剧集 A",
+					"SeriesProductionYear": 2024,
+				},
+				{
+					"Id":         "episode-1b",
+					"Name":       "第一集下",
+					"Type":       "Episode",
+					"SeriesId":   "series-a",
+					"SeriesName": "剧集 A",
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	db := newServiceTestDB(t, &model.StrmAccount{}, &model.EmbyMount{})
+	repos := repository.New(db)
+	svc := NewEmbyRemoteService(&config.Config{}, zap.NewNop(), repos, NewCryptoService("", zap.NewNop()))
+
+	rawConfig, _ := json.Marshal(map[string]string{
+		"url":            server.URL,
+		"token":          "fake-token",
+		"remote_user_id": "remote-user",
+	})
+	acct := &model.StrmAccount{
+		Base:     model.Base{ID: "acct-tv-fallback"},
+		Name:     "tv-emby",
+		Provider: model.StrmProviderEmbyRemote,
+		Config:   string(rawConfig),
+		Enabled:  true,
+	}
+	if err := repos.StrmAccount.Create(t.Context(), acct); err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	mount := &model.EmbyMount{
+		Base:           model.Base{ID: "mount-tv-fallback"},
+		AccountID:      acct.ID,
+		RemoteViewID:   "view-tv",
+		RemoteViewName: "剧集库",
+		CollectionType: "tvshows",
+		Enabled:        true,
+	}
+	if err := repos.EmbyMount.Create(t.Context(), mount); err != nil {
+		t.Fatalf("create mount: %v", err)
+	}
+
+	cards, err := svc.RemoteLatestCards(t.Context(), mount, acct, mount.RemoteViewID, 10)
+	if err != nil {
+		t.Fatalf("RemoteLatestCards failed: %v", err)
+	}
+	if !seriesQueryCalled.Load() || !latestCalled.Load() {
+		t.Fatalf("expected both Series query and Latest fallback, series=%v latest=%v", seriesQueryCalled.Load(), latestCalled.Load())
+	}
+	if got, _ := requestedSeriesType.Load().(string); got != "Series" {
+		t.Fatalf("series query IncludeItemTypes = %q, want Series", got)
+	}
+	if len(cards) != 2 {
+		t.Fatalf("expected 2 deduplicated series cards, got %d: %#v", len(cards), cards)
+	}
+	wantKeys := []string{
+		EncodeEmbyRemoteID(mount.ID, "series-b"),
+		EncodeEmbyRemoteID(mount.ID, "series-a"),
+	}
+	for i, want := range wantKeys {
+		if cards[i].Key != want {
+			t.Fatalf("card[%d].Key = %q, want %q", i, cards[i].Key, want)
+		}
+		if !cards[i].IsSeries {
+			t.Fatalf("card[%d] should be marked as series", i)
+		}
+	}
+}
+
+func TestEmbyLatestItemsRemoteTvShowsUseSeriesIDs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch strings.TrimPrefix(r.URL.Path, "/emby") {
+		case "/Users/remote-user/Items":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Items":            []map[string]any{},
+				"TotalRecordCount": 0,
+			})
+		case "/Users/remote-user/Items/Latest":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"Id":         "episode-10",
+					"Name":       "第十集",
+					"Type":       "Episode",
+					"SeriesId":   "series-10",
+					"SeriesName": "远程剧集",
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	db := newServiceTestDB(t,
+		&model.Setting{},
+		&model.User{},
+		&model.Favorite{},
+		&model.PlaybackHistory{},
+		&model.StrmAccount{},
+		&model.EmbyMount{},
+	)
+	repos := repository.New(db)
+	remoteSvc := NewEmbyRemoteService(&config.Config{}, zap.NewNop(), repos, NewCryptoService("", zap.NewNop()))
+	svc := NewEmbyService(&config.Config{}, zap.NewNop(), repos).SetEmbyRemote(remoteSvc)
+
+	rawConfig, _ := json.Marshal(map[string]string{
+		"url":            server.URL,
+		"token":          "fake-token",
+		"remote_user_id": "remote-user",
+	})
+	acct := &model.StrmAccount{
+		Base:     model.Base{ID: "acct-emby-latest"},
+		Name:     "tv-emby",
+		Provider: model.StrmProviderEmbyRemote,
+		Config:   string(rawConfig),
+		Enabled:  true,
+	}
+	if err := repos.StrmAccount.Create(t.Context(), acct); err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	mount := &model.EmbyMount{
+		Base:           model.Base{ID: "mount-emby-latest"},
+		AccountID:      acct.ID,
+		RemoteViewID:   "view-tv",
+		RemoteViewName: "剧集库",
+		CollectionType: "tvshows",
+		Enabled:        true,
+	}
+	if err := repos.EmbyMount.Create(t.Context(), mount); err != nil {
+		t.Fatalf("create mount: %v", err)
+	}
+
+	items, err := svc.LatestItems(t.Context(), "user-1", EncodeEmbyRemoteID(mount.ID, mount.RemoteViewID), 10)
+	if err != nil {
+		t.Fatalf("LatestItems failed: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 series item, got %d: %#v", len(items), items)
+	}
+	if items[0]["Type"] != "Series" {
+		t.Fatalf("latest item Type = %#v, want Series", items[0]["Type"])
+	}
+	wantID := EncodeEmbyRemoteID(mount.ID, "series-10")
+	if items[0]["Id"] != wantID {
+		t.Fatalf("latest item Id = %#v, want %q", items[0]["Id"], wantID)
+	}
+}
+
+// 远程剧集库分页拉全量：超过一页时必须继续翻页，否则第 201 条之后的剧集
+// 既不会出现在媒体库列表里，首页深链过来的 ?series= 也无从命中。
+func TestRemoteSeriesCardsFetchAllPages(t *testing.T) {
+	const totalSeries = remoteSeriesPageSize*2 + 50
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		query := r.URL.Query()
+		startIndex, _ := strconv.Atoi(query.Get("StartIndex"))
+		limit, _ := strconv.Atoi(query.Get("Limit"))
+		requests.Add(1)
+		items := make([]map[string]any, 0, limit)
+		for i := startIndex; i < totalSeries && len(items) < limit; i++ {
+			items = append(items, map[string]any{
+				"Id":                 "series-" + strconv.Itoa(i),
+				"Name":               "剧集 " + strconv.Itoa(i),
+				"Type":               "Series",
+				"RecursiveItemCount": 12,
+			})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Items":            items,
+			"TotalRecordCount": totalSeries,
+		})
+	}))
+	defer server.Close()
+
+	db := newServiceTestDB(t, &model.StrmAccount{}, &model.EmbyMount{})
+	repos := repository.New(db)
+	svc := NewEmbyRemoteService(&config.Config{}, zap.NewNop(), repos, NewCryptoService("", zap.NewNop()))
+
+	rawConfig, _ := json.Marshal(map[string]string{
+		"url":            server.URL,
+		"token":          "fake-token",
+		"remote_user_id": "remote-user",
+	})
+	acct := &model.StrmAccount{
+		Base:     model.Base{ID: "acct-series-pages"},
+		Name:     "tv-emby",
+		Provider: model.StrmProviderEmbyRemote,
+		Config:   string(rawConfig),
+		Enabled:  true,
+	}
+	if err := repos.StrmAccount.Create(t.Context(), acct); err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	mount := &model.EmbyMount{
+		Base:           model.Base{ID: "mount-series-pages"},
+		AccountID:      acct.ID,
+		RemoteViewID:   "view-tv",
+		RemoteViewName: "电视剧",
+		CollectionType: "tvshows",
+		Enabled:        true,
+	}
+	if err := repos.EmbyMount.Create(t.Context(), mount); err != nil {
+		t.Fatalf("create mount: %v", err)
+	}
+
+	cards, err := svc.RemoteSeriesCards(t.Context(), mount, acct, mount.RemoteViewID)
+	if err != nil {
+		t.Fatalf("RemoteSeriesCards failed: %v", err)
+	}
+	if len(cards) != totalSeries {
+		t.Fatalf("expected all %d series, got %d", totalSeries, len(cards))
+	}
+	if got := requests.Load(); got != 3 {
+		t.Fatalf("expected 3 paged requests, got %d", got)
+	}
+	lastKey := EncodeEmbyRemoteID(mount.ID, "series-"+strconv.Itoa(totalSeries-1))
+	if cards[len(cards)-1].Key != lastKey {
+		t.Fatalf("last card key = %q, want %q", cards[len(cards)-1].Key, lastKey)
+	}
+}
+
+// 首页「最新条目」卡片 key 必须与媒体库剧集列表的 key 一致，否则点击后
+// 媒体库页找不到目标剧集，只能退回整库列表。
+func TestRemoteLatestCardsKeyMatchesSeriesList(t *testing.T) {
+	var seriesQueryCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.TrimPrefix(r.URL.Path, "/emby") != "/Users/remote-user/Items" {
+			http.NotFound(w, r)
+			return
+		}
+		seriesQueryCalls.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Items": []map[string]any{
+				{
+					"Id":                 "series-latest",
+					"Name":               "刚刚更新",
+					"Type":               "Series",
+					"RecursiveItemCount": 24,
+				},
+			},
+			"TotalRecordCount": 1,
+		})
+	}))
+	defer server.Close()
+
+	db := newServiceTestDB(t, &model.StrmAccount{}, &model.EmbyMount{})
+	repos := repository.New(db)
+	svc := NewEmbyRemoteService(&config.Config{}, zap.NewNop(), repos, NewCryptoService("", zap.NewNop()))
+
+	rawConfig, _ := json.Marshal(map[string]string{
+		"url":            server.URL,
+		"token":          "fake-token",
+		"remote_user_id": "remote-user",
+	})
+	acct := &model.StrmAccount{
+		Base:     model.Base{ID: "acct-latest-key"},
+		Name:     "tv-emby",
+		Provider: model.StrmProviderEmbyRemote,
+		Config:   string(rawConfig),
+		Enabled:  true,
+	}
+	if err := repos.StrmAccount.Create(t.Context(), acct); err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	mount := &model.EmbyMount{
+		Base:           model.Base{ID: "mount-latest-key"},
+		AccountID:      acct.ID,
+		RemoteViewID:   "view-tv",
+		RemoteViewName: "电视剧",
+		CollectionType: "tvshows",
+		Enabled:        true,
+	}
+	if err := repos.EmbyMount.Create(t.Context(), mount); err != nil {
+		t.Fatalf("create mount: %v", err)
+	}
+
+	latestCards, err := svc.RemoteLatestCards(t.Context(), mount, acct, mount.RemoteViewID, 10)
+	if err != nil {
+		t.Fatalf("RemoteLatestCards failed: %v", err)
+	}
+	if len(latestCards) != 1 || !latestCards[0].IsSeries {
+		t.Fatalf("expected 1 series latest card, got %#v", latestCards)
+	}
+	seriesCards, err := svc.RemoteSeriesCards(t.Context(), mount, acct, mount.RemoteViewID)
+	if err != nil {
+		t.Fatalf("RemoteSeriesCards failed: %v", err)
+	}
+	if seriesQueryCalls.Load() < 2 {
+		t.Fatalf("expected both latest and series list queries, got %d", seriesQueryCalls.Load())
+	}
+	found := false
+	for _, card := range seriesCards {
+		if card.Key == latestCards[0].Key {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("latest card key %q not present in series list keys %#v", latestCards[0].Key, seriesCards)
 	}
 }
 

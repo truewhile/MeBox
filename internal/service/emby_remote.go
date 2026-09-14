@@ -860,6 +860,162 @@ func (r *EmbyRemoteService) RemoteLatest(ctx context.Context, mount *model.EmbyM
 	return out, nil
 }
 
+// RemoteLatestForDisplay 返回可直接展示的最新媒体条目。剧集库优先取 Series；
+// 远程 Latest 只返回 Episode 时，按 SeriesId 归并，避免调用方拿到单集 ID
+// 后无法在 Series 卡片列表中找到对应条目。
+func (r *EmbyRemoteService) RemoteLatestForDisplay(ctx context.Context, mount *model.EmbyMount, acct *model.StrmAccount, remoteViewID string, limit int) ([]map[string]any, error) {
+	if remoteCollectionLooksEpisodic(mount.CollectionType) {
+		return r.RemoteLatestSeries(ctx, mount, acct, remoteViewID, limit)
+	}
+	items, err := r.RemoteLatest(ctx, mount, acct, remoteViewID, limit)
+	if err != nil {
+		return nil, err
+	}
+	if remoteItemsContainEpisodes(items) {
+		return remoteSeriesItemsFromLatest(mount, items, limit), nil
+	}
+	return items, nil
+}
+
+// RemoteLatestSeries 拉取剧集库最近更新的 Series。部分 Emby 服务不支持
+// DateLastContentAdded 或过滤 Series，此时回退到 Latest 并把 Episode 归并到
+// 对应 Series。
+func (r *EmbyRemoteService) RemoteLatestSeries(ctx context.Context, mount *model.EmbyMount, acct *model.StrmAccount, remoteViewID string, limit int) ([]map[string]any, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	cfg, err := r.remoteConfigWithToken(ctx, acct)
+	if err != nil {
+		return nil, err
+	}
+	q := url.Values{}
+	q.Set("ParentId", remoteViewID)
+	q.Set("IncludeItemTypes", "Series")
+	q.Set("Recursive", "false")
+	q.Set("SortBy", "DateLastContentAdded")
+	q.Set("SortOrder", "Descending")
+	q.Set("Limit", strconv.Itoa(limit))
+	q.Set("Fields", "Overview,Genres,ProviderIds,Path,RecursiveItemCount,SeriesPrimaryImage,DateCreated,DateLastMediaAdded,PremiereDate,ProductionYear,CommunityRating,CriticRating")
+	var body struct {
+		Items []map[string]any `json:"Items"`
+	}
+	if err := r.doGet(ctx, acct, cfg, "/Users/"+url.PathEscape(r.remoteUserID(cfg))+"/Items", q, &body); err == nil && len(body.Items) > 0 {
+		RewriteEmbyRemoteIDs(body.Items, mount.ID)
+		return body.Items, nil
+	}
+
+	items, err := r.RemoteLatest(ctx, mount, acct, remoteViewID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return remoteSeriesItemsFromLatest(mount, items, limit), nil
+}
+
+func remoteCollectionLooksEpisodic(collectionType string) bool {
+	switch strings.ToLower(strings.TrimSpace(collectionType)) {
+	case "tvshows", "tv":
+		return true
+	default:
+		return false
+	}
+}
+
+func remoteItemsContainEpisodes(items []map[string]any) bool {
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(remoteItemString(item, "Type")), "Episode") {
+			return true
+		}
+	}
+	return false
+}
+
+func remoteSeriesItemsFromLatest(mount *model.EmbyMount, items []map[string]any, limit int) []map[string]any {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	out := make([]map[string]any, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if len(out) >= limit {
+			break
+		}
+		if !strings.EqualFold(strings.TrimSpace(remoteItemString(item, "Type")), "Episode") {
+			id := strings.TrimSpace(remoteItemString(item, "Id"))
+			if id == "" {
+				continue
+			}
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, item)
+			continue
+		}
+
+		seriesID := remoteItemSeriesID(item, mount)
+		if seriesID == "" {
+			continue
+		}
+		if _, exists := seen[seriesID]; exists {
+			continue
+		}
+		seen[seriesID] = struct{}{}
+		out = append(out, remoteSeriesPayloadFromEpisode(mount, item, seriesID))
+	}
+	return out
+}
+
+func remoteItemSeriesID(item map[string]any, mount *model.EmbyMount) string {
+	seriesID := strings.TrimSpace(remoteItemString(item, "SeriesId"))
+	if seriesID == "" {
+		return ""
+	}
+	if _, rawID, ok := DecodeEmbyRemoteID(seriesID); ok {
+		if mount == nil {
+			return rawID
+		}
+		return EncodeEmbyRemoteID(mount.ID, rawID)
+	}
+	if mount == nil {
+		return seriesID
+	}
+	return EncodeEmbyRemoteID(mount.ID, seriesID)
+}
+
+func remoteSeriesPayloadFromEpisode(mount *model.EmbyMount, episode map[string]any, seriesID string) map[string]any {
+	name := strings.TrimSpace(remoteItemString(episode, "SeriesName"))
+	if name == "" {
+		name = strings.TrimSpace(remoteItemString(episode, "Name"))
+	}
+	out := map[string]any{
+		"Id":   seriesID,
+		"Name": name,
+		"Type": "Series",
+	}
+	if mount != nil && strings.TrimSpace(mount.RemoteViewID) != "" {
+		out["ParentId"] = EncodeEmbyRemoteID(mount.ID, mount.RemoteViewID)
+	}
+	if tag := strings.TrimSpace(remoteItemString(episode, "SeriesPrimaryImageTag")); tag != "" {
+		out["ImageTags"] = map[string]any{"Primary": tag}
+	}
+	year := remoteItemInt(episode, "SeriesProductionYear")
+	if year == 0 {
+		year = remoteItemInt(episode, "SeriesYear")
+	}
+	if year == 0 {
+		year = remoteItemInt(episode, "ProductionYear")
+	}
+	if year > 0 {
+		out["ProductionYear"] = year
+	}
+	for _, key := range []string{"Genres", "ProviderIds", "DateLastMediaAdded", "CommunityRating", "CriticRating", "OfficialRating"} {
+		if value, ok := episode[key]; ok {
+			out[key] = value
+		}
+	}
+	return out
+}
+
 // RemotePlaybackInfo 拉取远程 PlaybackInfo，并按挂载的 proxy_play 配置重写
 // 播放 URL：不代理=指向远程绝对地址（播放字节不过 MeBox）；代理=指向 MeBox
 // 本地 /Videos/{encodedID} 端点（由 ProxyVideoStream 反代）。

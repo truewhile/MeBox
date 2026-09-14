@@ -124,6 +124,7 @@ export function LibraryPage() {
   })
 
   const {
+    resolvingSeries,
     selectedEpisodes,
     visibleEpisodes,
     selectedSeriesEpisodes,
@@ -132,6 +133,7 @@ export function LibraryPage() {
     handleSeriesClick,
     clearSelectedSeries,
   } = useLibrarySeriesSelection({
+    libraryID: id,
     items,
     seriesEpisodeItems,
     isSeriesLibrary,
@@ -209,7 +211,9 @@ export function LibraryPage() {
     return <>{actions}</>
   }, [canFavorite, favouriteBusyID, handleToggleFavourite, isFavourite, movieActions])
 
-  if (loading) {
+  // resolvingSeries：深链目标剧集不在已加载的一页卡片里，正在按 key
+  // 单独解析。此时先显示加载态，避免先渲染整个媒体库列表再跳走。
+  if (loading || resolvingSeries) {
     return (
       <div className="flex items-center justify-center py-32">
         <motion.div animate={{ opacity: [0.4, 1, 0.4] }} transition={{ repeat: Infinity, duration: 2 }} className="flex items-center gap-3">

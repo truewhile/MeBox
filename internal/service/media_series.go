@@ -33,6 +33,7 @@ type SeriesCard struct {
 	Rep         model.Media `json:"rep"`
 	LinkMedia   model.Media `json:"linkMedia"`
 	Count       int         `json:"count"`
+	IsSeries    bool        `json:"is_series,omitempty"`
 	LastAddedAt *time.Time  `json:"last_added_at,omitempty"`
 }
 
@@ -45,6 +46,7 @@ type SeriesCardView struct {
 	Rep           model.Media `json:"rep"`
 	LinkLibraryID string      `json:"linkLibraryId,omitempty"`
 	Count         int         `json:"count"`
+	IsSeries      bool        `json:"is_series,omitempty"`
 	LastAddedAt   *time.Time  `json:"last_added_at,omitempty"`
 }
 
@@ -59,6 +61,7 @@ func NewSeriesCardViews(cards []SeriesCard) []SeriesCardView {
 			Rep:           card.Rep,
 			LinkLibraryID: mediaTargetLibraryID(card.LinkMedia),
 			Count:         card.Count,
+			IsSeries:      card.IsSeries,
 			LastAddedAt:   card.LastAddedAt,
 		}
 	}

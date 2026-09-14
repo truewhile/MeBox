@@ -36,6 +36,7 @@ export type SeriesCard = {
   linkMedia?: Media
   linkLibraryId?: string
   count: number
+  is_series?: boolean
   last_added_at?: string
 }
 
@@ -223,6 +224,7 @@ export function seasonLabel(season: number): string {
 export function isSeriesCard(card: SeriesCard): boolean {
   const linkMedia = card.linkMedia ?? card.rep
   return (
+    card.is_series === true ||
     card.count > 1 ||
     isEpisodeLike(card.rep) ||
     isEpisodeLike(linkMedia) ||

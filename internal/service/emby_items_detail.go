@@ -218,7 +218,7 @@ func (e *EmbyService) loadLatestItems(ctx context.Context, userID, parentID stri
 		if mount == nil || acct == nil || !EmbyMountLibraryAllowed(e.mediaVisibility(ctx, userID), mount) {
 			return embyLatestCacheValue{Items: []map[string]any{}}, nil
 		}
-		out, err := e.remote.RemoteLatest(ctx, mount, acct, remoteParent, limit)
+		out, err := e.remote.RemoteLatestForDisplay(ctx, mount, acct, remoteParent, limit)
 		if err != nil {
 			return embyLatestCacheValue{}, err
 		}

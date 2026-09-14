@@ -180,31 +180,31 @@ func (r *EmbyRemoteService) MapRemoteItemToMedia(ctx context.Context, mount *mod
 	if _, rid, ok := DecodeEmbyRemoteID(seriesID); ok {
 		seriesID = rid
 	}
-		rating := remoteItemFloat(item, "CommunityRating")
-		if rating == 0 {
-			rating = remoteItemFloat(item, "CriticRating")
-		}
-		year := remoteItemInt(item, "ProductionYear")
-		if year == 0 {
-			year = remoteItemInt(item, "Year")
-		}
-		if year == 0 {
-			year = remoteItemInt(item, "SeriesProductionYear")
-		}
-		if year == 0 {
-			year = remoteItemInt(item, "SeriesYear")
-		}
-		media := model.Media{
-			Base:         model.Base{ID: EncodeEmbyRemoteID(encodeScope, remoteID)},
-			Title:        remoteItemString(item, "Name"),
-			OriginalName: remoteItemString(item, "OriginalTitle"),
-			Overview:     remoteItemString(item, "Overview"),
-			Year:         year,
-			Rating:       float32(rating),
-			Path:         remoteItemString(item, "Path"),
-			Genres:       remoteItemGenres(item),
-			ScrapeStatus: "done",
-		}
+	rating := remoteItemFloat(item, "CommunityRating")
+	if rating == 0 {
+		rating = remoteItemFloat(item, "CriticRating")
+	}
+	year := remoteItemInt(item, "ProductionYear")
+	if year == 0 {
+		year = remoteItemInt(item, "Year")
+	}
+	if year == 0 {
+		year = remoteItemInt(item, "SeriesProductionYear")
+	}
+	if year == 0 {
+		year = remoteItemInt(item, "SeriesYear")
+	}
+	media := model.Media{
+		Base:         model.Base{ID: EncodeEmbyRemoteID(encodeScope, remoteID)},
+		Title:        remoteItemString(item, "Name"),
+		OriginalName: remoteItemString(item, "OriginalTitle"),
+		Overview:     remoteItemString(item, "Overview"),
+		Year:         year,
+		Rating:       float32(rating),
+		Path:         remoteItemString(item, "Path"),
+		Genres:       remoteItemGenres(item),
+		ScrapeStatus: "done",
+	}
 	if date, ok := parseEmbyRemoteDate(remoteItemString(item, "DateCreated")); ok {
 		media.CreatedAt = date
 		media.UpdatedAt = date
@@ -509,6 +509,11 @@ func (r *EmbyRemoteService) remoteEpisodesOf(ctx context.Context, mount *model.E
 	return items, total, nil
 }
 
+// remoteSeriesPageSize 是远程剧集分页拉取的每页条数：Fields 带 Overview/Path
+// 等重字段，单页 1000 条时载荷会超过 doGet 的 8MB 截断上限，JSON 被静默截断
+// 直接解析失败，因此按 200 条翻页拉全量。
+const remoteSeriesPageSize = 200
+
 // RemoteSeriesCards 远程剧集库的系列卡片（ChildCount 作为集数）。
 //
 // 远程 Emby 的 Series DTO 不会返回 DateLastMediaAdded 字段（即使请求 Fields
@@ -532,16 +537,14 @@ func (r *EmbyRemoteService) RemoteSeriesCards(ctx context.Context, mount *model.
 	q.Set("Recursive", "false")
 	q.Set("SortBy", "DateLastContentAdded")
 	q.Set("SortOrder", "Descending")
-	// 每页 200：Fields 带全量重字段（Overview/MediaStreams 等）时单页 1000
-	// 条的载荷会超过 doGet 的 8MB 截断上限，JSON 被静默截断直接解析失败。
-	q.Set("Limit", "200")
+	q.Set("Limit", strconv.Itoa(remoteSeriesPageSize))
 	q.Set("Fields", "Overview,Genres,ProviderIds,Path,RecursiveItemCount,SeriesPrimaryImage,DateCreated,DateLastMediaAdded,PremiereDate,ProductionYear,CommunityRating,CriticRating")
 	var body struct {
 		Items            []map[string]any `json:"Items"`
 		TotalRecordCount int64            `json:"TotalRecordCount"`
 	}
 	cards := make([]SeriesCard, 0)
-	for startIndex := 0; ; startIndex += 200 {
+	for startIndex := 0; ; startIndex += remoteSeriesPageSize {
 		q.Set("StartIndex", strconv.Itoa(startIndex))
 		body.Items = nil
 		if err := r.doGet(ctx, acct, cfg, "/Users/"+url.PathEscape(r.remoteUserID(cfg))+"/Items", q, &body); err != nil {
@@ -565,9 +568,16 @@ func (r *EmbyRemoteService) RemoteSeriesCards(ctx context.Context, mount *model.
 			if date, ok := parseEmbyRemoteDate(remoteItemString(it, "DateLastMediaAdded")); ok {
 				lastAdded = &date
 			}
-			cards = append(cards, SeriesCard{Key: m.ID, Rep: m, LinkMedia: m, Count: count, LastAddedAt: lastAdded})
+			cards = append(cards, SeriesCard{
+				Key:         m.ID,
+				Rep:         m,
+				LinkMedia:   m,
+				Count:       count,
+				IsSeries:    true,
+				LastAddedAt: lastAdded,
+			})
 		}
-		if int64(len(cards)) >= body.TotalRecordCount || len(body.Items) < 1000 {
+		if int64(len(cards)) >= body.TotalRecordCount || len(body.Items) < remoteSeriesPageSize {
 			break
 		}
 	}
@@ -589,52 +599,14 @@ func (r *EmbyRemoteService) RemoteLatestCards(ctx context.Context, mount *model.
 		return cached, nil
 	}
 
-	// 剧集类媒体库：直接拉取最新入库/更新的 Series 剧集本身（按上次添加集日期倒序）。
-	// 避免 Emby /Items/Latest 默认返回无年份/无系列海报的单集（Episode）。
-	if mount != nil && (mount.CollectionType == "tvshows" || mount.CollectionType == "tv") {
-		q := url.Values{}
-		q.Set("ParentId", remoteViewID)
-		q.Set("IncludeItemTypes", "Series")
-		q.Set("Recursive", "false")
-		q.Set("SortBy", "DateLastContentAdded")
-		q.Set("SortOrder", "Descending")
-		q.Set("Limit", strconv.Itoa(limit))
-		q.Set("Fields", "Overview,Genres,ProviderIds,Path,RecursiveItemCount,SeriesPrimaryImage,DateCreated,DateLastMediaAdded,PremiereDate,ProductionYear,CommunityRating,CriticRating")
-		var body struct {
-			Items []map[string]any `json:"Items"`
-		}
-		if err := r.doGet(ctx, acct, cfg, "/Users/"+url.PathEscape(r.remoteUserID(cfg))+"/Items", q, &body); err == nil && len(body.Items) > 0 {
-			cards := make([]SeriesCard, 0, len(body.Items))
-			for _, it := range body.Items {
-				RewriteEmbyRemoteIDs(it, mount.ID)
-				m := r.MapRemoteItemToMedia(ctx, mount, acct, cfg, it)
-				count := remoteItemInt(it, "RecursiveItemCount")
-				if count == 0 {
-					count = remoteItemInt(it, "ChildCount")
-				}
-				if count == 0 {
-					count = 1
-				}
-				var lastAdded *time.Time
-				if date, ok := parseEmbyRemoteDate(remoteItemString(it, "DateLastMediaAdded")); ok {
-					lastAdded = &date
-				}
-				cards = append(cards, SeriesCard{Key: m.ID, Rep: m, LinkMedia: m, Count: count, LastAddedAt: lastAdded})
-			}
-			if r.cache != nil {
-				r.cache.SetJSON(ctx, cacheKey, cards, r.remoteMediaCacheTTL())
-			}
-			return cards, nil
-		}
-	}
-
-	items, err := r.RemoteLatest(ctx, mount, acct, remoteViewID, limit)
+	items, err := r.RemoteLatestForDisplay(ctx, mount, acct, remoteViewID, limit)
 	if err != nil {
 		return nil, err
 	}
 	cards := make([]SeriesCard, 0, len(items))
 	for _, it := range items {
 		m := r.MapRemoteItemToMedia(ctx, mount, acct, cfg, it)
+		isSeries := strings.EqualFold(strings.TrimSpace(remoteItemString(it, "Type")), "Series")
 		var lastAdded *time.Time
 		if !m.UpdatedAt.IsZero() {
 			t := m.UpdatedAt
@@ -647,7 +619,17 @@ func (r *EmbyRemoteService) RemoteLatestCards(ctx context.Context, mount *model.
 		if count == 0 {
 			count = remoteItemInt(it, "ChildCount")
 		}
-		cards = append(cards, SeriesCard{Key: m.ID, Rep: m, LinkMedia: m, Count: count, LastAddedAt: lastAdded})
+		if count == 0 {
+			count = 1
+		}
+		cards = append(cards, SeriesCard{
+			Key:         m.ID,
+			Rep:         m,
+			LinkMedia:   m,
+			Count:       count,
+			IsSeries:    isSeries,
+			LastAddedAt: lastAdded,
+		})
 	}
 	if r.cache != nil {
 		r.cache.SetJSON(ctx, cacheKey, cards, r.remoteMediaCacheTTL())
