@@ -9,6 +9,7 @@ import {
   FolderOpen,
   Library as LibraryIcon,
   Music,
+  Pin,
   Play,
   PlayCircle,
   Sparkles,
@@ -355,11 +356,19 @@ export function HomeLibrariesSection({
   libraryData,
   libraryCounts,
   onNeedPreviews,
+  pinnedIds = [],
+  onTogglePin,
+  showAllLink = true,
+  title = '媒体库',
 }: {
   libraries: Library[]
   libraryData?: Record<string, { cards: SeriesCard[]; items: Media[]; total: number }>
   libraryCounts: Record<string, number>
   onNeedPreviews?: (ids: string[], limit?: number) => void
+  pinnedIds?: string[]
+  onTogglePin?: (libraryId: string) => void
+  showAllLink?: boolean
+  title?: string
 }) {
   const PAGE_SIZE = 20
   const [currentPage, setCurrentPage] = useState(1)
@@ -382,7 +391,7 @@ export function HomeLibrariesSection({
           <div>
             <div className="flex items-center gap-2">
               <h2 className="font-display text-xl font-extrabold tracking-tight text-[var(--app-text)]">
-                媒体库
+                {title}
               </h2>
               {libraries.length > PAGE_SIZE && (
                 <span className="rounded-md border border-[var(--app-border)] bg-[var(--app-panel-soft)] px-1.5 py-0.5 text-[11px] font-semibold text-[var(--app-muted)]">
@@ -396,41 +405,45 @@ export function HomeLibrariesSection({
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
-          {totalPages > 1 && (
-            <div className="flex items-center gap-2 rounded-xl border border-[var(--app-border)] bg-[var(--app-panel-soft)] px-2 py-1 text-xs">
-              <button
-                type="button"
-                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                disabled={effectivePage <= 1}
-                className="rounded-lg p-1 text-[var(--app-muted)] hover:bg-[var(--app-hover)] hover:text-[var(--app-text)] disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[var(--app-muted)] transition-colors"
-                title="上一页"
-              >
-                <ChevronLeft size={14} />
-              </button>
-              <span className="font-mono text-xs font-semibold text-[var(--app-subtle)]">
-                {effectivePage} / {totalPages}
-              </span>
-              <button
-                type="button"
-                onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-                disabled={effectivePage >= totalPages}
-                className="rounded-lg p-1 text-[var(--app-muted)] hover:bg-[var(--app-hover)] hover:text-[var(--app-text)] disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[var(--app-muted)] transition-colors"
-                title="下一页"
-              >
-                <ChevronRight size={14} />
-              </button>
-            </div>
-          )}
+        {(totalPages > 1 || showAllLink) && (
+          <div className="flex items-center gap-3">
+            {totalPages > 1 && (
+              <div className="flex items-center gap-2 rounded-xl border border-[var(--app-border)] bg-[var(--app-panel-soft)] px-2 py-1 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                  disabled={effectivePage <= 1}
+                  className="rounded-lg p-1 text-[var(--app-muted)] hover:bg-[var(--app-hover)] hover:text-[var(--app-text)] disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[var(--app-muted)] transition-colors"
+                  title="上一页"
+                >
+                  <ChevronLeft size={14} />
+                </button>
+                <span className="font-mono text-xs font-semibold text-[var(--app-subtle)]">
+                  {effectivePage} / {totalPages}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={effectivePage >= totalPages}
+                  className="rounded-lg p-1 text-[var(--app-muted)] hover:bg-[var(--app-hover)] hover:text-[var(--app-text)] disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[var(--app-muted)] transition-colors"
+                  title="下一页"
+                >
+                  <ChevronRight size={14} />
+                </button>
+              </div>
+            )}
 
-          <Link
-            to="/libraries"
-            className="group inline-flex items-center gap-1 text-xs font-bold text-[var(--app-subtle)] transition-colors hover:text-brand-500"
-          >
-            <span>全部媒体库</span>
-            <ArrowRight size={14} className="transition-transform group-hover:translate-x-0.5" />
-          </Link>
-        </div>
+            {showAllLink && (
+              <Link
+                to="/libraries"
+                className="group inline-flex items-center gap-1 text-xs font-bold text-[var(--app-subtle)] transition-colors hover:text-brand-500"
+              >
+                <span>全部媒体库</span>
+                <ArrowRight size={14} className="transition-transform group-hover:translate-x-0.5" />
+              </Link>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-5 2xl:grid-cols-6">
@@ -440,6 +453,8 @@ export function HomeLibrariesSection({
             library={lib}
             count={libraryCounts[lib.id] ?? 0}
             cards={libraryData?.[lib.id]?.cards ?? []}
+            pinned={pinnedIds.includes(lib.id)}
+            onTogglePin={onTogglePin ? () => onTogglePin(lib.id) : undefined}
             onVisible={() => {
               if (!lib.cover_url) {
                 queuePreview(lib.id)
@@ -452,73 +467,100 @@ export function HomeLibrariesSection({
   )
 }
 
-function HomeLibraryCard({
+export function HomeLibraryCard({
   library,
   count,
   cards,
+  pinned = false,
+  onTogglePin,
   onVisible,
 }: {
   library: Library
   count: number
   cards: SeriesCard[]
+  pinned?: boolean
+  onTogglePin?: () => void
   onVisible: () => void
 }) {
-  const ref = useInViewOnce<HTMLAnchorElement>(onVisible)
+  const ref = useInViewOnce<HTMLDivElement>(onVisible)
   const artwork = getLibraryArtworks(library, cards)
 
   return (
-    <Link
+    <div
       ref={ref}
-      to={`/library/${library.id}`}
-      className="group relative flex flex-col justify-between overflow-hidden rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel)] p-3 transition-all duration-300 hover:-translate-y-1 hover:border-brand-500/50 hover:bg-[var(--app-hover)]/40 hover:shadow-lg hover:shadow-brand-500/10"
-      title={library.name}
+      className={`group relative h-full overflow-hidden rounded-2xl border bg-[var(--app-panel)] transition-all duration-300 hover:-translate-y-1 hover:border-brand-500/50 hover:bg-[var(--app-hover)]/40 hover:shadow-lg hover:shadow-brand-500/10 ${
+        pinned ? 'border-brand-500/60 ring-1 ring-brand-500/20' : 'border-[var(--app-border)]'
+      }`}
     >
-      <div
-        className={`relative h-28 w-full overflow-hidden rounded-xl bg-[linear-gradient(135deg,var(--app-panel-soft),var(--app-panel))] shadow-inner ${
-          artwork.length > 1 ? 'grid grid-cols-2 gap-0.5' : ''
-        }`}
+      <Link
+        to={`/library/${library.id}`}
+        className="flex h-full flex-col justify-between p-3"
+        title={library.name}
       >
-        {artwork.length > 0 ? (
-          artwork.map(({ src, version }, index) => (
-            <img
-              key={`${src}-${index}`}
-              src={imageURL(
-                src,
-                version,
-                library.cover_url ? undefined : { maxWidth: 480, maxHeight: 320, quality: 78 },
-              )}
-              alt=""
-              loading="lazy"
-              referrerPolicy="no-referrer"
-              className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
-              onError={(event) => {
-                event.currentTarget.style.visibility = 'hidden'
-              }}
-            />
-          ))
-        ) : (
-          <div className="flex h-full w-full items-center justify-center text-brand-500">
-            {TYPE_ICONS[library.type] || <FolderOpen size={28} />}
-          </div>
-        )}
-
-        <div className="absolute top-2 right-2 rounded-lg border border-white/20 bg-black/60 px-2 py-0.5 text-[10px] font-bold text-white backdrop-blur-md shadow-sm">
-          {TYPE_LABELS[library.type] || '自定义'}
-        </div>
-      </div>
-
-      <div className="mt-3 flex flex-col justify-between">
-        <h3
-          className="line-clamp-2 break-words font-display text-sm font-bold text-[var(--app-text)] group-hover:text-brand-500"
-          title={library.name}
+        <div
+          className={`relative h-28 w-full overflow-hidden rounded-xl bg-[linear-gradient(135deg,var(--app-panel-soft),var(--app-panel))] shadow-inner ${
+            artwork.length > 1 ? 'grid grid-cols-2 gap-0.5' : ''
+          }`}
         >
-          {library.name}
-        </h3>
-        <p className="mt-0.5 text-xs text-[var(--app-muted)]">
-          {count > 0 ? `${count} 部媒体` : '暂无条目'}
-        </p>
-      </div>
-    </Link>
+          {artwork.length > 0 ? (
+            artwork.map(({ src, version }, index) => (
+              <img
+                key={`${src}-${index}`}
+                src={imageURL(
+                  src,
+                  version,
+                  library.cover_url ? undefined : { maxWidth: 480, maxHeight: 320, quality: 78 },
+                )}
+                alt=""
+                loading="lazy"
+                referrerPolicy="no-referrer"
+                className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+                onError={(event) => {
+                  event.currentTarget.style.visibility = 'hidden'
+                }}
+              />
+            ))
+          ) : (
+            <div className="flex h-full w-full items-center justify-center text-brand-500">
+              {TYPE_ICONS[library.type] || <FolderOpen size={28} />}
+            </div>
+          )}
+
+          <div className="absolute top-2 right-2 rounded-lg border border-white/20 bg-black/60 px-2 py-0.5 text-[10px] font-bold text-white backdrop-blur-md shadow-sm">
+            {TYPE_LABELS[library.type] || '自定义'}
+          </div>
+        </div>
+
+        <div className="mt-3 flex flex-col justify-between">
+          <h3
+            className="line-clamp-2 break-words font-display text-sm font-bold text-[var(--app-text)] group-hover:text-brand-500"
+            title={library.name}
+          >
+            {library.name}
+          </h3>
+          <p className="mt-0.5 text-xs text-[var(--app-muted)]">
+            {count > 0 ? `${count} 部媒体` : '暂无条目'}
+          </p>
+        </div>
+      </Link>
+
+      {onTogglePin && (
+        <button
+          type="button"
+          onClick={onTogglePin}
+          className={`absolute left-2 top-2 z-10 rounded-lg border p-1.5 shadow-sm backdrop-blur-md transition-all duration-200 opacity-100 sm:pointer-events-none sm:opacity-0 sm:group-hover:pointer-events-auto sm:group-hover:opacity-100 sm:group-focus-within:pointer-events-auto sm:group-focus-within:opacity-100 sm:focus-visible:pointer-events-auto sm:focus-visible:opacity-100 ${
+            pinned
+              ? 'border-brand-400/50 bg-brand-500 text-white'
+              : 'border-white/20 bg-black/60 text-white hover:bg-black/75'
+          }`}
+          title={pinned ? '取消置顶' : '置顶媒体库'}
+          aria-label={pinned ? '取消置顶' : '置顶媒体库'}
+          aria-pressed={pinned}
+        >
+          <Pin size={13} className={pinned ? 'fill-current' : ''} />
+        </button>
+      )}
+    </div>
   )
 }
 
