@@ -33,6 +33,7 @@ type User struct {
 	SubtitleChineseMode string `gorm:"size:16;not null;default:original" json:"subtitle_chinese_mode"`
 	// 网页播放器偏好按用户存储，切换媒体对象后继续沿用。
 	PlayerVolume        float64 `gorm:"not null;default:1" json:"player_volume"`
+	PlayerPlaybackRate  float64 `gorm:"not null;default:1" json:"player_playback_rate"`
 	DanmakuEnabled      bool    `gorm:"not null;default:true" json:"danmaku_enabled"`
 	DanmakuOpacity      float64 `gorm:"not null;default:1" json:"danmaku_opacity"`
 	DanmakuFontSize     int     `gorm:"not null;default:24" json:"danmaku_font_size"`

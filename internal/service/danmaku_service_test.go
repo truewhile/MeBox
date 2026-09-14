@@ -422,6 +422,7 @@ func TestDanmakuFetchUsesPerUserSourceAndCredentials(t *testing.T) {
 	user.DanmakuFontSize = 30
 	user.DanmakuArea = 0.7
 	user.PlayerVolume = 0.42
+	user.PlayerPlaybackRate = 1.25
 	require.NoError(t, svc.repo.User.Create(ctx, &user))
 	seedDanmakuMedia(t, svc, "per-user-media", "测试动画", "", 0)
 
@@ -430,6 +431,7 @@ func TestDanmakuFetchUsesPerUserSourceAndCredentials(t *testing.T) {
 	require.Contains(t, res.Raw, "弹幕A")
 	require.Equal(t, srv.URL(), res.Source)
 	require.Equal(t, 0.42, res.Volume)
+	require.Equal(t, 1.25, res.PlaybackRate)
 	require.Equal(t, "0.65", res.Opacity)
 	require.Equal(t, "30", res.FontSize)
 	require.Equal(t, srv.lastHeaders.Get("X-AppId"), "user-app-id")

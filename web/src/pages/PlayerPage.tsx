@@ -19,6 +19,7 @@ import { profileAPI } from '../api/profile'
 import { useAuthStore } from '../stores/auth'
 import type { Media, PlaybackInfo, PlaybackQuality } from '../types'
 import { getSeriesKey, seriesTitleFromPath } from '../utils/groupSeries'
+import { normalizePlaybackRate } from '../utils/playbackRate'
 import { isRemoteEmbyID } from '../utils/remoteEmby'
 import {
   normalizeSubtitleChineseMode,
@@ -109,8 +110,13 @@ export function PlayerPage() {
   const [playerVolume, setPlayerVolume] = useState(() =>
     normalizePlayerVolume(authUser?.player_volume),
   )
+  const [playerPlaybackRate, setPlayerPlaybackRate] = useState(() =>
+    normalizePlaybackRate(authUser?.player_playback_rate),
+  )
   const persistedSubtitleChineseModeRef = useRef(subtitleChineseMode)
   const playerVolumeTouchedRef = useRef(false)
+  const playerPlaybackRateTouchedRef = useRef(false)
+  const playerPlaybackRateSaveSeqRef = useRef(0)
   const subtitlePreferenceTouchedRef = useRef(false)
   const subtitlePreferenceSaveQueueRef = useRef<Promise<void>>(Promise.resolve())
   const [hlsUnavailable, setHlsUnavailable] = useState(false)
@@ -245,6 +251,10 @@ export function PlayerPage() {
         if (!playerVolumeTouchedRef.current) {
           setPlayerVolume(volume)
         }
+        const playbackRate = normalizePlaybackRate(cfg.playback_rate)
+        if (!playerPlaybackRateTouchedRef.current) {
+          setPlayerPlaybackRate(playbackRate)
+        }
         setDanmakuEnabled(cfg.enabled)
         setDanmakuOpacity(Number(cfg.opacity) || 1)
         setDanmakuFontSize(Number(cfg.font_size) || 24)
@@ -254,6 +264,10 @@ export function PlayerPage() {
         if (!playerVolumeTouchedRef.current) {
           const current = useAuthStore.getState().user
           if (current) setAuthUser({ ...current, player_volume: volume })
+        }
+        if (!playerPlaybackRateTouchedRef.current) {
+          const current = useAuthStore.getState().user
+          if (current) setAuthUser({ ...current, player_playback_rate: playbackRate })
         }
       })
       .catch(() => {
@@ -284,6 +298,34 @@ export function PlayerPage() {
         })
         .catch(() => {
           toast.error('音量保存失败，请重试')
+        })
+    },
+    [setAuthUser],
+  )
+
+  const changePlayerPlaybackRate = useCallback((next: number) => {
+    playerPlaybackRateTouchedRef.current = true
+    setPlayerPlaybackRate(normalizePlaybackRate(next))
+  }, [])
+
+  const commitPlayerPlaybackRate = useCallback(
+    (next: number) => {
+      playerPlaybackRateTouchedRef.current = true
+      const playbackRate = normalizePlaybackRate(next)
+      setPlayerPlaybackRate(playbackRate)
+      const saveSeq = ++playerPlaybackRateSaveSeqRef.current
+      void danmakuAPI
+        .updateSettings({ playback_rate: playbackRate })
+        .then((cfg) => {
+          if (saveSeq !== playerPlaybackRateSaveSeqRef.current) return
+          const saved = normalizePlaybackRate(cfg.playback_rate)
+          setPlayerPlaybackRate(saved)
+          const current = useAuthStore.getState().user
+          if (current) setAuthUser({ ...current, player_playback_rate: saved })
+        })
+        .catch(() => {
+          if (saveSeq !== playerPlaybackRateSaveSeqRef.current) return
+          toast.error('倍速保存失败，请重试')
         })
     },
     [setAuthUser],
@@ -1424,6 +1466,9 @@ export function PlayerPage() {
         playerVolume={playerVolume}
         onPlayerVolumeChange={changePlayerVolume}
         onPlayerVolumeCommit={commitPlayerVolume}
+        playerPlaybackRate={playerPlaybackRate}
+        onPlayerPlaybackRateChange={changePlayerPlaybackRate}
+        onPlayerPlaybackRateCommit={commitPlayerPlaybackRate}
         danmakuEnabled={danmakuEnabled}
         danmakuOpacity={danmakuOpacity}
         danmakuFontSize={danmakuFontSize}

@@ -71,6 +71,7 @@ export interface DanmakuConfig {
   font_size: string
   area: string
   volume: number
+  playback_rate: number
   /** Per-user preference: merge the same episode's multiple sources. */
   merge_sources: boolean
 }
@@ -87,6 +88,7 @@ export interface DanmakuSettingsPatch {
   area?: number
   merge_sources?: boolean
   volume?: number
+  playback_rate?: number
 }
 
 // danmakuAPI fetches danmaku comments for a media item. The backend resolves

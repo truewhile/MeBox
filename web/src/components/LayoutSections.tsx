@@ -4,6 +4,7 @@ import clsx from 'clsx'
 import { LayoutSidebarContent, type LayoutSidebarContentProps } from './LayoutSidebarContent'
 import { isPlayerRoute } from './layoutNavigation'
 import { RouteErrorBoundary } from './RouteErrorBoundary'
+import { useScrollMemory } from '../hooks/useScrollMemory'
 import type { useLayoutSidebar } from './useLayoutSidebar'
 
 type LayoutSidebarState = ReturnType<typeof useLayoutSidebar>
@@ -30,6 +31,7 @@ type LayoutSidebarsProps = Omit<
 
 type LayoutWorkspaceProps = {
   routeKey: string
+  userKey?: string
   showMobileBottomNav?: boolean
 }
 
@@ -109,7 +111,13 @@ export function LayoutSidebars({
   )
 }
 
-export function LayoutWorkspace({ routeKey, showMobileBottomNav = false }: LayoutWorkspaceProps) {
+export function LayoutWorkspace({
+  routeKey,
+  userKey = 'anonymous',
+  showMobileBottomNav = false,
+}: LayoutWorkspaceProps) {
+  useScrollMemory(routeKey, userKey)
+
   const bottomPad = showMobileBottomNav
     ? 'pb-[calc(3.75rem+env(safe-area-inset-bottom,0px))] lg:pb-10'
     : ''

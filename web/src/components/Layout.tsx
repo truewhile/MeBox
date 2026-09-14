@@ -87,7 +87,11 @@ export function Layout() {
             pathname={location.pathname}
           />
         )}
-        <LayoutWorkspace routeKey={location.pathname} showMobileBottomNav={showMobileBottomNav} />
+        <LayoutWorkspace
+          routeKey={location.pathname}
+          userKey={user?.id}
+          showMobileBottomNav={showMobileBottomNav}
+        />
         {showMobileBottomNav && (
           <MobileBottomNav onOpenMenu={() => sidebar.setIsMobileDrawerOpen(true)} />
         )}

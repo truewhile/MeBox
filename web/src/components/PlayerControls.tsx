@@ -18,11 +18,18 @@ import {
   Rewind,
   SkipBack,
   SkipForward,
+  Timer,
   Volume2,
   VolumeX,
 } from 'lucide-react'
 import type { SubtitleTrack } from '../api/subtitles'
 import type { PlaybackQuality } from '../types'
+import {
+  formatPlaybackRate,
+  normalizePlaybackRate,
+  PLAYBACK_RATE_OPTIONS,
+  stepPlaybackRate,
+} from '../utils/playbackRate'
 import type { SubtitleChineseMode } from '../utils/subtitleChinese'
 import {
   SUBTITLE_POSITION_OPTIONS,
@@ -47,18 +54,28 @@ const SEEK_STEP_SEC = 10
 const SEEK_REPEAT_MS = 160
 const SEEK_APPLY_MS = 220
 const SEEK_HINT_MS = 700
+const PLAYBACK_RATE_REPEAT_MS = 140
+const PLAYBACK_RATE_HINT_MS = 900
 
 type SeekHint = {
   dir: 'back' | 'forward'
   seconds: number
 }
 
-function isEditableTarget(target: EventTarget | null): boolean {
+function isPlayerSeekRange(target: EventTarget | null): boolean {
+  return target instanceof HTMLInputElement && target.dataset.playerSeekRange === 'true'
+}
+
+function shouldIgnorePlayerSeekShortcut(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false
-  return Boolean(
-    target.closest('input, textarea, select, [contenteditable="true"]') ||
-      target.isContentEditable,
+  const control = target.closest<HTMLElement>(
+    'input, textarea, select, [contenteditable="true"]',
   )
+  if (control instanceof HTMLInputElement) {
+    // 进度条需要继续走播放器的 10 秒快捷键；其它输入控件保留原生键盘行为。
+    return !isPlayerSeekRange(control)
+  }
+  return Boolean(control || target.isContentEditable)
 }
 
 type PlayerControlsProps = {
@@ -67,6 +84,10 @@ type PlayerControlsProps = {
   volume?: number
   onVolumeChange?: (volume: number) => void
   onVolumeCommit?: (volume: number) => void
+  /** 用户级播放倍速，由播放页从数据库读取。 */
+  playbackRate?: number
+  onPlaybackRateChange?: (rate: number) => void
+  onPlaybackRateCommit?: (rate: number) => void
   uiVisible: boolean
   onUiVisibleChange: (visible: boolean) => void
   subs: SubtitleTrack[]
@@ -108,6 +129,9 @@ export function PlayerControls({
   volume: volumeProp = 1,
   onVolumeChange,
   onVolumeCommit,
+  playbackRate: playbackRateProp = 1,
+  onPlaybackRateChange,
+  onPlaybackRateCommit,
   uiVisible,
   onUiVisibleChange,
   subs,
@@ -159,11 +183,14 @@ export function PlayerControls({
   const subtitleMenuRef = useRef<HTMLDivElement | null>(null)
   const [qualityMenuOpen, setQualityMenuOpen] = useState(false)
   const qualityMenuRef = useRef<HTMLDivElement | null>(null)
+  const [speedMenuOpen, setSpeedMenuOpen] = useState(false)
+  const speedMenuRef = useRef<HTMLDivElement | null>(null)
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const controlsHoveredRef = useRef(false)
   const isScrubbingRef = useRef(false)
   const subtitleMenuOpenRef = useRef(false)
   const qualityMenuOpenRef = useRef(false)
+  const speedMenuOpenRef = useRef(false)
   const danmakuOpenRef = useRef(false)
   const playlistOpenRef = useRef(false)
   const pendingSeekRef = useRef<number | null>(null)
@@ -173,7 +200,11 @@ export function PlayerControls({
   const seekApplyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const seekHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastSeekAtRef = useRef(0)
+  const playbackRateRef = useRef(normalizePlaybackRate(playbackRateProp))
+  const playbackRateHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastPlaybackRateAtRef = useRef(0)
   const [seekHint, setSeekHint] = useState<SeekHint | null>(null)
+  const [playbackRateHint, setPlaybackRateHint] = useState<number | null>(null)
   const [stageEl, setStageEl] = useState<HTMLElement | null>(null)
 
   useEffect(() => {
@@ -193,6 +224,10 @@ export function PlayerControls({
   }, [qualityMenuOpen])
 
   useEffect(() => {
+    speedMenuOpenRef.current = speedMenuOpen
+  }, [speedMenuOpen])
+
+  useEffect(() => {
     danmakuOpenRef.current = danmakuOpen
   }, [danmakuOpen])
 
@@ -203,6 +238,10 @@ export function PlayerControls({
   useEffect(() => {
     durationRef.current = duration
   }, [duration])
+
+  useEffect(() => {
+    playbackRateRef.current = normalizePlaybackRate(playbackRateProp)
+  }, [playbackRateProp])
 
   useEffect(() => {
     setStageEl(container())
@@ -219,9 +258,19 @@ export function PlayerControls({
     setMuted(next === 0)
   }, [video, volumeProp])
 
-  // 点击控制栏外部时关闭字幕/画质菜单
+  // 倍速由播放页按用户持久化；配置加载、切换剧集或切换播放源后同步到当前 video。
   useEffect(() => {
-    if (!subtitleMenuOpen && !qualityMenuOpen) return
+    const el = video()
+    if (!el) return
+    const next = normalizePlaybackRate(playbackRateProp)
+    if (Math.abs(el.playbackRate - next) > 0.001) {
+      el.playbackRate = next
+    }
+  }, [video, playbackRateProp])
+
+  // 点击控制栏外部时关闭字幕/画质/倍速菜单
+  useEffect(() => {
+    if (!subtitleMenuOpen && !qualityMenuOpen && !speedMenuOpen) return
     const onDocClick = (e: MouseEvent) => {
       if (subtitleMenuRef.current && !subtitleMenuRef.current.contains(e.target as Node)) {
         setSubtitleMenuOpen(false)
@@ -229,10 +278,13 @@ export function PlayerControls({
       if (qualityMenuRef.current && !qualityMenuRef.current.contains(e.target as Node)) {
         setQualityMenuOpen(false)
       }
+      if (speedMenuRef.current && !speedMenuRef.current.contains(e.target as Node)) {
+        setSpeedMenuOpen(false)
+      }
     }
     document.addEventListener('mousedown', onDocClick)
     return () => document.removeEventListener('mousedown', onDocClick)
-  }, [subtitleMenuOpen, qualityMenuOpen])
+  }, [subtitleMenuOpen, qualityMenuOpen, speedMenuOpen])
 
   // 播放时 3 秒无操作自动隐藏控制栏；暂停/悬停/拖动进度条/打开菜单时保持显示。
   // 监听挂在整个播放器舞台容器（data-player-stage）上，避免光标移到控制栏时因离开视频画面而误触发 mouseleave。
@@ -249,6 +301,7 @@ export function PlayerControls({
         !isScrubbingRef.current &&
         !subtitleMenuOpenRef.current &&
         !qualityMenuOpenRef.current &&
+        !speedMenuOpenRef.current &&
         !danmakuOpenRef.current &&
         !playlistOpenRef.current
       ) {
@@ -258,6 +311,7 @@ export function PlayerControls({
             !isScrubbingRef.current &&
             !subtitleMenuOpenRef.current &&
             !qualityMenuOpenRef.current &&
+            !speedMenuOpenRef.current &&
             !danmakuOpenRef.current &&
             !playlistOpenRef.current
           ) {
@@ -360,7 +414,7 @@ export function PlayerControls({
 
   // 当悬停或菜单状态改变时，更新控制栏计时器
   useEffect(() => {
-    if (controlsHovered || isScrubbing || subtitleMenuOpen || qualityMenuOpen || danmakuOpen || playlistOpen) {
+    if (controlsHovered || isScrubbing || subtitleMenuOpen || qualityMenuOpen || speedMenuOpen || danmakuOpen || playlistOpen) {
       onUiVisibleChange(true)
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
     } else {
@@ -370,7 +424,7 @@ export function PlayerControls({
         hideTimerRef.current = setTimeout(() => onUiVisibleChange(false), 3000)
       }
     }
-  }, [controlsHovered, isScrubbing, subtitleMenuOpen, qualityMenuOpen, danmakuOpen, playlistOpen, onUiVisibleChange, video])
+  }, [controlsHovered, isScrubbing, subtitleMenuOpen, qualityMenuOpen, speedMenuOpen, danmakuOpen, playlistOpen, onUiVisibleChange, video])
 
   const togglePlay = () => {
     const el = video()
@@ -378,6 +432,30 @@ export function PlayerControls({
     if (el.paused) void el.play()?.catch(() => undefined)
     else el.pause()
   }
+
+  const changePlaybackRate = useCallback((next: number) => {
+    const normalized = normalizePlaybackRate(next)
+    playbackRateRef.current = normalized
+    onPlaybackRateChange?.(normalized)
+    setPlaybackRateHint(normalized)
+    if (playbackRateHintTimerRef.current) {
+      clearTimeout(playbackRateHintTimerRef.current)
+    }
+    playbackRateHintTimerRef.current = setTimeout(() => {
+      setPlaybackRateHint(null)
+      playbackRateHintTimerRef.current = null
+    }, PLAYBACK_RATE_HINT_MS)
+  }, [onPlaybackRateChange])
+
+  const commitPlaybackRate = useCallback(() => {
+    onPlaybackRateCommit?.(playbackRateRef.current)
+  }, [onPlaybackRateCommit])
+
+  const selectPlaybackRate = useCallback((next: number) => {
+    const normalized = normalizePlaybackRate(next)
+    changePlaybackRate(normalized)
+    onPlaybackRateCommit?.(normalized)
+  }, [changePlaybackRate, onPlaybackRateCommit])
 
   const applyAbsoluteSeek = useCallback(
     (absolute: number) => {
@@ -454,7 +532,7 @@ export function PlayerControls({
     }, 3000)
   }, [onUiVisibleChange, video])
 
-  const queueRelativeSeek = useCallback((delta: number) => {
+  const queueRelativeSeek = useCallback((delta: number, immediate: boolean) => {
     const el = video()
     if (!el) return
     if (!seekBurstRef.current) {
@@ -489,6 +567,16 @@ export function PlayerControls({
 
     if (seekHintTimerRef.current) clearTimeout(seekHintTimerRef.current)
     seekHintTimerRef.current = setTimeout(() => setSeekHint(null), SEEK_HINT_MS)
+    if (immediate) {
+      if (seekApplyTimerRef.current) {
+        clearTimeout(seekApplyTimerRef.current)
+        seekApplyTimerRef.current = null
+      }
+      const burst = seekBurstRef.current
+      seekBurstRef.current = null
+      applySeekRef.current(burst.base + burst.delta)
+      return
+    }
     if (seekApplyTimerRef.current) clearTimeout(seekApplyTimerRef.current)
     seekApplyTimerRef.current = setTimeout(() => {
       const burst = seekBurstRef.current
@@ -502,23 +590,47 @@ export function PlayerControls({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return
-      if (isEditableTarget(e.target)) return
+      if (shouldIgnorePlayerSeekShortcut(e.target)) return
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault()
+        const now = Date.now()
+        if (e.repeat && now - lastPlaybackRateAtRef.current < PLAYBACK_RATE_REPEAT_MS) return
+        lastPlaybackRateAtRef.current = now
+        changePlaybackRate(
+          stepPlaybackRate(playbackRateRef.current, e.key === 'ArrowUp' ? 1 : -1),
+        )
+        return
+      }
       if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
       e.preventDefault()
       const now = Date.now()
       if (e.repeat && now - lastSeekAtRef.current < SEEK_REPEAT_MS) return
+      const immediate = !e.repeat && now - lastSeekAtRef.current >= SEEK_APPLY_MS
       lastSeekAtRef.current = now
       e.preventDefault()
-      queueRelativeSeek(e.key === 'ArrowLeft' ? -SEEK_STEP_SEC : SEEK_STEP_SEC)
+      queueRelativeSeek(e.key === 'ArrowLeft' ? -SEEK_STEP_SEC : SEEK_STEP_SEC, immediate)
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [queueRelativeSeek])
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [changePlaybackRate, queueRelativeSeek])
+
+  useEffect(() => {
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return
+      if (shouldIgnorePlayerSeekShortcut(e.target)) return
+      e.preventDefault()
+      commitPlaybackRate()
+    }
+    window.addEventListener('keyup', onKeyUp, true)
+    return () => window.removeEventListener('keyup', onKeyUp, true)
+  }, [commitPlaybackRate])
 
   useEffect(() => {
     return () => {
       if (seekApplyTimerRef.current) clearTimeout(seekApplyTimerRef.current)
       if (seekHintTimerRef.current) clearTimeout(seekHintTimerRef.current)
+      if (playbackRateHintTimerRef.current) clearTimeout(playbackRateHintTimerRef.current)
     }
   }, [])
 
@@ -612,9 +724,24 @@ export function PlayerControls({
       )
     : null
 
+  const playbackRateOverlay = playbackRateHint && stageEl
+    ? createPortal(
+        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center">
+          <div className="flex items-center gap-2 rounded-full bg-black/65 px-5 py-3 text-white shadow-lg backdrop-blur-sm">
+            <Timer size={22} />
+            <span className="text-sm font-semibold tabular-nums">
+              {formatPlaybackRate(playbackRateHint)} 倍速
+            </span>
+          </div>
+        </div>,
+        stageEl,
+      )
+    : null
+
   return (
     <>
     {seekOverlay}
+    {playbackRateOverlay}
     <div
       className={`pointer-events-auto absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-black/80 via-black/40 to-transparent px-3 pb-3 pt-14 transition-opacity duration-300 ${
         uiVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
@@ -665,6 +792,7 @@ export function PlayerControls({
         <div className="order-2 flex min-w-0 basis-full items-center gap-2 sm:order-none sm:basis-auto sm:flex-1">
           <input
             type="range"
+            data-player-seek-range="true"
             min={0}
             max={duration || 0}
             step={0.1}
@@ -697,6 +825,7 @@ export function PlayerControls({
             <button
               onClick={() => {
                 setSubtitleMenuOpen(false)
+                setSpeedMenuOpen(false)
                 setQualityMenuOpen((v) => !v)
               }}
               className="flex items-center gap-1 rounded-full p-1.5 transition hover:bg-white/15"
@@ -754,11 +883,55 @@ export function PlayerControls({
           </div>
         )}
 
+        <div className="relative" ref={speedMenuRef}>
+          <button
+            onClick={() => {
+              setSubtitleMenuOpen(false)
+              setQualityMenuOpen(false)
+              setSpeedMenuOpen((v) => !v)
+            }}
+            className="flex items-center gap-1 rounded-full p-1.5 transition hover:bg-white/15"
+            title="播放速度（↑/↓ 调节）"
+          >
+            <Timer size={18} className={speedMenuOpen ? 'text-rose-400' : 'text-white/80'} />
+            <span className="text-[10px] font-semibold tabular-nums text-white/80">
+              {formatPlaybackRate(playbackRateProp)}
+            </span>
+          </button>
+          {speedMenuOpen && (
+            <div className="absolute bottom-11 right-0 z-30 min-w-36 overflow-hidden rounded-xl border border-white/15 bg-black/85 p-1 shadow-2xl backdrop-blur">
+              <p className="px-3 pb-1 pt-2 text-[10px] uppercase tracking-wide text-white/40">
+                播放速度
+              </p>
+              {PLAYBACK_RATE_OPTIONS.map((rate) => {
+                const current = normalizePlaybackRate(playbackRateProp) === rate
+                return (
+                  <button
+                    key={rate}
+                    type="button"
+                    onClick={() => {
+                      selectPlaybackRate(rate)
+                      setSpeedMenuOpen(false)
+                    }}
+                    className={`flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-xs transition ${
+                      current ? 'text-rose-400 hover:bg-white/10' : 'text-white/85 hover:bg-white/10'
+                    }`}
+                  >
+                    <span className="tabular-nums">{formatPlaybackRate(rate)}</span>
+                    {current && <Check size={13} className="ml-auto text-rose-400" />}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </div>
+
         {subs.length > 0 && (
           <div className="relative" ref={subtitleMenuRef}>
             <button
               onClick={() => {
                 setQualityMenuOpen(false)
+                setSpeedMenuOpen(false)
                 setSubtitleMenuOpen((v) => !v)
               }}
               className="rounded-full p-1.5 transition hover:bg-white/15"
