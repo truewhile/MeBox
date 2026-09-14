@@ -199,6 +199,14 @@ npm --prefix web run dev
 
 Release builds ship single-file binaries for Windows, Linux, and macOS on amd64 and arm64.
 
+Build the Windows executable locally:
+
+```powershell
+.\scripts\build-windows.ps1 -Version dev
+```
+
+The Windows executable uses the project logo and runs without a console window. It stays in the notification area, with menu actions for opening MeBox, toggling auto-start, viewing logs, restarting, and exiting.
+
 ---
 
 ## Acknowledgements

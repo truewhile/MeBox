@@ -77,7 +77,7 @@ jobs:
       - name: Build linux/arm64
         run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -X main.version=${{ steps.version.outputs.full_version }}" -o dist/mebox-beta-linux-arm64 ./cmd/server
       - name: Build windows/amd64
-        run: CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=${{ steps.version.outputs.full_version }}" -o dist/mebox-beta-windows-amd64.exe ./cmd/server
+        run: CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -H=windowsgui -X main.version=${{ steps.version.outputs.full_version }}" -o dist/mebox-beta-windows-amd64.exe ./cmd/server
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

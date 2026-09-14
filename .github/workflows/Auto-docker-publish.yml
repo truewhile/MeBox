@@ -196,8 +196,12 @@ jobs:
           path: web/dist
       - name: Build binary
         run: |
+          LDFLAGS="-s -w -X main.version=${{ needs.build-image.outputs.release_tag }}"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            LDFLAGS="$LDFLAGS -H=windowsgui"
+          fi
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            go build -trimpath -ldflags="-s -w -X main.version=${{ needs.build-image.outputs.release_tag }}" \
+            go build -trimpath -ldflags="$LDFLAGS" \
             -o "dist/mebox-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./cmd/server
       - name: Package
         run: |

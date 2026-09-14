@@ -225,6 +225,14 @@ npm --prefix web run dev     # http://127.0.0.1:3000
 
 CI 会在 Release 中提供 Windows / Linux / macOS 的 amd64、arm64 单文件可执行程序。
 
+Windows 本地打包：
+
+```powershell
+.\scripts\build-windows.ps1 -Version dev
+```
+
+Windows 可执行程序使用项目 Logo，不显示控制台窗口；启动后会常驻系统托盘。托盘菜单可打开 MeBox、切换开机自启、查看日志、重启或退出。
+
 ---
 
 ## 鸣谢
