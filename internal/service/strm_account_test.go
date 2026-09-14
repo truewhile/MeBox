@@ -10,6 +10,7 @@ import (
 	"github.com/truewhile/MeBox/internal/config"
 	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/repository"
+	"github.com/truewhile/MeBox/internal/service/cloud"
 	"github.com/truewhile/MeBox/internal/service/cloud115"
 )
 
@@ -154,6 +155,76 @@ func TestPersist115TokensKeepsSharedClient(t *testing.T) {
 	if first != second {
 		t.Fatal("automatic token persistence must keep the in-memory shared client")
 	}
+}
+
+// TestTestStrmAccountKeepsTokensRefreshedDuringPing 回归测试：
+// Ping 期间 115 客户端可能刷新并持久化 token。账号测试只能写 last_test_*
+// 字段，不能再用请求开始时读取的旧 Config 整包覆盖，否则新 token 会被旧值
+// 覆盖，最终导致账号在下次重启后失效。
+func TestTestStrmAccountKeepsTokensRefreshedDuringPing(t *testing.T) {
+	svc := testStrmService(t)
+	ctx := context.Background()
+	acct, err := svc.CreateStrmAccount(ctx, "115", model.StrmProvider115, map[string]string{
+		"app_id":        "100195129",
+		"access_token":  "at-old",
+		"refresh_token": "rt-old",
+	})
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+
+	svc.providerMu.Lock()
+	svc.provider115Cache[acct.ID] = &refreshOnPing115Provider{svc: svc, accountID: acct.ID}
+	svc.providerMu.Unlock()
+
+	got := svc.TestStrmAccount(ctx, acct.ID)
+	if got == nil {
+		t.Fatal("TestStrmAccount returned nil")
+	}
+	if !got.LastTestOK || got.LastTestResult != "ok" {
+		t.Fatalf("test result = (%v, %q), want ok", got.LastTestOK, got.LastTestResult)
+	}
+	gotCfg, err := svc.strmAccountConfig(got)
+	if err != nil {
+		t.Fatalf("decode returned config: %v", err)
+	}
+	if gotCfg["access_token"] != "at-new" || gotCfg["refresh_token"] != "rt-new" {
+		t.Fatalf("returned account lost refreshed tokens: %#v", gotCfg)
+	}
+
+	fresh, err := svc.repo.StrmAccount.FindByID(ctx, acct.ID)
+	if err != nil || fresh == nil {
+		t.Fatalf("reload account: %v", err)
+	}
+	freshCfg, err := svc.strmAccountConfig(fresh)
+	if err != nil {
+		t.Fatalf("decode persisted config: %v", err)
+	}
+	if freshCfg["access_token"] != "at-new" || freshCfg["refresh_token"] != "rt-new" {
+		t.Fatalf("persisted account lost refreshed tokens: %#v", freshCfg)
+	}
+}
+
+// refreshOnPing115Provider 模拟真实 115 客户端在 Ping 内完成 token 轮转并
+// 通过持久化回调写回新 token 的行为。
+type refreshOnPing115Provider struct {
+	svc       *StrmService
+	accountID string
+}
+
+func (p *refreshOnPing115Provider) Type() string { return model.StrmProvider115 }
+
+func (p *refreshOnPing115Provider) Ping(context.Context) error {
+	p.svc.persist115Tokens(p.accountID, "at-new", "rt-new")
+	return nil
+}
+
+func (p *refreshOnPing115Provider) List(context.Context, string) ([]cloud.FileEntry, error) {
+	return nil, nil
+}
+
+func (p *refreshOnPing115Provider) Resolve(context.Context, string) (*cloud.DirectLink, error) {
+	return nil, nil
 }
 
 func TestDeleteStrmAccountCascadesEmbyMounts(t *testing.T) {

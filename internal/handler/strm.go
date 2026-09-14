@@ -138,25 +138,35 @@ func testStrmAccountHandler(svc *service.Container) gin.HandlerFunc {
 			return
 		}
 		now := time.Now()
-		acct.LastTestAt = &now
 		if acct.Provider == model.StrmProviderEmbyRemote && svc.EmbyRemote != nil {
+			result := ""
+			ok := false
 			if err := svc.EmbyRemote.TestConnection(c.Request.Context(), acct); err != nil {
-				acct.LastTestResult = err.Error()
-				acct.LastTestOK = false
+				result = err.Error()
 			} else {
-				acct.LastTestResult = "ok"
-				acct.LastTestOK = true
+				result = "ok"
+				ok = true
 			}
-		} else {
-			acct = svc.Strm.TestStrmAccount(c.Request.Context(), id)
-			if acct == nil {
-				c.JSON(http.StatusNotFound, gin.H{"error": "网盘账号不存在"})
+			acct.LastTestAt = &now
+			acct.LastTestResult = result
+			acct.LastTestOK = ok
+			if err := svc.Repo.StrmAccount.UpdateTestResult(c.Request.Context(), acct.ID, now, result, ok); err != nil {
+				// 写库失败时仍返回本地测试结果；不要回退到整行 Update，
+				// 那会覆盖 TestConnection 期间可能刷新的账号配置。
+				c.JSON(http.StatusOK, strmAccountViews(svc, []model.StrmAccount{*acct})[0])
 				return
+			}
+			if fresh, err := svc.Repo.StrmAccount.FindByID(c.Request.Context(), acct.ID); err == nil && fresh != nil {
+				acct = fresh
 			}
 			c.JSON(http.StatusOK, strmAccountViews(svc, []model.StrmAccount{*acct})[0])
 			return
 		}
-		_ = svc.Repo.StrmAccount.Update(c.Request.Context(), acct)
+		acct = svc.Strm.TestStrmAccount(c.Request.Context(), id)
+		if acct == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "网盘账号不存在"})
+			return
+		}
 		c.JSON(http.StatusOK, strmAccountViews(svc, []model.StrmAccount{*acct})[0])
 	}
 }

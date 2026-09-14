@@ -57,6 +57,21 @@ func (r *StrmAccountRepository) Update(ctx context.Context, a *model.StrmAccount
 	})
 }
 
+// UpdateTestResult updates only connectivity-test metadata. Callers that touch
+// account credentials must not use Update with a snapshot read before Ping:
+// a 115 token refresh can persist new tokens while Ping is running, and writing
+// the stale snapshot back would revoke the freshly rotated credentials.
+func (r *StrmAccountRepository) UpdateTestResult(ctx context.Context, id string, at time.Time, result string, ok bool) error {
+	return withSQLiteBusyRetry(ctx, func() error {
+		return r.db.WithContext(ctx).Model(&model.StrmAccount{}).Where("id = ?", id).Updates(map[string]any{
+			"last_test_at":     at,
+			"last_test_result": result,
+			"last_test_ok":     ok,
+			"updated_at":       time.Now(),
+		}).Error
+	})
+}
+
 func (r *StrmAccountRepository) Delete(ctx context.Context, id string) error {
 	return withSQLiteBusyRetry(ctx, func() error {
 		return r.db.WithContext(ctx).Unscoped().Where("id = ?", id).Delete(&model.StrmAccount{}).Error

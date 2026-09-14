@@ -449,19 +449,37 @@ func (s *StrmService) TestStrmAccount(ctx context.Context, id string) *model.Str
 		return nil
 	}
 	now := time.Now()
-	acct.LastTestAt = &now
+	result := ""
+	ok := false
 	provider, err := s.providerFor(ctx, acct)
 	if err != nil {
-		acct.LastTestResult = err.Error()
-		acct.LastTestOK = false
+		result = err.Error()
 	} else if err := provider.Ping(ctx); err != nil {
-		acct.LastTestResult = err.Error()
-		acct.LastTestOK = false
+		result = err.Error()
 	} else {
-		acct.LastTestResult = "ok"
-		acct.LastTestOK = true
+		result = "ok"
+		ok = true
 	}
-	_ = s.repo.StrmAccount.Update(ctx, acct)
+	// Ping 期间 115 客户端可能刷新 access/refresh token，并通过
+	// OnTokenRefreshed 持久化新配置。这里只写测试结果字段，不能把请求开始时
+	// 读取的旧 acct.Config 整包写回，否则会把刚轮转的 token 覆盖失效。
+	updateErr := s.repo.StrmAccount.UpdateTestResult(ctx, id, now, result, ok)
+	if updateErr != nil && s.log != nil {
+		s.log.Warn("update strm account test result failed", zap.String("account_id", id), zap.Error(updateErr))
+	}
+	// 重新读取，确保返回给前端的账号配置已经是 Ping 期间刷新后的版本。
+	if fresh, err := s.repo.StrmAccount.FindByID(ctx, id); err == nil && fresh != nil {
+		if updateErr != nil {
+			// 写库失败时仍让本次响应展示刚完成测试的结果。
+			fresh.LastTestAt = &now
+			fresh.LastTestResult = result
+			fresh.LastTestOK = ok
+		}
+		return fresh
+	}
+	acct.LastTestAt = &now
+	acct.LastTestResult = result
+	acct.LastTestOK = ok
 	return acct
 }
 
