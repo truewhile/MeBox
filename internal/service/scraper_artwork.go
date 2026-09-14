@@ -40,9 +40,9 @@ func (s *ScraperService) prepareScrapedArtworkURL(ctx context.Context, mediaID, 
 				s.log.Warn("MetaTube artwork processing failed; using local face-aware crop",
 					zap.String("media_id", mediaID),
 					zap.String("field", field),
-					zap.String("candidate", candidate),
-					zap.String("source", originalSource),
-					zap.Error(err))
+					zap.String("candidate", redactSensitiveURL(candidate)),
+					zap.String("source", redactSensitiveURL(originalSource)),
+					zap.Error(redactSensitiveError(err)))
 				if current != "" && isHTTPish(current) {
 					return originalSource, current
 				}
@@ -53,16 +53,16 @@ func (s *ScraperService) prepareScrapedArtworkURL(ctx context.Context, mediaID, 
 			s.log.Warn("scrape artwork prefetch failed; keeping existing artwork",
 				zap.String("media_id", mediaID),
 				zap.String("field", field),
-				zap.String("candidate", candidate),
-				zap.String("existing", current),
-				zap.Error(err))
+				zap.String("candidate", redactSensitiveURL(candidate)),
+				zap.String("existing", redactSensitiveURL(current)),
+				zap.Error(redactSensitiveError(err)))
 			return current, ""
 		}
 		s.log.Warn("scrape artwork prefetch failed; keeping new artwork URL for retry",
 			zap.String("media_id", mediaID),
 			zap.String("field", field),
-			zap.String("candidate", candidate),
-			zap.Error(err))
+			zap.String("candidate", redactSensitiveURL(candidate)),
+			zap.Error(redactSensitiveError(err)))
 		return candidate, ""
 	}
 	if current != "" && isHTTPish(current) {
@@ -98,7 +98,9 @@ func (s *ScraperService) removeCachedScrapedArtwork(urls ...string) {
 		}
 		seen[raw] = struct{}{}
 		if err := s.images.RemoveCached(raw); err != nil {
-			s.log.Debug("remove old scraped artwork cache failed", zap.String("url", raw), zap.Error(err))
+			s.log.Debug("remove old scraped artwork cache failed",
+				zap.String("url", redactSensitiveURL(raw)),
+				zap.Error(redactSensitiveError(err)))
 		}
 	}
 }

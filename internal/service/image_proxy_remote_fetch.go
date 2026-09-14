@@ -48,14 +48,14 @@ func (p *ImageProxy) canUseExternalImageFallback() bool {
 func (p *ImageProxy) fetchRemoteImageOnce(ctx context.Context, raw, host string, candidate remoteImageFetchClient) ([]byte, string, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, raw, nil)
 	if err != nil {
-		p.log.Warn("imageproxy: build request failed", zap.String("url", raw), zap.Error(err))
+		p.log.Warn("imageproxy: build request failed", zap.String("url", redactSensitiveURL(raw)), zap.Error(redactSensitiveError(err)))
 		return nil, "", "", errImageProxyRequestSetup
 	}
 	applyRemoteImageHeaders(req, host, raw)
 
 	resp, err := candidate.client.Do(req)
 	if err != nil {
-		p.log.Warn("imageproxy: upstream fetch failed", zap.String("host", host), zap.String("client", candidate.name), zap.Error(err))
+		logImageFetchError(p.log, "imageproxy: upstream fetch failed", host, candidate.name, err)
 		return nil, "", "", err
 	}
 	defer resp.Body.Close()
@@ -65,7 +65,7 @@ func (p *ImageProxy) fetchRemoteImageOnce(ctx context.Context, raw, host string,
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil || len(data) == 0 {
-		p.log.Warn("imageproxy: read upstream body failed", zap.String("host", host), zap.String("client", candidate.name), zap.Error(err))
+		p.log.Warn("imageproxy: read upstream body failed", zap.String("host", host), zap.String("client", candidate.name), zap.Error(redactSensitiveError(err)))
 		if err == nil {
 			err = errors.New("upstream image body is empty")
 		}
@@ -77,6 +77,22 @@ func (p *ImageProxy) fetchRemoteImageOnce(ctx context.Context, raw, host string,
 		return nil, "", "", errImageProxyNonImageContent
 	}
 	return data, ctype, resp.Header.Get("Content-Length"), nil
+}
+
+func logImageFetchError(log *zap.Logger, message, host, client string, err error) {
+	if log == nil || err == nil {
+		return
+	}
+	fields := []zap.Field{
+		zap.String("host", host),
+		zap.String("client", client),
+		zap.Error(redactSensitiveError(err)),
+	}
+	if errors.Is(err, context.Canceled) {
+		log.Debug(message, fields...)
+		return
+	}
+	log.Warn(message, fields...)
 }
 
 func applyRemoteImageHeaders(req *http.Request, host, raw string) {
@@ -162,9 +178,9 @@ func fetchRemoteImageWithCurl(ctx context.Context, raw, host string) ([]byte, st
 		"--header", "Cache-Control: no-cache",
 		"--header", "Pragma: no-cache",
 	}
-		if referer := remoteImageReferer(host, raw); referer != "" {
-			args = append(args, "--referer", referer)
-		}
+	if referer := remoteImageReferer(host, raw); referer != "" {
+		args = append(args, "--referer", referer)
+	}
 	if cookie := remoteImageCookie(host); cookie != "" {
 		args = append(args, "--cookie", cookie)
 	}
@@ -188,9 +204,9 @@ func fetchRemoteImageWithCurl(ctx context.Context, raw, host string) ([]byte, st
 	if waitErr != nil {
 		message := strings.TrimSpace(stderr.String())
 		if message != "" {
-			return nil, "", "", errors.New(message)
+			return nil, "", "", redactSensitiveError(errors.New(message))
 		}
-		return nil, "", "", waitErr
+		return nil, "", "", redactSensitiveError(waitErr)
 	}
 	if len(data) == 0 {
 		return nil, "", "", errors.New("curl image body is empty")

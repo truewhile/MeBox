@@ -510,12 +510,12 @@ func (r *EmbyRemoteService) ensureTokenOnLine(ctx context.Context, acct *model.S
 	req.Header.Set("X-Emby-Authorization", `MediaBrowser Client="MeBox", Device="MeBox-Federated", DeviceId="mebox-federated", Version="1.0"`)
 	resp, err := r.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("连接远程 Emby 失败: %w", err)
+		return redactSensitiveError(fmt.Errorf("连接远程 Emby 失败: %w", err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("远程 Emby 登录失败(%d): %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return redactSensitiveError(fmt.Errorf("远程 Emby 登录失败(%d): %s", resp.StatusCode, strings.TrimSpace(string(data))))
 	}
 	var login struct {
 		AccessToken string `json:"AccessToken"`
@@ -599,8 +599,16 @@ func (r *EmbyRemoteService) doGet(ctx context.Context, acct *model.StrmAccount, 
 	}
 	if lastErr != nil {
 		if r.log != nil && acct != nil {
-			r.log.Warn("remote emby request failed",
-				zap.String("account", acct.Name), zap.String("path", path), zap.Error(lastErr))
+			fields := []zap.Field{
+				zap.String("account", acct.Name),
+				zap.String("path", path),
+				zap.Error(redactSensitiveError(lastErr)),
+			}
+			if errors.Is(lastErr, context.Canceled) {
+				r.log.Debug("remote emby request canceled", fields...)
+			} else {
+				r.log.Warn("remote emby request failed", fields...)
+			}
 		}
 		return lastErr
 	}
@@ -629,7 +637,7 @@ func (r *EmbyRemoteService) doGetOnLine(ctx context.Context, acct *model.StrmAcc
 		req.Header.Set("X-Emby-Token", cfg.Token)
 		resp, err := r.http.Do(req)
 		if err != nil {
-			return fmt.Errorf("请求远程 Emby 失败: %w", err)
+			return redactSensitiveError(fmt.Errorf("请求远程 Emby 失败: %w", err))
 		}
 		// 读 8MB+1 以区分"刚好 8MB"与"被截断"：截断的 JSON 会让
 		// Unmarshal 报 unexpected end，难以定位；这里显式报错。
@@ -656,7 +664,7 @@ func (r *EmbyRemoteService) doGetOnLine(ctx context.Context, acct *model.StrmAcc
 			continue
 		}
 		if resp.StatusCode >= 300 {
-			return fmt.Errorf("远程 Emby 请求失败(%d): %s", resp.StatusCode, strings.TrimSpace(string(data)))
+			return redactSensitiveError(fmt.Errorf("远程 Emby 请求失败(%d): %s", resp.StatusCode, strings.TrimSpace(string(data))))
 		}
 		if out == nil {
 			return nil
@@ -1121,7 +1129,7 @@ func (r *EmbyRemoteService) proxyVideoStreamOnLine(ctx context.Context, w http.R
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return fmt.Errorf("远程 Emby 视频流失败(%d): %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return redactSensitiveError(fmt.Errorf("远程 Emby 视频流失败(%d): %s", resp.StatusCode, strings.TrimSpace(string(data))))
 	}
 	for _, header := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Cache-Control"} {
 		if value := resp.Header.Get(header); value != "" {
@@ -1281,12 +1289,12 @@ func (r *EmbyRemoteService) doMutateOnLine(ctx context.Context, cfg *EmbyRemoteC
 	req.Header.Set("X-Emby-Token", cfg.Token)
 	resp, err := r.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("请求远程 Emby 失败: %w", err)
+		return redactSensitiveError(fmt.Errorf("请求远程 Emby 失败: %w", err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return fmt.Errorf("远程 Emby 状态同步失败(%d): %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return redactSensitiveError(fmt.Errorf("远程 Emby 状态同步失败(%d): %s", resp.StatusCode, strings.TrimSpace(string(data))))
 	}
 	return nil
 }

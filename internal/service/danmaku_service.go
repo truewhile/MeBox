@@ -1423,7 +1423,9 @@ func (s *DanmakuService) fetchCommentWithFallback(ctx context.Context, primary, 
 		}
 		lastErr = err
 		if i < len(bases)-1 {
-			s.log.Warn("danmaku comment fetch failed on configured source, falling back to official", zap.String("source", base), zap.Error(err))
+			s.log.Warn("danmaku comment fetch failed on configured source, falling back to official",
+				zap.String("source", redactSensitiveURL(base)),
+				zap.Error(redactSensitiveError(err)))
 		}
 	}
 	return "", "auto", lastErr
@@ -1439,7 +1441,9 @@ func (s *DanmakuService) searchCandidatesWithSource(ctx context.Context, configu
 		if err == nil {
 			return candidates, configured, nil
 		}
-		s.log.Warn("danmaku search failed on configured source, falling back to official", zap.String("source", configured), zap.Error(err))
+		s.log.Warn("danmaku search failed on configured source, falling back to official",
+			zap.String("source", redactSensitiveURL(configured)),
+			zap.Error(redactSensitiveError(err)))
 	}
 	candidates, err := s.searchCandidates(ctx, official, name, episode)
 	return candidates, official, err
@@ -1573,9 +1577,9 @@ func (s *DanmakuService) lookupConfiguredEpisodes(ctx context.Context, configure
 	candidates, err := s.searchCandidates(ctx, configured, m.AnimeTitle, episodeNum)
 	if err != nil {
 		s.log.Debug("danmaku configured lookup failed",
-			zap.String("source", configured),
+			zap.String("source", redactSensitiveURL(configured)),
 			zap.String("anime", m.AnimeTitle),
-			zap.Error(err))
+			zap.Error(redactSensitiveError(err)))
 		return nil, false
 	}
 	matched := matchDanmakuEpisodes(candidates, episodeNum, m.EpisodeTitle)

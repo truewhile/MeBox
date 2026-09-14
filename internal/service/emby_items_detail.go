@@ -130,11 +130,27 @@ func (e *EmbyService) LatestItems(ctx context.Context, userID, parentID string, 
 		limit = 20
 	}
 	cacheKey := e.embyLatestCacheKey(userID, parentID, limit)
-	if items, ok := e.cachedLatestItems(ctx, cacheKey); ok {
+	if items, stale, ok := e.cachedLatestItemsWithStale(ctx, cacheKey); ok {
+		if stale {
+			e.refreshLatestItemsAsync(cacheKey, userID, parentID, limit)
+		}
 		return items, nil
 	}
+	value, err := e.loadLatestItemsCached(ctx, userID, parentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	if value.Items == nil {
+		return []map[string]any{}, nil
+	}
+	return value.Items, nil
+}
+
+func (e *EmbyService) loadLatestItemsCached(ctx context.Context, userID, parentID string, limit int) (embyLatestCacheValue, error) {
+	cacheKey := e.embyLatestCacheKey(userID, parentID, limit)
 	// 一个客户端断开不应取消正在为其他客户端填充的共享重建。
-	loadCtx := context.WithoutCancel(ctx)
+	loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
+	defer cancel()
 	v, err, _ := e.latestFlight.Do(cacheKey, func() (any, error) {
 		if items, ok := e.cachedLatestItems(loadCtx, cacheKey); ok {
 			return embyLatestCacheValue{Items: items}, nil
@@ -144,34 +160,55 @@ func (e *EmbyService) LatestItems(ctx context.Context, userID, parentID string, 
 			return nil, err
 		}
 		if e.cache != nil {
-			e.cache.SetJSON(loadCtx, cacheKey, value, time.Duration(e.embyLatestCacheTTLSeconds())*time.Second)
+			freshTTL := time.Duration(e.embyLatestCacheTTLSeconds()) * time.Second
+			e.cache.SetJSONWithStale(loadCtx, cacheKey, value, freshTTL, freshTTL+30*time.Minute)
 		}
 		e.rememberArtworkRefs(value.Artwork)
 		return value, nil
 	})
 	if err != nil {
-		return nil, err
+		return embyLatestCacheValue{}, err
 	}
 	cached, _ := v.(embyLatestCacheValue)
-	if cached.Items == nil {
-		return []map[string]any{}, nil
+	return cached, nil
+}
+
+func (e *EmbyService) refreshLatestItemsAsync(cacheKey, userID, parentID string, limit int) {
+	if e == nil || e.cache == nil {
+		return
 	}
-	return cached.Items, nil
+	if _, loaded := e.latestRefresh.LoadOrStore(cacheKey, struct{}{}); loaded {
+		return
+	}
+	go func() {
+		defer e.latestRefresh.Delete(cacheKey)
+		if _, err := e.loadLatestItemsCached(context.Background(), userID, parentID, limit); err != nil && e.log != nil {
+			e.log.Debug("background refresh of latest items failed",
+				zap.String("parent_id", parentID),
+				zap.Error(redactSensitiveError(err)))
+		}
+	}()
 }
 
 func (e *EmbyService) cachedLatestItems(ctx context.Context, cacheKey string) ([]map[string]any, bool) {
+	items, stale, ok := e.cachedLatestItemsWithStale(ctx, cacheKey)
+	return items, ok && !stale
+}
+
+func (e *EmbyService) cachedLatestItemsWithStale(ctx context.Context, cacheKey string) ([]map[string]any, bool, bool) {
 	if e == nil || e.cache == nil {
-		return nil, false
+		return nil, false, false
 	}
 	var cached embyLatestCacheValue
-	if !e.cache.GetJSON(ctx, cacheKey, &cached) {
-		return nil, false
+	found, stale := e.cache.GetJSONStale(ctx, cacheKey, &cached)
+	if !found {
+		return nil, false, false
 	}
 	e.rememberArtworkRefs(cached.Artwork)
 	if cached.Items == nil {
-		return []map[string]any{}, true
+		return []map[string]any{}, stale, true
 	}
-	return cached.Items, true
+	return cached.Items, stale, true
 }
 
 func (e *EmbyService) loadLatestItems(ctx context.Context, userID, parentID string, limit int) (embyLatestCacheValue, error) {

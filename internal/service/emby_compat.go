@@ -69,7 +69,8 @@ type EmbyService struct {
 	// latestFlight collapses the homepage stampede: clients request Latest
 	// for every library at once, and a shared expiry used to rebuild each
 	// library in parallel.
-	latestFlight singleflight.Group
+	latestFlight  singleflight.Group
+	latestRefresh sync.Map
 
 	tmdb          *TMDbProvider
 	adult         *AdultProvider

@@ -199,6 +199,11 @@ environment:
 **硬链接失败（cross-device link）？**  
 硬链接要求源与目标在同一文件系统/子卷；跨盘、跨 btrfs 子卷或网盘挂载时请改用复制或软链接。
 
+**日志保留时间太短？**
+
+默认应用日志为 `20MB x 5`，容器 stdout 日志为 `20m x 3`。排障时可在 compose 中调大
+`MEBOX_LOGGING_MAX_SIZE_MB`、`MEBOX_LOGGING_MAX_BACKUPS` 与服务的 `logging.options.max-size/max-file`。
+
 **第三方播放器连不上？**  
 确认地址为 `http://IP:18080`，使用 MeBox 用户账号；反代部署需正确配置外部 URL 与 HTTPS 头。
 
@@ -207,6 +212,7 @@ environment:
 ## 开发构建
 
 后端通过 `go:embed` 嵌入 `web/dist`，**编译前必须先构建前端**。
+前端构建要求 Node.js `20.19+` 或 `22.12+`。
 
 ```bash
 npm --prefix web ci

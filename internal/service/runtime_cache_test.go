@@ -116,3 +116,74 @@ func TestRuntimeCacheSetMaxSizeEvictsImmediately(t *testing.T) {
 		t.Fatal("newest entry should remain after lowering cache limit")
 	}
 }
+
+func TestRuntimeCacheReturnsStaleValueAfterFreshTTL(t *testing.T) {
+	cache := newRuntimeCacheForTest(t, 1)
+	key := "latest:stale"
+	cache.SetJSONWithStale(context.Background(), key, "cached-value", time.Minute, time.Hour)
+
+	fullKey := cache.key(key)
+	cache.mu.Lock()
+	item := cache.memory[fullKey]
+	item.expiresAt = time.Now().Add(-time.Second)
+	cache.memory[fullKey] = item
+	cache.mu.Unlock()
+
+	var fresh string
+	if cache.GetJSON(context.Background(), key, &fresh) {
+		t.Fatal("expired fresh entry must not be returned by GetJSON")
+	}
+	var stale string
+	found, isStale := cache.GetJSONStale(context.Background(), key, &stale)
+	if !found || !isStale {
+		t.Fatalf("GetJSONStale found=%t stale=%t, want true/true", found, isStale)
+	}
+	if stale != "cached-value" {
+		t.Fatalf("stale value=%q, want cached-value", stale)
+	}
+}
+
+func TestRuntimeCacheDoesNotReturnOrdinaryEntryAsStale(t *testing.T) {
+	cache := newRuntimeCacheForTest(t, 1)
+	key := "latest:ordinary"
+	cache.SetJSON(context.Background(), key, "cached-value", time.Minute)
+
+	fullKey := cache.key(key)
+	cache.mu.Lock()
+	item := cache.memory[fullKey]
+	expiredAt := time.Now().Add(-time.Second)
+	item.expiresAt = expiredAt
+	item.staleUntil = expiredAt
+	cache.memory[fullKey] = item
+	cache.mu.Unlock()
+
+	var out string
+	if found, isStale := cache.GetJSONStale(context.Background(), key, &out); found || isStale {
+		t.Fatalf("ordinary expired entry found=%t stale=%t, want false/false", found, isStale)
+	}
+}
+
+func TestRuntimeCacheStalePrefersFreshRedisValue(t *testing.T) {
+	cache := newRuntimeCacheForTest(t, 1)
+	key := "latest:redis-fresh"
+	cache.SetJSONWithStale(context.Background(), key, "local-stale", time.Minute, time.Hour)
+
+	fullKey := cache.key(key)
+	cache.mu.Lock()
+	item := cache.memory[fullKey]
+	item.expiresAt = time.Now().Add(-time.Second)
+	cache.memory[fullKey] = item
+	cache.mu.Unlock()
+
+	cache.redisGet = func(context.Context, string) ([]byte, error) {
+		return []byte(`"redis-fresh"`), nil
+	}
+	var out string
+	found, stale := cache.GetJSONStale(context.Background(), key, &out)
+	if !found || stale {
+		t.Fatalf("GetJSONStale found=%t stale=%t, want true/false", found, stale)
+	}
+	if out != "redis-fresh" {
+		t.Fatalf("value=%q, want redis-fresh", out)
+	}
+}

@@ -196,14 +196,14 @@ func (p *ImageProxy) fetchAndCacheRemoteImage(ctx context.Context, raw, host, ca
 			p.writeImageCache(cachePath, failPath, "img-*.tmp", data)
 			return data, ctype, contentLength, nil
 		}
-		p.log.Warn("imageproxy: curl fallback failed", zap.String("host", host), zap.Error(err))
+		logImageFetchError(p.log, "imageproxy: curl fallback failed", host, "curl", err)
 		lastErr = err
 	}
 	p.markImageFetchFailed(failPath)
 	if lastErr == nil {
 		lastErr = errors.New("upstream image fetch failed")
 	}
-	return nil, "", "", lastErr
+	return nil, "", "", redactSensitiveError(lastErr)
 }
 
 type sharedRemoteImageResult struct {

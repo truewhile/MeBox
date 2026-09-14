@@ -19,6 +19,7 @@ func Register(r *gin.Engine, cfg *config.Config, log *zap.Logger, svc *service.C
 	api.Use(middleware.GzipAPI())
 	{
 		api.GET("/health", healthCheck)
+		api.HEAD("/health", healthCheck)
 		api.GET("/version", versionInfo)
 		api.GET("/public/ui-config", publicUIConfigHandler(svc))
 

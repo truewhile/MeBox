@@ -127,5 +127,10 @@ func (z zapStdLogger) Printf(format string, args ...interface{}) {
 	if z.log == nil {
 		return
 	}
-	z.log.Sugar().Infof(format, args...)
+	message := fmt.Sprintf(format, args...)
+	if strings.Contains(strings.ToLower(message), "context canceled") {
+		z.log.Debug(message)
+		return
+	}
+	z.log.Info(message)
 }

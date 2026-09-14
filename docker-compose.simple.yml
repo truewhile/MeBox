@@ -64,8 +64,8 @@ services:
       MEBOX_LOGGING_LEVEL: info
       MEBOX_LOGGING_FORMAT: console
       MEBOX_LOGGING_OUTPUT_PATH: /data/logs
-      MEBOX_LOGGING_MAX_SIZE_MB: "50"
-      MEBOX_LOGGING_MAX_BACKUPS: "20"
+      MEBOX_LOGGING_MAX_SIZE_MB: "20"
+      MEBOX_LOGGING_MAX_BACKUPS: "5"
       MEBOX_LOGGING_MAX_AGE_DAYS: "30"
 
     extra_hosts:
@@ -82,5 +82,5 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "50m"
-        max-file: "10"
+        max-size: "20m"
+        max-file: "3"

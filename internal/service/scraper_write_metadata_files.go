@@ -117,8 +117,8 @@ func (s *ScraperService) downloadArtworkToPathWithOptions(ctx context.Context, d
 	if err != nil || len(data) == 0 {
 		s.log.Warn("scrape artwork download failed",
 			zap.String("name", name),
-			zap.String("url", raw),
-			zap.Error(err))
+			zap.String("url", redactSensitiveURL(raw)),
+			zap.Error(redactSensitiveError(err)))
 		return ""
 	}
 	if !isImageContentType(ctype) || isTransparentPlaceholderData(data) {

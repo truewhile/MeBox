@@ -2,7 +2,7 @@
 # =============================================================================
 # Multi-architecture build for MeBox.
 #
-# Stage 1 (frontend) :  Node 20  -> static SPA bundle
+# Stage 1 (frontend) :  Node 20.19+ -> static SPA bundle
 # Stage 2 (backend)  :  Go 1.25  -> single static binary (CGO_ENABLED=0)
 # Stage 3 (runtime)  :  Alpine 3.23 -> ffmpeg + tzdata + non-root user
 #
@@ -15,7 +15,7 @@
 # =============================================================================
 
 # ---- Stage 1: frontend (always build on the host architecture) -------------
-FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend
+FROM --platform=$BUILDPLATFORM node:20.19-alpine AS frontend
 ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org/
 WORKDIR /app/web
 COPY web/package*.json ./

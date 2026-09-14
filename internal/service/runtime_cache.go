@@ -25,7 +25,10 @@ const (
 type RuntimeCacheService struct {
 	log    *zap.Logger
 	client *redis.Client
-	prefix string
+	// redisGet is separated from client so cache ordering can be tested without
+	// requiring a live Redis instance.
+	redisGet func(ctx context.Context, key string) ([]byte, error)
+	prefix   string
 
 	mu        sync.RWMutex
 	memory    map[string]runtimeCacheItem
@@ -36,10 +39,11 @@ type RuntimeCacheService struct {
 }
 
 type runtimeCacheItem struct {
-	raw       []byte
-	expiresAt time.Time
-	lastUsed  time.Time
-	size      int64
+	raw        []byte
+	expiresAt  time.Time
+	staleUntil time.Time
+	lastUsed   time.Time
+	size       int64
 }
 
 // runtimeObjectItem 直存 Go 对象，跳过 JSON 编解码。热点路径（整库行、
@@ -95,6 +99,9 @@ func NewRuntimeCacheService(cfg *config.Config, log *zap.Logger) *RuntimeCacheSe
 		return c
 	}
 	c.client = client
+	c.redisGet = func(ctx context.Context, key string) ([]byte, error) {
+		return client.Get(ctx, key).Bytes()
+	}
 	if log != nil {
 		log.Info("redis runtime cache enabled with in-process L1", zap.String("addr", opts.Addr), zap.String("prefix", c.prefix))
 	}
@@ -120,8 +127,8 @@ func (c *RuntimeCacheService) GetJSON(ctx context.Context, key string, out any) 
 	if raw, ok := c.getMemory(fullKey); ok {
 		return json.Unmarshal(raw, out) == nil
 	}
-	if c.client != nil {
-		raw, err := c.client.Get(ctx, fullKey).Bytes()
+	if c.redisGet != nil {
+		raw, err := c.redisGet(ctx, fullKey)
 		if err == nil {
 			if json.Unmarshal(raw, out) != nil {
 				return false
@@ -131,6 +138,36 @@ func (c *RuntimeCacheService) GetJSON(ctx context.Context, key string, out any) 
 		}
 	}
 	return false
+}
+
+// GetJSONStale returns a fresh value when available and otherwise a retained
+// stale value stored with SetJSONWithStale. The stale flag lets
+// callers serve immediately while refreshing in the background.
+func (c *RuntimeCacheService) GetJSONStale(ctx context.Context, key string, out any) (found bool, stale bool) {
+	if !c.Enabled() || strings.TrimSpace(key) == "" || out == nil {
+		return false, false
+	}
+	fullKey := c.key(key)
+	raw, ok, isStale := c.getMemoryWithStale(fullKey)
+	if ok && !isStale {
+		return json.Unmarshal(raw, out) == nil, false
+	}
+	// A stale L1 entry must not hide a newer value written by another
+	// instance. Prefer Redis whenever the local copy is stale, then fall back
+	// to it only when Redis is unavailable or its fresh value has expired.
+	if c.redisGet != nil {
+		redisRaw, err := c.redisGet(ctx, fullKey)
+		if err == nil {
+			if json.Unmarshal(redisRaw, out) == nil {
+				c.setMemoryOwned(fullKey, redisRaw, 2*time.Second)
+				return true, false
+			}
+		}
+	}
+	if ok {
+		return json.Unmarshal(raw, out) == nil, isStale
+	}
+	return false, false
 }
 
 func (c *RuntimeCacheService) SetJSON(ctx context.Context, key string, value any, ttl time.Duration) {
@@ -145,6 +182,27 @@ func (c *RuntimeCacheService) SetJSON(ctx context.Context, key string, value any
 	c.setMemoryOwned(fullKey, raw, ttl)
 	if c.client != nil {
 		_ = c.client.Set(ctx, fullKey, raw, ttl).Err()
+	}
+}
+
+// SetJSONWithStale stores a fresh value for freshTTL and keeps an in-process
+// stale copy for staleTTL. Redis keeps only the fresh window so multi-instance
+// deployments retain the existing consistency semantics.
+func (c *RuntimeCacheService) SetJSONWithStale(ctx context.Context, key string, value any, freshTTL, staleTTL time.Duration) {
+	if !c.Enabled() || strings.TrimSpace(key) == "" || value == nil || freshTTL <= 0 {
+		return
+	}
+	if staleTTL < freshTTL {
+		staleTTL = freshTTL
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return
+	}
+	fullKey := c.key(key)
+	c.setMemoryBytesWithStale(fullKey, raw, freshTTL, staleTTL, true)
+	if c.client != nil {
+		_ = c.client.Set(ctx, fullKey, raw, freshTTL).Err()
 	}
 }
 
@@ -255,20 +313,29 @@ func (c *RuntimeCacheService) key(key string) string {
 }
 
 func (c *RuntimeCacheService) getMemory(key string) ([]byte, bool) {
+	raw, ok, stale := c.getMemoryWithStale(key)
+	return raw, ok && !stale
+}
+
+func (c *RuntimeCacheService) getMemoryWithStale(key string) ([]byte, bool, bool) {
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	item, ok := c.memory[key]
 	if !ok {
-		return nil, false
+		return nil, false, false
 	}
-	if !now.Before(item.expiresAt) {
+	staleUntil := item.staleUntil
+	if staleUntil.IsZero() {
+		staleUntil = item.expiresAt
+	}
+	if !now.Before(staleUntil) {
 		c.removeMemoryLocked(key)
-		return nil, false
+		return nil, false, false
 	}
 	item.lastUsed = now
 	c.memory[key] = item
-	return item.raw, true
+	return item.raw, true, !now.Before(item.expiresAt)
 }
 
 func (c *RuntimeCacheService) setMemory(key string, raw []byte, ttl time.Duration) {
@@ -280,8 +347,15 @@ func (c *RuntimeCacheService) setMemoryOwned(key string, raw []byte, ttl time.Du
 }
 
 func (c *RuntimeCacheService) setMemoryBytes(key string, raw []byte, ttl time.Duration, owned bool) {
-	if ttl <= 0 || len(raw) == 0 {
+	c.setMemoryBytesWithStale(key, raw, ttl, ttl, owned)
+}
+
+func (c *RuntimeCacheService) setMemoryBytesWithStale(key string, raw []byte, freshTTL, staleTTL time.Duration, owned bool) {
+	if freshTTL <= 0 || len(raw) == 0 {
 		return
+	}
+	if staleTTL < freshTTL {
+		staleTTL = freshTTL
 	}
 	size := int64(len(key)+len(raw)) + runtimeCacheEntryOverheadBytes
 	now := time.Now()
@@ -298,10 +372,11 @@ func (c *RuntimeCacheService) setMemoryBytes(key string, raw []byte, ttl time.Du
 		raw = append([]byte(nil), raw...)
 	}
 	c.memory[key] = runtimeCacheItem{
-		raw:       raw,
-		expiresAt: now.Add(ttl),
-		lastUsed:  now,
-		size:      size,
+		raw:        raw,
+		expiresAt:  now.Add(freshTTL),
+		staleUntil: now.Add(staleTTL),
+		lastUsed:   now,
+		size:       size,
 	}
 	c.bytesUsed += size
 }
@@ -334,7 +409,11 @@ func (c *RuntimeCacheService) entryCountLocked() int {
 
 func (c *RuntimeCacheService) evictExpiredLocked(now time.Time) {
 	for key, item := range c.memory {
-		if !now.Before(item.expiresAt) {
+		staleUntil := item.staleUntil
+		if staleUntil.IsZero() {
+			staleUntil = item.expiresAt
+		}
+		if !now.Before(staleUntil) {
 			c.removeMemoryLocked(key)
 		}
 	}

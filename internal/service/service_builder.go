@@ -88,7 +88,9 @@ func (b *serviceContainerBuilder) configureMediaSearchBackend() {
 	}
 	b.repos.Media.SetSearchBackend(searchBackend)
 	if b.log != nil {
-		b.log.Info("opensearch media search enabled", zap.String("index", b.cfg.Search.Index), zap.String("url", b.cfg.Search.OpenSearchURL))
+		b.log.Info("opensearch media search enabled",
+			zap.String("index", b.cfg.Search.Index),
+			zap.String("url", redactSensitiveURL(b.cfg.Search.OpenSearchURL)))
 	}
 }
 

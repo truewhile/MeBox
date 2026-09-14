@@ -92,8 +92,8 @@ services:
       MEBOX_LOGGING_LEVEL: info
       MEBOX_LOGGING_FORMAT: console
       MEBOX_LOGGING_OUTPUT_PATH: /data/logs
-      MEBOX_LOGGING_MAX_SIZE_MB: "50"
-      MEBOX_LOGGING_MAX_BACKUPS: "20"
+      MEBOX_LOGGING_MAX_SIZE_MB: "20"
+      MEBOX_LOGGING_MAX_BACKUPS: "5"
       MEBOX_LOGGING_MAX_AGE_DAYS: "30"
 
       # 轻量模式默认只使用 PostgreSQL，适合大多数 NAS。
@@ -141,8 +141,8 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "50m"
-        max-file: "10"
+        max-size: "20m"
+        max-file: "3"
 
   postgres:
     image: postgres:16-alpine
@@ -166,5 +166,5 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "50m"
-        max-file: "10"
+        max-size: "20m"
+        max-file: "3"
