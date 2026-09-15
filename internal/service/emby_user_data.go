@@ -11,8 +11,8 @@ import (
 	"github.com/truewhile/MeBox/internal/model"
 )
 
-// SetFavorite 把 mediaID 标为 userID 的收藏。挂载的远程 Emby 条目会同时写入
-// 本地 favourites 表并透传到对应远程服务器，保证网页与第三方 Emby 客户端一致。
+// SetFavorite 把 mediaID 标为 userID 的收藏。只写入 MeBox 本地 favourites 表，
+// 按 user_id 隔离；挂载远程 Emby 共用账号，不能再透传收藏以免串用户。
 func (e *EmbyService) SetFavorite(ctx context.Context, userID, mediaID string, favorite bool) error {
 	if err := SyncUserFavorite(ctx, e.repo, e.remote, userID, mediaID, favorite); err != nil {
 		return err
@@ -22,15 +22,8 @@ func (e *EmbyService) SetFavorite(ctx context.Context, userID, mediaID string, f
 }
 
 // MarkPlayed 把 mediaID 标为已看（写一个 100% 进度的 history 行）。
-// 远程 Emby 条目直接透传到对应服务器（本地不落库）。
+// 远程挂载条目同样只落本地 PlaybackHistory，按 MeBox 用户隔离。
 func (e *EmbyService) MarkPlayed(ctx context.Context, userID, mediaID string, played bool) error {
-	if e.remote != nil && IsEmbyRemoteID(mediaID) {
-		acctID, remoteID, _ := DecodeEmbyRemoteID(mediaID)
-		if err := e.ProxyRemoteSetPlayed(ctx, acctID, remoteID, played); err != nil {
-			return err
-		}
-		return nil
-	}
 	if !played {
 		err := e.repo.DB.WithContext(ctx).
 			Where("user_id = ? AND media_id = ?", userID, mediaID).
@@ -40,15 +33,20 @@ func (e *EmbyService) MarkPlayed(ctx context.Context, userID, mediaID string, pl
 		}
 		return err
 	}
-	m, err := e.repo.Media.FindByID(ctx, mediaID)
-	if err != nil || m == nil {
-		return errors.New("media not found")
+	dur := int64(0)
+	if IsEmbyRemoteID(mediaID) {
+		dur = remoteItemDurationMs(ctx, e, mediaID)
+	} else {
+		m, err := e.repo.Media.FindByID(ctx, mediaID)
+		if err != nil || m == nil {
+			return errors.New("media not found")
+		}
+		dur = int64(m.DurationSec) * 1000
 	}
-	dur := int64(m.DurationSec) * 1000
 	if dur <= 0 {
 		dur = 1
 	}
-	err = e.repo.History.Upsert(ctx, &model.PlaybackHistory{
+	err := e.repo.History.Upsert(ctx, &model.PlaybackHistory{
 		UserID:     userID,
 		MediaID:    mediaID,
 		PositionMs: dur,
@@ -60,6 +58,36 @@ func (e *EmbyService) MarkPlayed(ctx context.Context, userID, mediaID string, pl
 		e.invalidateEmbyItemsCache(ctx)
 	}
 	return err
+}
+
+func remoteItemDurationMs(ctx context.Context, e *EmbyService, mediaID string) int64 {
+	if e == nil || e.remote == nil || !IsEmbyRemoteID(mediaID) {
+		return 0
+	}
+	mountID, remoteID, _ := DecodeEmbyRemoteID(mediaID)
+	mount, acct, err := e.remote.ResolveMount(ctx, mountID)
+	if err != nil || mount == nil || acct == nil {
+		return 0
+	}
+	item, err := e.remote.RemoteItem(ctx, mount, acct, remoteID)
+	if err != nil || item == nil {
+		return 0
+	}
+	switch ticks := item["RunTimeTicks"].(type) {
+	case float64:
+		if ticks > 0 {
+			return int64(ticks) / 10_000
+		}
+	case int64:
+		if ticks > 0 {
+			return ticks / 10_000
+		}
+	case int:
+		if ticks > 0 {
+			return int64(ticks) / 10_000
+		}
+	}
+	return 0
 }
 
 // RecordProgress 记录播放进度（来自 Emby 客户端的 /Sessions/Playing/Progress）。
@@ -138,8 +166,9 @@ func embyPlaySessionStartedAtMs(playSessionID string) int64 {
 	return value
 }
 
-// mergeRemoteUserData applies the current MeBox user's locally recorded playback
-// and favourite state to remote Emby payloads.
+// mergeRemoteUserData overlays the current MeBox user's locally recorded
+// playback and favourite state onto remote Emby payloads. Remote mounts share
+// one upstream Emby account, so upstream UserData must never leak across MeBox users.
 func (e *EmbyService) mergeRemoteUserData(ctx context.Context, userID string, payload any) error {
 	if strings.TrimSpace(userID) == "" || payload == nil {
 		return nil
@@ -178,18 +207,7 @@ func (e *EmbyService) mergeRemoteUserData(ctx context.Context, userID string, pa
 	}
 	for _, item := range items {
 		id, _ := item["Id"].(string)
-		userData, _ := item["UserData"].(map[string]any)
-		if h := byMediaID[id]; h != nil {
-			item["UserData"] = mergedRemoteUserData(userData, h)
-			userData, _ = item["UserData"].(map[string]any)
-		}
-		if favSet[id] {
-			if userData == nil {
-				userData = map[string]any{}
-				item["UserData"] = userData
-			}
-			userData["IsFavorite"] = true
-		}
+		item["UserData"] = applyMeBoxUserData(item["UserData"], byMediaID[id], favSet[id])
 	}
 	return nil
 }
@@ -221,11 +239,36 @@ func remoteItemMaps(payload any) []map[string]any {
 }
 
 func mergedRemoteUserData(raw any, history *model.PlaybackHistory) map[string]any {
+	favorite := false
+	if existing, ok := raw.(map[string]any); ok {
+		if v, ok := existing["IsFavorite"].(bool); ok {
+			favorite = v
+		}
+	}
+	return applyMeBoxUserData(raw, history, favorite)
+}
+
+// applyMeBoxUserData rebuilds UserData for a remote item using only MeBox-local
+// per-user state. Shared upstream Emby favourite/progress fields are discarded.
+func applyMeBoxUserData(raw any, history *model.PlaybackHistory, favorite bool) map[string]any {
 	userData := map[string]any{}
 	if existing, ok := raw.(map[string]any); ok {
 		for key, value := range existing {
-			userData[key] = value
+			switch key {
+			case "IsFavorite", "PlaybackPositionTicks", "Played", "PlayedPercentage", "PlayCount", "LastPlayedDate":
+				continue
+			default:
+				userData[key] = value
+			}
 		}
+	}
+	userData["IsFavorite"] = favorite
+	if history == nil {
+		userData["PlaybackPositionTicks"] = int64(0)
+		userData["Played"] = false
+		userData["PlayedPercentage"] = float64(0)
+		userData["PlayCount"] = 0
+		return userData
 	}
 	duration := history.DurationMs
 	position := history.PositionMs
@@ -237,18 +280,9 @@ func mergedRemoteUserData(raw any, history *model.PlaybackHistory) map[string]an
 	userData["Played"] = history.Completed
 	userData["PlayedPercentage"] = percentage
 	if history.Completed {
-		playCount := 0
-		switch value := userData["PlayCount"].(type) {
-		case int:
-			playCount = value
-		case int64:
-			playCount = int(value)
-		case float64:
-			playCount = int(value)
-		}
-		if playCount < 1 {
-			userData["PlayCount"] = 1
-		}
+		userData["PlayCount"] = 1
+	} else {
+		userData["PlayCount"] = 0
 	}
 	return userData
 }

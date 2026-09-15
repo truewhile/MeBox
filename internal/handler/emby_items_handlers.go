@@ -13,13 +13,7 @@ import (
 func parseEmbyItemsParams(c *gin.Context) service.ItemsParams {
 	limit, _ := strconv.Atoi(embyFirstNonEmptyString(firstQueryValue(c, "Limit", "limit"), "50"))
 	offset, _ := strconv.Atoi(embyFirstNonEmptyString(firstQueryValue(c, "StartIndex", "startIndex", "startindex"), "0"))
-	uid := c.Param("userId")
-	if uid == "" {
-		uid = firstQueryValue(c, "UserId", "userId", "userid")
-	}
-	if uid == "" {
-		uid = embyUserID(c)
-	}
+	uid := embyEffectiveUserID(c)
 	splitOpt := func(s string) []string {
 		if s == "" {
 			return nil
@@ -73,10 +67,7 @@ func embyItemsHandler(svc *service.Container) gin.HandlerFunc {
 func embyItemByIDHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
-		uid := c.Param("userId")
-		if uid == "" {
-			uid = embyUserID(c)
-		}
+		uid := embyEffectiveUserID(c)
 		out, err := svc.Emby.Item(c.Request.Context(), id, uid)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -106,13 +97,7 @@ func embyUserItemByIDHandler(svc *service.Container) gin.HandlerFunc {
 
 func embyLatestItemsHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		uid := c.Param("userId")
-		if uid == "" {
-			uid = firstQueryValue(c, "UserId", "userId", "userid")
-		}
-		if uid == "" {
-			uid = embyUserID(c)
-		}
+		uid := embyEffectiveUserID(c)
 		limit, _ := strconv.Atoi(embyFirstNonEmptyString(firstQueryValue(c, "Limit", "limit"), "20"))
 		out, err := svc.Emby.LatestItems(c.Request.Context(), uid, firstQueryValue(c, "ParentId", "parentId", "parentid"), limit)
 		if err != nil {
@@ -126,13 +111,7 @@ func embyLatestItemsHandler(svc *service.Container) gin.HandlerFunc {
 
 func embyResumeItemsHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		uid := c.Param("userId")
-		if uid == "" {
-			uid = firstQueryValue(c, "UserId", "userId", "userid")
-		}
-		if uid == "" {
-			uid = embyUserID(c)
-		}
+		uid := embyEffectiveUserID(c)
 		limit, _ := strconv.Atoi(embyFirstNonEmptyString(firstQueryValue(c, "Limit", "limit"), "20"))
 		out, err := svc.Emby.ResumeItems(c.Request.Context(), uid, limit)
 		if err != nil {
@@ -147,13 +126,7 @@ func embyResumeItemsHandler(svc *service.Container) gin.HandlerFunc {
 func embyItemsCountsHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if svc != nil && svc.Emby != nil {
-			uid := firstQueryValue(c, "UserId", "userId")
-			if uid == "" {
-				uid = c.Param("userId")
-			}
-			if uid == "" {
-				uid = embyUserID(c)
-			}
+			uid := embyEffectiveUserID(c)
 			out, err := svc.Emby.ItemCounts(c.Request.Context(), uid)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -209,7 +182,7 @@ func embySaveDisplayPreferencesHandler(_ *service.Container) gin.HandlerFunc {
 func embyShowSeasonsHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		params := service.ItemsParams{
-			UserID:   firstQueryValue(c, "UserId", "userId"),
+			UserID:   embyEffectiveUserID(c),
 			ParentID: c.Param("id"),
 			Limit:    500,
 		}
@@ -230,7 +203,7 @@ func embyShowEpisodesHandler(svc *service.Container) gin.HandlerFunc {
 			parentID = c.Param("id")
 		}
 		params := service.ItemsParams{
-			UserID:           firstQueryValue(c, "UserId", "userId"),
+			UserID:           embyEffectiveUserID(c),
 			ParentID:         parentID,
 			IncludeItemTypes: []string{"Episode"},
 			Recursive:        true,
