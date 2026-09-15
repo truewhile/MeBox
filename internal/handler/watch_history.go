@@ -92,13 +92,14 @@ func historyStatsHandler(svc *service.Container) gin.HandlerFunc {
 func historyContinueHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		uid, _ := c.Get(middleware.CtxUserID)
+		userID := toString(uid)
 		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
 		if limit <= 0 || limit > 50 {
 			limit = 10
 		}
 		var rows []model.PlaybackHistory
 		if err := svc.Repo.DB.
-			Where("user_id = ? AND completed = ?", toString(uid), false).
+			Where("user_id = ? AND completed = ?", userID, false).
 			Order("watched_at desc").
 			Limit(limit).
 			Find(&rows).Error; err != nil {
@@ -116,58 +117,49 @@ func historyContinueHandler(svc *service.Container) gin.HandlerFunc {
 		}
 		mIdx := make(map[string]model.Media, len(media))
 		for _, m := range media {
-			if !mediaVisibleForRequest(c, svc, &m) {
-				continue
-			}
 			mIdx[m.ID] = m
 		}
 		out := make([]gin.H, 0, len(rows))
+		staleIDs := make([]string, 0)
 		for _, r := range rows {
 			m, ok := mIdx[r.MediaID]
-			if !ok {
-				if svc.EmbyRemote != nil && service.IsEmbyRemoteID(r.MediaID) {
-					mountID, remoteID, _ := service.DecodeEmbyRemoteID(r.MediaID)
-					if mount, acct, _ := svc.EmbyRemote.ResolveMount(c.Request.Context(), mountID); mount != nil && acct != nil {
-						if rm, err := svc.EmbyRemote.RemoteMediaDetail(c.Request.Context(), mount, acct, remoteID); err == nil && rm != nil {
-							if mediaVisibleForRequest(c, svc, rm) {
-								out = append(out, gin.H{
-									"history": r,
-									"media":   *rm,
-								})
-							}
-							continue
-						}
-					}
-				}
-				fallback := fallbackHistoryMedia(r.MediaID)
-				if fallback != nil {
+			if ok {
+				if mediaVisibleForRequest(c, svc, &m) {
 					out = append(out, gin.H{
 						"history": r,
-						"media":   *fallback,
+						"media":   m,
 					})
 				}
 				continue
 			}
-			out = append(out, gin.H{
-				"history": r,
-				"media":   m,
-			})
+
+			if svc.EmbyRemote != nil && service.IsEmbyRemoteID(r.MediaID) {
+				mountID, remoteID, _ := service.DecodeEmbyRemoteID(r.MediaID)
+				mount, acct, resolveErr := svc.EmbyRemote.ResolveMount(c.Request.Context(), mountID)
+				if resolveErr == nil && mount != nil && acct != nil {
+					remoteMedia, detailErr := svc.EmbyRemote.RemoteMediaDetail(c.Request.Context(), mount, acct, remoteID)
+					if detailErr == nil && remoteMedia != nil {
+						if mediaVisibleForRequest(c, svc, remoteMedia) {
+							out = append(out, gin.H{
+								"history": r,
+								"media":   *remoteMedia,
+							})
+						}
+						continue
+					}
+				}
+			}
+
+			// 媒体记录已不存在。继续返回占位卡只会让用户点击后遇到 404，
+			// 因此清理这条失效播放记录，不再占用继续观看列表。
+			staleIDs = append(staleIDs, r.MediaID)
+		}
+		if len(staleIDs) > 0 {
+			_ = svc.Repo.DB.WithContext(c.Request.Context()).Unscoped().
+				Where("user_id = ? AND media_id IN ?", userID, staleIDs).
+				Delete(&model.PlaybackHistory{}).Error
 		}
 		c.JSON(http.StatusOK, out)
-	}
-}
-
-func fallbackHistoryMedia(mediaID string) *model.Media {
-	if mediaID == "" {
-		return nil
-	}
-	title := "媒体"
-	if service.IsEmbyRemoteID(mediaID) {
-		title = "远程媒体"
-	}
-	return &model.Media{
-		Base:  model.Base{ID: mediaID},
-		Title: title,
 	}
 }
 
