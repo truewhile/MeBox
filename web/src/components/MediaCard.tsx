@@ -4,6 +4,9 @@ import { Film, Play, Layers, Star } from 'lucide-react'
 import { imageURL } from '../api/client'
 import type { Media } from '../types'
 
+const ACTION_OVERLAY_CLASS =
+  'absolute right-2 top-2 z-20 flex flex-wrap justify-end gap-1 opacity-100 transition-opacity sm:pointer-events-none sm:opacity-0 sm:group-hover:pointer-events-auto sm:group-hover:opacity-100 sm:focus-within:pointer-events-auto sm:focus-within:opacity-100'
+
 // memo：父级状态变化（如轮播切图、其它卡片操作）不再级联重渲染所有卡片。
 // 注意 actions/renderActions 必须引用稳定（用 renderActions 传函数）memo 才生效。
 export const MediaCard = memo(function MediaCard({
@@ -153,7 +156,7 @@ export const MediaCard = memo(function MediaCard({
           {card}
         </button>
         {actionContent && (
-          <div className="absolute right-2 top-2 z-20 flex flex-wrap justify-end gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          <div className={ACTION_OVERLAY_CLASS}>
             {actionContent}
           </div>
         )}
@@ -167,7 +170,7 @@ export const MediaCard = memo(function MediaCard({
         <Link to={href} className="block">
           {card}
         </Link>
-        <div className="absolute right-2 top-2 z-20 flex flex-wrap justify-end gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+        <div className={ACTION_OVERLAY_CLASS}>
           {actionContent}
         </div>
       </div>

@@ -30,7 +30,7 @@ export function LibraryMovieActions({
   }
 
   return (
-    <>
+    <div className="hidden flex-wrap justify-end gap-1 sm:flex">
       <button title="智能刮削" disabled={busy} onClick={() => onSmartScrape(media)} className={buttonClass}>
         <Sparkles size={13} />
       </button>
@@ -46,6 +46,6 @@ export function LibraryMovieActions({
       <button title="删除" disabled={busy} onClick={() => onDelete(media)} className={`${buttonClass} hover:!bg-red-50 hover:!text-red-500`}>
         <Trash2 size={13} />
       </button>
-    </>
+    </div>
   )
 }
