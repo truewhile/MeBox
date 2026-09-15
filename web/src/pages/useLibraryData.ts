@@ -6,6 +6,7 @@ import type { Library, Media } from '../types'
 import { peekLibrary, resolveLibrary } from '../utils/libraryCache'
 import { groupSeries, isEpisodeLike, type SeriesCard } from '../utils/groupSeries'
 import type { SortField, SortOrder } from '../utils/mediaSort'
+import { MAX_RESTORE_PAGES, readListPosition, writeListPosition } from '../hooks/useListPositionMemory'
 
 export function useLibraryData(
   libraryID: string,
@@ -42,6 +43,84 @@ export function useLibraryData(
   const libraryRef = useRef<Library | null>(null)
   const modeRef = useRef<'media' | 'series'>('media')
   const moreInFlightRef = useRef(false)
+
+  // 分页位置按「媒体库 + 排序」记忆：详情页返回、甚至换完排序再切回来，
+  // 都能回到上次加载到的页数。
+  const positionKey = `library:${libraryID}:${sortField}:${sortOrder}`
+
+  // 拉取并追加下一页。滚动哨兵、按钮和首屏分页恢复共用这一条路径，
+  // 避免两套分页逻辑各自算页码。
+  const appendNextPage = useCallback(async (options?: { remember?: boolean }) => {
+    const lib = libraryRef.current
+    if (!lib || !hasMoreRef.current) return false
+    const seq = requestSeqRef.current
+    const page = nextPageRef.current
+    try {
+      if (modeRef.current === 'series') {
+        const data = await libraryAPI.listSeries(libraryID, page, pageSizeFor(lib), {
+          sort: sortField,
+          order: sortOrder,
+        })
+        if (seq !== requestSeqRef.current) return false
+        const pageItems = data.items ?? []
+        setServerSeriesCards((prev) => [...prev, ...pageItems])
+        loadedCountRef.current += pageItems.length
+        totalRef.current = data.total ?? totalRef.current
+        nextPageRef.current = page + 1
+        hasMoreRef.current = pageItems.length > 0 && loadedCountRef.current < totalRef.current
+      } else {
+        const data = await libraryAPI.listMedia(libraryID, page, pageSizeFor(lib), {
+          sort: sortField,
+          order: sortOrder,
+        })
+        if (seq !== requestSeqRef.current) return false
+        const pageItems = data.items ?? []
+        setItems((prev) => [...prev, ...pageItems])
+        loadedCountRef.current += pageItems.length
+        totalRef.current = data.total ?? totalRef.current
+        nextPageRef.current = page + 1
+        hasMoreRef.current = pageItems.length > 0 && loadedCountRef.current < totalRef.current
+      }
+      setTotal(totalRef.current)
+      setHasMore(hasMoreRef.current)
+      if (options?.remember !== false) writeListPosition(positionKey, page)
+      return true
+    } catch {
+      if (seq === requestSeqRef.current) {
+        toast.error('媒体库加载失败')
+        hasMoreRef.current = false
+        setHasMore(false)
+      }
+      return false
+    }
+  }, [libraryID, positionKey, sortField, sortOrder])
+
+  const loadMore = useCallback(async (options?: { remember?: boolean }) => {
+    if (moreInFlightRef.current || !hasMoreRef.current) return
+    moreInFlightRef.current = true
+    setLoadingMore(true)
+    try {
+      await appendNextPage(options)
+    } finally {
+      moreInFlightRef.current = false
+      setLoadingMore(false)
+    }
+  }, [appendNextPage])
+
+  const loadAll = useCallback(async () => {
+    const seq = requestSeqRef.current
+    setLoadingMore(true)
+    try {
+      while (seq === requestSeqRef.current && hasMoreRef.current) {
+        // 一次拉全量（random 排序前的准备）不代表用户的分页位置，不写入记忆。
+        await loadMore({ remember: false })
+        if (seq !== requestSeqRef.current || !hasMoreRef.current) break
+        await yieldToBrowser()
+      }
+    } finally {
+      if (seq === requestSeqRef.current) setLoadingMore(false)
+    }
+  }, [loadMore])
 
   useEffect(() => {
     if (!libraryID) return
@@ -106,6 +185,19 @@ export function useLibraryData(
         setTotal(totalRef.current)
         hasMoreRef.current = loadedCountRef.current < totalRef.current
         setHasMore(hasMoreRef.current)
+
+        // 按记忆的分页位置把后续页补回来：从详情页返回时直接回到上次翻到的
+        // 位置，而不是只剩第一页。超出上限的部分继续交给底部哨兵按需加载。
+        const restoreTarget = Math.min(readListPosition(positionKey, 1), MAX_RESTORE_PAGES)
+        while (
+          !cancelled &&
+          seq === requestSeqRef.current &&
+          hasMoreRef.current &&
+          nextPageRef.current <= restoreTarget
+        ) {
+          const advanced = await appendNextPage()
+          if (!advanced) break
+        }
       } catch {
         if (!cancelled && seq === requestSeqRef.current) {
           toast.error('媒体库加载失败')
@@ -122,7 +214,7 @@ export function useLibraryData(
       cancelled = true
       requestSeqRef.current += 1
     }
-  }, [libraryID, reloadTick, sortField, sortOrder])
+  }, [appendNextPage, libraryID, positionKey, reloadTick, sortField, sortOrder])
 
   useEffect(() => {
     if (!libraryID || !isSeriesLibrary || !selectedSeries) {
@@ -145,65 +237,6 @@ export function useLibraryData(
       })
     return () => { cancelled = true }
   }, [libraryID, isSeriesLibrary, selectedSeries])
-
-  const loadMore = useCallback(async () => {
-    const lib = libraryRef.current
-    if (!lib || moreInFlightRef.current || !hasMoreRef.current) return
-    const seq = requestSeqRef.current
-    moreInFlightRef.current = true
-    setLoadingMore(true)
-    try {
-      const page = nextPageRef.current
-      if (modeRef.current === 'series') {
-        const data = await libraryAPI.listSeries(libraryID, page, pageSizeFor(lib), {
-          sort: sortField,
-          order: sortOrder,
-        })
-        if (seq !== requestSeqRef.current) return
-        const pageItems = data.items ?? []
-        setServerSeriesCards((prev) => [...prev, ...pageItems])
-        loadedCountRef.current += pageItems.length
-        totalRef.current = data.total ?? totalRef.current
-        nextPageRef.current = page + 1
-        hasMoreRef.current = pageItems.length > 0 && loadedCountRef.current < totalRef.current
-      } else {
-        const data = await libraryAPI.listMedia(libraryID, page, pageSizeFor(lib), {
-          sort: sortField,
-          order: sortOrder,
-        })
-        if (seq !== requestSeqRef.current) return
-        const pageItems = data.items ?? []
-        setItems((prev) => [...prev, ...pageItems])
-        loadedCountRef.current += pageItems.length
-        totalRef.current = data.total ?? totalRef.current
-        nextPageRef.current = page + 1
-        hasMoreRef.current = pageItems.length > 0 && loadedCountRef.current < totalRef.current
-      }
-      setTotal(totalRef.current)
-      setHasMore(hasMoreRef.current)
-    } catch {
-      toast.error('媒体库加载失败')
-      hasMoreRef.current = false
-      setHasMore(false)
-    } finally {
-      moreInFlightRef.current = false
-      setLoadingMore(false)
-    }
-  }, [libraryID, sortField, sortOrder])
-
-  const loadAll = useCallback(async () => {
-    const seq = requestSeqRef.current
-    setLoadingMore(true)
-    try {
-      while (seq === requestSeqRef.current && hasMoreRef.current) {
-        await loadMore()
-        if (seq !== requestSeqRef.current || !hasMoreRef.current) break
-        await yieldToBrowser()
-      }
-    } finally {
-      if (seq === requestSeqRef.current) setLoadingMore(false)
-    }
-  }, [loadMore])
 
   const reloadCurrentLibrary = useCallback(() => {
     setReloadTick((tick) => tick + 1)

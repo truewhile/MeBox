@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import {
   ArrowRight,
   ChevronLeft,
@@ -20,6 +20,7 @@ import {
 import { imageURL } from '../api/client'
 import { useInViewOnce } from '../hooks/useInViewOnce'
 import { useLazyPreviewBatch } from '../hooks/useLazyPreviewBatch'
+import { useRememberedListPosition } from '../hooks/useListPositionMemory'
 import { MediaCard } from '../components/MediaCard'
 import type { HistoryItem } from '../api/playback'
 import type { Library, Media } from '../types'
@@ -371,7 +372,13 @@ export function HomeLibrariesSection({
   title?: string
 }) {
   const PAGE_SIZE = 20
-  const [currentPage, setCurrentPage] = useState(1)
+  // 分页位置按路由分别记忆：首页「媒体库」和 /libraries 的「媒体库入口」
+  // 各自保留自己的页码，进入媒体库详情再返回时不会掉回第一页。
+  const { pathname } = useLocation()
+  const [currentPage, setCurrentPage] = useRememberedListPosition(
+    `libraries-grid:${pathname}`,
+    1,
+  )
   const totalPages = Math.max(1, Math.ceil(libraries.length / PAGE_SIZE))
   const effectivePage = Math.min(currentPage, totalPages)
   const queuePreview = useLazyPreviewBatch((ids) => onNeedPreviews?.(ids, 2))

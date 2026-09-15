@@ -1,10 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { Library as LibraryIcon, RefreshCw, Sparkles } from 'lucide-react'
 
 import { EpisodeArtworkToggle } from '../components/EpisodeArtworkToggle'
+import { useRememberedListPosition } from '../hooks/useListPositionMemory'
 import { HomeLibrariesSection, HomeLibraryRowSection } from './HomePageSections'
 import type { LibraryPreview } from './librariesPageModel'
+
+// 返回媒体库列表时最多一次性解锁的货架数量：滚动到很深的位置后回来
+// 仍能落到原处，同时避免一次渲染过多货架。上限之外的继续按需解锁。
+const MAX_RESTORED_SHELVES = 15
 
 export function LibrariesHeader({
   previewCount,
@@ -100,7 +105,12 @@ export function LibrariesContent({
   // 下方媒体库货架继续按需解锁：首屏先展示前 3 个，滚动接近底部再加载 2 个。
   const INITIAL_SHELVES = 3
   const STEP_SHELVES = 2
-  const [visibleCount, setVisibleCount] = useState(INITIAL_SHELVES)
+  // 货架解锁数量同样跨路由记忆：进入媒体库详情再返回不会从头解锁。
+  const [visibleCount, setVisibleCount] = useRememberedListPosition(
+    'libraries-shelves',
+    INITIAL_SHELVES,
+    MAX_RESTORED_SHELVES,
+  )
   const sentinelRef = useRef<HTMLButtonElement | null>(null)
   const userScrolledRef = useRef(false)
 
@@ -109,7 +119,7 @@ export function LibrariesContent({
       if (prev >= previews.length) return prev
       return Math.min(prev + STEP_SHELVES, previews.length)
     })
-  }, [previews.length])
+  }, [previews.length, setVisibleCount])
 
   useEffect(() => {
     const currentTargets = previews.slice(0, visibleCount).map((preview) => preview.library.id)
