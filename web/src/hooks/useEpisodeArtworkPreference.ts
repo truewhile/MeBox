@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateA
 import toast from 'react-hot-toast'
 
 import { adminAPI } from '../api/admin'
+import { useAuthStore } from '../stores/auth'
 
 const SETTING_KEY = 'scrape.episode_images'
 
@@ -13,8 +14,11 @@ export function useEpisodeArtworkPreference(): [boolean, Dispatch<SetStateAction
   const enabledRef = useRef(false)
   const changedLocally = useRef(false)
   const saveQueue = useRef(Promise.resolve())
+  const isAdmin = useAuthStore((state) => state.user?.role === 'admin')
 
   useEffect(() => {
+    if (!isAdmin) return
+
     let active = true
     adminAPI.listSettings()
       .then((settings) => {
@@ -32,9 +36,11 @@ export function useEpisodeArtworkPreference(): [boolean, Dispatch<SetStateAction
     return () => {
       active = false
     }
-  }, [])
+  }, [isAdmin])
 
   const setEnabled = useCallback((nextValue: SetStateAction<boolean>) => {
+    if (!isAdmin) return
+
     const next = typeof nextValue === 'function' ? nextValue(enabledRef.current) : nextValue
     if (enabledRef.current === next) return
     changedLocally.current = true
@@ -47,7 +53,7 @@ export function useEpisodeArtworkPreference(): [boolean, Dispatch<SetStateAction
       .catch(() => {
         toast.error('保存每集图片设置失败')
       })
-  }, [])
+  }, [isAdmin])
 
   return [enabled, setEnabled]
 }
