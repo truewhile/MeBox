@@ -40,6 +40,23 @@ export function shouldRememberScroll(pathname: string): boolean {
 }
 
 /**
+ * 路由切换时 Outlet 内容变矮，浏览器会把共享滚动容器的 scrollTop 钳低，
+ * 并可能同步触发 scroll 事件。这种“假滚动”不能写入存储，否则返回时永远回到顶部。
+ */
+export function shouldPersistScrollSample(input: {
+  current: number
+  lastSaved: number
+  height: number
+  lastHeight: number
+}): boolean {
+  const { current, lastSaved, height, lastHeight } = input
+  if (height + 1 < lastHeight && current < lastSaved) {
+    return false
+  }
+  return true
+}
+
+/**
  * 记住列表页的滚动位置。页面内容会异步长高，因此恢复期间会监听内容高度，
  * 直到目标位置可达；期间用户主动滚动会立即接管，避免和恢复逻辑抢滚动条。
  */
@@ -61,6 +78,7 @@ export function useScrollMemory(pathname: string, userKey = 'anonymous'): void {
     let restoreFrame = 0
     let restorePumpUntil = 0
     let lastSaved = saved
+    let lastHeight = el.scrollHeight
 
     const stopRestore = () => {
       if (restoreFrame) {
@@ -80,6 +98,7 @@ export function useScrollMemory(pathname: string, userKey = 'anonymous'): void {
       restoring = false
       stopRestore()
       lastSaved = Math.round(el.scrollTop)
+      lastHeight = el.scrollHeight
       writeScrollPosition(key, lastSaved)
     }
 
@@ -108,6 +127,19 @@ export function useScrollMemory(pathname: string, userKey = 'anonymous'): void {
     const saveNow = () => {
       if (restoring) return
       const current = Math.round(el.scrollTop)
+      const height = el.scrollHeight
+      if (
+        !shouldPersistScrollSample({
+          current,
+          lastSaved,
+          height,
+          lastHeight,
+        })
+      ) {
+        lastHeight = height
+        return
+      }
+      lastHeight = height
       if (current === lastSaved) return
       lastSaved = current
       writeScrollPosition(key, current)
@@ -118,6 +150,7 @@ export function useScrollMemory(pathname: string, userKey = 'anonymous'): void {
       restoring = false
       stopRestore()
       lastSaved = Math.round(el.scrollTop)
+      lastHeight = el.scrollHeight
       writeScrollPosition(key, lastSaved)
     }
 
@@ -172,6 +205,8 @@ export function useScrollMemory(pathname: string, userKey = 'anonymous'): void {
       window.removeEventListener('touchstart', cancelRestore, true)
       window.removeEventListener('keydown', onKeyDown, true)
       stopRestore()
+      // 清理时写入最后一次有效位置，避免依赖已被钳制的 el.scrollTop。
+      writeScrollPosition(key, lastSaved)
     }
   }, [pathname, userKey])
 }
