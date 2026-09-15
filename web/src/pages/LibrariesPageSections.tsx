@@ -9,6 +9,7 @@ import type { LibraryPreview } from './librariesPageModel'
 export function LibrariesHeader({
   previewCount,
   total,
+  isAdmin,
   repairMsg,
   repairEpisodeArtwork,
   repairing,
@@ -18,6 +19,7 @@ export function LibrariesHeader({
 }: {
   previewCount: number
   total: number
+  isAdmin: boolean
   repairMsg: string
   repairEpisodeArtwork: boolean
   repairing: boolean
@@ -33,49 +35,53 @@ export function LibrariesHeader({
           共 {previewCount} 个目录 · {total.toLocaleString()} 个条目。每个目录直接展示最新入库内容。
         </p>
       </div>
-      <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-        {repairMsg && <span className="w-full text-xs text-ink-50">{repairMsg}</span>}
-        <EpisodeArtworkToggle
-          checked={repairEpisodeArtwork}
-          onChange={onRepairEpisodeArtworkChange}
-          title="关闭后仍会获取主海报和每集文字元数据，只跳过每集图片"
-          className="h-9 sm:h-10 text-xs sm:text-sm"
-        />
-        <button
-          type="button"
-          onClick={onRepairRescrape}
-          disabled={repairing}
-          className="btn-outline !px-3 !py-1.5 text-xs sm:!px-4 sm:!py-2.5 sm:text-sm disabled:cursor-not-allowed disabled:opacity-60"
-          title="从媒体路径回填缺失/错误的外部 ID，再批量重刮整库"
-        >
-          <RefreshCw size={14} className={repairing ? 'animate-spin' : ''} />
-          {repairing ? '正在启动…' : '全库修复+重刮'}
-        </button>
-        <Link
-          to="/scraper/queue"
-          className="btn-outline inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs sm:!px-4 sm:!py-2.5 sm:text-sm"
-          title="查看正在进行的刮削任务与进度"
-        >
-          <Sparkles size={14} className="text-brand-500" />
-          <span>刮削队列</span>
-        </Link>
-        <button
-          type="button"
-          onClick={onManageLibraries}
-          className="btn-outline !px-3 !py-1.5 text-xs sm:!px-4 sm:!py-2.5 sm:text-sm"
-        >
-          管理媒体库
-        </button>
-      </div>
+      {isAdmin && (
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+          {repairMsg && <span className="w-full text-xs text-ink-50">{repairMsg}</span>}
+          <EpisodeArtworkToggle
+            checked={repairEpisodeArtwork}
+            onChange={onRepairEpisodeArtworkChange}
+            title="关闭后仍会获取主海报和每集文字元数据，只跳过每集图片"
+            className="h-9 sm:h-10 text-xs sm:text-sm"
+          />
+          <button
+            type="button"
+            onClick={onRepairRescrape}
+            disabled={repairing}
+            className="btn-outline !px-3 !py-1.5 text-xs sm:!px-4 sm:!py-2.5 sm:text-sm disabled:cursor-not-allowed disabled:opacity-60"
+            title="从媒体路径回填缺失/错误的外部 ID，再批量重刮整库"
+          >
+            <RefreshCw size={14} className={repairing ? 'animate-spin' : ''} />
+            {repairing ? '正在启动…' : '全库修复+重刮'}
+          </button>
+          <Link
+            to="/scraper/queue"
+            className="btn-outline inline-flex items-center gap-1.5 !px-3 !py-1.5 text-xs sm:!px-4 sm:!py-2.5 sm:text-sm"
+            title="查看正在进行的刮削任务与进度"
+          >
+            <Sparkles size={14} className="text-brand-500" />
+            <span>刮削队列</span>
+          </Link>
+          <button
+            type="button"
+            onClick={onManageLibraries}
+            className="btn-outline !px-3 !py-1.5 text-xs sm:!px-4 sm:!py-2.5 sm:text-sm"
+          >
+            管理媒体库
+          </button>
+        </div>
+      )}
     </div>
   )
 }
 
-export function LibrariesEmptyState() {
+export function LibrariesEmptyState({ isAdmin = false }: { isAdmin?: boolean }) {
   return (
     <div className="flex flex-col items-center justify-center rounded-3xl border border-dashed border-[var(--app-border)] bg-[var(--app-panel)] py-24 text-center">
       <LibraryIcon className="mb-4 h-12 w-12 text-[var(--app-muted)]" />
-      <p className="text-sm text-[var(--app-muted)]">暂无媒体库，请到管理后台添加目录。</p>
+      <p className="text-sm text-[var(--app-muted)]">
+        {isAdmin ? '暂无媒体库，请到管理后台添加目录。' : '暂无可用媒体库。'}
+      </p>
     </div>
   )
 }

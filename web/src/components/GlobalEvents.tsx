@@ -37,6 +37,7 @@ export function GlobalEvents() {
       }
     }
     if (topic === 'scrape' && p.finished) {
+      if (role !== 'admin') return
       const processed = Number(p.processed ?? 0)
       const matched = Number(p.matched ?? 0)
       const failed = Number(p.failed ?? 0)
@@ -51,6 +52,7 @@ export function GlobalEvents() {
       }
     }
     if (topic === 'subscription') {
+      if (role !== 'admin') return
       const queued = (p.queued as number | undefined) ?? 0
       if (queued > 0) toast.success(`订阅「${p.name}」已加入 ${queued} 项下载`)
     }
