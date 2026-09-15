@@ -26,6 +26,13 @@ func embyUserID(c *gin.Context) string {
 	return ""
 }
 
+// embyEffectiveUserID 返回当前鉴权用户。收藏、续播、播放进度等用户态数据必须
+// 绑定到登录身份；路径/Query 里的 UserId 只是 Emby URL 形态兼容，不能覆盖鉴权结果，
+// 否则多用户会串到同一个 UserId 上。
+func embyEffectiveUserID(c *gin.Context) string {
+	return embyUserID(c)
+}
+
 const embyCompatSessionTTL = 30 * time.Minute
 
 type embyCompatSession struct {

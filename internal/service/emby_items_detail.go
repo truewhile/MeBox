@@ -38,14 +38,6 @@ func (e *EmbyService) Item(ctx context.Context, mediaID, userID string) (map[str
 		if err := e.mergeRemoteUserData(ctx, userID, out); err != nil {
 			return nil, err
 		}
-		if favorite, _ := IsUserFavorite(ctx, e.repo, userID, mediaID); favorite {
-			userData, _ := out["UserData"].(map[string]any)
-			if userData == nil {
-				userData = map[string]any{}
-				out["UserData"] = userData
-			}
-			userData["IsFavorite"] = true
-		}
 		return out, nil
 	}
 	if lib, err := e.repo.Library.FindByID(ctx, mediaID); err != nil {
@@ -466,10 +458,24 @@ func (e *EmbyService) resumableItems(ctx context.Context, p ItemsParams) (map[st
 		return map[string]any{"Items": []any{}, "TotalRecordCount": int64(0), "StartIndex": p.StartIndex}, nil
 	}
 
+	mediaIDs := make([]string, 0, len(hist))
 	localIDs := make([]string, 0, len(hist))
 	for _, h := range hist {
+		mediaIDs = append(mediaIDs, h.MediaID)
 		if !IsEmbyRemoteID(h.MediaID) {
 			localIDs = append(localIDs, h.MediaID)
+		}
+	}
+	favSet := map[string]bool{}
+	if len(mediaIDs) > 0 {
+		var favs []model.Favorite
+		if err := e.repo.DB.WithContext(ctx).
+			Where("user_id = ? AND media_id IN ?", p.UserID, mediaIDs).
+			Find(&favs).Error; err != nil {
+			return nil, err
+		}
+		for _, fav := range favs {
+			favSet[fav.MediaID] = true
 		}
 	}
 	byID := map[string]*model.Media{}
@@ -498,7 +504,7 @@ func (e *EmbyService) resumableItems(ctx context.Context, p ItemsParams) (map[st
 				continue
 			}
 			localTotal++
-			slots = append(slots, resumeSlot{item: e.itemPayload(ctx, m, false, h.PositionMs, false)})
+			slots = append(slots, resumeSlot{item: e.itemPayload(ctx, m, favSet[h.MediaID], h.PositionMs, false)})
 			continue
 		}
 		if e.remote == nil || !IsEmbyRemoteID(h.MediaID) {
@@ -559,7 +565,7 @@ func (e *EmbyService) resumableItems(ctx context.Context, p ItemsParams) (map[st
 					continue
 				}
 			}
-			item["UserData"] = mergedRemoteUserData(item["UserData"], &f.hist)
+			item["UserData"] = applyMeBoxUserData(item["UserData"], &f.hist, favSet[f.hist.MediaID])
 			slots[i].item = item
 		}
 	}

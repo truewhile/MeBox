@@ -10,10 +10,7 @@ import (
 
 func embyViewsHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		uid := c.Param("userId")
-		if uid == "" {
-			uid = embyUserID(c)
-		}
+		uid := embyEffectiveUserID(c)
 		out, err := svc.Emby.Views(c.Request.Context(), uid)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

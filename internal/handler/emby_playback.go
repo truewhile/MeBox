@@ -13,10 +13,7 @@ import (
 
 func embyPlaybackInfoHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		uid := c.Param("userId")
-		if uid == "" {
-			uid = embyUserID(c)
-		}
+		uid := embyEffectiveUserID(c)
 		out, err := svc.Emby.PlaybackInfo(c.Request.Context(), c.Param("id"), uid)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -47,10 +44,7 @@ func embySubtitleStreamHandler(svc *service.Container) gin.HandlerFunc {
 			}
 			return
 		}
-		uid := c.Param("userId")
-		if uid == "" {
-			uid = embyUserID(c)
-		}
+		uid := embyEffectiveUserID(c)
 		ctx := c.Request.Context()
 		// The official-format route carries a :format suffix (Stream.ass /
 		// Stream.vtt); prefer it for the Content-Type when present, otherwise

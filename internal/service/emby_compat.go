@@ -205,6 +205,10 @@ func (e *EmbyService) Items(ctx context.Context, p ItemsParams) (map[string]any,
 			if containsEmbyFilter(p.Filters, "IsFavorite") {
 				return e.favoriteItems(ctx, p)
 			}
+			// 继续观看必须走 MeBox 本地 PlaybackHistory，不能转发到远程共用账号。
+			if containsEmbyFilter(p.Filters, "IsResumable") {
+				return e.resumableItems(ctx, p)
+			}
 			mountID, _, _ := DecodeEmbyRemoteID(p.ParentID)
 			mount, acct, _ := e.remote.ResolveMount(ctx, mountID)
 			if mount == nil || acct == nil {

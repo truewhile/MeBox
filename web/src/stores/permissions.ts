@@ -53,8 +53,9 @@ export const usePermissionStore = create<PermissionState>((set, get) => ({
 
   hasPermission: (key: string) => {
     const state = get()
-    // Super user (admin or plus) has all permissions
-    if (state.isSuper) {
+    // Only admins implicitly have every capability in the UI.
+    // Plus / is_super must not reveal scrape/organize/delete controls.
+    if (state.role === 'admin') {
       return true
     }
     return (state.permissions ?? {})[key] === true

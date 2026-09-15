@@ -5,6 +5,7 @@ import { toolsAPI } from '../api/tools'
 import { openManageLibrariesDialog } from '../components/manageLibrariesDialog'
 import { useEpisodeArtworkPreference } from '../hooks/useEpisodeArtworkPreference'
 import { usePinnedLibraries } from '../hooks/usePinnedLibraries'
+import { useAuthStore } from '../stores/auth'
 import {
   LibrariesContent,
   LibrariesEmptyState,
@@ -18,6 +19,7 @@ import { sortLibraryPreviews } from '../utils/pinnedLibraries'
 import { partitionPreviewIDs } from '../utils/remoteEmby'
 
 export function LibrariesPage() {
+  const isAdmin = useAuthStore((state) => state.user?.role === 'admin')
   const [libraries, setLibraries] = useState<Library[]>([])
   const [libraryData, setLibraryData] = useState<Record<string, { cards: SeriesCard[]; total: number }>>({})
   const { pinnedIds, loading: pinnedLoading, togglePin } = usePinnedLibraries()
@@ -103,7 +105,7 @@ export function LibrariesPage() {
   }, [])
 
   async function handleRepairRescrape() {
-    if (repairing) return
+    if (!isAdmin || repairing) return
     setRepairing(true)
     setRepairMsg('')
     try {
@@ -117,6 +119,7 @@ export function LibrariesPage() {
   }
 
   const handleManageLibraries = async () => {
+    if (!isAdmin) return
     await openManageLibrariesDialog()
     await loadLibraries({ force: true })
   }
@@ -154,6 +157,7 @@ export function LibrariesPage() {
       <LibrariesHeader
         previewCount={previews.length}
         total={total}
+        isAdmin={isAdmin}
         repairMsg={repairMsg}
         repairEpisodeArtwork={repairEpisodeArtwork}
         repairing={repairing}
@@ -163,7 +167,7 @@ export function LibrariesPage() {
       />
 
       {previews.length === 0 ? (
-        <LibrariesEmptyState />
+        <LibrariesEmptyState isAdmin={isAdmin} />
       ) : (
         <LibrariesContent
           previews={sortedPreviews}
