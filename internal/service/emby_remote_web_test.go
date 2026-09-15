@@ -121,8 +121,13 @@ func TestRemoteSeriesCardsAutoAuthOnFirstBrowse(t *testing.T) {
 		}
 		if r.URL.Path == "/emby/Users/real-user-guid/Items" {
 			q := r.URL.Query()
-			if q.Get("ParentId") != "view-1" || q.Get("IncludeItemTypes") != "Series" {
+			if q.Get("IncludeItemTypes") != "Series" || q.Get("ParentId") != "view-1" {
 				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if q.Get("Recursive") != "true" {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte("expected Recursive=true"))
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -231,6 +236,11 @@ func TestRemoteSeriesCardsResolveUserIDFromAPIKey(t *testing.T) {
 			return
 		}
 		if r.URL.Path == "/emby/Users/real-user-guid/Items" {
+			q := r.URL.Query()
+			if q.Get("ParentId") != "view-2" || q.Get("Recursive") != "true" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"TotalRecordCount": 1,
@@ -674,6 +684,11 @@ func TestRemoteSeriesCardsFetchAllPages(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		query := r.URL.Query()
+		if query.Get("Recursive") != "true" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte("expected Recursive=true"))
+			return
+		}
 		startIndex, _ := strconv.Atoi(query.Get("StartIndex"))
 		limit, _ := strconv.Atoi(query.Get("Limit"))
 		requests.Add(1)
@@ -740,6 +755,84 @@ func TestRemoteSeriesCardsFetchAllPages(t *testing.T) {
 	}
 }
 
+// 与 Emby 客户端一致：Recursive=true 拉全库 Series，并过滤 anime 等中间容器。
+func TestRemoteSeriesCardsRecursiveFiltersAnimeContainers(t *testing.T) {
+	var sawRecursive atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.TrimPrefix(r.URL.Path, "/emby") != "/Users/remote-user/Items" {
+			http.NotFound(w, r)
+			return
+		}
+		q := r.URL.Query()
+		if q.Get("ParentId") != "view-2023" || q.Get("IncludeItemTypes") != "Series" {
+			http.NotFound(w, r)
+			return
+		}
+		if q.Get("Recursive") == "true" {
+			sawRecursive.Store(true)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"TotalRecordCount": 5,
+			"Items": []map[string]any{
+				{"Id": "c0", "Name": "anime", "Type": "Series", "Path": "https://cdn/0/anime/", "RecursiveItemCount": 3086},
+				{"Id": "c1", "Name": "anime", "Type": "Series", "Path": "https://cdn/1/anime/", "RecursiveItemCount": 567},
+				{"Id": "s-a", "Name": "数码宝贝 BEATBREAK", "Type": "Series", "Path": "https://cdn/0/anime/digimon", "RecursiveItemCount": 24},
+				{"Id": "s-b", "Name": "活死喵之夜", "Type": "Series", "Path": "https://cdn/0/anime/nyaight", "RecursiveItemCount": 12},
+				{"Id": "s-c", "Name": "药屋少女的呢喃", "Type": "Series", "Path": "https://cdn/1/anime/kusuriya", "RecursiveItemCount": 51},
+			},
+		})
+	}))
+	defer server.Close()
+
+	db := newServiceTestDB(t, &model.StrmAccount{}, &model.EmbyMount{})
+	repos := repository.New(db)
+	svc := NewEmbyRemoteService(&config.Config{}, zap.NewNop(), repos, NewCryptoService("", zap.NewNop()))
+
+	rawConfig, _ := json.Marshal(map[string]string{
+		"url":            server.URL,
+		"token":          "fake-token",
+		"remote_user_id": "remote-user",
+	})
+	acct := &model.StrmAccount{
+		Base:     model.Base{ID: "acct-recursive"},
+		Name:     "nijigem",
+		Provider: model.StrmProviderEmbyRemote,
+		Config:   string(rawConfig),
+		Enabled:  true,
+	}
+	if err := repos.StrmAccount.Create(t.Context(), acct); err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	mount := &model.EmbyMount{
+		Base:           model.Base{ID: "mount-recursive"},
+		AccountID:      acct.ID,
+		RemoteViewID:   "view-2023",
+		RemoteViewName: "2023前 动漫",
+		CollectionType: "tvshows",
+		Enabled:        true,
+	}
+	if err := repos.EmbyMount.Create(t.Context(), mount); err != nil {
+		t.Fatalf("create mount: %v", err)
+	}
+
+	cards, err := svc.RemoteSeriesCards(t.Context(), mount, acct, mount.RemoteViewID)
+	if err != nil {
+		t.Fatalf("RemoteSeriesCards failed: %v", err)
+	}
+	if !sawRecursive.Load() {
+		t.Fatal("expected Recursive=true on remote Items request")
+	}
+	if len(cards) != 3 {
+		t.Fatalf("cards = %d, want 3 real series after filtering anime containers", len(cards))
+	}
+	for _, card := range cards {
+		if strings.EqualFold(card.Rep.Title, "anime") {
+			t.Fatalf("container title %q should have been filtered", card.Rep.Title)
+		}
+	}
+}
+
 // 首页「最新条目」卡片 key 必须与媒体库剧集列表的 key 一致，否则点击后
 // 媒体库页找不到目标剧集，只能退回整库列表。
 func TestRemoteLatestCardsKeyMatchesSeriesList(t *testing.T) {
@@ -751,6 +844,14 @@ func TestRemoteLatestCardsKeyMatchesSeriesList(t *testing.T) {
 			return
 		}
 		seriesQueryCalls.Add(1)
+		parentID := r.URL.Query().Get("ParentId")
+		if parentID == "series-latest" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Items":            []map[string]any{},
+				"TotalRecordCount": 0,
+			})
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"Items": []map[string]any{
 				{

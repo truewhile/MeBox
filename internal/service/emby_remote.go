@@ -880,6 +880,9 @@ func (r *EmbyRemoteService) RemoteLatestForDisplay(ctx context.Context, mount *m
 // RemoteLatestSeries 拉取剧集库最近更新的 Series。部分 Emby 服务不支持
 // DateLastContentAdded 或过滤 Series，此时回退到 Latest 并把 Episode 归并到
 // 对应 Series。
+//
+// 使用 Recursive=true 并跳过 anime/ 等中间容器，与 RemoteSeriesCards /
+// Emby 客户端列剧集方式一致。
 func (r *EmbyRemoteService) RemoteLatestSeries(ctx context.Context, mount *model.EmbyMount, acct *model.StrmAccount, remoteViewID string, limit int) ([]map[string]any, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
@@ -891,17 +894,32 @@ func (r *EmbyRemoteService) RemoteLatestSeries(ctx context.Context, mount *model
 	q := url.Values{}
 	q.Set("ParentId", remoteViewID)
 	q.Set("IncludeItemTypes", "Series")
-	q.Set("Recursive", "false")
+	q.Set("Recursive", "true")
 	q.Set("SortBy", "DateLastContentAdded")
 	q.Set("SortOrder", "Descending")
-	q.Set("Limit", strconv.Itoa(limit))
+	// 多取一些以便滤掉中间容器后仍够 limit。
+	q.Set("Limit", strconv.Itoa(limit*4))
 	q.Set("Fields", "Overview,Genres,ProviderIds,Path,RecursiveItemCount,SeriesPrimaryImage,DateCreated,DateLastMediaAdded,PremiereDate,ProductionYear,CommunityRating,CriticRating")
 	var body struct {
 		Items []map[string]any `json:"Items"`
 	}
 	if err := r.doGet(ctx, acct, cfg, "/Users/"+url.PathEscape(r.remoteUserID(cfg))+"/Items", q, &body); err == nil && len(body.Items) > 0 {
-		RewriteEmbyRemoteIDs(body.Items, mount.ID)
-		return body.Items, nil
+		filtered := make([]map[string]any, 0, limit)
+		for _, it := range body.Items {
+			name := remoteItemString(it, "Name")
+			path := remoteItemString(it, "Path")
+			if remoteSeriesItemLooksLikeContainer(name, path) {
+				continue
+			}
+			filtered = append(filtered, it)
+			if len(filtered) >= limit {
+				break
+			}
+		}
+		if len(filtered) > 0 {
+			RewriteEmbyRemoteIDs(filtered, mount.ID)
+			return filtered, nil
+		}
 	}
 
 	items, err := r.RemoteLatest(ctx, mount, acct, remoteViewID, limit)

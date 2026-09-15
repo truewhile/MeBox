@@ -516,17 +516,17 @@ const remoteSeriesPageSize = 200
 
 // RemoteSeriesCards 远程剧集库的系列卡片（ChildCount 作为集数）。
 //
-// 远程 Emby 的 Series DTO 不会返回 DateLastMediaAdded 字段（即使请求 Fields
-// 也缺失），但其服务端排序支持 SortBy=DateLastContentAdded——即客户端"上次
-// 添加集日期"排序。因此这里直接按该键倒序分页拉全量，返回的卡片顺序与对方
-// Emby 客户端选择"上次添加集日期"完全一致；LastAddedAt 在远程提供字段时
-// 才填充，否则保持 nil（前端对无该值的卡片维持服务器顺序，不再回退加入日期）。
+// 与 Emby 客户端一致：IncludeItemTypes=Series + Recursive=true，按
+// DateLastContentAdded 倒序分页拉全库剧集。多媒体根下的 anime/ 等中间容器
+// 若偶发出现在结果里则过滤掉；LastAddedAt 仅在远程提供 DateLastMediaAdded
+// 时填充。
 func (r *EmbyRemoteService) RemoteSeriesCards(ctx context.Context, mount *model.EmbyMount, acct *model.StrmAccount, remoteViewID string) ([]SeriesCard, error) {
 	cfg, err := r.remoteConfigWithToken(ctx, acct)
 	if err != nil {
 		return nil, err
 	}
-	cacheKey := r.remoteCacheKey("series-cards", acct.ID, mount.ID, remoteViewID)
+	// v3：Recursive=true（对齐 Emby 客户端），与旧直属/下探缓存区分。
+	cacheKey := r.remoteCacheKey("series-cards-v3", acct.ID, mount.ID, remoteViewID)
 	var cached []SeriesCard
 	if r.cache != nil && r.cache.GetJSON(ctx, cacheKey, &cached) {
 		return cached, nil
@@ -534,7 +534,7 @@ func (r *EmbyRemoteService) RemoteSeriesCards(ctx context.Context, mount *model.
 	q := url.Values{}
 	q.Set("ParentId", remoteViewID)
 	q.Set("IncludeItemTypes", "Series")
-	q.Set("Recursive", "false")
+	q.Set("Recursive", "true")
 	q.Set("SortBy", "DateLastContentAdded")
 	q.Set("SortOrder", "Descending")
 	q.Set("Limit", strconv.Itoa(remoteSeriesPageSize))
@@ -554,9 +554,13 @@ func (r *EmbyRemoteService) RemoteSeriesCards(ctx context.Context, mount *model.
 			break
 		}
 		for _, it := range body.Items {
+			name := remoteItemString(it, "Name")
+			path := remoteItemString(it, "Path")
+			if remoteSeriesItemLooksLikeContainer(name, path) {
+				continue
+			}
 			RewriteEmbyRemoteIDs(it, mount.ID)
 			m := r.MapRemoteItemToMedia(ctx, mount, acct, cfg, it)
-			// 集数优先用递归条目数（ChildCount 只算直属 Season 文件夹数）。
 			count := remoteItemInt(it, "RecursiveItemCount")
 			if count == 0 {
 				count = remoteItemInt(it, "ChildCount")
@@ -577,7 +581,7 @@ func (r *EmbyRemoteService) RemoteSeriesCards(ctx context.Context, mount *model.
 				LastAddedAt: lastAdded,
 			})
 		}
-		if int64(len(cards)) >= body.TotalRecordCount || len(body.Items) < remoteSeriesPageSize {
+		if int64(startIndex+len(body.Items)) >= body.TotalRecordCount || len(body.Items) < remoteSeriesPageSize {
 			break
 		}
 	}
@@ -585,6 +589,14 @@ func (r *EmbyRemoteService) RemoteSeriesCards(ctx context.Context, mount *model.
 		r.cache.SetJSON(ctx, cacheKey, cards, r.remoteMediaCacheTTL())
 	}
 	return cards, nil
+}
+
+func remoteSeriesItemLooksLikeContainer(name, path string) bool {
+	if isEmbyGenericContainer(name) {
+		return true
+	}
+	base := pathBaseSlash(strings.TrimRight(strings.ReplaceAll(path, "\\", "/"), "/"))
+	return base != "" && isEmbyGenericContainer(base)
 }
 
 // RemoteLatestCards 远程库最新条目（首页预览卡片），映射 SeriesCard。
