@@ -17,10 +17,16 @@ import {
 import type { LibraryPreview } from './librariesPageModel'
 import type { Library } from '../types'
 import type { SeriesCard } from '../utils/groupSeries'
+import {
+  readLibraryListSort,
+  sortLibraryPreviewsByField,
+  writeLibraryListSort,
+  type LibraryListSortField,
+  type LibraryListSortOrder,
+} from '../utils/libraryListSort'
 import { fetchLibraries, invalidateLibraries, peekLibraries } from '../utils/libraryCache'
 import { ALL_TAG_ID, buildLibraryTagTabs, filterLibrariesByTag } from '../utils/libraryTags'
 import type { LibraryTag } from '../utils/libraryTags'
-import { sortLibraryPreviews } from '../utils/pinnedLibraries'
 import { partitionPreviewIDs } from '../utils/remoteEmby'
 
 export function LibrariesPage() {
@@ -33,6 +39,8 @@ export function LibrariesPage() {
   const [repairing, setRepairing] = useState(false)
   const [repairEpisodeArtwork, setRepairEpisodeArtwork] = useEpisodeArtworkPreference()
   const [repairMsg, setRepairMsg] = useState('')
+  const [sortField, setSortField] = useState<LibraryListSortField>(() => readLibraryListSort().field)
+  const [sortOrder, setSortOrder] = useState<LibraryListSortOrder>(() => readLibraryListSort().order)
 
   // 缓存每个库已加载到的预览数量：入口网格只需要 2 张，横向货架需要 10 张。
   const fetchedPreviewLimitsRef = useRef<Map<string, number>>(new Map())
@@ -146,7 +154,16 @@ export function LibrariesPage() {
     })
   }, [libraries, libraryData])
 
-  const sortedPreviews = useMemo(() => sortLibraryPreviews(previews, pinnedIds), [previews, pinnedIds])
+  const sortedPreviews = useMemo(
+    () => sortLibraryPreviewsByField(previews, pinnedIds, sortField, sortOrder),
+    [previews, pinnedIds, sortField, sortOrder],
+  )
+
+  const handleSortChange = useCallback((field: LibraryListSortField, order: LibraryListSortOrder) => {
+    setSortField(field)
+    setSortOrder(order)
+    writeLibraryListSort(field, order)
+  }, [])
 
   const handleTogglePin = useCallback((libraryId: string) => {
     void togglePin(libraryId)
@@ -180,6 +197,9 @@ export function LibrariesPage() {
         repairMsg={repairMsg}
         repairEpisodeArtwork={repairEpisodeArtwork}
         repairing={repairing}
+        sortField={sortField}
+        sortOrder={sortOrder}
+        onSortChange={handleSortChange}
         onRepairEpisodeArtworkChange={setRepairEpisodeArtwork}
         onRepairRescrape={handleRepairRescrape}
         onManageLibraries={handleManageLibraries}
@@ -228,7 +248,7 @@ export function LibrariesPage() {
   )
 }
 
-/** 按选中标签过滤媒体库预览（ALL_TAG_ID 时原样返回，保留置顶/手动排序）。 */
+/** 按选中标签过滤媒体库预览（ALL_TAG_ID 时原样返回，保留置顶/列表排序）。 */
 function filterPreviewsByTag(previews: LibraryPreview[], tags: LibraryTag[], tagId: string): LibraryPreview[] {
   if (!tagId || tagId === ALL_TAG_ID) return previews
   const ordered = filterLibrariesByTag(
