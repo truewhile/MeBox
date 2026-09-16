@@ -78,6 +78,23 @@ check('VR180 的 1:2 画幅为上下并排', vr180Ou.profile.stereo === 'ou')
 const topBottom = detectVr360Profile({ path: '/media/vr/vr360-top-bottom.mp4' })
 check('top-bottom 关键词为上下并排', topBottom.profile.stereo === 'ou')
 
+// 回归：真实媒体库里出现过的误判（单词里含 vr、分辨率写法含 360）。
+const valvrave = detectVr360Profile({
+  title: '革命机Valvrave',
+  path: '/media/anime/2013/[革命机] Valvrave the Liberator (2013)/01.mkv',
+})
+check('单词里的 vr 不误判（Valvrave）', !valvrave.confident)
+check('误判时仍给出可用的默认配置', profileOf(valvrave.profile) === 'equirect360/mono')
+
+const resolution360p = detectVr360Profile({ path: '/media/movie/movie-360p.mp4', width: 640, height: 360 })
+check('360p 分辨率写法不误判', !resolution360p.confident)
+
+const titleWithVrWord = detectVr360Profile({ title: '某动画 VR 特别篇', path: '/media/anime/01.mkv' })
+check('标题里的独立 VR 词元可识别', titleWithVrWord.confident)
+
+const ipvr = detectVr360Profile({ path: '/media/云下载/ipvr00192pl/ipvr00192.part2.mp4' })
+check('编号形态 ipvr00192 可识别', ipvr.confident && ipvr.profile.projection === 'equirect180')
+
 // ---------- 立体裁切与偏好归一化 ----------
 
 check('单眼不裁切', closeAll(vr360FrameUv('mono').scale, [1, 1]))

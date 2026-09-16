@@ -66,6 +66,10 @@ type Vr360StageProps = {
   uiVisible: boolean
   /** 轻触画面（未发生拖拽）时回调，与普通播放一致：唤出控制栏或切换播放。 */
   onSurfaceTap: () => void
+  /**
+   * 第一帧真正画出来时回调，每次挂载只上报一次（改投影方式/画幅布局不会重新上报），
+   * 调用方据此结束「正在启动」提示。
+   */
   onReady: () => void
   onError: (message: string) => void
   /** 用户调整投影方式/立体布局时回调，由播放页保存为下次进入的默认值。 */

@@ -174,38 +174,111 @@ func (s *StrmService) firstEnabledAccountOf(ctx context.Context, provider string
 	return nil, nil
 }
 
+// ErrStrmProxyNotApplicable 表示该媒体没有需要服务端转发的直链（本地文件本身同源）。
+var ErrStrmProxyNotApplicable = errors.New("strm proxy not applicable")
+
+// ProxyMediaDirect 把媒体行的网盘/STRM 直链解析为真实地址后由服务端反向代理给
+// 客户端，让浏览器拿到「同源」数据。画质与原文件完全一致，不触发任何转码。
+//
+// 用途：VR 全景播放要把视频帧读进 WebGL 纹理，而跨域直链（网盘 302 跳到 CDN）
+// 在浏览器里属于被污染的资源，WebGL 读取会抛 SecurityError；把流量经服务端转发
+// 是「原画 + VR」唯一可行的办法。
+func (s *StrmService) ProxyMediaDirect(ctx context.Context, w http.ResponseWriter, r *http.Request, m *model.Media) error {
+	if s == nil || m == nil {
+		return ErrStrmProxyNotApplicable
+	}
+	raw := strings.TrimSpace(m.STRMURL)
+	if raw == "" {
+		path := strings.TrimSpace(m.Path)
+		if !strings.HasSuffix(strings.ToLower(path), ".strm") {
+			return ErrStrmProxyNotApplicable
+		}
+		target, err := readLocalSTRMTarget(path)
+		if err != nil {
+			return err
+		}
+		raw = strings.TrimSpace(target)
+	}
+	if raw == "" {
+		return ErrStrmProxyNotApplicable
+	}
+	result, err := s.ResolvePlayTarget(ctx, raw)
+	if err != nil {
+		return err
+	}
+	switch {
+	case result.Link != nil && result.Link.URL != "":
+		return s.ProxyDirect(ctx, w, r, result.Link)
+	case result.RedirectURL != "":
+		return s.ProxyDirect(ctx, w, r, &cloud.DirectLink{URL: result.RedirectURL})
+	default:
+		// 本地文件（LocalPath）由静态文件处理器提供，本身就是同源。
+		return ErrStrmProxyNotApplicable
+	}
+}
+
 // ProxyDirect 反向代理渲染直链内容（保留 Range 请求头以支持拖动播放）。
 func (s *StrmService) ProxyDirect(ctx context.Context, w http.ResponseWriter, r *http.Request, link *cloud.DirectLink) error {
 	if link == nil || link.URL == "" {
 		return errors.New("空直链")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link.URL, nil)
+	method := http.MethodGet
+	if r != nil && r.Method == http.MethodHead {
+		method = http.MethodHead
+	}
+	req, err := http.NewRequestWithContext(ctx, method, link.URL, nil)
 	if err != nil {
 		return err
 	}
 	for k, v := range link.Headers {
 		req.Header.Set(k, v)
 	}
-	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
-		req.Header.Set("Range", rangeHeader)
+	if r != nil {
+		if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
+			req.Header.Set("Range", rangeHeader)
+		}
+		// 部分网盘直链按 UA 防盗链；解析时未绑定 UA 的直链沿用浏览器 UA 更稳。
+		if ua := strings.TrimSpace(r.Header.Get("User-Agent")); ua != "" && req.Header.Get("User-Agent") == "" {
+			req.Header.Set("User-Agent", ua)
+		}
 	}
 	resp, err := s.http.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	for _, header := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag"} {
+	for _, header := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified"} {
 		if value := resp.Header.Get(header); value != "" {
 			w.Header().Set(header, value)
 		}
 	}
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		w.WriteHeader(http.StatusOK)
-	} else {
-		w.WriteHeader(resp.StatusCode)
+	// 原样透传上游状态码：Range 请求必须回 206，改写成 200 会让浏览器误判
+	// 响应长度，拖动进度条时反复重新拉流。
+	w.WriteHeader(resp.StatusCode)
+	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
+		return nil
 	}
-	if resp.StatusCode == http.StatusPartialContent || resp.StatusCode == http.StatusOK {
-		_, _ = io.Copy(w, resp.Body)
+	if method == http.MethodHead {
+		return nil
 	}
-	return nil
+	// 边转发边 flush，避免大体积视频被 net/http 的写缓冲切成一段段卡顿。
+	writer := io.Writer(w)
+	if flusher, ok := w.(http.Flusher); ok {
+		writer = &flushWriter{writer: w, flusher: flusher}
+	}
+	_, err = io.Copy(writer, resp.Body)
+	return err
+}
+
+type flushWriter struct {
+	writer  io.Writer
+	flusher http.Flusher
+}
+
+func (f *flushWriter) Write(p []byte) (int, error) {
+	n, err := f.writer.Write(p)
+	if f.flusher != nil {
+		f.flusher.Flush()
+	}
+	return n, err
 }

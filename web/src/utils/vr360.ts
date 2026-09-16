@@ -93,15 +93,21 @@ export type Vr360Detection = {
 }
 
 // 关键词分两类：明确的关键词按子串匹配（"vr360" 里也含 "360"），
-// 容易误伤的两字母缩写按独立词元匹配（避免 "1ou" / "sivr" 之类误判）。
-const PANORAMA_SUBSTRINGS = ['360', 'equirect', 'insta360', 'pano', 'vuze', 'theta', '全景']
+// 容易误伤的两字母缩写按作品编号形态匹配。
+const PANORAMA_SUBSTRINGS = ['equirect', 'insta360', 'pano', 'vuze', 'theta', '全景']
 const FISHEYE_SUBSTRINGS = ['fisheye', '鱼眼']
 const VR180_SUBSTRINGS = ['vr180', '180vr', '180°', '180度', '半景']
 const SBS_SUBSTRINGS = ['side-by-side', 'sidebyside', 'side_by_side', '左右']
 const OU_SUBSTRINGS = ['over-under', 'top-bottom', 'topbottom', '上下']
-const VR_TOKENS = ['vr']
 const SBS_TOKENS = ['sbs', 'hsbs', 'lr']
 const OU_TOKENS = ['ou', 'tb', 'vou', 'tou']
+
+// 「VR」必须落在作品编号形态上，不能只是单词里的字母组合：
+//   vr180 / vr00192（后面跟数字）、sivr-270 / kmvr.mkv（跟在字母后并以非字母数字收尾）。
+// 这样 "Valvrave"、"VRoid" 这类单词不会被误判成 VR 素材。
+const VR_NAME_PATTERN = /vr[0-9]|[a-z]vr(?![a-z0-9])/
+// 「360」需要排除 "360p" 之类的分辨率写法和 "1360" 之类的数字片段。
+const PANORAMA_360_PATTERN = /(?<![0-9])360(?![0-9p])/
 
 function detectText(input: Vr360DetectInput): string {
   return [input.path, input.relativePath, input.originalName, input.title]
@@ -152,8 +158,10 @@ export function detectVr360Profile(input: Vr360DetectInput): Vr360Detection {
 
   const fisheye = hasSubstring(text, FISHEYE_SUBSTRINGS)
   const vr180 = hasSubstring(text, VR180_SUBSTRINGS)
-  const panorama = hasSubstring(text, PANORAMA_SUBSTRINGS)
-  const vrToken = hasToken(tokens, VR_TOKENS) || nameText.includes('vr')
+  const panorama =
+    hasSubstring(text, PANORAMA_SUBSTRINGS) || PANORAMA_360_PATTERN.test(text)
+  // 标题里只认独立的 "vr" 词元；文件名/路径里允许作品编号形态。
+  const vrToken = tokens.has('vr') || VR_NAME_PATTERN.test(nameText)
   const confident = fisheye || vr180 || panorama || vrToken
 
   let projection: Vr360Projection = DEFAULT_VR360_PROFILE.projection

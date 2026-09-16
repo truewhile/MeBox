@@ -33,7 +33,7 @@ import {
   type SubtitlePosition,
   type SubtitleStylePreset,
 } from '../utils/subtitleDisplay'
-import { pickPlayerMode, needsTranscodeForBrowser, isDirectStreamMedia, type PlayerMode } from './playerPageModel'
+import { pickPlayerMode, needsTranscodeForBrowser, isDirectStreamMedia, isStrmMedia, type PlayerMode } from './playerPageModel'
 import { classifyDirectPlayError } from './directPlayError'
 import { apiErrorMessage } from './StrmManagePage'
 import { PlayerTopBar } from './PlayerTopBar'
@@ -45,6 +45,7 @@ import { mediaVersionsOf } from '../utils/mediaVersion'
 import {
   detectVr360Profile,
   loadVr360Preference,
+  sameVr360Profile,
   saveVr360Preference,
   type Vr360Detection,
   type Vr360Profile,
@@ -108,6 +109,17 @@ export function PlayerPage() {
   const [vr360, setVr360] = useState<Vr360Profile | null>(null)
   const [vr360Detected, setVr360Detected] = useState(false)
   const vr360TouchedRef = useRef(false)
+  // VR 取帧失败后的自愈：只尝试一次「切到 HLS」，并在切换窗口内忽略重复报错。
+  const vr360TextureRetryUsedRef = useRef(false)
+  const vr360TextureRetryUntilRef = useRef(0)
+  // VR 全景下 STRM/网盘直连必须由服务端同源转发，浏览器才允许 WebGL 读取画面；
+  // 普通播放仍然 302 直连，避免把网盘流量压到服务器。放在 ref 里是为了让
+  // handleVideoError 里的 src 比对始终拿到最新值。
+  const vr360DirectProxy = Boolean(vr360) && isStrmMedia(media)
+  const vr360DirectProxyRef = useRef(vr360DirectProxy)
+  useEffect(() => {
+    vr360DirectProxyRef.current = vr360DirectProxy
+  }, [vr360DirectProxy])
   const [mode, setMode] = useState<PlayerMode>('direct')
   const [subs, setSubs] = useState<SubtitleTrack[]>([])
   const [subtitleIndex, setSubtitleIndex] = useState<number>(0)
@@ -471,6 +483,8 @@ export function PlayerPage() {
     setMedia(null)
     setLoadError('')
     vr360TouchedRef.current = false
+    vr360TextureRetryUsedRef.current = false
+    vr360TextureRetryUntilRef.current = 0
     setVr360(null)
     setVr360Detected(false)
     setHlsStartSec(0)
@@ -578,6 +592,35 @@ export function PlayerPage() {
     setVr360(detection.profile)
   }, [id, media])
 
+  // 远端 Emby 挂载的媒体常常没有宽高元数据（width/height 为 0），等播放器拿到
+  // 真实画面尺寸后再补一次识别。HLS 转码是等比缩放，所以比例依然可信。
+  useEffect(() => {
+    if (!media || media.id !== id) return
+    if (media.width > 0 && media.height > 0) return
+    const video = ref.current
+    if (!video) return
+    const refine = () => {
+      if (vr360TouchedRef.current || video.videoWidth <= 0 || video.videoHeight <= 0) return
+      const detection = detectVr360Profile({
+        title: media.title,
+        originalName: media.original_name,
+        path: media.path,
+        relativePath: media.relative_path,
+        width: video.videoWidth,
+        height: video.videoHeight,
+      })
+      setVr360Detected(detection.confident)
+      const preference = loadVr360Preference()
+      if (!preference.autoDetect || !detection.confident) return
+      setVr360((current) =>
+        current && sameVr360Profile(current, detection.profile) ? current : detection.profile,
+      )
+    }
+    video.addEventListener('loadedmetadata', refine)
+    refine()
+    return () => video.removeEventListener('loadedmetadata', refine)
+  }, [id, media])
+
   const toggleVr360 = useCallback(() => {
     vr360TouchedRef.current = true
     if (vr360) {
@@ -605,13 +648,6 @@ export function PlayerPage() {
     vr360TouchedRef.current = true
     setVr360(profile)
     saveVr360Preference({ ...loadVr360Preference(), profile })
-  }, [])
-
-  const handleVr360Error = useCallback((message: string) => {
-    vr360TouchedRef.current = true
-    setVr360(null)
-    setPlayerError(message)
-    toast.error(message)
   }, [])
 
   // Wire up the actual <video> element when we know the mode.
@@ -683,6 +719,33 @@ export function PlayerPage() {
       }
     },
     [mediaId, setPlaybackMode, switchToLocalHLS],
+  )
+
+  // 切到 HLS 播放（优先 115 云端，其次本地转码）。toggleMode 与「VR 需要同源帧」
+  // 的自愈逻辑共用，避免两处各写一遍云端/本地选择。
+  const enterHlsPlayback = useCallback(
+    (startSec: number) => {
+      setHlsStartSec(startSec)
+      const preferred =
+        playbackInfo?.provider === 'cloud115'
+          ? findPlaybackQualityById(playbackInfo, selectedQuality) ??
+            findPlaybackQualityById(playbackInfo, playbackInfo.default_quality)
+          : undefined
+      if (preferred?.source === 'cloud') {
+        setHlsSource('cloud')
+        if (preferred.available) {
+          setCloudWaiting(false)
+        } else {
+          setCloudWaiting(true)
+          setCloudWaitMessage(preferred.note || `正在等待 115 转码 ${preferred.label}…`)
+          void startCloudTranscode(Number(preferred.id) || 4)
+        }
+      } else {
+        switchToLocalHLS(startSec)
+      }
+      setPlaybackMode('hls')
+    },
+    [playbackInfo, selectedQuality, setPlaybackMode, startCloudTranscode, switchToLocalHLS],
   )
 
   // 云端转码等待：按后端建议间隔轮询，完成后自动切到云 HLS。
@@ -869,13 +932,30 @@ export function PlayerPage() {
         setPlaybackMode('direct')
       })
     } else {
-      const url = streamURL(mediaId)
+      // VR 全景需要浏览器能读帧：STRM/网盘直链会被 302 到跨域 CDN，此时改为
+      // 服务端同源转发（原画，不转码）；普通播放仍走 302 直连，省服务器流量。
+      const url = streamURL(mediaId, { proxy: vr360DirectProxyRef.current })
       const absoluteURL = new URL(url, window.location.href).href
       // 其它异步播放器状态更新不应重启同一个直连请求；STRM 的重定向/换链
       // 比本地文件慢，重启请求可能产生一个短暂但会触发 onError 的中断。
       if (video.src !== absoluteURL) {
         directRetryRef.current = false
         clearFallbackTimer()
+        // 进出 VR 会切换播放源地址，这里保住当前播放位置。
+        const resumeAt = video.currentTime > 2 ? video.currentTime : 0
+        if (resumeAt > 0) {
+          video.addEventListener(
+            'loadedmetadata',
+            () => {
+              try {
+                video.currentTime = resumeAt
+              } catch {
+                // ignore
+              }
+            },
+            { once: true },
+          )
+        }
         video.src = url
         void video.play().catch(() => undefined)
       }
@@ -904,6 +984,7 @@ export function PlayerPage() {
     setPlaybackMode,
     switchToLocalHLS,
     teardownHls,
+    vr360DirectProxy,
   ])
 
   // Stop host ffmpeg when leaving this HLS player. The keepalive request also
@@ -1263,37 +1344,48 @@ export function PlayerPage() {
     }
     const next = mode === 'hls' ? 'direct' : 'hls'
     if (next === 'hls') {
-      setHlsStartSec(0)
-      const preferred =
-        playbackInfo?.provider === 'cloud115'
-          ? findPlaybackQualityById(playbackInfo, selectedQuality) ??
-            findPlaybackQualityById(playbackInfo, playbackInfo.default_quality)
-          : undefined
-      if (preferred?.source === 'cloud') {
-        setHlsSource('cloud')
-        if (preferred.available) {
-          setCloudWaiting(false)
-        } else {
-          setCloudWaiting(true)
-          setCloudWaitMessage(preferred.note || `正在等待 115 转码 ${preferred.label}…`)
-          void startCloudTranscode(Number(preferred.id) || 4)
-        }
-      } else {
-        switchToLocalHLS()
-      }
+      enterHlsPlayback(0)
     } else {
       setCloudWaiting(false)
     }
     setPlaybackMode(next)
   }, [
+    enterHlsPlayback,
     isDirectStream,
     mode,
-    playbackInfo,
-    selectedQuality,
     setPlaybackMode,
-    startCloudTranscode,
-    switchToLocalHLS,
   ])
+
+  // VR 渲染取不到帧时：网盘/STRM 的直连会 302 跳到 CDN，视频就变成跨域资源，
+  // 浏览器禁止 WebGL 读取（texImage2D 抛 SecurityError）。此时自动切到同源的
+  // HLS（云端优先）再继续 VR，只有确实做不到时才如实报错并退出 VR。
+  const handleVr360Error = useCallback(
+    (message: string) => {
+      const now = Date.now()
+      // 切换 HLS 的过程中旧的直连帧还会继续上报失败，先忽略这一窗口内的重复错误。
+      if (now < vr360TextureRetryUntilRef.current) return
+      const canRetryWithHls =
+        !vr360TextureRetryUsedRef.current &&
+        modeRef.current === 'direct' &&
+        !directOnly &&
+        !isRemoteEmbyID(mediaRef.current?.id)
+      if (canRetryWithHls) {
+        vr360TextureRetryUsedRef.current = true
+        vr360TextureRetryUntilRef.current = now + 15_000
+        setPlayerError('')
+        toast('直连源跨域，浏览器无法取帧；正在切到 HLS 转码后继续 VR 全景')
+        enterHlsPlayback(ref.current?.currentTime || 0)
+        return
+      }
+      vr360TouchedRef.current = true
+      setVr360(null)
+      setPlayerError(
+        `${message}。若当前是网盘/STRM 直连（会 302 跳转到 CDN），浏览器不允许 WebGL 读取跨域画面，请改用 HLS 播放后再开启 VR。`,
+      )
+      toast.error(message)
+    },
+    [directOnly, enterHlsPlayback],
+  )
 
   const handleSeekAbsolute = useCallback(
     (absoluteSec: number) => {
@@ -1420,7 +1512,9 @@ export function PlayerPage() {
 
     if (retryingDirectRef.current) return
 
-    const expectedSrc = mediaId ? new URL(streamURL(mediaId), window.location.href).href : ''
+    const expectedSrc = mediaId
+      ? new URL(streamURL(mediaId, { proxy: vr360DirectProxyRef.current }), window.location.href).href
+      : ''
     const action = classifyDirectPlayError({
       errorCode: video?.error?.code,
       readyState: video?.readyState ?? 0,

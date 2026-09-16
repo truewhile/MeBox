@@ -263,7 +263,10 @@ export function PlayerVideoStage({
   const [stageRect, setStageRect] = useState<{ width: number; height: number } | null>(null)
   const [controlsVisible, setControlsVisible] = useState(true)
   // VR 渲染器是否已经画出第一帧（在此之前给出「正在启动」提示，避免只看到黑屏）。
-  const [vrReady, setVrReady] = useState(false)
+  // 只按「媒体 ID」记录：切换投影方式/画幅布局不会重建画布，也就不能清掉这个
+  // 状态——渲染器只在挂载后上报一次就绪，清掉之后提示会一直停在「正在启动」。
+  const [vrReadyMediaId, setVrReadyMediaId] = useState<string | null>(null)
+  const vrReady = Boolean(media && vrReadyMediaId === media.id)
   const revealControlsOnlyRef = useRef(false)
   // 当前展示的字幕文本（由自定义字幕层渲染，100% 透明无黑框）
   const [activeCues, setActiveCues] = useState<SubtitleCue[]>([])
@@ -285,11 +288,6 @@ export function PlayerVideoStage({
   useEffect(() => {
     setAssFallbackPath(null)
   }, [media?.id, activeSubtitleTrack?.path, subs])
-
-  // 切换媒体或 VR 配置后重新等待渲染器的第一帧。
-  useEffect(() => {
-    setVrReady(false)
-  }, [media?.id, vr360?.projection, vr360?.stereo])
 
   useEffect(() => {
     const selectedTrack = subs[subtitleIndex]
@@ -639,7 +637,7 @@ export function PlayerVideoStage({
                 profile={vr360}
                 uiVisible={controlsVisible}
                 onSurfaceTap={handleSurfaceActivate}
-                onReady={() => setVrReady(true)}
+                onReady={() => setVrReadyMediaId(media.id)}
                 onError={(message) => onVr360Error?.(message)}
                 onProfileChange={onVr360ProfileChange}
               />

@@ -141,8 +141,13 @@ const profileQuery = () => {
 // streamURL returns a direct-play URL for <video src>. The JWT is added as
 // a query parameter because <video> elements cannot send Authorization
 // headers.
-export function streamURL(mediaId: string): string {
-  return `/api/stream/${encodeURIComponent(mediaId)}?${tokenQuery()}${profileQuery()}`
+//
+// proxy=true 时由服务端把网盘/STRM 直链转发为同源数据（画质与原文件一致、
+// 不转码）。VR 全景渲染需要把视频帧读进 WebGL 纹理，跨域直链会被浏览器
+// 判定为污染资源而禁止读取，因此只有这种场景才需要开启。
+export function streamURL(mediaId: string, options: { proxy?: boolean } = {}): string {
+  const proxy = options.proxy ? '&proxy=1' : ''
+  return `/api/stream/${encodeURIComponent(mediaId)}?${tokenQuery()}${profileQuery()}${proxy}`
 }
 
 // hlsURL returns the m3u8 playlist URL fed into hls.js.

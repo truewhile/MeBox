@@ -722,7 +722,9 @@ func streamHandler(svc *service.Container) gin.HandlerFunc {
 				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 				return
 			}
-			if mount.ProxyPlay {
+			// 远程 Emby 条目的同源转发：VR 全景需要浏览器读帧（见 stream_proxy.go），
+			// 与挂载账号的 proxy_play 开关等价。
+			if mount.ProxyPlay || wantSameOriginProxy(c) {
 				if err := svc.Emby.ProxyRemoteVideoStream(ctx, c.Writer, c.Request, mountID, remoteID); err != nil {
 					if !c.Writer.Written() {
 						c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
@@ -757,6 +759,15 @@ func streamHandler(svc *service.Container) gin.HandlerFunc {
 		}
 		if !enforceScopedPlaybackToken(c, m.ID) {
 			return
+		}
+		// ?proxy=1：把网盘/STRM 直链改为服务端同源转发（网页端读帧、VR 全景用），
+		// 画质与原文件一致，不触发转码。
+		if wantSameOriginProxy(c) {
+			handled, proxyErr := proxySTRMStream(c, svc, m)
+			if handled {
+				writeProxyError(c, proxyErr)
+				return
+			}
 		}
 		err = svc.Stream.ServeFile(c.Writer, c.Request, c.Param("id"))
 		if errors.Is(err, service.ErrMediaNotFound) {
