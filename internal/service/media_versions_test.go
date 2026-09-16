@@ -443,6 +443,88 @@ func TestMediaVersionLabelUsesContainerAndSize(t *testing.T) {
 	}
 }
 
+func TestMediaPartNumberFromPath(t *testing.T) {
+	cases := []struct {
+		path string
+		want int
+		ok   bool
+	}{
+		{"/media/云下载/ipvr00192pl/fbzip.com@ipvr00192.part1.strm", 1, true},
+		{"/media/云下载/ipvr00192pl/fbzip.com@ipvr00192.part2.strm", 2, true},
+		{"/media/云下载/sivr-270/sivr-270-1.strm", 1, true},
+		{"/media/云下载/sivr-270/sivr-270-7.strm", 7, true},
+		{"/media/云下载/fc2/FC2PPV-4701981-cd2.strm", 2, true},
+		{"/media/Movies/Inception.2010.1080p.BluRay.x264.mkv", 0, false},
+		{"/media/Movies/Movie.2024.mkv", 0, false},
+	}
+	for _, tc := range cases {
+		got, ok := mediaPartNumber(tc.path)
+		if ok != tc.ok || got != tc.want {
+			t.Fatalf("mediaPartNumber(%q) = (%d, %v), want (%d, %v)", tc.path, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestGroupMediaVersionsSortsPartsAscending(t *testing.T) {
+	rows := []model.Media{
+		{
+			Base:      model.Base{ID: "p3"},
+			LibraryID: "cloud",
+			Title:     "SIVR-270",
+			Path:      "/media/云下载/sivr-270/sivr-270-3.strm",
+			Year:      2023,
+			NSFW:      true,
+			SizeBytes: 300,
+		},
+		{
+			Base:      model.Base{ID: "p1"},
+			LibraryID: "cloud",
+			Title:     "SIVR-270",
+			Path:      "/media/云下载/sivr-270/sivr-270-1.strm",
+			Year:      2023,
+			NSFW:      true,
+			SizeBytes: 100,
+		},
+		{
+			Base:      model.Base{ID: "p2"},
+			LibraryID: "cloud",
+			Title:     "SIVR-270",
+			Path:      "/media/云下载/sivr-270/sivr-270-2.strm",
+			Year:      2023,
+			NSFW:      true,
+			SizeBytes: 200,
+		},
+	}
+	grouped := groupMediaVersions(rows)
+	if len(grouped) != 1 || len(grouped[0].Versions) != 3 {
+		t.Fatalf("grouped = %#v", grouped)
+	}
+	want := []string{"p1", "p2", "p3"}
+	for i, id := range want {
+		if grouped[0].Versions[i].ID != id {
+			t.Fatalf("versions[%d] = %q, want %q (order %#v)", i, grouped[0].Versions[i].ID, id, grouped[0].Versions)
+		}
+	}
+	if grouped[0].ID != "p1" {
+		t.Fatalf("primary = %q, want p1 (first part)", grouped[0].ID)
+	}
+}
+
+func TestMediaVersionLabelFallsBackToFilenameWhenIndistinct(t *testing.T) {
+	label := MediaVersionLabel(model.Media{
+		Title:     "SIVR-270-【VR】河北彩花",
+		Path:      "/media/云下载/sivr-270/sivr-270-1.strm",
+		SizeBytes: 157,
+		STRMURL:   "/api/strm/play/cloud115/video.mp4?pickcode=a",
+	})
+	if !strings.Contains(label, "sivr-270-1") {
+		t.Fatalf("indistinct strm label should fall back to filename, got %q", label)
+	}
+	if strings.EqualFold(label, "MP4") || strings.Contains(label, "云端") {
+		t.Fatalf("should not keep generic-only label %q", label)
+	}
+}
+
 // SIVR-270 现场：一部分分片走在线刮削（MetaTube 把番号/provider 借用进
 // douban_id/thetvdb_id），另一部分只从本地 NFO 拿到标题（没有外部 ID）。
 // 按外部 ID 分组会把它们裂成两张标题完全相同的卡，必须按番号折成一张。
@@ -565,6 +647,58 @@ func TestGroupMediaVersionsMergesAdultPartsWithBorrowedMetaTubeIDs(t *testing.T)
 	}
 	if len(grouped[0].Versions) != 2 {
 		t.Fatalf("versions len = %d, want 2", len(grouped[0].Versions))
+	}
+	if grouped[0].Versions[0].ID != "ipvr-00192-part1" || grouped[0].Versions[1].ID != "ipvr-00192-part2" {
+		t.Fatalf("versions should be part1 then part2, got %#v", grouped[0].Versions)
+	}
+}
+
+func TestGetMediaItemListsAdultVersionsAcrossMetadataSources(t *testing.T) {
+	db := newServiceTestDB(t, &model.Library{}, &model.Media{})
+	repos := repository.New(db)
+	lib := model.Library{Name: "云下载", Path: "/media/云下载", Type: "movie", Enabled: true}
+	if err := repos.Library.Create(t.Context(), &lib); err != nil {
+		t.Fatal(err)
+	}
+	rows := []model.Media{
+		{
+			// 走 MetaTube 刮削的分片：番号/provider 被借用进 douban/thetvdb。
+			LibraryID:    lib.ID,
+			Title:        "SIVR-270-【VR】河北彩花",
+			OriginalName: "SIVR-270",
+			Path:         "/media/云下载/sivr-270/sivr-270-1.strm",
+			Year:         2023,
+			NSFW:         true,
+			DoubanID:     "SIVR-270",
+			TheTVDBID:    "JavBus",
+			ScrapeStatus: "matched",
+			SizeBytes:    200,
+		},
+		{
+			// 只有本地 NFO 身份的分片：两个外部 ID 都为空。
+			LibraryID:    lib.ID,
+			Title:        "SIVR-270-【VR】河北彩花",
+			OriginalName: "SIVR-270",
+			Path:         "/media/云下载/sivr-270/sivr-270-4.strm",
+			Year:         2023,
+			NSFW:         true,
+			ScrapeStatus: "matched",
+			SizeBytes:    100,
+		},
+	}
+	if err := db.Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewMediaService(&config.Config{}, zap.NewNop(), repos).
+		SetRuntimeCache(NewRuntimeCacheService(&config.Config{}, zap.NewNop()))
+	item, err := svc.GetMediaItem(t.Context(), rows[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item == nil || len(item.Versions) != 2 {
+		// 详情页版本列表不能只按外部 ID 收窄，否则没有 ID 的分片会消失。
+		t.Fatalf("versions = %#v, want both parts", item)
 	}
 }
 

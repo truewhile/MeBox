@@ -107,6 +107,15 @@ function cleanFallbackFilename(raw: string): string {
   return name
 }
 
+function isIndistinctVersionLabel(parts: string[]): boolean {
+  if (parts.length === 0) return true
+  return parts.every((part) => {
+    const upper = part.toUpperCase()
+    if (upper === '云端直链' || upper === 'STRM') return true
+    return VIDEO_EXTENSIONS.has(part.toLowerCase())
+  })
+}
+
 /** 版本切换展示名：分辨率 · 容器 · 编码 · 体积 / 规格 / 来源标签。 */
 export function mediaVersionLabel(media: Media): string {
   const isStrm = isStrmMedia(media)
@@ -153,11 +162,11 @@ export function mediaVersionLabel(media: Media): string {
     parts.push('云端直链')
   }
 
-  if (parts.length > 0) {
+  // 只有容器 /「云端直链」时无法区分多分片，回退文件名（sivr-270-1 / …part1）
+  if (parts.length > 0 && !isIndistinctVersionLabel(parts)) {
     return parts.join(' · ')
   }
 
-  // 兜底：使用清理后的文件名
   const cleaned = cleanFallbackFilename(media.path || '')
   return cleaned || media.title || media.id
 }

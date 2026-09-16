@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"sort"
 	"strings"
 	"time"
 
@@ -179,9 +178,18 @@ func (s *MediaService) listVersionSiblings(ctx context.Context, media *model.Med
 		libraryIDs = []string{media.LibraryID}
 	}
 	filter := repository.MediaQueryFilter{IncludeNSFW: true}
-	candidates, narrowed, err := s.repo.Media.ListVersionCandidates(ctx, libraryIDs, *media, 5000)
-	if err != nil {
-		return nil, err
+	// 成人条目按番号分组，而番号常常只存在于路径/标题里：本地 NFO 来源的分片
+	// 没有 douban_id/thetvdb_id（MetaTube 刮削出来的那几个才有）。若仍按外部
+	// ID 预先收窄候选集，同番号的其它分片会被 SQL 直接排除，表现就是库里折叠
+	// 出了 N 个版本、详情页却只列出带 ID 的那几个。因此成人条目不预先收窄，
+	// 直接在该库范围内比对版本键。
+	var candidates []model.Media
+	narrowed := false
+	if mediaAdultGroupCode(*media) == "" {
+		candidates, narrowed, err = s.repo.Media.ListVersionCandidates(ctx, libraryIDs, *media, 5000)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if !narrowed {
 		candidates, err = s.repo.Media.ListByLibrariesFilteredNoCount(ctx, libraryIDs, 0, 5000, filter)
@@ -199,14 +207,6 @@ func (s *MediaService) listVersionSiblings(ctx context.Context, media *model.Med
 	if len(matched) == 0 {
 		return []model.Media{*media}, nil
 	}
-	sort.SliceStable(matched, func(i, j int) bool {
-		if matched[i].ID == media.ID {
-			return true
-		}
-		if matched[j].ID == media.ID {
-			return false
-		}
-		return betterMediaVersion(matched[i], matched[j])
-	})
+	sortMediaVersionsForDisplay(matched)
 	return matched, nil
 }

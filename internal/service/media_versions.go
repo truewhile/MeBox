@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -77,34 +78,28 @@ func groupMediaVersions(items []model.Media) []MediaItem {
 		return nil
 	}
 	type group struct {
-		key     string
-		primary model.Media
-		rows    []model.Media
+		key  string
+		rows []model.Media
 	}
 	groups := make([]group, 0, len(items))
 	byKey := make(map[string]int, len(items))
 	for _, item := range items {
 		key := mediaVersionGroupKey(item)
 		if key == "" {
-			groups = append(groups, group{primary: item, rows: []model.Media{item}})
+			groups = append(groups, group{rows: []model.Media{item}})
 			continue
 		}
 		if idx, ok := byKey[key]; ok {
 			groups[idx].rows = append(groups[idx].rows, item)
-			if betterMediaVersion(item, groups[idx].primary) {
-				groups[idx].primary = item
-			}
 			continue
 		}
 		byKey[key] = len(groups)
-		groups = append(groups, group{key: key, primary: item, rows: []model.Media{item}})
+		groups = append(groups, group{key: key, rows: []model.Media{item}})
 	}
 	out := make([]MediaItem, 0, len(groups))
 	for _, g := range groups {
-		sort.SliceStable(g.rows, func(i, j int) bool {
-			return betterMediaVersion(g.rows[i], g.rows[j])
-		})
-		item := MediaItem{Media: g.primary}
+		sortMediaVersionsForDisplay(g.rows)
+		item := MediaItem{Media: g.rows[0]}
 		if len(g.rows) > 1 {
 			item.Versions = g.rows
 		}
@@ -351,8 +346,11 @@ func mediaVersionFileStem(name string) string {
 }
 
 // MediaVersionLabel 生成版本切换展示名（分辨率 / 容器 / 编码 / 体积 / 文件名）。
+// 当只有容器等无法区分多版本的信息时，回退到清理后的文件名。
 func MediaVersionLabel(m model.Media) string {
 	parts := make([]string, 0, 4)
+	isStrm := strings.HasSuffix(strings.ToLower(strings.TrimSpace(m.Path)), ".strm") ||
+		strings.TrimSpace(m.STRMURL) != ""
 	if m.Height > 0 {
 		parts = append(parts, fmt.Sprintf("%dp", m.Height))
 	} else if m.Width > 0 {
@@ -368,17 +366,91 @@ func MediaVersionLabel(m model.Media) string {
 	if codec := strings.TrimSpace(m.VideoCodec); codec != "" {
 		parts = append(parts, strings.ToUpper(codec))
 	}
-	if m.SizeBytes > 0 {
+	// STRM 占位体积（通常几十到几百字节）不能区分分片，跳过。
+	placeholderSize := isStrm && m.SizeBytes > 0 && m.SizeBytes < 1024*1024
+	if m.SizeBytes > 0 && !placeholderSize {
 		parts = append(parts, formatMediaSize(m.SizeBytes))
 	}
-	if len(parts) > 0 {
+	if len(parts) > 0 && !mediaVersionLabelIndistinct(parts) {
 		return strings.Join(parts, " · ")
 	}
-	base := filepath.Base(strings.ReplaceAll(strings.TrimSpace(m.Path), "\\", "/"))
-	if base == "" || base == "." {
-		return firstNonEmpty(m.Title, m.OriginalName, m.ID)
+	if cleaned := cleanMediaVersionFilename(m.Path); cleaned != "" {
+		return cleaned
 	}
-	return base
+	return firstNonEmpty(m.Title, m.OriginalName, m.ID)
+}
+
+func mediaVersionLabelIndistinct(parts []string) bool {
+	if len(parts) == 0 {
+		return true
+	}
+	for _, part := range parts {
+		upper := strings.ToUpper(strings.TrimSpace(part))
+		if upper == "" || upper == "云端直链" || upper == "STRM" {
+			continue
+		}
+		if _, ok := videoExtensions["."+strings.ToLower(upper)]; ok {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func cleanMediaVersionFilename(path string) string {
+	base := filepath.Base(strings.ReplaceAll(strings.TrimSpace(path), "\\", "/"))
+	if base == "" || base == "." {
+		return ""
+	}
+	stem := mediaFileStem(base)
+	stem = strings.ReplaceAll(stem, "_", " ")
+	stem = strings.ReplaceAll(stem, ".", " ")
+	return strings.Join(strings.Fields(stem), " ")
+}
+
+// mediaPartNumber 从路径提取分片序号（part1 / cd2 / -3）。
+// 裸后缀只认 1–2 位数字，避免把年份 2024 当成 part。
+func mediaPartNumber(path string) (int, bool) {
+	stem := mediaFileStem(filepath.Base(strings.ReplaceAll(strings.TrimSpace(path), "\\", "/")))
+	if stem == "" {
+		return 0, false
+	}
+	lower := strings.ToLower(stem)
+	for _, re := range mediaPartNumberPatterns {
+		if m := re.FindStringSubmatch(lower); len(m) == 2 {
+			n, err := strconv.Atoi(m[1])
+			if err == nil && n > 0 {
+				return n, true
+			}
+		}
+	}
+	return 0, false
+}
+
+var mediaPartNumberPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?:^|[.\-_])part[\s._-]*(\d{1,3})$`),
+	regexp.MustCompile(`(?:^|[.\-_])(?:cd|disc|disk)[\s._-]*(\d{1,3})$`),
+	regexp.MustCompile(`[-_](\d{1,2})$`),
+}
+
+func sortMediaVersionsForDisplay(rows []model.Media) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		return compareMediaVersionsForDisplay(rows[i], rows[j])
+	})
+}
+
+// compareMediaVersionsForDisplay：有分片号时按 1→2→3… 升序；否则按画质/体积择优。
+func compareMediaVersionsForDisplay(a, b model.Media) bool {
+	pa, oka := mediaPartNumber(a.Path)
+	pb, okb := mediaPartNumber(b.Path)
+	if oka && okb {
+		if pa != pb {
+			return pa < pb
+		}
+	} else if oka != okb {
+		return oka
+	}
+	return betterMediaVersion(a, b)
 }
 
 func mediaVersionContainerFromPath(path, strmURL string) string {
