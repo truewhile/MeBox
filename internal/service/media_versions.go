@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/truewhile/MeBox/internal/model"
@@ -193,6 +194,18 @@ func mediaVersionGroupKey(m model.Media) string {
 		return mediaVersionStemGroupKey(m, libKey)
 	}
 
+	// 成人条目按番号折叠。在线刮削（MetaTube）会把番号与 provider「借用」
+	// 存进 douban_id/thetvdb_id，本地 NFO 路径则拿不到这两个字段；一旦按
+	// 外部 ID 分组，同一部片的各个分片就会因为元数据来源不同（在线刮削 vs
+	// 本地 NFO）裂成两张标题相同的卡。番号取自原文件名/路径/标题，与元数据
+	// 来源无关，因此这里统一用番号做版本身份。
+	if code := mediaAdultGroupCode(m); code != "" {
+		if libKey == "" {
+			libKey = "_"
+		}
+		return fmt.Sprintf("adult:%s:%s", libKey, code)
+	}
+
 	switch {
 	case m.TMDbID > 0:
 		if libKey != "" {
@@ -265,6 +278,44 @@ func mediaVersionGroupKey(m model.Media) string {
 		return fmt.Sprintf("movie:%s:%s:%d", libKey, title, year)
 	}
 	return fmt.Sprintf("movie:%s:%d", title, year)
+}
+
+// mediaAdultGroupCode 返回成人条目的番号，作为与元数据来源无关的版本身份。
+//
+// 只在已经确认是成人条目（NSFW）时才返回番号：番号本身来自原文件名/路径/
+// 标题，不会随「在线刮削（MetaTube 把番号与 provider 借用进 douban_id/
+// thetvdb_id）」还是「本地 NFO（不带外部 ID）」而改变，因此两条来源能算出
+// 同一个键。未标记 NSFW 的条目仍走标题分组，普通影视库里 "The Matrix 1999"
+// 这类文件名不会被当成番号。
+func mediaAdultGroupCode(m model.Media) string {
+	if !m.NSFW {
+		return ""
+	}
+	code := firstText(
+		normalizeAdultCode(m.OriginalName),
+		AdultCodeFromMediaPath(m.Path),
+		normalizeAdultCode(m.Title),
+	)
+	if code == "" {
+		return ""
+	}
+	return canonicalAdultGroupCode(code)
+}
+
+// canonicalAdultGroupCode 去掉番号数字部分的补零，让 IPVR-00192 与 IPVR-192
+// 这类同一部片的不同写法落到同一个分组键上。无法解析数字的番号原样返回
+// （如 FC2-PPV-4701981）。
+func canonicalAdultGroupCode(code string) string {
+	code = strings.ToUpper(strings.TrimSpace(code))
+	prefix, digits, ok := strings.Cut(code, "-")
+	if !ok {
+		return code
+	}
+	value, err := strconv.Atoi(digits)
+	if err != nil {
+		return code
+	}
+	return prefix + "-" + strconv.Itoa(value)
 }
 
 // mediaVersionStemGroupKey 按「库 + 父目录 + 文件词干」折叠多版本

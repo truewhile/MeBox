@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"go.uber.org/zap"
@@ -48,9 +49,13 @@ type movieNFO struct {
 	Poster   string   `xml:"thumb,omitempty"`
 	Fanart   string   `xml:"fanart,omitempty"`
 	TMDb     int      `xml:"tmdbid,omitempty"`
-	Genre    []string `xml:"genre,omitempty"`
-	Country  []string `xml:"country,omitempty"`
-	Language []string `xml:"language,omitempty"`
+	// UniqueIDs 让 sidecar 能把 MeBox 自己用的外部 ID 原样带回来。缺了它，
+	// 「在线刮削 → 写 NFO → 重扫读 NFO」会丢掉 douban/thetvdb（成人条目借用
+	// 这两个字段存番号/provider），同一部片的两条来源就会算出不同的版本键。
+	UniqueIDs []nfoUniqueID `xml:"uniqueid,omitempty"`
+	Genre     []string      `xml:"genre,omitempty"`
+	Country   []string      `xml:"country,omitempty"`
+	Language  []string      `xml:"language,omitempty"`
 }
 
 type episodeNFO struct {
@@ -167,17 +172,18 @@ func WriteMediaNFO(m *model.Media) (string, error) {
 			}
 		}
 		doc = movieNFO{
-			Title:    title,
-			Original: original,
-			Year:     m.Year,
-			Plot:     m.Overview,
-			Rating:   m.Rating,
-			Poster:   m.PosterURL,
-			Fanart:   m.BackdropURL,
-			TMDb:     m.TMDbID,
-			Genre:    splitNFOList(m.Genres),
-			Country:  splitNFOList(m.Countries),
-			Language: splitNFOList(m.Languages),
+			Title:     title,
+			Original:  original,
+			Year:      m.Year,
+			Plot:      m.Overview,
+			Rating:    m.Rating,
+			Poster:    m.PosterURL,
+			Fanart:    m.BackdropURL,
+			TMDb:      m.TMDbID,
+			UniqueIDs: nfoExternalUniqueIDs(m),
+			Genre:     splitNFOList(m.Genres),
+			Country:   splitNFOList(m.Countries),
+			Language:  splitNFOList(m.Languages),
 		}
 	}
 	out, err := xml.MarshalIndent(doc, "", "  ")
@@ -199,6 +205,30 @@ func splitNFOList(value string) []string {
 		if part != "" {
 			out = append(out, part)
 		}
+	}
+	return out
+}
+
+// nfoExternalUniqueIDs 把 MeBox 使用的外部 ID 写进 sidecar，供自己重扫时读回
+// （metadataFromDoc 会按 type 还原成 bangumi/douban/thetvdb 字段）。
+// TMDb 走 <tmdbid>，单集 NFO 不写唯一 ID：单集 ID 属于单集，写进整剧身份会把
+// 同一部剧拆成多张卡（见 mergeEpisodeMetadata 的约束说明）。
+func nfoExternalUniqueIDs(m *model.Media) []nfoUniqueID {
+	if m == nil {
+		return nil
+	}
+	out := make([]nfoUniqueID, 0, 3)
+	if m.BangumiID > 0 {
+		out = append(out, nfoUniqueID{Type: "bangumi", Value: strconv.Itoa(m.BangumiID)})
+	}
+	if id := strings.TrimSpace(m.DoubanID); id != "" {
+		out = append(out, nfoUniqueID{Type: "douban", Value: id})
+	}
+	if id := strings.TrimSpace(m.TheTVDBID); id != "" {
+		out = append(out, nfoUniqueID{Type: "thetvdb", Value: id})
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

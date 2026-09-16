@@ -442,3 +442,164 @@ func TestMediaVersionLabelUsesContainerAndSize(t *testing.T) {
 		t.Fatalf("unexpected label %q", label)
 	}
 }
+
+// SIVR-270 现场：一部分分片走在线刮削（MetaTube 把番号/provider 借用进
+// douban_id/thetvdb_id），另一部分只从本地 NFO 拿到标题（没有外部 ID）。
+// 按外部 ID 分组会把它们裂成两张标题完全相同的卡，必须按番号折成一张。
+func TestGroupMediaVersionsMergesAdultPartsAcrossMetadataSources(t *testing.T) {
+	online := model.Media{
+		Base:         model.Base{ID: "sivr-270-2"},
+		LibraryID:    "cloud",
+		Title:        "SIVR-270-【VR】河北彩花",
+		OriginalName: "SIVR-270",
+		Path:         "/media/云下载/sivr-270/sivr-270-2.strm",
+		Year:         2023,
+		NSFW:         true,
+		DoubanID:     "SIVR-270",
+		TheTVDBID:    "JavBus",
+		ScrapeStatus: "matched",
+		SizeBytes:    200,
+	}
+	fromNFO := model.Media{
+		Base:         model.Base{ID: "sivr-270-3"},
+		LibraryID:    "cloud",
+		Title:        "SIVR-270-【VR】河北彩花",
+		OriginalName: "SIVR-270",
+		Path:         "/media/云下载/sivr-270/sivr-270-3.strm",
+		Year:         2023,
+		NSFW:         true,
+		ScrapeStatus: "matched",
+		SizeBytes:    100,
+	}
+
+	grouped := groupMediaVersions([]model.Media{online, fromNFO})
+	if len(grouped) != 1 {
+		t.Fatalf("grouped len = %d, want 1: %#v", len(grouped), grouped)
+	}
+	if len(grouped[0].Versions) != 2 {
+		t.Fatalf("versions len = %d, want 2", len(grouped[0].Versions))
+	}
+	if grouped[0].Path != online.Path {
+		t.Fatalf("larger part should stay primary, got %q", grouped[0].Path)
+	}
+}
+
+func TestGroupMediaVersionsKeepsDifferentAdultCodesSeparate(t *testing.T) {
+	rows := []model.Media{
+		{
+			Base:      model.Base{ID: "sivr-270"},
+			LibraryID: "cloud",
+			Title:     "SIVR-270 作品",
+			Path:      "/media/云下载/sivr-270/sivr-270-1.strm",
+			Year:      2023,
+			NSFW:      true,
+		},
+		{
+			Base:      model.Base{ID: "sivr-271"},
+			LibraryID: "cloud",
+			Title:     "SIVR-271 作品",
+			Path:      "/media/云下载/sivr-271/sivr-271-1.strm",
+			Year:      2023,
+			NSFW:      true,
+		},
+	}
+	grouped := groupMediaVersions(rows)
+	if len(grouped) != 2 {
+		t.Fatalf("different adult codes must stay separate: %#v", grouped)
+	}
+}
+
+// 同一部片的两种写法：路径里的 IPVR-00192 与刮削回来的 IPVR-192 必须归一。
+func TestGroupMediaVersionsMergesAdultCodesIgnoringZeroPadding(t *testing.T) {
+	scraped := model.Media{
+		Base:         model.Base{ID: "ipvr-192-part2"},
+		LibraryID:    "cloud",
+		Title:        "IPVR-192-相沢みなみ",
+		OriginalName: "IPVR-192",
+		Path:         "/media/云下载/ipvr00192pl/scraped/part2.strm",
+		Year:         2022,
+		NSFW:         true,
+		ScrapeStatus: "matched",
+		SizeBytes:    200,
+	}
+	fromPath := model.Media{
+		Base:      model.Base{ID: "ipvr-00192-part1"},
+		LibraryID: "cloud",
+		Title:     "fbzip com@ipvr00192",
+		Path:      "/media/云下载/ipvr00192pl/fbzip.com@ipvr00192.part1.strm",
+		Year:      2022,
+		NSFW:      true,
+		SizeBytes: 100,
+	}
+	grouped := groupMediaVersions([]model.Media{scraped, fromPath})
+	if len(grouped) != 1 || len(grouped[0].Versions) != 2 {
+		t.Fatalf("zero padded code must fold into one item: %#v", grouped)
+	}
+}
+
+func TestGroupMediaVersionsMergesAdultPartsWithBorrowedMetaTubeIDs(t *testing.T) {
+	// IPVR-00192 现场：两个 part 标题、年份完全一样，但 part2 是走 MetaTube
+	// 刮削的（番号/provider 被借用进 douban_id/thetvdb_id），part1 只有本地
+	// NFO 身份、两个字段为空。旧逻辑按外部 ID 分组会裂成两张卡。
+	part1 := model.Media{
+		Base:         model.Base{ID: "ipvr-00192-part1"},
+		LibraryID:    "cloud",
+		Title:        "IPVR-00192-IPVR-192-【VR】相沢みなみ",
+		OriginalName: "IPVR-00192",
+		Path:         "/media/云下载/ipvr00192pl/fbzip.com@ipvr00192.part1.strm",
+		Year:         2022,
+		NSFW:         true,
+		ScrapeStatus: "matched",
+		SizeBytes:    100,
+	}
+	part2 := part1
+	part2.ID = "ipvr-00192-part2"
+	part2.Path = "/media/云下载/ipvr00192pl/fbzip.com@ipvr00192.part2.strm"
+	part2.DoubanID = "ipvr00192"
+	part2.TheTVDBID = "JAV321"
+	part2.SizeBytes = 200
+
+	grouped := groupMediaVersions([]model.Media{part1, part2})
+	if len(grouped) != 1 {
+		t.Fatalf("grouped len = %d, want 1: %#v", len(grouped), grouped)
+	}
+	if len(grouped[0].Versions) != 2 {
+		t.Fatalf("versions len = %d, want 2", len(grouped[0].Versions))
+	}
+}
+
+func TestMediaAdultGroupCodeRequiresNSFW(t *testing.T) {
+	cases := []struct {
+		name string
+		m    model.Media
+		want string
+	}{
+		{
+			name: "普通影片名里的字母+数字不当番号",
+			m:    model.Media{Title: "Spider-Man 2008 1080p", Path: "/media/Movies/Spider-Man 2008 1080p.mkv"},
+			want: "",
+		},
+		{
+			name: "未识别成人的条目即使文件名像番号也不折叠",
+			m:    model.Media{Title: "SIVR-270", Path: "/media/云下载/sivr-270/sivr-270-1.strm"},
+			want: "",
+		},
+		{
+			name: "已标记 NSFW 时按番号分组",
+			m:    model.Media{NSFW: true, Title: "sivr 270", Path: "/media/云下载/sivr-270/sivr-270-1.strm"},
+			want: "SIVR-270",
+		},
+		{
+			name: "站点前缀里带补零的番号会归一",
+			m:    model.Media{NSFW: true, Title: "fbzip com@ipvr00192", Path: "/media/云下载/ipvr00192pl/fbzip.com@ipvr00192.part1.strm"},
+			want: "IPVR-192",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mediaAdultGroupCode(tc.m); got != tc.want {
+				t.Fatalf("mediaAdultGroupCode = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
