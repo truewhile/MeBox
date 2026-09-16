@@ -12,6 +12,8 @@ import {
 import { AssSubtitleStage } from '../components/AssSubtitleStage'
 import { DanmakuStage } from '../components/DanmakuStage'
 import { PlayerControls } from '../components/PlayerControls'
+import { Vr360Stage } from '../components/Vr360Stage'
+import type { Vr360Profile } from '../utils/vr360'
 import {
   subtitleTextStyle,
   type SubtitlePosition,
@@ -186,6 +188,13 @@ type PlayerVideoStageProps = {
   selectedQuality?: string
   onSelectQuality?: (quality: PlaybackQuality) => void
   showQuality?: boolean
+  /** VR 全景播放配置；非 null 表示当前处于 VR 模式。 */
+  vr360?: Vr360Profile | null
+  /** 是否由文件名/画幅自动识别出 VR 素材（用于在菜单里提示）。 */
+  vr360Detected?: boolean
+  onToggleVr360?: () => void
+  onVr360ProfileChange?: (profile: Vr360Profile) => void
+  onVr360Error?: (message: string) => void
   waiting?: boolean
   waitingMessage?: string
 }
@@ -241,6 +250,11 @@ export function PlayerVideoStage({
   selectedQuality = '',
   onSelectQuality,
   showQuality = false,
+  vr360 = null,
+  vr360Detected = false,
+  onToggleVr360,
+  onVr360ProfileChange,
+  onVr360Error,
   waiting = false,
   waitingMessage = '',
 }: PlayerVideoStageProps) {
@@ -248,6 +262,8 @@ export function PlayerVideoStage({
   const [videoRatio, setVideoRatio] = useState<number | null>(null)
   const [stageRect, setStageRect] = useState<{ width: number; height: number } | null>(null)
   const [controlsVisible, setControlsVisible] = useState(true)
+  // VR 渲染器是否已经画出第一帧（在此之前给出「正在启动」提示，避免只看到黑屏）。
+  const [vrReady, setVrReady] = useState(false)
   const revealControlsOnlyRef = useRef(false)
   // 当前展示的字幕文本（由自定义字幕层渲染，100% 透明无黑框）
   const [activeCues, setActiveCues] = useState<SubtitleCue[]>([])
@@ -269,6 +285,11 @@ export function PlayerVideoStage({
   useEffect(() => {
     setAssFallbackPath(null)
   }, [media?.id, activeSubtitleTrack?.path, subs])
+
+  // 切换媒体或 VR 配置后重新等待渲染器的第一帧。
+  useEffect(() => {
+    setVrReady(false)
+  }, [media?.id, vr360?.projection, vr360?.stereo])
 
   useEffect(() => {
     const selectedTrack = subs[subtitleIndex]
@@ -392,7 +413,9 @@ export function PlayerVideoStage({
   const handleStagePointerDown = (event: PointerEvent<HTMLDivElement>) => {
     revealControlsOnlyRef.current = event.pointerType === 'touch' && !controlsVisible
   }
-  const handleStageClick = () => {
+  // 舞台任意位置的「激活」（轻触/单击）：移动端控制栏隐藏时首次轻触只唤出
+  // 控制栏，控制栏已显示时再次轻触才切换播放/暂停。
+  const handleSurfaceActivate = () => {
     if (revealControlsOnlyRef.current) {
       revealControlsOnlyRef.current = false
       setControlsVisible(true)
@@ -550,18 +573,25 @@ export function PlayerVideoStage({
       : true
 
   const assTrack = subtitleIndex >= 0 ? subs[subtitleIndex] : undefined
-  const wrapperStyle = videoRatio
+  // VR 模式下画面由 WebGL 画布输出，舞台窗口本身就是「镜头」，
+  // 不再按视频宽高比留黑边。
+  const wrapperStyle = vr360
     ? {
-        aspectRatio: `${videoRatio}`,
-        width: isWiderThanStage ? '100%' : 'auto',
-        height: isWiderThanStage ? 'auto' : '100%',
-        maxWidth: '100%',
-        maxHeight: '100%',
-      }
-    : {
         width: '100%',
         height: '100%',
       }
+    : videoRatio
+      ? {
+          aspectRatio: `${videoRatio}`,
+          width: isWiderThanStage ? '100%' : 'auto',
+          height: isWiderThanStage ? 'auto' : '100%',
+          maxWidth: '100%',
+          maxHeight: '100%',
+        }
+      : {
+          width: '100%',
+          height: '100%',
+        }
 
   return (
     <div
@@ -569,7 +599,7 @@ export function PlayerVideoStage({
       data-player-stage
       className="relative flex h-full w-full flex-1 items-center justify-center overflow-hidden bg-black"
       onPointerDown={handleStagePointerDown}
-      onClick={handleStageClick}
+      onClick={handleSurfaceActivate}
       onDoubleClick={toggleFullscreen}
     >
       {media ? (
@@ -602,6 +632,18 @@ export function PlayerVideoStage({
                   )
                 })}
             </video>
+            {vr360 ? (
+              <Vr360Stage
+                key={`${media.id}:vr360`}
+                videoRef={videoRef}
+                profile={vr360}
+                uiVisible={controlsVisible}
+                onSurfaceTap={handleSurfaceActivate}
+                onReady={() => setVrReady(true)}
+                onError={(message) => onVr360Error?.(message)}
+                onProfileChange={onVr360ProfileChange}
+              />
+            ) : null}
             <DanmakuStage
               key={media.id}
               media={media}
@@ -692,6 +734,9 @@ export function PlayerVideoStage({
             selectedQuality={selectedQuality}
             onSelectQuality={onSelectQuality}
             showQuality={showQuality}
+            vr360={vr360}
+            vr360Detected={vr360Detected}
+            onToggleVr360={onToggleVr360}
           />
           {danmakuPanel}
           {playlistPanel}
@@ -701,6 +746,14 @@ export function PlayerVideoStage({
       ) : (
         <p className="text-sand-500">加载中…</p>
       )}
+      {vr360 && media && !vrReady ? (
+        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-black/60">
+          <div className="flex items-center gap-2 rounded-full border border-white/15 bg-black/80 px-5 py-3 text-sm text-white shadow-2xl backdrop-blur">
+            <Loader2 className="animate-spin text-rose-400" size={18} />
+            正在启动 VR 全景渲染…
+          </div>
+        </div>
+      ) : null}
       {playerError ? (
         <div className="absolute bottom-20 left-1/2 w-[min(92vw,720px)] -translate-x-1/2 rounded-2xl border border-white/15 bg-black/75 px-5 py-4 text-sm text-white shadow-2xl backdrop-blur">
           {playerError}

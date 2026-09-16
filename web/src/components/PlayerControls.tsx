@@ -16,6 +16,7 @@ import {
   PictureInPicture,
   Play,
   Rewind,
+  Rotate3d,
   SkipBack,
   SkipForward,
   Timer,
@@ -24,6 +25,7 @@ import {
 } from 'lucide-react'
 import type { SubtitleTrack } from '../api/subtitles'
 import type { PlaybackQuality } from '../types'
+import type { Vr360Profile } from '../utils/vr360'
 import {
   formatPlaybackRate,
   normalizePlaybackRate,
@@ -116,6 +118,11 @@ type PlayerControlsProps = {
   selectedQuality?: string
   onSelectQuality?: (quality: PlaybackQuality) => void
   showQuality?: boolean
+  /** VR 全景播放配置；非 null 表示当前处于 VR 模式。 */
+  vr360?: Vr360Profile | null
+  /** 是否由文件名/画幅自动识别为 VR 素材（按钮上加一个小圆点提示）。 */
+  vr360Detected?: boolean
+  onToggleVr360?: () => void
   /** Media metadata duration (seconds). Used when HLS only knows transcoded length. */
   knownDuration?: number
   /** Absolute source offset of the current HLS session (seconds). */
@@ -159,6 +166,9 @@ export function PlayerControls({
   selectedQuality = '',
   onSelectQuality,
   showQuality = false,
+  vr360 = null,
+  vr360Detected = false,
+  onToggleVr360,
   knownDuration = 0,
   streamOffset = 0,
   onSeekAbsolute,
@@ -1089,6 +1099,24 @@ export function PlayerControls({
           <span className="hidden sm:inline">弹幕</span>
           {danmakuEnabled && <span className="h-1.5 w-1.5 rounded-full bg-lime-400" />}
         </button>
+
+        {/* VR 全景播放开关 */}
+        {onToggleVr360 && (
+          <button
+            onClick={onToggleVr360}
+            className={
+              'flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-medium transition ' +
+              (vr360
+                ? 'bg-rose-500/90 text-white hover:bg-rose-500'
+                : 'bg-white/10 text-white/80 hover:bg-white/20')
+            }
+            title={vr360 ? '退出 VR 全景播放' : '切换到 VR 全景播放（可用鼠标或陀螺仪转动视角）'}
+          >
+            <Rotate3d size={15} />
+            <span className="hidden sm:inline">VR</span>
+            {vr360Detected && !vr360 && <span className="h-1.5 w-1.5 rounded-full bg-amber-300" />}
+          </button>
+        )}
 
         <button
           onClick={toggleMute}

@@ -42,6 +42,13 @@ import { PlayerDanmakuPanel } from '../components/PlayerDanmakuPanel'
 import { PlayerPlaylistPanel } from '../components/PlayerPlaylistPanel'
 import { MediaVersionSwitcher } from '../components/MediaVersionSwitcher'
 import { mediaVersionsOf } from '../utils/mediaVersion'
+import {
+  detectVr360Profile,
+  loadVr360Preference,
+  saveVr360Preference,
+  type Vr360Detection,
+  type Vr360Profile,
+} from '../utils/vr360'
 
 // Fullscreen, dark-themed video page.
 //
@@ -96,6 +103,11 @@ export function PlayerPage() {
   const fallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const [media, setMedia] = useState<Media | null>(null)
+  // VR 全景播放：null = 普通播放。识别结果与用户开关只存本机，
+  // 不改动数据库，换设备/换浏览器不会互相影响。
+  const [vr360, setVr360] = useState<Vr360Profile | null>(null)
+  const [vr360Detected, setVr360Detected] = useState(false)
+  const vr360TouchedRef = useRef(false)
   const [mode, setMode] = useState<PlayerMode>('direct')
   const [subs, setSubs] = useState<SubtitleTrack[]>([])
   const [subtitleIndex, setSubtitleIndex] = useState<number>(0)
@@ -458,6 +470,9 @@ export function PlayerPage() {
   useEffect(() => {
     setMedia(null)
     setLoadError('')
+    vr360TouchedRef.current = false
+    setVr360(null)
+    setVr360Detected(false)
     setHlsStartSec(0)
     setPlaybackInfo(null)
     setHlsSource('local')
@@ -536,6 +551,68 @@ export function PlayerPage() {
       cancelled = true
     }
   }, [id, modeParam, directOnly])
+
+  // VR 全景素材识别：只在用户没手动改过开关时自动进入 VR 模式。
+  // 识别完全基于文件名/路径关键词与画幅比例，误判时点一下 VR 按钮即可退出。
+  useEffect(() => {
+    if (!media || media.id !== id) return
+    const detection = detectVr360Profile({
+      title: media.title,
+      originalName: media.original_name,
+      path: media.path,
+      relativePath: media.relative_path,
+      width: media.width,
+      height: media.height,
+    })
+    setVr360Detected(detection.confident)
+    if (vr360TouchedRef.current) return
+    const preference = loadVr360Preference()
+    if (!preference.autoDetect || !detection.confident) {
+      setVr360(null)
+      return
+    }
+    if (detection.profile.projection !== preference.profile.projection) {
+      // 投影方式由文件名决定（360 / 180 / 鱼眼），记住它作为下次的默认值。
+      saveVr360Preference({ ...preference, profile: detection.profile })
+    }
+    setVr360(detection.profile)
+  }, [id, media])
+
+  const toggleVr360 = useCallback(() => {
+    vr360TouchedRef.current = true
+    if (vr360) {
+      setVr360(null)
+      return
+    }
+    const current = mediaRef.current
+    const detection: Vr360Detection | null = current
+      ? detectVr360Profile({
+          title: current.title,
+          originalName: current.original_name,
+          path: current.path,
+          relativePath: current.relative_path,
+          width: current.width,
+          height: current.height,
+        })
+      : null
+    const preference = loadVr360Preference()
+    const profile = detection?.profile ?? preference.profile
+    saveVr360Preference({ ...preference, profile })
+    setVr360(profile)
+  }, [vr360])
+
+  const changeVr360Profile = useCallback((profile: Vr360Profile) => {
+    vr360TouchedRef.current = true
+    setVr360(profile)
+    saveVr360Preference({ ...loadVr360Preference(), profile })
+  }, [])
+
+  const handleVr360Error = useCallback((message: string) => {
+    vr360TouchedRef.current = true
+    setVr360(null)
+    setPlayerError(message)
+    toast.error(message)
+  }, [])
 
   // Wire up the actual <video> element when we know the mode.
   // Depend on media.id (not the media object): refreshing duration after
@@ -1499,6 +1576,11 @@ export function PlayerPage() {
         showQuality={showQuality}
         waiting={cloudWaiting}
         waitingMessage={cloudWaitMessage}
+        vr360={vr360}
+        vr360Detected={vr360Detected}
+        onToggleVr360={toggleVr360}
+        onVr360ProfileChange={changeVr360Profile}
+        onVr360Error={handleVr360Error}
         playlistPanel={
           <PlayerPlaylistPanel
             open={playlistOpen}
