@@ -8,6 +8,7 @@ import { openManageLibrariesDialog } from '../components/manageLibrariesDialog'
 import { useEpisodeArtworkPreference } from '../hooks/useEpisodeArtworkPreference'
 import { useLibraryTags } from '../hooks/useLibraryTags'
 import { usePinnedLibraries } from '../hooks/usePinnedLibraries'
+import { useLibraryListSort } from '../hooks/useLibraryListSort'
 import { useAuthStore } from '../stores/auth'
 import {
   LibrariesContent,
@@ -18,9 +19,7 @@ import type { LibraryPreview } from './librariesPageModel'
 import type { Library } from '../types'
 import type { SeriesCard } from '../utils/groupSeries'
 import {
-  readLibraryListSort,
   sortLibraryPreviewsByField,
-  writeLibraryListSort,
   type LibraryListSortField,
   type LibraryListSortOrder,
 } from '../utils/libraryListSort'
@@ -41,8 +40,7 @@ export function LibrariesPage() {
   const [repairing, setRepairing] = useState(false)
   const [repairEpisodeArtwork, setRepairEpisodeArtwork] = useEpisodeArtworkPreference()
   const [repairMsg, setRepairMsg] = useState('')
-  const [sortField, setSortField] = useState<LibraryListSortField>(() => readLibraryListSort().field)
-  const [sortOrder, setSortOrder] = useState<LibraryListSortOrder>(() => readLibraryListSort().order)
+  const { field: sortField, order: sortOrder, setSort: setLibrarySort } = useLibraryListSort()
 
   // 缓存每个库已加载到的预览数量：入口网格只需要 2 张，横向货架需要 10 张。
   const fetchedPreviewLimitsRef = useRef<Map<string, number>>(new Map())
@@ -162,10 +160,8 @@ export function LibrariesPage() {
   )
 
   const handleSortChange = useCallback((field: LibraryListSortField, order: LibraryListSortOrder) => {
-    setSortField(field)
-    setSortOrder(order)
-    writeLibraryListSort(field, order)
-  }, [])
+    setLibrarySort(field, order)
+  }, [setLibrarySort])
 
   const handleTogglePin = useCallback((libraryId: string) => {
     void togglePin(libraryId)

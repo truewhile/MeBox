@@ -76,7 +76,32 @@ function compareLibraries(a: Library, b: Library, field: LibraryListSortField, o
 /**
  * 置顶组始终在前；组内按 field/order 排序。
  * pinnedIds 的相对顺序只决定「是否置顶」，组内不再保留置顶拖拽序。
+ *
+ * 首页与 /libraries 共用这份排序，保证两处的媒体库顺序一致。
  */
+export function sortLibrariesByField(
+  libraries: Library[],
+  pinnedIds: string[],
+  field: LibraryListSortField,
+  order: LibraryListSortOrder,
+): Library[] {
+  if (libraries.length < 2) return libraries
+
+  const pinnedRank = new Map(pinnedIds.map((id, index) => [id, index]))
+  const pinned: Library[] = []
+  const rest: Library[] = []
+  for (const library of libraries) {
+    if (pinnedRank.has(library.id)) pinned.push(library)
+    else rest.push(library)
+  }
+
+  const byField = (a: Library, b: Library) => compareLibraries(a, b, field, order)
+  pinned.sort(byField)
+  rest.sort(byField)
+  return [...pinned, ...rest]
+}
+
+/** 预览列表按库排序：先排库，再按排好的库顺序取回对应预览。 */
 export function sortLibraryPreviewsByField<T extends { library: Library }>(
   items: T[],
   pinnedIds: string[],
@@ -84,17 +109,14 @@ export function sortLibraryPreviewsByField<T extends { library: Library }>(
   order: LibraryListSortOrder,
 ): T[] {
   if (items.length < 2) return items
-
-  const pinnedRank = new Map(pinnedIds.map((id, index) => [id, index]))
-  const pinned: T[] = []
-  const rest: T[] = []
-  for (const item of items) {
-    if (pinnedRank.has(item.library.id)) pinned.push(item)
-    else rest.push(item)
-  }
-
-  const byField = (a: T, b: T) => compareLibraries(a.library, b.library, field, order)
-  pinned.sort(byField)
-  rest.sort(byField)
-  return [...pinned, ...rest]
+  const ordered = sortLibrariesByField(
+    items.map((item) => item.library),
+    pinnedIds,
+    field,
+    order,
+  )
+  const byId = new Map(items.map((item) => [item.library.id, item]))
+  return ordered
+    .map((library) => byId.get(library.id))
+    .filter((item): item is T => item !== undefined)
 }

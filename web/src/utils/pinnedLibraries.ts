@@ -67,31 +67,3 @@ export function togglePinnedLibraryId(current: string[], id: string): string[] {
 export function isLibraryPinned(id: string, pinnedIds: string[]): boolean {
   return pinnedIds.includes(id)
 }
-
-export function sortByPinnedIds<T extends { id: string }>(items: T[], pinnedIds: string[]): T[] {
-  if (pinnedIds.length === 0) return items
-  const rank = new Map(pinnedIds.map((pinnedId, index) => [pinnedId, index]))
-  return [...items].sort((a, b) => {
-    const aRank = rank.get(a.id)
-    const bRank = rank.get(b.id)
-    const aPinned = aRank !== undefined
-    const bPinned = bRank !== undefined
-    if (aPinned !== bPinned) return aPinned ? -1 : 1
-    if (aPinned && bPinned) return aRank - bRank
-    return 0
-  })
-}
-
-export function sortLibraryPreviews<T extends { library: { id: string } }>(items: T[], pinnedIds: string[]): T[] {
-  if (pinnedIds.length === 0) return items
-  const rank = new Map(pinnedIds.map((id, index) => [id, index]))
-  return [...items].sort((a, b) => {
-    const aRank = rank.get(a.library.id)
-    const bRank = rank.get(b.library.id)
-    const aPinned = aRank !== undefined
-    const bPinned = bRank !== undefined
-    if (aPinned !== bPinned) return aPinned ? -1 : 1
-    if (aPinned && bPinned) return aRank - bRank
-    return 0
-  })
-}

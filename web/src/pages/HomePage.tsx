@@ -11,7 +11,8 @@ import { LibraryTagBar } from '../components/LibraryTagBar'
 import { ManageLibraryTagsDialogView } from '../components/ManageLibraryTagsDialogView'
 import { useLibraryTags } from '../hooks/useLibraryTags'
 import { usePinnedLibraries } from '../hooks/usePinnedLibraries'
-import { sortByPinnedIds } from '../utils/pinnedLibraries'
+import { useLibraryListSort } from '../hooks/useLibraryListSort'
+import { sortLibrariesByField } from '../utils/libraryListSort'
 import { partitionPreviewIDs } from '../utils/remoteEmby'
 import {
   ContinueWatchingSection,
@@ -34,6 +35,7 @@ export function HomePage() {
   const [librariesLoading, setLibrariesLoading] = useState(true)
   const [historyLoading, setHistoryLoading] = useState(true)
   const { pinnedIds } = usePinnedLibraries()
+  const { field: sortField, order: sortOrder } = useLibraryListSort()
   const libraryTags = useLibraryTags()
 
   // 1. 媒体库元数据极速加载（不带 preview，毫秒级秒开首屏）。
@@ -90,7 +92,12 @@ export function HomePage() {
     }
   }, [])
 
-  const sortedLibraries = useMemo(() => sortByPinnedIds(libraries, pinnedIds), [libraries, pinnedIds])
+  // 与 /libraries 共用同一份排序偏好（默认库名倒序）：置顶库始终在前，
+  // 组内按偏好排序字段排。这样在媒体库页改过排序后，首页顺序也一致。
+  const sortedLibraries = useMemo(
+    () => sortLibrariesByField(libraries, pinnedIds, sortField, sortOrder),
+    [libraries, pinnedIds, sortField, sortOrder],
+  )
 
   // 标签过滤只作用于展示层：选中的标签栏决定哪部分媒体库参与轮播/入口网格/内容行。
   const effectiveTagId = libraryTags.selectedTagId
