@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { libraryAPI } from '../api/library'
 import { toolsAPI } from '../api/tools'
 import { LibraryTagBar } from '../components/LibraryTagBar'
-import { openManageLibraryTagsDialog } from '../components/manageLibraryTagsDialog'
+import { ManageLibraryTagsDialogView } from '../components/ManageLibraryTagsDialogView'
 import { openManageLibrariesDialog } from '../components/manageLibrariesDialog'
 import { useEpisodeArtworkPreference } from '../hooks/useEpisodeArtworkPreference'
 import { useLibraryTags } from '../hooks/useLibraryTags'
@@ -152,18 +152,7 @@ export function LibrariesPage() {
     void togglePin(libraryId)
   }, [togglePin])
 
-  const handleManageTags = useCallback(() => {
-    void openManageLibraryTagsDialog({
-      tags: libraryTags.tags,
-      libraries,
-      saving: libraryTags.saving,
-      onCreate: libraryTags.createTag,
-      onRename: libraryTags.renameTag,
-      onRemove: libraryTags.removeTag,
-      onAssign: libraryTags.assignLibrary,
-    })
-  }, [libraries, libraryTags])
-
+  const [libraryTagsOpen, setLibraryTagsOpen] = useState(false)
   const effectiveTagId = libraryTags.selectedTagId
   const tagTabs = useMemo(
     () => buildLibraryTagTabs(sortedPreviews.map((preview) => preview.library), libraryTags.tags),
@@ -203,9 +192,23 @@ export function LibrariesPage() {
         onCreate={(name) => {
           void libraryTags.createTag(name)
         }}
-        onManage={handleManageTags}
+        onManage={() => setLibraryTagsOpen(true)}
         busy={libraryTags.saving}
       />
+
+      {libraryTagsOpen && (
+        <ManageLibraryTagsDialogView
+          tags={libraryTags.tags}
+          libraries={libraries}
+          saving={libraryTags.saving}
+          onCreate={libraryTags.createTag}
+          onRename={libraryTags.renameTag}
+          onRemove={libraryTags.removeTag}
+          onAssign={libraryTags.assignLibrary}
+          onAssignBatch={libraryTags.assignLibraries}
+          onClose={() => setLibraryTagsOpen(false)}
+        />
+      )}
 
       {previews.length === 0 ? (
         <LibrariesEmptyState isAdmin={isAdmin} />

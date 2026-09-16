@@ -8,7 +8,7 @@ import type { SeriesCard } from '../utils/groupSeries'
 import { fetchLibraries, peekLibraries } from '../utils/libraryCache'
 import { buildLibraryTagTabs, filterLibrariesByTag } from '../utils/libraryTags'
 import { LibraryTagBar } from '../components/LibraryTagBar'
-import { openManageLibraryTagsDialog } from '../components/manageLibraryTagsDialog'
+import { ManageLibraryTagsDialogView } from '../components/ManageLibraryTagsDialogView'
 import { useLibraryTags } from '../hooks/useLibraryTags'
 import { usePinnedLibraries } from '../hooks/usePinnedLibraries'
 import { sortByPinnedIds } from '../utils/pinnedLibraries'
@@ -103,17 +103,7 @@ export function HomePage() {
     [sortedLibraries, libraryTags.tags, effectiveTagId],
   )
 
-  const handleManageTags = useCallback(() => {
-    void openManageLibraryTagsDialog({
-      tags: libraryTags.tags,
-      libraries,
-      saving: libraryTags.saving,
-      onCreate: libraryTags.createTag,
-      onRename: libraryTags.renameTag,
-      onRemove: libraryTags.removeTag,
-      onAssign: libraryTags.assignLibrary,
-    })
-  }, [libraries, libraryTags])
+  const [libraryTagsOpen, setLibraryTagsOpen] = useState(false)
 
   // 按需拉取卡片预览管理。同一个库可能先以 4 张封面用于入口网格，
   // 稍后需要 10 张用于内容横排，因此缓存的是已加载数量而不是简单布尔值。
@@ -350,9 +340,22 @@ export function HomePage() {
             onCreate={(name) => {
               void libraryTags.createTag(name)
             }}
-            onManage={handleManageTags}
+            onManage={() => setLibraryTagsOpen(true)}
             busy={libraryTags.saving}
           />
+          {libraryTagsOpen && (
+            <ManageLibraryTagsDialogView
+              tags={libraryTags.tags}
+              libraries={libraries}
+              saving={libraryTags.saving}
+              onCreate={libraryTags.createTag}
+              onRename={libraryTags.renameTag}
+              onRemove={libraryTags.removeTag}
+              onAssign={libraryTags.assignLibrary}
+              onAssignBatch={libraryTags.assignLibraries}
+              onClose={() => setLibraryTagsOpen(false)}
+            />
+          )}
           {taggedLibraries.length === 0 ? (
             <p className="rounded-2xl border border-dashed border-[var(--app-border)] bg-[var(--app-panel)] px-4 py-12 text-center text-sm text-[var(--app-muted)]">
               「{effectiveTagId}」标签下还没有媒体库，可在「管理标签」里把媒体库归入该标签。

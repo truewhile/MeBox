@@ -3,6 +3,7 @@ import toast from 'react-hot-toast'
 
 import {
   ALL_TAG_ID,
+  assignLibrariesToTag,
   attachLibraryToTag,
   dedupeLibraryTags,
   loadLibraryTags,
@@ -36,6 +37,8 @@ export type UseLibraryTagsResult = {
   setTagLibraries: (name: string, libraryIds: string[]) => Promise<void>
   /** 把媒体库挂到标签下；tagName 为空表示移出所有标签。 */
   assignLibrary: (libraryId: string, tagName: string) => Promise<void>
+  /** 批量把媒体库挂到标签下；tagName 为空表示批量移出所有标签。一次写入。 */
+  assignLibraries: (libraryIds: string[], tagName: string) => Promise<void>
 }
 
 /**
@@ -220,6 +223,13 @@ export function useLibraryTags(): UseLibraryTagsResult {
     [mutate],
   )
 
+  const assignLibraries = useCallback(
+    async (libraryIds: string[], tagName: string) => {
+      await mutate((current) => assignLibrariesToTag(current, libraryIds, tagName))
+    },
+    [mutate],
+  )
+
   return {
     tags,
     loading,
@@ -232,6 +242,7 @@ export function useLibraryTags(): UseLibraryTagsResult {
     removeTag,
     setTagLibraries,
     assignLibrary,
+    assignLibraries,
   }
 }
 

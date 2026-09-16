@@ -1,10 +1,14 @@
 import {
   ALL_TAG_ID,
+  assignLibrariesToTag,
+  attachLibrariesToTag,
   attachLibraryToTag,
   buildLibraryTagTabs,
   dedupeLibraryTags,
+  detachLibrariesFromTag,
   detachLibraryFromTag,
   filterLibrariesByTag,
+  filterLibrariesForTagging,
   normalizeLibraryTags,
   normalizeTagName,
   resolveSelectedTagId,
@@ -83,6 +87,46 @@ const detached = detachLibraryFromTag(
   '电影',
 )
 check('detach removes only the requested library', detached[0].library_ids.join(',') === 'b')
+
+const batchAttached = attachLibrariesToTag(
+  [
+    { name: '动画', library_ids: ['a', 'x'] },
+    { name: '电影', library_ids: ['b'] },
+  ],
+  ['b', 'x', 'b', ' missing '],
+  '动画',
+)
+check('batch attach moves every id out of its old tag', batchAttached[1].library_ids.length === 0)
+check('batch attach keeps order and dedupes ids', batchAttached[0].library_ids.join(',') === 'a,b,x,missing')
+check('batch attach ignores unknown target tag', attachLibrariesToTag([{ name: '动画', library_ids: [] }], ['a'], '不存在')[0].library_ids.length === 0)
+check('batch attach with no ids is a no-op', attachLibrariesToTag([{ name: '动画', library_ids: ['a'] }], [], '动画')[0].library_ids.join(',') === 'a')
+
+const batchDetached = detachLibrariesFromTag(
+  [
+    { name: '动画', library_ids: ['a', 'b'] },
+    { name: '电影', library_ids: ['b', 'c'] },
+  ],
+  ['b', 'c'],
+)
+check('batch detach removes ids from every tag', batchDetached[0].library_ids.join(',') === 'a')
+check('batch detach clears emptied tags', batchDetached[1].library_ids.length === 0)
+check(
+  'assign with empty tag name clears everything',
+  assignLibrariesToTag([{ name: '动画', library_ids: ['a'] }], ['a'], '')[0].library_ids.length === 0,
+)
+check(
+  'assign with a tag routes to attach',
+  assignLibrariesToTag([{ name: '动画', library_ids: [] }], ['a'], '动画')[0].library_ids.join(',') === 'a',
+)
+
+const searchable = [
+  { id: 'lib-a', name: '电影库', path: '/media/movies', type: 'movie' },
+  { id: 'lib-b', name: 'TV Shows', path: '/media/tv', type: 'tv' },
+]
+check('tagging search matches name', filterLibrariesForTagging(searchable as never, '电影').length === 1)
+check('tagging search matches path', filterLibrariesForTagging(searchable as never, 'media/tv').length === 1)
+check('tagging search matches type case-insensitively', filterLibrariesForTagging(searchable as never, 'MOVIE').length === 1)
+check('tagging search with blank keyword returns all', filterLibrariesForTagging(searchable as never, '  ').length === 2)
 
 check('blank name is rejected', tagNameError('   ', []) !== '')
 check('duplicate name is rejected', tagNameError('动画', [{ name: '动画', library_ids: [] }]) !== '')

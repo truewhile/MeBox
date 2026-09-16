@@ -232,3 +232,67 @@ export function detachLibraryFromTag(tags: LibraryTag[], libraryId: string, tagN
     tag.name === tagName ? { ...tag, library_ids: tag.library_ids.filter((id) => id !== libraryId) } : tag,
   )
 }
+
+/**
+ * 批量把一个或多个媒体库挂到标签下：先从各自原标签移除，再按传入顺序追加，
+ * 保证「一库一标签」。整批只产生一次写入。
+ */
+export function attachLibrariesToTag(
+  tags: LibraryTag[],
+  libraryIds: string[],
+  tagName: string,
+): LibraryTag[] {
+  const target = findTagIdByName(tags, tagName)
+  const moving = normalizeLibraryIds(libraryIds)
+  if (!target || moving.length === 0) return tags
+  const movingSet = new Set(moving)
+  const next = tags.map((tag) => ({
+    ...tag,
+    library_ids: tag.library_ids.filter((id) => !movingSet.has(id)),
+  }))
+  return next.map((tag) =>
+    tag.name === target ? { ...tag, library_ids: [...tag.library_ids, ...moving] } : tag,
+  )
+}
+
+/** 批量把媒体库移出所有标签（即变为「未分类」）。 */
+export function detachLibrariesFromTag(tags: LibraryTag[], libraryIds: string[]): LibraryTag[] {
+  const moving = new Set(normalizeLibraryIds(libraryIds))
+  if (moving.size === 0) return tags
+  return tags.map((tag) => ({
+    ...tag,
+    library_ids: tag.library_ids.filter((id) => !moving.has(id)),
+  }))
+}
+
+/** 批量归类：tagName 为空表示移出所有标签。 */
+export function assignLibrariesToTag(
+  tags: LibraryTag[],
+  libraryIds: string[],
+  tagName: string,
+): LibraryTag[] {
+  return tagName ? attachLibrariesToTag(tags, libraryIds, tagName) : detachLibrariesFromTag(tags, libraryIds)
+}
+
+/** 去掉空白与重复，保留首次出现的顺序。 */
+export function normalizeLibraryIds(libraryIds: unknown): string[] {
+  if (!Array.isArray(libraryIds)) return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of libraryIds) {
+    const trimmed = String(raw ?? '').trim()
+    if (!trimmed || seen.has(trimmed)) continue
+    seen.add(trimmed)
+    out.push(trimmed)
+  }
+  return out
+}
+
+/** 媒体库列表的模糊匹配（名称 / 路径 / 类型），供标签管理里的搜索框使用。 */
+export function filterLibrariesForTagging(libraries: Library[], keyword: string): Library[] {
+  const needle = keyword.trim().toLowerCase()
+  if (!needle) return libraries
+  return libraries.filter((lib) =>
+    `${lib.name} ${lib.path} ${lib.type}`.toLowerCase().includes(needle),
+  )
+}
