@@ -340,6 +340,9 @@ export function HomePage() {
             onCreate={(name) => {
               void libraryTags.createTag(name)
             }}
+            onReorder={(names) => {
+              void libraryTags.reorderTags(names)
+            }}
             onManage={() => setLibraryTagsOpen(true)}
             busy={libraryTags.saving}
           />

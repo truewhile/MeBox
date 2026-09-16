@@ -11,6 +11,7 @@ import {
   filterLibrariesForTagging,
   normalizeLibraryTags,
   normalizeTagName,
+  reorderLibraryTags,
   resolveSelectedTagId,
   tagNameError,
 } from './libraryTags.ts'
@@ -49,10 +50,10 @@ check('tag tab keeps creation order', tabs[1].name === '动画' && tabs[2].name 
 check('tag count ignores unavailable libraries', tabs[1].count === 1)
 
 check(
-  'filtering keeps tag order and drops unknown ids',
+  'filtering drops unknown ids and keeps input order',
   filterLibrariesByTag(libs, [{ name: '动画', library_ids: ['lib-c', 'missing', 'lib-a'] }], '动画')
     .map((lib) => lib.id)
-    .join(',') === 'lib-c,lib-a',
+    .join(',') === 'lib-a,lib-c',
 )
 check('全部 returns every library in original order', filterLibrariesByTag(libs, [], ALL_TAG_ID).length === 3)
 check('unknown tag yields no libraries', filterLibrariesByTag(libs, [], 'nope').length === 0)
@@ -133,6 +134,33 @@ check('duplicate name is rejected', tagNameError('动画', [{ name: '动画', li
 check(
   'renaming a tag to itself is allowed',
   tagNameError('动画', [{ name: '动画', library_ids: [] }], '动画') === '',
+)
+
+const reorderable = [
+  { name: '动画', library_ids: [] },
+  { name: '电影', library_ids: [] },
+  { name: '音乐', library_ids: [] },
+]
+check(
+  'reorder moves a tag to the requested slot',
+  reorderLibraryTags(reorderable, ['电影', '动画', '音乐']).map((tag) => tag.name).join(',') === '电影,动画,音乐',
+)
+check(
+  'reorder can move a tag to the front',
+  reorderLibraryTags(reorderable, ['音乐', '动画', '电影']).map((tag) => tag.name).join(',') === '音乐,动画,电影',
+)
+check(
+  'names missing from the order keep relative order at the end',
+  reorderLibraryTags(reorderable, ['电影']).map((tag) => tag.name).join(',') === '电影,动画,音乐',
+)
+check(
+  'empty order leaves tags untouched',
+  reorderLibraryTags(reorderable, []).map((tag) => tag.name).join(',') === '动画,电影,音乐',
+)
+check('reorder ignores extra unknown names', reorderLibraryTags(reorderable, ['不存在', '音乐']).map((tag) => tag.name).join(',') === '音乐,动画,电影')
+check(
+  'reordering with fewer than two tags is a no-op',
+  reorderLibraryTags([{ name: '动画', library_ids: [] }], []).map((tag) => tag.name).join(',') === '动画',
 )
 
 console.log('libraryTags.test.ts ok')

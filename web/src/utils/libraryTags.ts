@@ -164,8 +164,9 @@ export function isLibraryInTag(tags: LibraryTag[], tagId: string, libraryId: str
 }
 
 /**
- * 按标签过滤媒体库：`tagId` 为「全部」时原样返回（保持原有置顶/手动排序），
- * 否则只保留该标签下的库，并保持标签里记录的顺序。
+ * 按标签过滤媒体库：`tagId` 为「全部」时原样返回。
+ * 只做成员筛选、保持输入顺序，展示顺序（置顶、排序下拉等）由调用方决定；
+ * 标签里记录的 library_ids 顺序只表示归属，不作为展示排序。
  */
 export function filterLibrariesByTag<T extends { id: string }>(
   libraries: T[],
@@ -173,15 +174,9 @@ export function filterLibrariesByTag<T extends { id: string }>(
   tagId: string,
 ): T[] {
   if (!tagId || tagId === ALL_TAG_ID) return libraries
-  const ids = tagLibraryIds(tags, tagId)
-  if (ids.length === 0) return []
-  const byId = new Map(libraries.map((lib) => [lib.id, lib]))
-  const out: T[] = []
-  for (const id of ids) {
-    const lib = byId.get(id)
-    if (lib) out.push(lib)
-  }
-  return out
+  const ids = new Set(tagLibraryIds(tags, tagId))
+  if (ids.size === 0) return []
+  return libraries.filter((lib) => ids.has(lib.id))
 }
 
 /** 生成标签栏模型：首项固定为「全部」，其后按标签顺序追加。 */
@@ -200,6 +195,22 @@ export function buildLibraryTagTabs(libraries: Library[], tags: LibraryTag[]): L
     })
   }
   return tabs
+}
+
+/**
+ * 按给定标签名顺序重排标签栏：`orderedNames` 是期望的标签名顺序（通常来自拖拽后的顺序）。
+ * 未出现在顺序里的标签（例如新建、旧数据并发写入）保持原相对顺序，追加到末尾，绝不丢失。
+ */
+export function reorderLibraryTags(tags: LibraryTag[], orderedNames: string[]): LibraryTag[] {
+  if (tags.length < 2) return tags
+  const rank = new Map(orderedNames.map((name, index) => [name, index]))
+  const ranked: LibraryTag[] = []
+  const rest: LibraryTag[] = []
+  for (const tag of tags) {
+    ;(rank.has(tag.name) ? ranked : rest).push(tag)
+  }
+  ranked.sort((a, b) => (rank.get(a.name) ?? 0) - (rank.get(b.name) ?? 0))
+  return [...ranked, ...rest]
 }
 
 /** 选中的标签是否仍存在；被删除或被过滤掉时回落到「全部」。 */

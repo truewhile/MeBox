@@ -31,11 +31,13 @@ import { partitionPreviewIDs } from '../utils/remoteEmby'
 
 export function LibrariesPage() {
   const isAdmin = useAuthStore((state) => state.user?.role === 'admin')
-  const [libraries, setLibraries] = useState<Library[]>([])
+  // 会话缓存命中时首屏即用缓存渲染（避免先闪一帧占位再被撑高），
+  // 这样 useScrollMemory 的布局期恢复才能在返回列表时立刻落到原位置。
+  const [libraries, setLibraries] = useState<Library[]>(() => peekLibraries() ?? [])
   const [libraryData, setLibraryData] = useState<Record<string, { cards: SeriesCard[]; total: number }>>({})
-  const { pinnedIds, loading: pinnedLoading, togglePin } = usePinnedLibraries()
+  const { pinnedIds, togglePin } = usePinnedLibraries()
   const libraryTags = useLibraryTags()
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(() => peekLibraries() === null)
   const [repairing, setRepairing] = useState(false)
   const [repairEpisodeArtwork, setRepairEpisodeArtwork] = useEpisodeArtworkPreference()
   const [repairMsg, setRepairMsg] = useState('')
@@ -184,7 +186,7 @@ export function LibrariesPage() {
     [taggedPreviews],
   )
 
-  if (loading || pinnedLoading) {
+  if (loading) {
     return <p className="px-2 py-8 text-sm text-sand-500">媒体库加载中…</p>
   }
 
@@ -211,6 +213,9 @@ export function LibrariesPage() {
         onSelect={libraryTags.setSelectedTagId}
         onCreate={(name) => {
           void libraryTags.createTag(name)
+        }}
+        onReorder={(names) => {
+          void libraryTags.reorderTags(names)
         }}
         onManage={() => setLibraryTagsOpen(true)}
         busy={libraryTags.saving}
@@ -248,19 +253,17 @@ export function LibrariesPage() {
   )
 }
 
-/** 按选中标签过滤媒体库预览（ALL_TAG_ID 时原样返回，保留置顶/列表排序）。 */
+/**
+ * 按选中标签过滤媒体库预览：复用共享的成员筛选（保持输入顺序），
+ * 这样排序下拉（含倒序）在标签页与「全部」页行为一致。
+ */
 function filterPreviewsByTag(previews: LibraryPreview[], tags: LibraryTag[], tagId: string): LibraryPreview[] {
   if (!tagId || tagId === ALL_TAG_ID) return previews
-  const ordered = filterLibrariesByTag(
-    previews.map((preview) => ({ id: preview.library.id })),
-    tags,
-    tagId,
-  )
   const byId = new Map(previews.map((preview) => [preview.library.id, preview]))
-  const out: LibraryPreview[] = []
-  for (const item of ordered) {
-    const preview = byId.get(item.id)
-    if (preview) out.push(preview)
+  const kept: LibraryPreview[] = []
+  for (const library of filterLibrariesByTag(previews.map((preview) => preview.library), tags, tagId)) {
+    const preview = byId.get(library.id)
+    if (preview) kept.push(preview)
   }
-  return out
+  return kept
 }

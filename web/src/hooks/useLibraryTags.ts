@@ -11,6 +11,7 @@ import {
   normalizeTagName,
   readCachedLibraryTags,
   readSelectedTagId,
+  reorderLibraryTags,
   resolveSelectedTagId,
   saveLibraryTags,
   writeCachedLibraryTags,
@@ -32,6 +33,8 @@ export type UseLibraryTagsResult = {
   setSelectedTagId: (tagId: string) => void
   createTag: (name: string) => Promise<string>
   renameTag: (from: string, to: string) => Promise<void>
+  /** 按给定标签名顺序重排标签栏（拖拽排序的落点）。 */
+  reorderTags: (orderedNames: string[]) => Promise<void>
   removeTag: (name: string) => Promise<void>
   /** 覆盖某个标签下的媒体库集合（保持传入顺序）。 */
   setTagLibraries: (name: string, libraryIds: string[]) => Promise<void>
@@ -103,13 +106,16 @@ export function useLibraryTags(): UseLibraryTagsResult {
   }, [])
 
   // 选中的标签可能被删除，落回「全部」以免标签栏空白。
+  // 注意：标签首次加载完成前 tags 为空集合，此时不能据此判定标签已被删除，
+  // 否则从子页面返回时，持久化的选中标签会被误重置为「全部」。
   useEffect(() => {
+    if (loading) return
     const resolved = resolveSelectedTagId(tags, selectedTagId)
     if (resolved !== selectedTagId) {
       selectedRef.current = resolved
       setSelectedTagIdState(resolved)
     }
-  }, [tags, selectedTagId])
+  }, [loading, tags, selectedTagId])
 
   const setSelectedTagId = useCallback((tagId: string) => {
     const next = tagId && tagId !== ALL_TAG_ID ? tagId : ALL_TAG_ID
@@ -193,6 +199,13 @@ export function useLibraryTags(): UseLibraryTagsResult {
     [mutate, setSelectedTagId],
   )
 
+  const reorderTags = useCallback(
+    async (orderedNames: string[]) => {
+      await mutate((current) => reorderLibraryTags(current, orderedNames))
+    },
+    [mutate],
+  )
+
   const removeTag = useCallback(
     async (name: string) => {
       await mutate((current) => current.filter((tag) => tag.name !== name))
@@ -239,6 +252,7 @@ export function useLibraryTags(): UseLibraryTagsResult {
     setSelectedTagId,
     createTag,
     renameTag,
+    reorderTags,
     removeTag,
     setTagLibraries,
     assignLibrary,
