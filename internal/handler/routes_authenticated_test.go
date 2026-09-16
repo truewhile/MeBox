@@ -27,6 +27,8 @@ func TestAuthenticatedRouteSurfacesAreRegistered(t *testing.T) {
 		"GET /api/me",
 		"GET /api/me/pinned-libraries",
 		"PUT /api/me/pinned-libraries",
+		"GET /api/me/library-tags",
+		"PUT /api/me/library-tags",
 		"GET /api/auth/permissions",
 		"GET /api/libraries",
 		"GET /api/media",

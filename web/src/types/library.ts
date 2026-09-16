@@ -28,6 +28,15 @@ export interface Library {
   total?: number
 }
 
+/**
+ * 用户自定义的媒体库标签分组。标签属于当前用户本人，用于在媒体库页把
+ * 同一标签下的媒体库聚合到一起。一个媒体库同时只属于一个标签。
+ */
+export interface LibraryTagSet {
+  name: string
+  library_ids: string[]
+}
+
 export interface ScanResult {
   library_id: string
   visited: number

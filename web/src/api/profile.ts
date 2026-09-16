@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { User } from '../types'
+import type { LibraryTagSet, User } from '../types'
 
 export const profileAPI = {
   get: () => api.get<User>('/me').then((r) => r.data),
@@ -20,6 +20,12 @@ export const profileAPI = {
 
   setPinnedLibraries: (libraryIds: string[]) =>
     api.put<{ library_ids: string[] }>('/me/pinned-libraries', { library_ids: libraryIds }).then((r) => r.data.library_ids ?? []),
+
+  getLibraryTags: () =>
+    api.get<{ tags: LibraryTagSet[] | null }>('/me/library-tags').then((r) => r.data.tags ?? []),
+
+  setLibraryTags: (tags: LibraryTagSet[]) =>
+    api.put<{ tags: LibraryTagSet[] | null }>('/me/library-tags', { tags }).then((r) => r.data.tags ?? []),
 
   adminUpdateRole: (id: string, role: 'admin' | 'user') =>
     api.patch<User>(`/admin/users/${id}/role`, { role }).then((r) => r.data),

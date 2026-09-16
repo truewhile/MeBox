@@ -144,6 +144,85 @@ func (p *ProfileService) SetPinnedLibraryIDs(ctx context.Context, userID string,
 	return normalized, nil
 }
 
+// GetLibraryTags returns the user's library tag groups, filtered to libraries
+// the user can still access. Empty tags are kept so an editor does not lose a
+// tag that was just created.
+func (p *ProfileService) GetLibraryTags(ctx context.Context, userID string) ([]model.LibraryTagSet, error) {
+	user, err := p.repo.User.FindByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if user == nil {
+		return nil, errors.New("user not found")
+	}
+	tags := model.NormalizeLibraryTags(user.DecodeLibraryTags())
+	if len(tags) == 0 {
+		return []model.LibraryTagSet{}, nil
+	}
+	visibility := UserDefaultMediaVisibility(ctx, p.repo, userID)
+	accessible, err := p.accessibleLibraryIDSet(ctx, visibility)
+	if err != nil {
+		return nil, err
+	}
+	for i := range tags {
+		tags[i].LibraryIDs = filterPinnedLibraryIDs(tags[i].LibraryIDs, accessible)
+		if tags[i].LibraryIDs == nil {
+			tags[i].LibraryIDs = []string{}
+		}
+	}
+	return tags, nil
+}
+
+// SetLibraryTags persists the user's library tag groups after dropping
+// inaccessible libraries. A library belongs to at most one tag: the first tag
+// that lists it wins, so the saved state always matches the tab UI.
+func (p *ProfileService) SetLibraryTags(ctx context.Context, userID string, tags []model.LibraryTagSet) ([]model.LibraryTagSet, error) {
+	if userID == "" {
+		return nil, errors.New("missing user id")
+	}
+	user, err := p.repo.User.FindByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if user == nil {
+		return nil, errors.New("user not found")
+	}
+	visibility := UserDefaultMediaVisibility(ctx, p.repo, userID)
+	accessible, err := p.accessibleLibraryIDSet(ctx, visibility)
+	if err != nil {
+		return nil, err
+	}
+	normalized := model.NormalizeLibraryTags(tags)
+	if len(normalized) > model.MaxLibraryTags {
+		normalized = normalized[:model.MaxLibraryTags]
+	}
+	claimed := make(map[string]struct{})
+	for i := range normalized {
+		filtered := make([]string, 0, len(normalized[i].LibraryIDs))
+		for _, id := range filterPinnedLibraryIDs(normalized[i].LibraryIDs, accessible) {
+			if _, taken := claimed[id]; taken {
+				continue
+			}
+			claimed[id] = struct{}{}
+			filtered = append(filtered, id)
+		}
+		normalized[i].LibraryIDs = filtered
+	}
+	raw, err := model.EncodeLibraryTags(normalized)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.repo.User.UpdateFields(ctx, userID, map[string]any{
+		"library_tags": raw,
+	}); err != nil {
+		return nil, err
+	}
+	if normalized == nil {
+		normalized = []model.LibraryTagSet{}
+	}
+	return normalized, nil
+}
+
 func (p *ProfileService) accessibleLibraryIDSet(ctx context.Context, visibility MediaVisibility) (map[string]struct{}, error) {
 	libs, err := p.repo.Library.List(ctx)
 	if err != nil {

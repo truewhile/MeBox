@@ -28,6 +28,11 @@ type User struct {
 	// PinnedLibraryIDs 存储用户置顶的媒体库 ID 列表（JSON 字符串），顺序即置顶优先级。
 	PinnedLibraryIDs  string   `gorm:"type:text" json:"-"`
 	PinnedLibraryList []string `gorm:"-" json:"pinned_library_ids,omitempty"`
+	// LibraryTags 存储用户自定义的媒体库标签分组（JSON 字符串），
+	// 形如 [{"name":"动画","library_ids":["lib-1","lib-2"]}]。标签属于用户本人，
+	// 用于在媒体库页把同一标签下的媒体库聚合到一起。
+	LibraryTags    string          `gorm:"type:text" json:"-"`
+	LibraryTagList []LibraryTagSet `gorm:"-" json:"library_tags,omitempty"`
 	// SubtitleChineseMode 是网页播放器外挂字幕的简繁转换偏好：
 	// original / simplified / traditional。
 	SubtitleChineseMode string `gorm:"size:16;not null;default:original" json:"subtitle_chinese_mode"`
@@ -103,4 +108,5 @@ func (u *User) PopulateComputedFields() {
 	}
 	u.AllowedLibraryList = u.DecodeAllowedLibraryIDs()
 	u.PinnedLibraryList = u.DecodePinnedLibraryIDs()
+	u.LibraryTagList = u.DecodeLibraryTags()
 }

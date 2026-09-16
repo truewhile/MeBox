@@ -6,6 +6,10 @@ import type { HistoryItem } from '../api/playback'
 import type { Library, Media } from '../types'
 import type { SeriesCard } from '../utils/groupSeries'
 import { fetchLibraries, peekLibraries } from '../utils/libraryCache'
+import { buildLibraryTagTabs, filterLibrariesByTag } from '../utils/libraryTags'
+import { LibraryTagBar } from '../components/LibraryTagBar'
+import { openManageLibraryTagsDialog } from '../components/manageLibraryTagsDialog'
+import { useLibraryTags } from '../hooks/useLibraryTags'
 import { usePinnedLibraries } from '../hooks/usePinnedLibraries'
 import { sortByPinnedIds } from '../utils/pinnedLibraries'
 import { partitionPreviewIDs } from '../utils/remoteEmby'
@@ -30,6 +34,7 @@ export function HomePage() {
   const [librariesLoading, setLibrariesLoading] = useState(true)
   const [historyLoading, setHistoryLoading] = useState(true)
   const { pinnedIds } = usePinnedLibraries()
+  const libraryTags = useLibraryTags()
 
   // 1. 媒体库元数据极速加载（不带 preview，毫秒级秒开首屏）。
   //    会话内已有缓存则先用缓存立即渲染，后台仍刷新一次兜底。
@@ -86,6 +91,29 @@ export function HomePage() {
   }, [])
 
   const sortedLibraries = useMemo(() => sortByPinnedIds(libraries, pinnedIds), [libraries, pinnedIds])
+
+  // 标签过滤只作用于展示层：选中的标签栏决定哪部分媒体库参与轮播/入口网格/内容行。
+  const effectiveTagId = libraryTags.selectedTagId
+  const tagTabs = useMemo(
+    () => buildLibraryTagTabs(sortedLibraries, libraryTags.tags),
+    [sortedLibraries, libraryTags.tags],
+  )
+  const taggedLibraries = useMemo(
+    () => filterLibrariesByTag(sortedLibraries, libraryTags.tags, effectiveTagId),
+    [sortedLibraries, libraryTags.tags, effectiveTagId],
+  )
+
+  const handleManageTags = useCallback(() => {
+    void openManageLibraryTagsDialog({
+      tags: libraryTags.tags,
+      libraries,
+      saving: libraryTags.saving,
+      onCreate: libraryTags.createTag,
+      onRename: libraryTags.renameTag,
+      onRemove: libraryTags.removeTag,
+      onAssign: libraryTags.assignLibrary,
+    })
+  }, [libraries, libraryTags])
 
   // 按需拉取卡片预览管理。同一个库可能先以 4 张封面用于入口网格，
   // 稍后需要 10 张用于内容横排，因此缓存的是已加载数量而不是简单布尔值。
@@ -153,14 +181,14 @@ export function HomePage() {
 
   // 3. 首屏只预取轮播和前三行所需的预览；入口卡片进入视口后自行按批加载。
   useEffect(() => {
-    if (sortedLibraries.length === 0) return
-    const carouselLibIds = sortedLibraries
+    if (taggedLibraries.length === 0) return
+    const carouselLibIds = taggedLibraries
       .filter((l) => l.carousel_enabled === true)
       .map((l) => l.id)
-    const topRowLibIds = sortedLibraries.slice(0, 3).map((l) => l.id)
+    const topRowLibIds = taggedLibraries.slice(0, 3).map((l) => l.id)
     const shelfTargets = Array.from(new Set([...carouselLibIds, ...topRowLibIds]))
     void fetchPreviews(shelfTargets, 10)
-  }, [sortedLibraries, fetchPreviews])
+  }, [taggedLibraries, fetchPreviews])
 
   // 4. 媒体库展示行渐进流式加载：默认先检视前 3 个库，随向下滚动逐步检视后续库
   const INITIAL_ROWS = 3
@@ -171,26 +199,26 @@ export function HomePage() {
 
   const revealMoreLibraries = useCallback(() => {
     setVisibleTargetCount((prev) => {
-      if (prev >= sortedLibraries.length) return prev
-      return Math.min(prev + STEP_ROWS, sortedLibraries.length)
+      if (prev >= taggedLibraries.length) return prev
+      return Math.min(prev + STEP_ROWS, taggedLibraries.length)
     })
-  }, [sortedLibraries.length])
+  }, [taggedLibraries.length])
 
   // 随 visibleTargetCount 增加，按需触发后续库的预览加载
   useEffect(() => {
-    if (sortedLibraries.length === 0) return
-    const currentTargets = sortedLibraries.slice(0, visibleTargetCount).map((l) => l.id)
+    if (taggedLibraries.length === 0) return
+    const currentTargets = taggedLibraries.slice(0, visibleTargetCount).map((l) => l.id)
     void fetchPreviews(currentTargets, 10)
-  }, [sortedLibraries, visibleTargetCount, fetchPreviews])
+  }, [taggedLibraries, visibleTargetCount, fetchPreviews])
 
   // 当前已拉取并确认有内容的媒体库行
   const visibleLibraries = useMemo(() => {
-    return sortedLibraries
+    return taggedLibraries
       .slice(0, visibleTargetCount)
       .filter((lib) => (libraryData[lib.id]?.cards?.length ?? 0) > 0)
-  }, [sortedLibraries, visibleTargetCount, libraryData])
+  }, [taggedLibraries, visibleTargetCount, libraryData])
 
-  const hasMoreLibraries = visibleTargetCount < sortedLibraries.length
+  const hasMoreLibraries = visibleTargetCount < taggedLibraries.length
 
   // 底部哨兵监听与滚动双保险（触底解锁后续媒体库行）
   useEffect(() => {
@@ -258,7 +286,7 @@ export function HomePage() {
   // series-type libs (loaded via /series), so gate on cards instead.
   const carouselItems = useMemo(() => {
     const candidateMedia: Media[] = []
-    const effectiveSelectedIds = libraries
+    const effectiveSelectedIds = taggedLibraries
       .filter((l) => l.carousel_enabled === true)
       .map((l) => l.id)
 
@@ -275,7 +303,7 @@ export function HomePage() {
 
     // Fallback to all loaded items with artwork
     if (candidateMedia.length === 0) {
-      for (const lib of libraries) {
+      for (const lib of taggedLibraries) {
         const data = libraryData[lib.id]
         if (data) {
           for (const card of data.cards) {
@@ -286,14 +314,13 @@ export function HomePage() {
     }
 
     return candidateMedia.slice(0, 10)
-  }, [libraries, libraryData])
+  }, [taggedLibraries, libraryData])
 
   // 库列表还没回来先展示整页 loading；库为空时再等一下播放记录，
   // 以免在"空站点"和"有观看记录"两个终态之间闪空白。
   if (librariesLoading || (libraries.length === 0 && historyLoading)) {
     return <HomeLoadingState />
   }
-
   const empty =
     libraries.length === 0 &&
     history.length === 0
@@ -313,14 +340,32 @@ export function HomePage() {
       {historyLoading && <ContinueWatchingSkeleton />}
       {!historyLoading && history.length > 0 && <ContinueWatchingSection history={history} />}
 
-      {/* 3. 媒体库卡片区（每页展示 20 个媒体库） */}
+      {/* 3. 媒体库标签栏 + 卡片区（每页展示 20 个媒体库） */}
       {sortedLibraries.length > 0 && (
-        <HomeLibrariesSection
-          libraries={sortedLibraries}
-          libraryData={libraryData}
-          libraryCounts={libraryCounts}
-          onNeedPreviews={fetchPreviews}
-        />
+        <section className="space-y-6">
+          <LibraryTagBar
+            tabs={tagTabs}
+            selectedTagId={effectiveTagId}
+            onSelect={libraryTags.setSelectedTagId}
+            onCreate={(name) => {
+              void libraryTags.createTag(name)
+            }}
+            onManage={handleManageTags}
+            busy={libraryTags.saving}
+          />
+          {taggedLibraries.length === 0 ? (
+            <p className="rounded-2xl border border-dashed border-[var(--app-border)] bg-[var(--app-panel)] px-4 py-12 text-center text-sm text-[var(--app-muted)]">
+              「{effectiveTagId}」标签下还没有媒体库，可在「管理标签」里把媒体库归入该标签。
+            </p>
+          ) : (
+            <HomeLibrariesSection
+              libraries={taggedLibraries}
+              libraryData={libraryData}
+              libraryCounts={libraryCounts}
+              onNeedPreviews={fetchPreviews}
+            />
+          )}
+        </section>
       )}
 
       {/* 4. 各媒体库内容展示行（向下滑动渐进流式加载，不受上方20个分页限制） */}
