@@ -77,6 +77,10 @@ func groupMediaVersions(items []model.Media) []MediaItem {
 	if len(items) == 0 {
 		return nil
 	}
+	// 同一番号只要有一个分片被刮削标记为成人内容，就认定整部片都是成人条目：
+	// 未刮削的分片（nsfw=false）也按番号折叠。否则「一个分片刮削成功、其余仍
+	// pending」时，已刮削的走番号分组、其余落到标题分组，整部片被拆成两张卡。
+	adultCodes := adultCodesVouchedByNSFW(items)
 	type group struct {
 		key  string
 		rows []model.Media
@@ -84,7 +88,7 @@ func groupMediaVersions(items []model.Media) []MediaItem {
 	groups := make([]group, 0, len(items))
 	byKey := make(map[string]int, len(items))
 	for _, item := range items {
-		key := mediaVersionGroupKey(item)
+		key := mediaVersionGroupKeyWithAdultVouch(item, adultCodes)
 		if key == "" {
 			groups = append(groups, group{rows: []model.Media{item}})
 			continue
@@ -135,16 +139,65 @@ func GroupEpisodeVersionsForDisplay(items []model.Media) []MediaItem {
 	return grouped
 }
 
-func mediaVersionGroupKey(m model.Media) string {
-	// 远程 Emby 挂载条目保持独立，不与其它远程条目或本地条目折叠合并。
-	if IsEmbyRemoteID(m.ID) {
-		return fmt.Sprintf("embyremote:%s", m.ID)
-	}
-
+// mediaVersionLibraryKey 返回版本身份里使用的库标识。
+func mediaVersionLibraryKey(m model.Media) string {
 	libKey := strings.ToLower(strings.TrimSpace(m.LibraryID))
 	if libKey == "" {
 		libKey = strings.ToLower(strings.TrimSpace(m.DisplayLibraryID))
 	}
+	return libKey
+}
+
+// adultCodesVouchedByNSFW 收集「已被刮削确认为成人内容」的番号。
+func adultCodesVouchedByNSFW(items []model.Media) map[string]bool {
+	codes := map[string]bool{}
+	for _, item := range items {
+		if !item.NSFW {
+			continue
+		}
+		if code := canonicalAdultGroupCode(AdultCodeFromMediaPath(item.Path)); code != "" {
+			codes[code] = true
+			continue
+		}
+		if code := mediaAdultGroupCode(item); code != "" {
+			codes[code] = true
+		}
+	}
+	return codes
+}
+
+// mediaVersionGroupKeyWithAdultVouch 是版本身份的统一入口：番号已被同组分片
+// 确认时优先按番号折叠，否则沿用 mediaVersionGroupKey 的原判定。
+func mediaVersionGroupKeyWithAdultVouch(m model.Media, vouched map[string]bool) string {
+	if key := adultVouchedGroupKey(m, vouched); key != "" {
+		return key
+	}
+	return mediaVersionGroupKey(m)
+}
+
+// adultVouchedGroupKey 在番号已被同组分片确认时，返回番号分组键；
+// 其余情况返回空串，表示沿用 mediaVersionGroupKey 的原判定。
+func adultVouchedGroupKey(m model.Media, vouched map[string]bool) string {
+	if len(vouched) == 0 || m.NSFW {
+		return ""
+	}
+	code := canonicalAdultGroupCode(AdultCodeFromMediaPath(m.Path))
+	if code == "" || !vouched[code] {
+		return ""
+	}
+	libKey := mediaVersionLibraryKey(m)
+	if libKey == "" {
+		libKey = "_"
+	}
+	return fmt.Sprintf("adult:%s:%s", libKey, code)
+}
+
+func mediaVersionGroupKey(m model.Media) string {	// 远程 Emby 挂载条目保持独立，不与其它远程条目或本地条目折叠合并。
+	if IsEmbyRemoteID(m.ID) {
+		return fmt.Sprintf("embyremote:%s", m.ID)
+	}
+
+	libKey := mediaVersionLibraryKey(m)
 	specialKind := mediaSpecialKind(m.Path)
 	season, episode := m.SeasonNum, m.EpisodeNum
 	if specialKind != "" && specialKind != mediaSpecialTheatrical && episode <= 0 {

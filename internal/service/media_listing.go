@@ -182,10 +182,13 @@ func (s *MediaService) listVersionSiblings(ctx context.Context, media *model.Med
 	// 没有 douban_id/thetvdb_id（MetaTube 刮削出来的那几个才有）。若仍按外部
 	// ID 预先收窄候选集，同番号的其它分片会被 SQL 直接排除，表现就是库里折叠
 	// 出了 N 个版本、详情页却只列出带 ID 的那几个。因此成人条目不预先收窄，
-	// 直接在该库范围内比对版本键。
+	// 直接在该库范围内比对版本键。未刮削但文件名带番号的分片同理：同一部片的
+	// 各分片元数据来源不一致（刮削 vs pending），收窄后标题也对不上。
 	var candidates []model.Media
 	narrowed := false
-	if mediaAdultGroupCode(*media) == "" {
+	hasAdultCode := mediaAdultGroupCode(*media) != "" ||
+		canonicalAdultGroupCode(AdultCodeFromMediaPath(media.Path)) != ""
+	if !hasAdultCode {
 		candidates, narrowed, err = s.repo.Media.ListVersionCandidates(ctx, libraryIDs, *media, 5000)
 		if err != nil {
 			return nil, err
@@ -198,9 +201,15 @@ func (s *MediaService) listVersionSiblings(ctx context.Context, media *model.Med
 		}
 	}
 	s.attachLibraryMetadata(ctx, candidates)
+	// 同番号只要有一个分片被确认为成人内容，尚未刮削的分片也按番号折叠，
+	// 与列表页的分组结果保持一致。
+	vouched := adultCodesVouchedByNSFW(candidates)
+	if vouchKey := adultVouchedGroupKey(*media, vouched); vouchKey != "" {
+		key = vouchKey
+	}
 	matched := make([]model.Media, 0, 4)
 	for _, row := range candidates {
-		if mediaVersionGroupKey(row) == key {
+		if mediaVersionGroupKeyWithAdultVouch(row, vouched) == key {
 			matched = append(matched, row)
 		}
 	}
