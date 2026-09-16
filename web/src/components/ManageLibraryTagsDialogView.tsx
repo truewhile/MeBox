@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Check, Loader2, Pencil, Plus, Tag, Trash2, X } from 'lucide-react'
+import { Check, GripVertical, Loader2, Pencil, Plus, Tag, Trash2, X } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 import { confirmAction } from './confirmAction'
 import type { Library } from '../types'
+import { useDragReorder } from '../hooks/useDragReorder'
 import {
   MAX_LIBRARY_TAGS,
   filterLibrariesForTagging,
@@ -19,6 +20,8 @@ export type ManageLibraryTagsDialogProps = {
   onCreate: (name: string) => Promise<string>
   onRename: (from: string, to: string) => Promise<void>
   onRemove: (name: string) => Promise<void>
+  /** 按给定标签名顺序重排标签（拖拽排序的落点）。 */
+  onReorder: (orderedNames: string[]) => Promise<void>
   /** 单个媒体库归类；tagName 为空表示移出所有标签。 */
   onAssign: (libraryId: string, tagName: string) => Promise<void>
   /** 批量归类；tagName 为空表示批量移出所有标签。一次写入。 */
@@ -42,6 +45,7 @@ export function ManageLibraryTagsDialogView({
   onCreate,
   onRename,
   onRemove,
+  onReorder,
   onAssign,
   onAssignBatch,
   onClose,
@@ -55,6 +59,10 @@ export function ManageLibraryTagsDialogView({
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [batchTag, setBatchTag] = useState('')
   const [applying, setApplying] = useState(false)
+  const { draggingId, dragOverId, dragProps } = useDragReorder(
+    tags.map((tag) => tag.name),
+    onReorder,
+  )
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -254,86 +262,110 @@ export function ManageLibraryTagsDialogView({
                   还没有标签。先创建一个，再把媒体库归入其中。
                 </p>
               ) : (
-                tags.map((tag) => (
-                  <div
-                    key={tag.name}
-                    className="flex items-center gap-2 rounded-xl border border-[var(--app-border)] bg-[var(--app-panel-soft)] px-2.5 py-2"
-                  >
-                    {renaming === tag.name ? (
-                      <>
-                        <input
-                          autoFocus
-                          value={renameDraft}
-                          onChange={(event) => setRenameDraft(event.target.value)}
-                          onKeyDown={(event) => {
-                            if (event.key === 'Enter') {
-                              event.preventDefault()
-                              void handleRename(tag.name)
-                            }
-                            if (event.key === 'Escape') {
+                tags.map((tag) => {
+                  const drag = dragProps(tag.name)
+                  const isDragOver = dragOverId === tag.name && draggingId !== tag.name
+                  return (
+                    <div
+                      key={tag.name}
+                      onDragOver={drag.onDragOver}
+                      onDragLeave={drag.onDragLeave}
+                      onDrop={drag.onDrop}
+                      className={`flex items-center gap-2 rounded-xl border px-2.5 py-2 transition-colors ${
+                        isDragOver
+                          ? 'border-brand-500/60 bg-brand-500/5'
+                          : 'border-[var(--app-border)] bg-[var(--app-panel-soft)]'
+                      }`}
+                    >
+                      {renaming === tag.name ? (
+                        <>
+                          <input
+                            autoFocus
+                            value={renameDraft}
+                            onChange={(event) => setRenameDraft(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter') {
+                                event.preventDefault()
+                                void handleRename(tag.name)
+                              }
+                              if (event.key === 'Escape') {
+                                setRenaming('')
+                                setRenameDraft('')
+                              }
+                            }}
+                            maxLength={24}
+                            className="min-w-0 flex-1 rounded-lg border border-[var(--app-border)] bg-[var(--app-panel)] px-2 py-1 text-xs font-semibold text-[var(--app-text)] outline-none focus:border-brand-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void handleRename(tag.name)}
+                            className="rounded-lg p-1 text-brand-500 transition-colors hover:bg-[var(--app-hover)]"
+                            title="保存名称"
+                          >
+                            <Check size={14} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
                               setRenaming('')
                               setRenameDraft('')
-                            }
-                          }}
-                          maxLength={24}
-                          className="min-w-0 flex-1 rounded-lg border border-[var(--app-border)] bg-[var(--app-panel)] px-2 py-1 text-xs font-semibold text-[var(--app-text)] outline-none focus:border-brand-500"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => void handleRename(tag.name)}
-                          className="rounded-lg p-1 text-brand-500 transition-colors hover:bg-[var(--app-hover)]"
-                          title="保存名称"
-                        >
-                          <Check size={14} />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setRenaming('')
-                            setRenameDraft('')
-                          }}
-                          className="rounded-lg p-1 text-[var(--app-muted)] transition-colors hover:bg-[var(--app-hover)]"
-                          title="取消"
-                        >
-                          <X size={14} />
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => setTagFilter(tag.name)}
-                          className="min-w-0 flex-1 truncate text-left text-sm font-bold text-[var(--app-text)] transition-colors hover:text-brand-500"
-                          title={`只看「${tag.name}」标签下的媒体库`}
-                        >
-                          {tag.name}
-                        </button>
-                        <span className="shrink-0 font-mono text-[10px] text-[var(--app-muted)]">
-                          {tag.library_ids.length}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setRenaming(tag.name)
-                            setRenameDraft(tag.name)
-                          }}
-                          className="rounded-lg p-1 text-[var(--app-muted)] transition-colors hover:bg-[var(--app-hover)] hover:text-brand-500"
-                          title="重命名"
-                        >
-                          <Pencil size={13} />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void handleRemove(tag)}
-                          className="rounded-lg p-1 text-[var(--app-muted)] transition-colors hover:bg-[var(--app-hover)] hover:text-red-500"
-                          title="删除标签"
-                        >
-                          <Trash2 size={13} />
-                        </button>
-                      </>
-                    )}
-                  </div>
-                ))
+                            }}
+                            className="rounded-lg p-1 text-[var(--app-muted)] transition-colors hover:bg-[var(--app-hover)]"
+                            title="取消"
+                          >
+                            <X size={14} />
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            draggable={drag.draggable}
+                            onDragStart={drag.onDragStart}
+                            onDragEnd={drag.onDragEnd}
+                            className={`-ml-1 shrink-0 cursor-grab rounded-lg p-1 text-[var(--app-muted)] transition-colors hover:bg-[var(--app-hover)] ${
+                              draggingId === tag.name ? 'opacity-40' : ''
+                            }`}
+                            title="拖拽调整标签顺序"
+                            aria-label="拖拽调整标签顺序"
+                          >
+                            <GripVertical size={13} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setTagFilter(tag.name)}
+                            className="min-w-0 flex-1 truncate text-left text-sm font-bold text-[var(--app-text)] transition-colors hover:text-brand-500"
+                            title={`只看「${tag.name}」标签下的媒体库`}
+                          >
+                            {tag.name}
+                          </button>
+                          <span className="shrink-0 font-mono text-[10px] text-[var(--app-muted)]">
+                            {tag.library_ids.length}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setRenaming(tag.name)
+                              setRenameDraft(tag.name)
+                            }}
+                            className="rounded-lg p-1 text-[var(--app-muted)] transition-colors hover:bg-[var(--app-hover)] hover:text-brand-500"
+                            title="重命名"
+                          >
+                            <Pencil size={13} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleRemove(tag)}
+                            className="rounded-lg p-1 text-[var(--app-muted)] transition-colors hover:bg-[var(--app-hover)] hover:text-red-500"
+                            title="删除标签"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )
+                })
               )}
             </div>
           </section>

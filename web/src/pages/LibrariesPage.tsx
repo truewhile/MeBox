@@ -210,9 +210,6 @@ export function LibrariesPage() {
         onCreate={(name) => {
           void libraryTags.createTag(name)
         }}
-        onReorder={(names) => {
-          void libraryTags.reorderTags(names)
-        }}
         onManage={() => setLibraryTagsOpen(true)}
         busy={libraryTags.saving}
       />
@@ -225,6 +222,7 @@ export function LibrariesPage() {
           onCreate={libraryTags.createTag}
           onRename={libraryTags.renameTag}
           onRemove={libraryTags.removeTag}
+          onReorder={libraryTags.reorderTags}
           onAssign={libraryTags.assignLibrary}
           onAssignBatch={libraryTags.assignLibraries}
           onClose={() => setLibraryTagsOpen(false)}
