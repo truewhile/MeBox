@@ -69,6 +69,18 @@ const VR_CONTROLS_HIDE_DELAY_MS = 3000
 /** VR 视角拖拽超过这个距离才算「真的在转动视角」，轻触不受影响。 */
 const VR_VIEW_DRAG_DISTANCE = 6
 
+/**
+ * 当前设备是否没有真正的鼠标悬停能力（手机/平板）。
+ *
+ * 触摸设备上「悬停保持显示」没有可靠的结束信号：手指抬起后浏览器不保证补发
+ * mouseleave，标记一旦置位就再也清不掉，控制栏会永久留在画面上。这里按设备
+ * 能力判断，避免依赖 MouseEvent.sourceCapabilities（实测常为 null，等于没修）。
+ */
+function isHoverlessDevice(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return true
+  return window.matchMedia('(hover: none)').matches
+}
+
 type SeekHint = {
   dir: 'back' | 'forward'
   seconds: number
@@ -104,6 +116,11 @@ type PlayerControlsProps = {
   onUiVisibleChange: (visible: boolean) => void
   /** 外部浮层（VR 工具条/设置面板）正被鼠标悬停：此时控制栏不自动隐藏。 */
   uiHold?: boolean
+  /**
+   * 画面已被锁住（播放器左侧的锁）。锁住时操作栏整条隐藏，自动隐藏计时器
+   * 也不再启动——否则计时器会在用户看不见的地方继续改写可见状态。
+   */
+  uiLocked?: boolean
   subs: SubtitleTrack[]
   /** 当前激活字幕轨道：-1=关闭，0..n-1=对应轨道。 */
   subtitleIndex: number
@@ -154,6 +171,7 @@ export function PlayerControls({
   uiVisible,
   onUiVisibleChange,
   uiHold = false,
+  uiLocked = false,
   subs,
   subtitleIndex,
   onSelectSubtitle,
@@ -214,6 +232,8 @@ export function PlayerControls({
   const holdControlsRef = useRef(false)
   /** 当前是否在 VR 全景播放中。 */
   const vr360ActiveRef = useRef(Boolean(vr360))
+  /** 画面是否已锁住（VR 锁）。事件回调里读它，避免闭包读到过期值。 */
+  const uiLockedRef = useRef(uiLocked)
   /** VR 画布上的按下状态：按住拖动 = 转动视角，不唤出控制栏。 */
   const vrDragRef = useRef<{ x: number; y: number; moved: boolean } | null>(null)
   const pendingSeekRef = useRef<number | null>(null)
@@ -238,6 +258,10 @@ export function PlayerControls({
     vr360ActiveRef.current = Boolean(vr360)
   }, [vr360])
 
+  useEffect(() => {
+    uiLockedRef.current = uiLocked
+  }, [uiLocked])
+
   // 「保持显示」条件集中在这里：悬停控制栏、拖动进度条、打开任何菜单或面板。
   // 事件回调里读 ref，渲染里读派生值，两边始终一致。
   const keepControlsVisible =
@@ -252,6 +276,18 @@ export function PlayerControls({
   useEffect(() => {
     holdControlsRef.current = keepControlsVisible
   }, [keepControlsVisible])
+
+  // 控制栏「悬停保持显示」在触摸设备上没有可靠的结束信号：手指抬起后浏览器不保证
+  // 补发 mouseleave，标记会一直挂着，控制栏就永远不隐藏。触摸设备直接不进入悬停
+  // 保持状态，改用 pointerup 兜底清理，避免个别浏览器仍派发 mouseenter。
+  useEffect(() => {
+    const onPointerUp = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch') return
+      setControlsHovered(false)
+    }
+    window.addEventListener('pointerup', onPointerUp)
+    return () => window.removeEventListener('pointerup', onPointerUp)
+  }, [])
 
   useEffect(() => {
     durationRef.current = duration
@@ -313,12 +349,15 @@ export function PlayerControls({
 
     const holdControls = () => holdControlsRef.current
 
+    /** 画面锁住时，控制栏必须保持隐藏，任何「用户活动」都不应该把它唤回来。 */
+    const isLocked = () => uiLockedRef.current
+
     const hideDelay = () =>
       vr360ActiveRef.current ? VR_CONTROLS_HIDE_DELAY_MS : CONTROLS_HIDE_DELAY_MS
 
     const resetTimer = () => {
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
-      if (el.paused || holdControls()) return
+      if (el.paused || holdControls() || isLocked()) return
       hideTimerRef.current = setTimeout(() => {
         if (holdControls()) return
         onUiVisibleChange(false)
@@ -327,6 +366,7 @@ export function PlayerControls({
 
     // 通用「用户活动」入口：显示控制栏并重新计时。播放/暂停等事件也走这里。
     const onMove = () => {
+      if (isLocked()) return
       onUiVisibleChange(true)
       resetTimer()
     }
@@ -464,6 +504,8 @@ export function PlayerControls({
   // 鼠标移动，计时器永远不会被安排，控制栏就会一直留在画面上。
   useEffect(() => {
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
+    // 锁住时控制栏整条不可见，也没有任何计时器需要跑。
+    if (uiLocked) return
     if (keepControlsVisible) {
       onUiVisibleChange(true)
       return
@@ -475,7 +517,7 @@ export function PlayerControls({
       if (holdControlsRef.current) return
       onUiVisibleChange(false)
     }, vr360ActiveRef.current ? VR_CONTROLS_HIDE_DELAY_MS : CONTROLS_HIDE_DELAY_MS)
-  }, [uiVisible, keepControlsVisible, onUiVisibleChange, video])
+  }, [uiVisible, keepControlsVisible, uiLocked, onUiVisibleChange, video])
 
   const togglePlay = () => {
     const el = video()
@@ -554,6 +596,8 @@ export function PlayerControls({
   }
 
   const revealControls = useCallback(() => {
+    // 锁住时键盘操作（方向键调进度/音量）不应该把控制栏唤回来。
+    if (uiLockedRef.current) return
     onUiVisibleChange(true)
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
     const el = video()
@@ -780,7 +824,10 @@ export function PlayerControls({
       className={`pointer-events-auto absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-black/80 via-black/40 to-transparent px-3 pb-3 pt-14 transition-opacity duration-300 ${
         uiVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
       }`}
-      onMouseEnter={() => setControlsHovered(true)}
+      onMouseEnter={() => {
+        if (isHoverlessDevice()) return
+        setControlsHovered(true)
+      }}
       onMouseLeave={() => setControlsHovered(false)}
       onClick={(e) => e.stopPropagation()}
       onPointerUp={(e) => e.stopPropagation()}

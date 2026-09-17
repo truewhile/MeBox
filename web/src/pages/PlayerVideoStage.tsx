@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent, ReactNode, RefObject } from 'react'
-import { Hand, Loader2, MousePointerClick, Rotate3d, Settings2, Smartphone, ZoomIn } from 'lucide-react'
+import {
+  Hand,
+  Loader2,
+  Lock,
+  LockOpen,
+  MousePointerClick,
+  Rotate3d,
+  Smartphone,
+  ZoomIn,
+} from 'lucide-react'
 
 import { subtitlesAPI, type SubtitleTrack } from '../api/subtitles'
 import { type DanmakuAnime, type DanmakuLoadedInfo } from '../api/danmaku'
@@ -19,6 +28,7 @@ import {
   type SubtitlePosition,
   type SubtitleStylePreset,
 } from '../utils/subtitleDisplay'
+import { isPointerInLockZone } from '../utils/playerLockZone'
 import { parseWebVTTCues, type SubtitleCue } from '../utils/subtitleVTT'
 
 type SubtitleRenderGroup = {
@@ -27,10 +37,13 @@ type SubtitleRenderGroup = {
   style: CSSProperties
 }
 
-/** VR 模式下必须连续点击这么多次才唤出控制栏：单击太容易在转视角时误触。 */
-const VR_TAP_COUNT = 3
-/** 相邻两次点击间隔超过该毫秒数就重新开始计数。 */
-const VR_TAP_GAP_MS = 900
+/**
+ * 锁按钮每次被唤出后停留的时间（毫秒）。
+ *
+ * 锁本身默认隐身，只在「鼠标悬停感应区」或「点击画面」之后露一会儿。解锁的瞬间
+ * 操作栏会立刻消失，如果锁也一起消失，用户就不知道锁在哪、也没法再锁回去。
+ */
+const LOCK_REVEAL_MS = 2600
 /** 首次操作说明的最长停留时间：到这里仍未点「知道了」也自动收起并记录为已看过。 */
 const VR_GUIDE_AUTO_DISMISS_MS = 20_000
 
@@ -276,10 +289,19 @@ export function PlayerVideoStage({
   const [controlsVisible, setControlsVisible] = useState(true)
   // 鼠标是否停在 VR 工具条/设置面板上：停住时控制栏不自动隐藏，否则设置面板会在点击前消失。
   const [vrUiHovered, setVrUiHovered] = useState(false)
-  // VR 下「连续点击唤出控制栏」已累计的次数（0 表示没在计数）。
-  const [vrTapCount, setVrTapCount] = useState(0)
-  const vrTapCountRef = useRef(0)
-  const vrTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 画面是否被「锁住」：锁上之后操作栏、VR 工具条、进度框全部隐藏，只剩干净的
+  // 画面，轻触画面也不会把它们唤回来，也不会误触发播放/暂停；想看操作栏必须先
+  // 点左边的锁解锁。VR 和普通播放共用这一套状态。
+  const [locked, setLocked] = useState(false)
+  // 锁按钮本身默认隐身（见下方的 lockVisible），这三个状态决定它什么时候露面：
+  //   lockHovered —— 桌面鼠标停在感应区里（移开就收）；
+  //   lockShown   —— 点了画面之后的临时显示窗口；
+  //   lockHint    —— 刚解锁，顺带显示「已解锁」提示。
+  const [lockHovered, setLockHovered] = useState(false)
+  const [lockShown, setLockShown] = useState(false)
+  const [lockHint, setLockHint] = useState(false)
+  const lockRevealTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lockVisible = lockHovered || lockShown
   const vrActive = Boolean(vr360)
   // VR 渲染器是否已经画出第一帧（在此之前给出「正在启动」提示，避免只看到黑屏）。
   // 只按「媒体 ID」记录：切换投影方式/画幅布局不会重建画布，也就不能清掉这个
@@ -427,25 +449,58 @@ export function PlayerVideoStage({
     if (video.paused) void video.play()?.catch(() => undefined)
     else video.pause()
   }
-  const handleStagePointerDown = (event: PointerEvent<HTMLDivElement>) => {
-    // VR 模式下单击不再负责唤出控制栏（改成连续 3 次点击），所以这里不预置开关。
-    revealControlsOnlyRef.current = !vrActive && event.pointerType === 'touch' && !controlsVisible
-  }
-
-  const resetVrTapCount = useCallback(() => {
-    vrTapCountRef.current = 0
-    setVrTapCount(0)
-    if (vrTapTimerRef.current) {
-      clearTimeout(vrTapTimerRef.current)
-      vrTapTimerRef.current = null
-    }
+  /**
+   * 临时把锁按钮唤出来（移动端点击画面、以及刚解锁时）。
+   *
+   * 每次都重新计时：连续点击时不会因为第一次的计时器到点而提前隐身。
+   */
+  const revealLock = useCallback((withUnlockHint: boolean) => {
+    setLockShown(true)
+    setLockHint(withUnlockHint)
+    if (lockRevealTimerRef.current) clearTimeout(lockRevealTimerRef.current)
+    lockRevealTimerRef.current = setTimeout(() => {
+      lockRevealTimerRef.current = null
+      setLockShown(false)
+      setLockHint(false)
+    }, LOCK_REVEAL_MS)
   }, [])
 
-  // 舞台任意位置的「激活」（轻触/单击）：移动端控制栏隐藏时首次轻触只唤出
-  // 控制栏，控制栏已显示时再次轻触才切换播放/暂停。
-  // VR 模式下单击不切换播放，也不唤出控制栏：单击太容易误触，必须连续点击
-  // VR_TAP_COUNT 次才会显示控制栏；控制栏已显示时单击即收起。
+  useEffect(
+    () => () => {
+      if (lockRevealTimerRef.current) clearTimeout(lockRevealTimerRef.current)
+    },
+    [],
+  )
+
+  const handleStagePointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    // 触摸端没有悬停，靠点击画面把锁唤出来（顺带给刚上锁的用户一个解锁入口）。
+    if (event.pointerType === 'touch') revealLock(false)
+    // 锁住时轻触画面不做任何事；VR 模式下也不负责唤出控制栏（画面默认是干净的）。
+    if (locked) {
+      revealControlsOnlyRef.current = false
+      return
+    }
+    // 未锁的移动端：控制栏隐藏时首次轻触只唤出控制栏，不切换播放。
+    revealControlsOnlyRef.current =
+      !vrActive && event.pointerType === 'touch' && !controlsVisible
+  }
+
+  // 桌面端：鼠标移到画面左侧中间就把锁露出来，移开就收回去。
+  const handleStagePointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== 'mouse') return
+    const rect = event.currentTarget.getBoundingClientRect()
+    setLockHovered(
+      isPointerInLockZone(event.clientX - rect.left, event.clientY - rect.top, rect.height),
+    )
+  }
+
+  // 舞台任意位置的「激活」（轻触/单击）：
+  //   普通播放：桌面端直接切换播放/暂停；移动端控制栏隐藏时首次轻触只唤出控制栏，
+  //             控制栏已显示时再次轻触才切换播放/暂停。
+  //   VR 模式：单击只负责显示/收起操作栏，不切换播放。
+  // 两种情况都在锁住时完全无反应——只能点锁解锁（锁由上面的 pointerdown 唤出）。
   const handleSurfaceActivate = () => {
+    if (locked) return
     if (revealControlsOnlyRef.current) {
       revealControlsOnlyRef.current = false
       setControlsVisible(true)
@@ -453,50 +508,49 @@ export function PlayerVideoStage({
     }
     revealControlsOnlyRef.current = false
     if (vrActive) {
-      if (controlsVisible) {
-        resetVrTapCount()
-        setControlsVisible(false)
-        return
-      }
-      const next = vrTapCountRef.current + 1
-      vrTapCountRef.current = next
-      setVrTapCount(next)
-      if (vrTapTimerRef.current) {
-        clearTimeout(vrTapTimerRef.current)
-        vrTapTimerRef.current = null
-      }
-      if (next >= VR_TAP_COUNT) {
-        resetVrTapCount()
-        setControlsVisible(true)
-        return
-      }
-      // 相邻两次点击间隔超过 VR_TAP_GAP_MS 就重新计数，避免把零散点击累加起来。
-      vrTapTimerRef.current = setTimeout(() => {
-        vrTapTimerRef.current = null
-        vrTapCountRef.current = 0
-        setVrTapCount(0)
-      }, VR_TAP_GAP_MS)
+      setControlsVisible((visible) => !visible)
       return
     }
     togglePlay()
   }
-  // 进入 VR 全景播放时先亮一次控制栏与 VR 工具条，让用户知道入口在哪；
-  // 之后完全由自动隐藏和「连点画面」控制。退出 VR 时要清掉 VR 浮层的悬停状态，
-  // 否则控制栏会以为还有浮层被悬停而一直不隐藏。
+
+  const toggleLock = () => {
+    const next = !locked
+    setLocked(next)
+    // 锁上时立刻收起操作栏；解锁时也保持收起，这样画面在任何一侧都不会突然
+    // 弹出一整条浮层。解锁那一下顺带显示「已解锁」提示。
+    setControlsVisible(false)
+    revealLock(!next)
+  }
+
+  /** 复位锁定状态：切模式/换片时调用，避免上一次的锁挡住新的内容。 */
+  const resetLock = useCallback(() => {
+    setLocked(false)
+    setLockShown(false)
+    setLockHint(false)
+    setLockHovered(false)
+    if (lockRevealTimerRef.current) {
+      clearTimeout(lockRevealTimerRef.current)
+      lockRevealTimerRef.current = null
+    }
+  }, [])
+
+  // 进入 VR 全景播放时先亮一次操作栏与 VR 工具条，让用户知道入口在哪；
+  // 退出 VR 时清掉 VR 浮层的悬停状态，否则控制栏会以为还有浮层被悬停而不隐藏。
+  // 两种情况都要解除锁定：切模式是个明确的操作意图，不该被上一次的锁挡住。
   useEffect(() => {
-    resetVrTapCount()
+    resetLock()
     if (vrActive) {
       setControlsVisible(true)
       return
     }
     setVrUiHovered(false)
-  }, [vrActive, resetVrTapCount])
-  useEffect(
-    () => () => {
-      if (vrTapTimerRef.current) clearTimeout(vrTapTimerRef.current)
-    },
-    [],
-  )
+  }, [resetLock, vrActive])
+
+  // 换集/换片时同样复位：新内容应该从干净的、可操作的状态开始。
+  useEffect(() => {
+    resetLock()
+  }, [media?.id, resetLock])
 
   // 首次操作说明只出现一次：读完了点「知道了」会立即落库；放着不管也会在
   // VR_GUIDE_AUTO_DISMISS_MS 之后自动收起并同样记录为已看过，避免每次进 VR 都弹。
@@ -681,6 +735,8 @@ export function PlayerVideoStage({
       data-player-stage
       className="relative flex h-full w-full flex-1 items-center justify-center overflow-hidden bg-black"
       onPointerDown={handleStagePointerDown}
+      onPointerMove={handleStagePointerMove}
+      onMouseLeave={() => setLockHovered(false)}
       onClick={handleSurfaceActivate}
       onDoubleClick={toggleFullscreen}
     >
@@ -787,9 +843,10 @@ export function PlayerVideoStage({
             playbackRate={playerPlaybackRate}
             onPlaybackRateChange={onPlayerPlaybackRateChange}
             onPlaybackRateCommit={onPlayerPlaybackRateCommit}
-            uiVisible={controlsVisible}
+            uiVisible={controlsVisible && !locked}
             onUiVisibleChange={setControlsVisible}
             uiHold={vrUiHovered}
+            uiLocked={locked}
             subs={subs}
             subtitleIndex={subtitleIndex}
             onSelectSubtitle={onSelectSubtitle}
@@ -858,11 +915,11 @@ export function PlayerVideoStage({
               </li>
               <li className="flex items-start gap-2">
                 <MousePointerClick size={14} className="mt-0.5 shrink-0 text-white/45" />
-                连续点击画面 {VR_TAP_COUNT} 次：显示控制栏（进度条、音量、画质、倍速、VR 设置）
+                单击画面：显示或收起操作栏（进度条、音量、画质、倍速、VR 设置）
               </li>
               <li className="flex items-start gap-2">
-                <Settings2 size={14} className="mt-0.5 shrink-0 text-white/45" />
-                控制栏显示时单击画面即可收起
+                <Lock size={14} className="mt-0.5 shrink-0 text-white/45" />
+                锁默认隐身：电脑把鼠标移到左侧中间、手机点一下画面就会浮现
               </li>
               <li className="flex items-start gap-2">
                 <Smartphone size={14} className="mt-0.5 shrink-0 text-white/45" />
@@ -879,10 +936,42 @@ export function PlayerVideoStage({
           </div>
         </div>
       ) : null}
-      {/* 连点计数反馈：没有反馈时用户连点两次会觉得没反应。 */}
-      {vrActive && !vrGuideVisible && !controlsVisible && vrTapCount > 0 ? (
-        <div className="pointer-events-none absolute bottom-24 left-1/2 z-30 -translate-x-1/2 rounded-full border border-white/15 bg-black/75 px-4 py-1.5 text-xs text-white/90 shadow-xl backdrop-blur">
-          再连点 {VR_TAP_COUNT - vrTapCount} 次显示控制栏
+      {/* 锁定按钮：贴在画面左侧正中，VR 和普通播放都有，但默认隐身。
+          桌面端把鼠标移到左侧中间就会浮现，移开即收；移动端点一下画面唤出，并在
+          LOCK_REVEAL_MS 后自动隐身。
+          未锁时点一下就把操作栏、进度框和 VR 工具条全部藏起来，同时屏蔽画面轻触
+          （不会误触发播放/暂停）；锁住后按钮变淡，提醒「这里是锁」。
+          注意：隐身时必须 pointer-events-none——否则这块隐形按钮会吃掉画面单击，
+          手机上想点画面唤出锁反而会误触上锁。 */}
+      <button
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation()
+          toggleLock()
+        }}
+        // 舞台在 pointerdown 上判断「是不是移动端轻触唤出控制栏」，锁按钮上的
+        // 触摸不应该参与那套判断，否则点锁会被当成一次画面轻触。
+        onPointerDown={(event) => event.stopPropagation()}
+        onDoubleClick={(event) => event.stopPropagation()}
+        aria-hidden={!lockVisible}
+        tabIndex={lockVisible ? 0 : -1}
+        aria-label={locked ? '解锁画面，恢复操作栏' : '锁定画面，隐藏操作栏和进度框'}
+        title={locked ? '点一下解锁，恢复操作栏与进度框' : '锁上后画面轻触无效，只留这个锁'}
+        className={`absolute left-2 top-1/2 z-30 -translate-y-1/2 rounded-full border p-3 shadow-2xl backdrop-blur transition-opacity duration-200 sm:left-4 ${
+          lockVisible ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'
+        } ${
+          locked
+            ? // 锁住时按钮退到很淡的状态：既提示「这里是锁」，又不打扰观看。
+              'border-white/10 bg-black/35 text-white/45 hover:bg-black/65 hover:text-white'
+            : 'border-white/15 bg-black/65 text-white hover:bg-black/85'
+        }`}
+      >
+        {locked ? <Lock size={20} /> : <LockOpen size={20} />}
+      </button>
+      {/* 解锁提示：操作栏此时已经藏起来了，用户点锁之后需要知道发生了什么。 */}
+      {lockHint ? (
+        <div className="pointer-events-none absolute left-16 top-1/2 z-30 -translate-y-1/2 rounded-full border border-white/15 bg-black/75 px-3 py-1.5 text-xs text-white/90 shadow-xl backdrop-blur sm:left-20">
+          已解锁，点画面可显示操作栏
         </div>
       ) : null}
       {playerError ? (

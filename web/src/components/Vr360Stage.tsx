@@ -101,6 +101,20 @@ function screenOrientationAngle(): number {
   return typeof legacy === 'number' ? legacy : 0
 }
 
+/**
+ * 当前设备是否没有真正的鼠标悬停能力（手机/平板）。
+ *
+ * 触摸设备上「悬停保持显示」这套机制本身就是错的：手指抬起后浏览器不保证补发
+ * mouseleave，一旦走进悬停状态标记就再也清不掉，控制栏和 VR 工具条会永久留在
+ * 画面上。这里按设备能力判断，而不是去猜某个鼠标事件是不是触摸合成的——
+ * 后者依赖 MouseEvent.sourceCapabilities，实测在不少浏览器里是 null，判断会
+ * 静默失效、等于没修。
+ */
+function isHoverlessDevice(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return true
+  return window.matchMedia('(hover: none)').matches
+}
+
 type DeviceOrientationEventConstructor = {
   requestPermission?: () => Promise<'granted' | 'denied' | 'default'>
 }
@@ -415,6 +429,10 @@ export function Vr360Stage({
   }, [])
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    // 轻触画面把视角拖动之外的浮层悬停状态清掉：触摸设备不会再发出 mouseleave，
+    // 上一步点击工具条/设置面板留下的「悬停保持显示」会一直挂着，控制栏就永远
+    // 不隐藏了。用户已经在点画面，说明指针早已离开浮层。
+    if (event.pointerType === 'touch') onUiHoldChange?.(false)
     try {
       event.currentTarget.setPointerCapture?.(event.pointerId)
     } catch {
@@ -528,7 +546,12 @@ export function Vr360Stage({
             // 抢走拖动转视角的手势，也可能被误点（例如误开陀螺仪、误开设置面板）。
             uiVisible ? 'pointer-events-auto' : 'pointer-events-none'
           }`}
-          onMouseEnter={() => onUiHoldChange?.(true)}
+          // 触摸设备不参与「悬停保持显示」：手指抬起后不会补发 mouseleave，
+          // 标记会永久挂在打开状态，控制栏和 VR 工具条就再也不自动隐藏。
+          onMouseEnter={() => {
+            if (isHoverlessDevice()) return
+            onUiHoldChange?.(true)
+          }}
           onMouseLeave={() => onUiHoldChange?.(false)}
         >
           <button
@@ -597,7 +620,10 @@ export function Vr360Stage({
             className={`w-[min(92vw,420px)] rounded-2xl border border-white/15 bg-black/75 px-3 py-2.5 text-white shadow-2xl backdrop-blur ${
               uiVisible ? 'pointer-events-auto' : 'pointer-events-none'
             }`}
-            onMouseEnter={() => onUiHoldChange?.(true)}
+            onMouseEnter={() => {
+              if (isHoverlessDevice()) return
+              onUiHoldChange?.(true)
+            }}
             onMouseLeave={() => onUiHoldChange?.(false)}
           >
             <p className="mb-1.5 text-[10px] uppercase tracking-wide text-white/45">投影方式</p>
