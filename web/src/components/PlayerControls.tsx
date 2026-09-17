@@ -965,7 +965,7 @@ export function PlayerControls({
           />
         </div>
       )}
-      <div className="sm:hidden">{PLAYER_MENU_DIVIDER}</div>
+      <div className={`sm:hidden ${PLAYER_MENU_DIVIDER}`} />
     </>
   )
 
@@ -1502,7 +1502,7 @@ function SubtitleItems({
 
       {canAdjustSelectedSubtitle && (
         <>
-          {PLAYER_MENU_DIVIDER}
+          <div className={PLAYER_MENU_DIVIDER} />
           <p className={PLAYER_MENU_LABEL}>字幕位置</p>
           <div className="flex flex-wrap gap-1 px-2.5 pb-1">
             {SUBTITLE_POSITION_OPTIONS.map(([value, label]) => (
@@ -1548,7 +1548,7 @@ function SubtitleItems({
 
       {canConvertSelectedSubtitle && (
         <>
-          {PLAYER_MENU_DIVIDER}
+          <div className={PLAYER_MENU_DIVIDER} />
           <p className={PLAYER_MENU_LABEL}>外挂字幕简繁转换</p>
           {(
             [
