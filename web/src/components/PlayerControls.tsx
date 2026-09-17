@@ -65,7 +65,7 @@ const PLAYBACK_RATE_HINT_MS = 900
 /** 播放中控制栏无操作自动隐藏的延时。 */
 const CONTROLS_HIDE_DELAY_MS = 3000
 /** VR 全景播放的隐藏延时更短：浮层由单击唤出，收得越快越不打扰观看。 */
-const VR_CONTROLS_HIDE_DELAY_MS = 2000
+const VR_CONTROLS_HIDE_DELAY_MS = 3000
 /** VR 视角拖拽超过这个距离才算「真的在转动视角」，轻触不受影响。 */
 const VR_VIEW_DRAG_DISTANCE = 6
 

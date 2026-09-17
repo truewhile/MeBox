@@ -515,6 +515,9 @@ export function Vr360Stage({
         onClick={(event) => event.stopPropagation()}
       />
       <div
+        // 阻止浮层内按钮/面板的点击冒泡到舞台的 handleSurfaceActivate：否则点击
+        // 投影方式/画幅布局等设置项会被误判为「单击收起控制栏」，面板在切换后立即消失。
+        onClick={(event) => event.stopPropagation()}
         className={`pointer-events-none absolute inset-x-0 top-2 z-20 flex flex-col items-center gap-1.5 px-2 transition-opacity duration-300 ${
           uiVisible ? 'opacity-100' : 'opacity-0'
         }`}
