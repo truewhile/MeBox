@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Check, ChevronDown, ChevronRight, Eye, EyeOff, Film, Hash, KeyRound, Loader2, MessageSquareText, RefreshCw, Search, Server, Settings2, Sparkles, Tag, X } from 'lucide-react'
 
 import type { DanmakuAnime, DanmakuEpisode, DanmakuLoadedInfo } from '../api/danmaku'
+import { PLAYER_DRAWER, PLAYER_ICON_BUTTON, PLAYER_PANEL_HEADER } from './playerTheme'
 
 // PlayerDanmakuPanel — the on-player danmaku control panel. It displays
 // the matched danmaku details (anime title, episode title, comment count,
@@ -194,24 +195,26 @@ export function PlayerDanmakuPanel({
 
   return (
     // 面板悬浮于视频上方：阻止点击冒泡，避免触发视频区域的播放/暂停切换。
+    // 排布和选集抽屉完全一致（整条贴住右边缘、标题栏常驻），两个面板互斥打开时
+    // 位置不会跳，用户也不用重新找入口。
     <div
       onClick={(e) => e.stopPropagation()}
-      className="absolute inset-x-3 top-12 bottom-3 z-30 w-auto overflow-y-auto overscroll-contain rounded-2xl border border-white/15 bg-black/85 p-4 text-white shadow-2xl backdrop-blur-md sm:inset-x-auto sm:bottom-auto sm:right-4 sm:top-16 sm:w-80 sm:max-h-[calc(100%-5rem)]"
+      onPointerDown={(e) => e.stopPropagation()}
+      onPointerUp={(e) => e.stopPropagation()}
+      className={`absolute inset-y-0 right-0 z-30 ${PLAYER_DRAWER}`}
     >
-      <div className="mb-3 flex items-center justify-between">
-        <div className="flex items-center gap-2 text-sm font-semibold">
-          <MessageSquareText size={16} className="text-rose-400" /> 弹幕设置
-          {settingsSaving && <Loader2 size={12} className="animate-spin text-rose-300" />}
+      <div className={PLAYER_PANEL_HEADER}>
+        <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+          <MessageSquareText size={16} className="shrink-0 text-rose-400" />
+          <span className="truncate">弹幕设置</span>
+          {settingsSaving && <Loader2 size={12} className="shrink-0 animate-spin text-rose-300" />}
         </div>
-        <button
-          onClick={onClose}
-          className="rounded-full p-1 text-white/60 transition hover:bg-white/10 hover:text-white"
-          title="关闭"
-        >
+        <button onClick={onClose} className={PLAYER_ICON_BUTTON} title="关闭 (Esc)">
           <X size={16} />
         </button>
       </div>
 
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3.5">
       {/* 是否加载弹幕 */}
       <label className="mb-3 flex cursor-pointer items-center justify-between rounded-lg bg-white/5 px-2.5 py-2 text-sm transition hover:bg-white/10">
         <span className="text-white/85">加载弹幕</span>
@@ -572,6 +575,7 @@ export function PlayerDanmakuPanel({
             </p>
           </div>
         )}
+      </div>
       </div>
     </div>
   )

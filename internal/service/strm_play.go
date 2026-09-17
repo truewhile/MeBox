@@ -121,7 +121,7 @@ func (s *StrmService) resolveLocalPlay(ctx context.Context, rawPath string) (*St
 // 支持：
 //   - /api/strm/play/{provider}/video{ext}?acct=..&pickcode=.. （常规格式，含账号）
 //   - /api/cloud/play/{type}?ref=.. （旧格式，无账号 → 取该类型第一个启用账号）
-//   - 绝对 http(s) 链接（直接透传）
+//   - 绝对 http(s) 链接（直接透传，包含别的 MeBox / MediaStationGo 实例的播放端点）
 //   - 其余协议（webdav:// 等）返回错误，由调用方决定是否静默跳过
 func (s *StrmService) ResolvePlayTarget(ctx context.Context, raw string) (*StrmPlayResult, error) {
 	raw = strings.TrimSpace(raw)
@@ -131,6 +131,17 @@ func (s *StrmService) ResolvePlayTarget(ctx context.Context, raw string) (*StrmP
 	u, err := url.Parse(raw)
 	if err != nil {
 		return nil, fmt.Errorf("解析播放目标失败: %w", err)
+	}
+	// 别的 MeBox / MediaStationGo 实例的播放端点：本机没有对应账号，按普通外部
+	// 直链处理——客户端与 ffmpeg 直接跟随 302 去对方实例取流（/api/strm/play 是
+	// 公开端点，不需要本机凭据），不能拿本机账号去查别人的 pickcode。
+	if isPlaybackAPIPath(u.Path) && !s.isLocalPlaybackTarget(ctx, raw) {
+		switch strings.ToLower(strings.TrimSpace(u.Scheme)) {
+		case "http", "https":
+			return &StrmPlayResult{RedirectURL: raw}, nil
+		default:
+			return nil, fmt.Errorf("不支持的播放目标协议: %s", u.Scheme)
+		}
 	}
 	lowerPath := strings.ToLower(u.Path)
 	switch {
@@ -154,6 +165,16 @@ func (s *StrmService) ResolvePlayTarget(ctx context.Context, raw string) (*StrmP
 	default:
 		return nil, fmt.Errorf("不支持的播放目标协议: %s", u.Scheme)
 	}
+}
+
+// isLocalPlaybackTarget 报告播放地址是否属于本机。这里没有 HTTP 请求上下文，
+// 「本机」由 strm.base_url / 各同步目录覆盖的 base_url / 本机网盘账号共同界定
+// （见 isInternalPlaybackTarget）。
+func (s *StrmService) isLocalPlaybackTarget(ctx context.Context, raw string) bool {
+	if s == nil {
+		return true
+	}
+	return isInternalPlaybackTarget(ctx, s.repo, s.cfg, nil, raw)
 }
 
 // firstEnabledAccountOf 返回指定提供方第一个凭据可用的启用账号。

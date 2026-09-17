@@ -746,7 +746,10 @@ func TestHandleMetaSha1Identity(t *testing.T) {
 
 // fakeRemoteProvider 是 walkRemote 并发遍历的假提供方：返回一棵固定目录树，
 // 并记录每个目录被 List 的次数，用于验证并发遍历无漏目录、无重复目录。
+// walkRemote 会并发调用 List，因此计数必须加锁：此前直接写 map 会偶发
+// "fatal error: concurrent map writes"，把整个测试进程带走。
 type fakeRemoteProvider struct {
+	mu     sync.Mutex
 	listed map[string]int
 }
 
@@ -756,11 +759,20 @@ func (f *fakeRemoteProvider) Resolve(context.Context, string) (*cloud.DirectLink
 	return &cloud.DirectLink{URL: "http://cdn/x.mkv"}, nil
 }
 
+// listedCount 返回某个目录被 List 的次数。
+func (f *fakeRemoteProvider) listedCount(dirID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listed[dirID]
+}
+
 func (f *fakeRemoteProvider) List(_ context.Context, dirID string) ([]cloud.FileEntry, error) {
+	f.mu.Lock()
 	if f.listed == nil {
 		f.listed = map[string]int{}
 	}
 	f.listed[dirID]++
+	f.mu.Unlock()
 	switch dirID {
 	case "root":
 		return []cloud.FileEntry{
@@ -828,8 +840,8 @@ func TestWalkRemoteConcurrent(t *testing.T) {
 	st.flushPreferredVideos()
 
 	for _, dir := range []string{"root", "a", "a1", "b"} {
-		if provider.listed[dir] != 1 {
-			t.Errorf("目录 %s 被列出 %d 次，期望 1 次", dir, provider.listed[dir])
+		if count := provider.listedCount(dir); count != 1 {
+			t.Errorf("目录 %s 被列出 %d 次，期望 1 次", dir, count)
 		}
 	}
 

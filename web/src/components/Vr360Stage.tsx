@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, RefObject } from 'react'
-import { Check, Compass, Minus, Plus, RotateCcw, Settings2, Smartphone } from 'lucide-react'
+import { Compass, LogOut, Minus, Plus, RotateCcw, Settings2, Smartphone } from 'lucide-react'
 
+import {
+  PLAYER_ICON_BUTTON,
+  PLAYER_SEGMENT,
+  PLAYER_SEGMENT_GROUP,
+  PLAYER_SEGMENT_OFF,
+  PLAYER_SEGMENT_ON,
+  PLAYER_TEXT_BUTTON,
+} from './playerTheme'
 import {
   VR360_DEFAULT_FOV,
   VR360_MAX_FOV,
@@ -74,6 +82,8 @@ type Vr360StageProps = {
   onError: (message: string) => void
   /** 用户调整投影方式/立体布局时回调，由播放页保存为下次进入的默认值。 */
   onProfileChange?: (profile: Vr360Profile) => void
+  /** 退出 VR 全景播放（回到普通播放）。不提供时工具条上不显示退出入口。 */
+  onExitVr?: () => void
   /**
    * 鼠标是否停留在 VR 工具条/设置面板上。由播放页转给控制栏：悬停这些浮层时
    * 控制栏不应该自动隐藏（否则设置面板会在点击前消失）。
@@ -136,6 +146,7 @@ export function Vr360Stage({
   onReady,
   onError,
   onProfileChange,
+  onExitVr,
   onUiHoldChange,
 }: Vr360StageProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -541,7 +552,7 @@ export function Vr360Stage({
         }`}
       >
         <div
-          className={`flex flex-wrap items-center justify-center gap-1.5 rounded-2xl border border-white/15 bg-black/65 px-2 py-1.5 text-white shadow-2xl backdrop-blur ${
+          className={`flex flex-wrap items-center justify-center gap-0.5 rounded-xl border border-white/10 bg-[#0d0e12]/90 p-1 text-white shadow-[0_10px_38px_rgba(0,0,0,0.6)] backdrop-blur-xl ${
             // 浮层隐藏时必须彻底不接收指针事件：否则看不见的按钮既会在画面顶部
             // 抢走拖动转视角的手势，也可能被误点（例如误开陀螺仪、误开设置面板）。
             uiVisible ? 'pointer-events-auto' : 'pointer-events-none'
@@ -557,21 +568,19 @@ export function Vr360Stage({
           <button
             type="button"
             onClick={toggleGyro}
-            className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition ${
-              gyroState === 'active'
-                ? 'bg-rose-500/90 text-white hover:bg-rose-500'
-                : 'bg-white/10 text-white/85 hover:bg-white/20'
+            className={`${PLAYER_TEXT_BUTTON} ${
+              gyroState === 'active' ? 'bg-rose-500 text-white hover:bg-rose-500' : ''
             }`}
             title="用手机陀螺仪转动视角"
           >
             <Smartphone size={14} />
             陀螺仪
-            {gyroState === 'active' && <Compass size={13} className="text-white/85" />}
+            {gyroState === 'active' && <Compass size={12} className="text-white/85" />}
           </button>
           <button
             type="button"
             onClick={resetView}
-            className="flex items-center gap-1.5 rounded-full bg-white/10 px-2.5 py-1 text-xs font-medium text-white/85 transition hover:bg-white/20"
+            className={PLAYER_TEXT_BUTTON}
             title="恢复默认视角与视场角"
           >
             <RotateCcw size={14} />
@@ -580,44 +589,53 @@ export function Vr360Stage({
           <button
             type="button"
             onClick={() => setSettingsOpen((open) => !open)}
-            className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition ${
-              settingsOpen
-                ? 'bg-rose-500/90 text-white hover:bg-rose-500'
-                : 'bg-white/10 text-white/85 hover:bg-white/20'
-            }`}
+            className={`${PLAYER_TEXT_BUTTON} ${settingsOpen ? 'bg-white/15 text-white' : ''}`}
             title="投影方式与画幅布局"
           >
             <Settings2 size={14} />
             画面
           </button>
-          <div className="flex items-center gap-0.5">
-            <button
-              type="button"
-              onClick={() => zoomBy(1.15)}
-              className="rounded-full p-1.5 transition hover:bg-white/15"
-              title="视野拉远"
-            >
-              <Minus size={15} />
-            </button>
-            <span className="w-9 text-center text-[10px] tabular-nums text-white/75">
-              {(VR360_DEFAULT_FOV / fovHint).toFixed(1)}×
-            </span>
-            <button
-              type="button"
-              onClick={() => zoomBy(1 / 1.15)}
-              className="rounded-full p-1.5 transition hover:bg-white/15"
-              title="视野拉近"
-            >
-              <Plus size={15} />
-            </button>
-          </div>
+          <div className="mx-0.5 h-5 w-px bg-white/10" />
+          <button
+            type="button"
+            onClick={() => zoomBy(1.15)}
+            className={PLAYER_ICON_BUTTON}
+            title="视野拉远"
+          >
+            <Minus size={15} />
+          </button>
+          <span className="w-9 text-center text-[10px] tabular-nums text-white/70">
+            {(VR360_DEFAULT_FOV / fovHint).toFixed(1)}×
+          </span>
+          <button
+            type="button"
+            onClick={() => zoomBy(1 / 1.15)}
+            className={PLAYER_ICON_BUTTON}
+            title="视野拉近"
+          >
+            <Plus size={15} />
+          </button>
+          {onExitVr ? (
+            <>
+              <div className="mx-0.5 h-5 w-px bg-white/10" />
+              <button
+                type="button"
+                onClick={onExitVr}
+                className={`${PLAYER_TEXT_BUTTON} hover:bg-rose-500/20 hover:text-rose-200`}
+                title="退出 VR 全景，回到普通播放"
+              >
+                <LogOut size={14} />
+                退出 VR
+              </button>
+            </>
+          ) : null}
         </div>
-        <p className="pointer-events-none rounded-full bg-black/45 px-3 py-1 text-[10px] text-white/70 backdrop-blur">
+        <p className="pointer-events-none rounded-md bg-black/45 px-3 py-1 text-[10px] text-white/65 backdrop-blur">
           {hint || '拖动旋转视角 · 滚轮或双指缩放'}
         </p>
         {settingsOpen ? (
           <div
-            className={`w-[min(92vw,420px)] rounded-2xl border border-white/15 bg-black/75 px-3 py-2.5 text-white shadow-2xl backdrop-blur ${
+            className={`w-[min(92vw,420px)] rounded-xl border border-white/10 bg-[#0d0e12]/95 px-3 py-3 text-white shadow-[0_10px_38px_rgba(0,0,0,0.6)] backdrop-blur-xl ${
               uiVisible ? 'pointer-events-auto' : 'pointer-events-none'
             }`}
             onMouseEnter={() => {
@@ -626,46 +644,40 @@ export function Vr360Stage({
             }}
             onMouseLeave={() => onUiHoldChange?.(false)}
           >
-            <p className="mb-1.5 text-[10px] uppercase tracking-wide text-white/45">投影方式</p>
-            <div className="flex flex-wrap gap-1.5">
+            <p className="mb-1.5 text-[10px] uppercase tracking-wide text-white/40">投影方式</p>
+            <div className={PLAYER_SEGMENT_GROUP}>
               {VR360_PROJECTION_OPTIONS.map(([value, label]) => (
                 <button
                   key={value}
                   type="button"
                   onClick={() => onProfileChange?.({ ...profile, projection: value })}
-                  className={`flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] transition ${
-                    profile.projection === value
-                      ? 'bg-rose-500/25 text-rose-200'
-                      : 'bg-white/5 text-white/75 hover:bg-white/15'
+                  className={`${PLAYER_SEGMENT} ${
+                    profile.projection === value ? PLAYER_SEGMENT_ON : PLAYER_SEGMENT_OFF
                   }`}
                 >
-                  {profile.projection === value && <Check size={11} />}
                   {label}
                 </button>
               ))}
             </div>
-            <p className="mb-1.5 mt-2.5 text-[10px] uppercase tracking-wide text-white/45">
+            <p className="mb-1.5 mt-3 text-[10px] uppercase tracking-wide text-white/40">
               画幅布局
             </p>
-            <div className="flex flex-wrap gap-1.5">
+            <div className={PLAYER_SEGMENT_GROUP}>
               {VR360_STEREO_OPTIONS.map(([value, label]) => (
                 <button
                   key={value}
                   type="button"
                   onClick={() => onProfileChange?.({ ...profile, stereo: value })}
-                  className={`flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] transition ${
-                    profile.stereo === value
-                      ? 'bg-rose-500/25 text-rose-200'
-                      : 'bg-white/5 text-white/75 hover:bg-white/15'
+                  className={`${PLAYER_SEGMENT} ${
+                    profile.stereo === value ? PLAYER_SEGMENT_ON : PLAYER_SEGMENT_OFF
                   }`}
                 >
-                  {profile.stereo === value && <Check size={11} />}
                   {label}
                 </button>
               ))}
             </div>
             {profile.stereo !== 'mono' && (
-              <p className="mt-2 text-[10px] leading-relaxed text-white/45">
+              <p className="mt-2.5 text-[10px] leading-relaxed text-white/45">
                 左右/上下并排素材在当前屏幕上只显示左眼画面；真正的双眼立体画面需要 VR
                 头显（WebXR）。
               </p>

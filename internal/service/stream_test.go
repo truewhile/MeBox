@@ -216,6 +216,78 @@ func TestServeFileRedirectsLocalSTRMFileTargetByDefault(t *testing.T) {
 	}
 }
 
+// 别的 MeBox / MediaStationGo 实例生成的 .strm：里面的 acct 是对方实例的账号，
+// 本机不能拿自己的账号去解析，直接把 302 透传给客户端，由客户端去对方实例取流。
+func TestServeFilePassesThroughForeignInstanceSTRMURL(t *testing.T) {
+	repos := newStreamTestRepo(t)
+	target := "http://other-mebox.example:18080/api/strm/play/cloud115/video.mkv?acct=other-acct&pickcode=xyz"
+	if err := repos.DB.Create(&model.Media{
+		Base:      model.Base{ID: "foreign-strm"},
+		Title:     "Foreign STRM",
+		Path:      "D:/media/Foreign.strm",
+		Container: "strm",
+		STRMURL:   target,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := NewStreamService(&config.Config{}, zap.NewNop(), repos, nil)
+	req := httptest.NewRequest(http.MethodGet, "http://nas.local:18080/api/stream/foreign-strm?token=jwt123", nil)
+	w := httptest.NewRecorder()
+
+	if err := svc.ServeFile(w, req, "foreign-strm"); err != nil {
+		t.Fatalf("foreign instance strm url should be passed through: %v", err)
+	}
+	if w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	if loc != target {
+		t.Fatalf("Location = %q, want untouched %q", loc, target)
+	}
+	if strings.Contains(loc, "jwt123") {
+		t.Fatalf("foreign instance url must not receive our auth token, got %q", loc)
+	}
+}
+
+// 本机自己生成的 .strm 在换了域名/IP 之后仍要认领：host 对不上，但 acct 是本机
+// 网盘账号，于是按当前请求 host 相对化，保持可播放。
+func TestServeFileRealignsOwnSTRMURLOtherHost(t *testing.T) {
+	repos := repository.New(newServiceTestDB(t, &model.Media{}, &model.Setting{}, &model.StrmAccount{}))
+	if err := repos.StrmAccount.Create(t.Context(), &model.StrmAccount{
+		Base:     model.Base{ID: "own-acct"},
+		Name:     "own",
+		Provider: model.StrmProvider115,
+		Enabled:  true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repos.DB.Create(&model.Media{
+		Base:      model.Base{ID: "own-strm"},
+		Title:     "Own STRM",
+		Path:      "D:/media/Own.strm",
+		Container: "strm",
+		STRMURL:   "http://old-host:9011/api/strm/play/cloud115/video.mkv?acct=own-acct&pickcode=123",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := NewStreamService(&config.Config{}, zap.NewNop(), repos, nil)
+	req := httptest.NewRequest(http.MethodGet, "http://nas.local:18080/api/stream/own-strm?token=jwt123", nil)
+	w := httptest.NewRecorder()
+
+	if err := svc.ServeFile(w, req, "own-strm"); err != nil {
+		t.Fatalf("own strm url on a stale host should still play: %v", err)
+	}
+	if w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	if !strings.HasPrefix(loc, "http://nas.local:18080/api/strm/play/cloud115/video.mkv?") ||
+		!strings.Contains(loc, "acct=own-acct") ||
+		!strings.Contains(loc, "pickcode=123") {
+		t.Fatalf("own strm url should be realigned to current host, got %q", loc)
+	}
+}
+
 func TestCloudPlaybackModeUsesExplicitModeBeforeLegacySTRMFlag(t *testing.T) {
 	repos := newStreamTestRepo(t)
 	if got := CloudPlaybackMode(t.Context(), repos); got != CloudPlaybackModeRedirectProxy {

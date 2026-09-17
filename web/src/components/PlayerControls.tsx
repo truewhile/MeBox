@@ -5,7 +5,7 @@ import {
   CaptionsOff,
   Check,
   FastForward,
-  Gauge,
+  Layers,
   ListVideo,
   Loader2,
   Lock,
@@ -17,6 +17,7 @@ import {
   Play,
   Rewind,
   Rotate3d,
+  Settings2,
   SkipBack,
   SkipForward,
   Timer,
@@ -39,21 +40,36 @@ import {
   type SubtitlePosition,
   type SubtitleStylePreset,
 } from '../utils/subtitleDisplay'
+import {
+  PLAYER_ICON_BUTTON,
+  PLAYER_MENU_DIVIDER,
+  PLAYER_MENU_ITEM,
+  PLAYER_MENU_LABEL,
+  PLAYER_POPOVER,
+  PLAYER_RANGE_OVERLAY,
+  PLAYER_TEXT_BUTTON,
+  PLAYER_TRACK,
+  PLAYER_TRACK_FILL,
+} from './playerTheme'
 
-// PlayerControls — custom bottom control bar replacing the native <video
-// controls> (which cannot host custom buttons). The danmaku toggle sits right
-// next to the volume control. The bar auto-hides while playing and reappears
-// on mouse movement; it stays visible while paused or when hovering/interacting.
+// PlayerControls — 底部操作栏（自绘，替代原生 <video controls>，因为原生栏放不下
+// 自定义按钮）。
 //
-// VR 全景播放里这条规则要反过来：按住拖动就是转动视角，属于观看动作而不是
-// 操作意图，所以这类鼠标/触摸移动既不唤出控制栏，还会在开始转视角时立刻把
-// 浮层收掉（见 onVrPointerDown / onVrPointerMove）。
+// 排版参考 B 站：进度条单独占一行贴着画面底部，下面是一排等高等宽的图标按钮；
+// 只有「清晰度 / 倍速 / 选集」保留文字（这三个需要显示当前状态），其余一律
+// 收敛成同尺寸图标。任何需要展开选择的内容都只有两种落点——要么是贴着操作栏
+// 向上的小弹层，要么是右侧的「设置」面板，不再像以前那样在一条操作栏里混着
+// 圆形药丸按钮、独立下拉菜单和整块浮层面板。
+//
+// VR 全景播放里 auto-hide 的规则要反过来：按住拖动就是转动视角，属于观看动作
+// 而不是操作意图，所以这类鼠标/触摸移动既不唤出控制栏，还会在开始转视角时
+// 立刻把浮层收掉（见 onVrPointerDown / onVrPointerMove）。
 
 function formatTime(s: number): string {
   if (!Number.isFinite(s) || s < 0) s = 0
   const m = Math.floor(s / 60)
   const sec = Math.floor(s % 60)
-  return `${m}:${String(sec).padStart(2, '0')}`
+  return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
 }
 
 const SEEK_STEP_SEC = 10
@@ -79,6 +95,12 @@ const VR_VIEW_DRAG_DISTANCE = 6
 function isHoverlessDevice(): boolean {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return true
   return window.matchMedia('(hover: none)').matches
+}
+
+/** 把 0~1 的比例夹到安全区间，避免手柄/气泡贴到两端被裁掉。 */
+function clampRatio(value: number, min = 0, max = 1): number {
+  if (!Number.isFinite(value)) return min
+  return Math.min(max, Math.max(min, value))
 }
 
 type SeekHint = {
@@ -131,9 +153,13 @@ type PlayerControlsProps = {
   onSubtitlePositionChange: (position: SubtitlePosition) => void
   subtitleStyle: SubtitleStylePreset
   onSubtitleStyleChange: (style: SubtitleStylePreset) => void
+  /** 弹幕设置面板是否打开。 */
   danmakuOpen: boolean
+  /** 弹幕当前是否渲染在画面上（操作栏上的「弹」开关）。 */
   danmakuEnabled: boolean
-  onToggleDanmaku: () => void
+  onToggleDanmakuEnabled?: (next: boolean) => void
+  /** 打开弹幕设置面板（弹幕服务的搜索与参数都在那里）。 */
+  onOpenDanmaku?: () => void
   hasPrevEpisode?: boolean
   hasNextEpisode?: boolean
   onPrevEpisode?: () => void
@@ -142,11 +168,19 @@ type PlayerControlsProps = {
   nextEpisodeTitle?: string
   playlistOpen?: boolean
   hasPlaylist?: boolean
+  /** 当前条目有多个版本：选集面板里可切换版本。 */
+  hasVersions?: boolean
   onTogglePlaylist?: () => void
   qualities?: PlaybackQuality[]
+  /** 清晰度按钮上显示的文字（播放页按当前播放方式算好，直连时是「原画」）。 */
+  qualityLabel?: string
   selectedQuality?: string
   onSelectQuality?: (quality: PlaybackQuality) => void
   showQuality?: boolean
+  /** 当前播放方式的文字描述（直接播放 / HLS 转码 / 客户端直连解码 …）。 */
+  playbackModeLabel?: string
+  /** 可切换播放方式时提供；不可切换（直连解码、远程挂载）时不传，面板里显示为状态。 */
+  onTogglePlaybackMode?: () => void
   /** VR 全景播放配置；非 null 表示当前处于 VR 模式。 */
   vr360?: Vr360Profile | null
   /** 是否由文件名/画幅自动识别为 VR 素材（按钮上加一个小圆点提示）。 */
@@ -183,7 +217,8 @@ export function PlayerControls({
   onSubtitleStyleChange,
   danmakuOpen,
   danmakuEnabled,
-  onToggleDanmaku,
+  onToggleDanmakuEnabled,
+  onOpenDanmaku,
   hasPrevEpisode = false,
   hasNextEpisode = false,
   onPrevEpisode,
@@ -192,11 +227,15 @@ export function PlayerControls({
   nextEpisodeTitle,
   playlistOpen = false,
   hasPlaylist = false,
+  hasVersions = false,
   onTogglePlaylist,
   qualities = [],
+  qualityLabel = '清晰度',
   selectedQuality = '',
   onSelectQuality,
   showQuality = false,
+  playbackModeLabel = '',
+  onTogglePlaybackMode,
   vr360 = null,
   vr360Detected = false,
   onToggleVr360,
@@ -213,6 +252,8 @@ export function PlayerControls({
   const [playing, setPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
+  /** 已缓冲到的绝对秒数（HLS 会话要加上 streamOffset 才是完整时间轴）。 */
+  const [buffered, setBuffered] = useState(0)
   const [volume, setVolume] = useState(volumeProp)
   const [muted, setMuted] = useState(volumeProp === 0)
   const [fullscreen, setFullscreen] = useState(false)
@@ -220,12 +261,16 @@ export function PlayerControls({
   const [controlsHovered, setControlsHovered] = useState(false)
   const [isScrubbing, setIsScrubbing] = useState(false)
   const [scrubValue, setScrubValue] = useState<number | null>(null)
+  /** 进度条上的悬停预览位置（0~1）与对应秒数；移出即清空。 */
+  const [seekHover, setSeekHover] = useState<number | null>(null)
   const [subtitleMenuOpen, setSubtitleMenuOpen] = useState(false)
   const subtitleMenuRef = useRef<HTMLDivElement | null>(null)
   const [qualityMenuOpen, setQualityMenuOpen] = useState(false)
   const qualityMenuRef = useRef<HTMLDivElement | null>(null)
   const [speedMenuOpen, setSpeedMenuOpen] = useState(false)
   const speedMenuRef = useRef<HTMLDivElement | null>(null)
+  const [settingsMenuOpen, setSettingsMenuOpen] = useState(false)
+  const settingsMenuRef = useRef<HTMLDivElement | null>(null)
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const isScrubbingRef = useRef(false)
   /** 控制栏当前是否处于「必须保持显示」的状态（悬停/拖进度/菜单或面板打开）。 */
@@ -271,6 +316,7 @@ export function PlayerControls({
     subtitleMenuOpen ||
     qualityMenuOpen ||
     speedMenuOpen ||
+    settingsMenuOpen ||
     danmakuOpen ||
     playlistOpen
   useEffect(() => {
@@ -301,6 +347,16 @@ export function PlayerControls({
     setStageEl(container())
   }, [container])
 
+  // 浮层收起时同步关掉所有弹层：否则用户下次唤出操作栏，上一次没点掉的菜单会
+  // 直接弹回来盖住画面。
+  useEffect(() => {
+    if (uiVisible && !uiLocked) return
+    setSubtitleMenuOpen(false)
+    setQualityMenuOpen(false)
+    setSpeedMenuOpen(false)
+    setSettingsMenuOpen(false)
+  }, [uiVisible, uiLocked])
+
   // 音量由播放页按用户持久化；配置加载或切换对象后同步到当前 video。
   useEffect(() => {
     const el = video()
@@ -322,9 +378,9 @@ export function PlayerControls({
     }
   }, [video, playbackRateProp])
 
-  // 点击控制栏外部时关闭字幕/画质/倍速菜单
+  // 点击控制栏外部时关掉字幕/清晰度/倍速/设置弹层
   useEffect(() => {
-    if (!subtitleMenuOpen && !qualityMenuOpen && !speedMenuOpen) return
+    if (!subtitleMenuOpen && !qualityMenuOpen && !speedMenuOpen && !settingsMenuOpen) return
     const onDocClick = (e: MouseEvent) => {
       if (subtitleMenuRef.current && !subtitleMenuRef.current.contains(e.target as Node)) {
         setSubtitleMenuOpen(false)
@@ -335,10 +391,13 @@ export function PlayerControls({
       if (speedMenuRef.current && !speedMenuRef.current.contains(e.target as Node)) {
         setSpeedMenuOpen(false)
       }
+      if (settingsMenuRef.current && !settingsMenuRef.current.contains(e.target as Node)) {
+        setSettingsMenuOpen(false)
+      }
     }
     document.addEventListener('mousedown', onDocClick)
     return () => document.removeEventListener('mousedown', onDocClick)
-  }, [subtitleMenuOpen, qualityMenuOpen, speedMenuOpen])
+  }, [subtitleMenuOpen, qualityMenuOpen, speedMenuOpen, settingsMenuOpen])
 
   // 播放时 3 秒无操作自动隐藏控制栏；暂停/悬停/拖动进度条/打开菜单时保持显示。
   // 监听挂在整个播放器舞台容器（data-player-stage）上，避免光标移到控制栏时因离开视频画面而误触发 mouseleave。
@@ -418,6 +477,14 @@ export function PlayerControls({
       onMove()
     }
     const syncTime = () => {
+      const ranges = el.buffered
+      if (ranges && ranges.length > 0) {
+        try {
+          setBuffered(streamOffset + ranges.end(ranges.length - 1))
+        } catch {
+          setBuffered(0)
+        }
+      }
       if (isScrubbingRef.current) return
       if (pendingSeekRef.current !== null) {
         const curAbs = streamOffset + el.currentTime
@@ -461,6 +528,7 @@ export function PlayerControls({
     el.addEventListener('playing', syncPlay)
     el.addEventListener('pause', syncPlay)
     el.addEventListener('timeupdate', syncTime)
+    el.addEventListener('progress', syncTime)
     el.addEventListener('durationchange', syncMeta)
     el.addEventListener('loadedmetadata', syncMeta)
     el.addEventListener('volumechange', syncVolume)
@@ -482,6 +550,7 @@ export function PlayerControls({
       el.removeEventListener('playing', syncPlay)
       el.removeEventListener('pause', syncPlay)
       el.removeEventListener('timeupdate', syncTime)
+      el.removeEventListener('progress', syncTime)
       el.removeEventListener('durationchange', syncMeta)
       el.removeEventListener('loadedmetadata', syncMeta)
       el.removeEventListener('volumechange', syncVolume)
@@ -593,6 +662,15 @@ export function PlayerControls({
     applyAbsoluteSeek(v)
     setIsScrubbing(false)
     setScrubValue(null)
+    setSeekHover(null)
+  }
+
+  /** 进度条悬停预览：记录光标在轨道上的比例，用于显示秒数气泡。 */
+  const handleSeekHover = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (event.clientX === 0 && event.clientY === 0) return
+    const rect = event.currentTarget.getBoundingClientRect()
+    if (rect.width <= 0) return
+    setSeekHover(clampRatio((event.clientX - rect.left) / rect.width))
   }
 
   const revealControls = useCallback(() => {
@@ -766,22 +844,34 @@ export function PlayerControls({
     (selectedSubtitle.delivery === 'webvtt' || selectedSubtitle.delivery === 'ass')
   const canAdjustSelectedSubtitle = selectedSubtitle?.delivery === 'webvtt'
   const usesOriginalASS = selectedSubtitle?.delivery === 'ass'
-  const selectedQualityLabel = qualities.find((quality) => quality.id === selectedQuality)?.label ?? ''
   const qualityGroups = [
     { key: 'cloud', label: '115 云端', items: qualities.filter((quality) => quality.source !== 'local') },
     { key: 'local', label: '本地 HLS', items: qualities.filter((quality) => quality.source === 'local') },
   ].filter((group) => group.items.length > 0)
+  const hasQualityGroups = qualityGroups.length > 0
+
+  const durationSafe = Math.max(0, duration)
+  const playedRatio = durationSafe > 0 ? clampRatio(displayTime / durationSafe) : 0
+  const bufferedRatio = durationSafe > 0 ? clampRatio(buffered / durationSafe) : 0
+  const volumeRatio = clampRatio(muted ? 0 : volume)
+
+  // 悬停气泡：拖动时优先跟手柄走，否则跟光标。位置夹在两端内，避免气泡被裁掉。
+  const tooltipRatio = clampRatio(isScrubbing ? playedRatio : (seekHover ?? playedRatio), 0.04, 0.96)
+  const tooltipVisible = seekHover !== null || isScrubbing
+  const tooltipTime = isScrubbing || seekHover !== null
+    ? clampRatio(isScrubbing ? playedRatio : (seekHover as number)) * durationSafe
+    : 0
 
   const seekOverlay = seekHint && stageEl
     ? createPortal(
         <div className="pointer-events-none absolute inset-0 z-30">
           <div
-            className={`absolute top-1/2 flex w-36 -translate-y-1/2 flex-col items-center justify-center rounded-full bg-black/55 px-3 py-5 text-white shadow-lg backdrop-blur-sm ${
+            className={`absolute top-1/2 flex w-32 -translate-y-1/2 flex-col items-center justify-center rounded-2xl bg-black/55 px-3 py-4 text-white shadow-lg backdrop-blur-sm ${
               seekHint.dir === 'back' ? 'left-[8%] sm:left-[12%]' : 'right-[8%] sm:right-[12%]'
             }`}
           >
-            {seekHint.dir === 'back' ? <Rewind size={28} /> : <FastForward size={28} />}
-            <span className="mt-1 text-center text-sm font-medium leading-tight">
+            {seekHint.dir === 'back' ? <Rewind size={26} /> : <FastForward size={26} />}
+            <span className="mt-1 text-center text-xs font-medium leading-tight">
               {seekHint.seconds > 0
                 ? seekHint.dir === 'back'
                   ? '回退'
@@ -805,9 +895,9 @@ export function PlayerControls({
   const playbackRateOverlay = playbackRateHint && stageEl
     ? createPortal(
         <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center">
-          <div className="flex items-center gap-2 rounded-full bg-black/65 px-5 py-3 text-white shadow-lg backdrop-blur-sm">
-            <Timer size={22} />
-            <span className="text-sm font-semibold tabular-nums">
+          <div className="flex items-center gap-2 rounded-xl bg-black/65 px-4 py-2.5 text-white shadow-lg backdrop-blur-sm">
+            <Timer size={20} />
+            <span className="text-xs font-semibold tabular-nums">
               {formatPlaybackRate(playbackRateHint)} 倍速
             </span>
           </div>
@@ -816,12 +906,151 @@ export function PlayerControls({
       )
     : null
 
+  /** 小屏下操作栏放不下的项目（清晰度/倍速/选集/字幕）收进「设置」面板。 */
+  const compactOnlySections = (
+    <>
+      {showQuality && hasQualityGroups && (
+        <div className="sm:hidden">
+          <p className={PLAYER_MENU_LABEL}>清晰度</p>
+          <QualityItems
+            groups={qualityGroups}
+            selectedQuality={selectedQuality}
+            onSelect={(quality) => onSelectQuality?.(quality)}
+          />
+        </div>
+      )}
+      <div className="sm:hidden">
+        <p className={PLAYER_MENU_LABEL}>播放速度</p>
+        <SpeedItems
+          playbackRate={playbackRateProp}
+          onSelect={(rate) => selectPlaybackRate(rate)}
+        />
+      </div>
+      {onTogglePlaylist && (
+        <div className="sm:hidden">
+          <p className={PLAYER_MENU_LABEL}>选集</p>
+          <button
+            type="button"
+            disabled={!hasPlaylist}
+            onClick={() => {
+              setSettingsMenuOpen(false)
+              onTogglePlaylist()
+            }}
+            className={`${PLAYER_MENU_ITEM} disabled:cursor-not-allowed disabled:text-white/30 disabled:hover:bg-transparent`}
+          >
+            <ListVideo size={14} className="shrink-0 text-white/50" />
+            <span className="min-w-0 flex-1 truncate">
+              {hasPlaylist ? '打开选集列表' : '当前无更多剧集'}
+            </span>
+            {hasPlaylist && hasVersions && <Layers size={12} className="shrink-0 text-white/40" />}
+          </button>
+        </div>
+      )}
+      {subs.length > 0 && (
+        <div className="sm:hidden">
+          <p className={PLAYER_MENU_LABEL}>字幕</p>
+          <SubtitleItems
+            subs={subs}
+            subtitleIndex={subtitleIndex}
+            onSelectSubtitle={onSelectSubtitle}
+            canAdjustSelectedSubtitle={canAdjustSelectedSubtitle}
+            subtitlePosition={subtitlePosition}
+            onSubtitlePositionChange={onSubtitlePositionChange}
+            subtitleStyle={subtitleStyle}
+            onSubtitleStyleChange={onSubtitleStyleChange}
+            usesOriginalASS={usesOriginalASS}
+            canConvertSelectedSubtitle={canConvertSelectedSubtitle}
+            subtitleChineseMode={subtitleChineseMode}
+            onSubtitleChineseModeChange={onSubtitleChineseModeChange}
+          />
+        </div>
+      )}
+      <div className="sm:hidden">{PLAYER_MENU_DIVIDER}</div>
+    </>
+  )
+
+  const settingsPanel = (
+    <div className="p-1">
+      {compactOnlySections}
+
+      {playbackModeLabel && (
+        <div>
+          <p className={PLAYER_MENU_LABEL}>播放方式</p>
+          {onTogglePlaybackMode ? (
+            <button
+              type="button"
+              onClick={() => {
+                setSettingsMenuOpen(false)
+                onTogglePlaybackMode()
+              }}
+              className={PLAYER_MENU_ITEM}
+              title="在直接播放与 HLS 转码之间切换"
+            >
+              <Rotate3d size={14} className="shrink-0 text-white/50" />
+              <span className="min-w-0 flex-1 truncate">{playbackModeLabel}</span>
+              <span className="shrink-0 text-[10px] text-rose-300">切换</span>
+            </button>
+          ) : (
+            <p className="flex items-center gap-2 px-2.5 py-1.5 text-xs text-white/60">
+              <Lock size={13} className="shrink-0 text-white/35" />
+              <span className="min-w-0 flex-1 truncate">{playbackModeLabel}</span>
+            </p>
+          )}
+        </div>
+      )}
+
+      {onToggleVr360 && (
+        <div>
+          <p className={PLAYER_MENU_LABEL}>画面</p>
+          <button
+            type="button"
+            onClick={() => {
+              setSettingsMenuOpen(false)
+              onToggleVr360()
+            }}
+            className={PLAYER_MENU_ITEM}
+            title={vr360 ? '退出 VR 全景播放' : '切到 VR 全景播放（鼠标拖动或手机陀螺仪转视角）'}
+          >
+            <Rotate3d size={14} className={vr360 ? 'shrink-0 text-rose-400' : 'shrink-0 text-white/50'} />
+            <span className="min-w-0 flex-1 truncate">VR 全景播放</span>
+            {vr360 ? (
+              <Check size={13} className="shrink-0 text-rose-400" />
+            ) : vr360Detected ? (
+              <span className="shrink-0 text-[10px] text-amber-300">已识别</span>
+            ) : null}
+          </button>
+        </div>
+      )}
+
+      {onOpenDanmaku && (
+        <div>
+          <p className={PLAYER_MENU_LABEL}>弹幕</p>
+          <button
+            type="button"
+            onClick={() => {
+              setSettingsMenuOpen(false)
+              onOpenDanmaku()
+            }}
+            className={PLAYER_MENU_ITEM}
+            title="打开弹幕设置（搜索弹幕库、调整渲染参数）"
+          >
+            <MessageSquareText size={14} className="shrink-0 text-white/50" />
+            <span className="min-w-0 flex-1 truncate">弹幕设置</span>
+            {danmakuOpen ? (
+              <span className="shrink-0 text-[10px] text-rose-300">已打开</span>
+            ) : null}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+
   return (
     <>
     {seekOverlay}
     {playbackRateOverlay}
     <div
-      className={`pointer-events-auto absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-black/80 via-black/40 to-transparent px-3 pb-3 pt-14 transition-opacity duration-300 ${
+      className={`pointer-events-auto absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-black/85 via-black/45 to-transparent px-2.5 pb-1.5 pt-12 transition-opacity duration-300 sm:px-3.5 sm:pb-2.5 ${
         uiVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
       }`}
       onMouseEnter={() => {
@@ -832,393 +1061,535 @@ export function PlayerControls({
       onClick={(e) => e.stopPropagation()}
       onPointerUp={(e) => e.stopPropagation()}
     >
-      <div className="flex flex-wrap items-center gap-2 text-white sm:flex-nowrap sm:gap-2.5">
-        {/* 上一集 */}
-        <button
-          onClick={onPrevEpisode}
-          disabled={!hasPrevEpisode}
-          className={`rounded-full p-1.5 transition ${
-            hasPrevEpisode
-              ? 'hover:bg-white/15 text-white cursor-pointer'
-              : 'text-white/30 cursor-not-allowed opacity-40'
-          }`}
-          title={hasPrevEpisode ? (prevEpisodeTitle ? `上一集：${prevEpisodeTitle} ([)` : '上一集 ([)') : '没有上一集'}
-        >
-          <SkipBack size={18} />
-        </button>
+      {/* 进度条：单独占一行贴着画面底部，轨道只有 3px，悬停才变粗并露出圆点手柄 */}
+      <div
+        className="group/seek relative flex h-5 w-full items-center"
+        onMouseMove={handleSeekHover}
+        onMouseLeave={() => setSeekHover(null)}
+      >
+        <div className={`${PLAYER_TRACK} group-hover/seek:h-[5px]`}>
+          <div
+            className={`${PLAYER_TRACK_FILL} bg-white/30`}
+            style={{ width: `${bufferedRatio * 100}%` }}
+          />
+          <div
+            className={`${PLAYER_TRACK_FILL} bg-rose-500`}
+            style={{ width: `${playedRatio * 100}%` }}
+          />
+        </div>
+        <div
+          className="pointer-events-none absolute h-3 w-3 -translate-x-1/2 rounded-full bg-white opacity-0 shadow-md transition-opacity duration-150 group-hover/seek:opacity-100"
+          style={{ left: `${playedRatio * 100}%` }}
+        />
+        {tooltipVisible && durationSafe > 0 ? (
+          <div
+            className="pointer-events-none absolute bottom-4 -translate-x-1/2 rounded-md bg-black/85 px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-white shadow-lg"
+            style={{ left: `${tooltipRatio * 100}%` }}
+          >
+            {formatTime(tooltipTime)}
+          </div>
+        ) : null}
+        <input
+          type="range"
+          data-player-seek-range="true"
+          min={0}
+          max={durationSafe}
+          step={0.1}
+          value={displayTime}
+          onMouseDown={handleSeekStart}
+          onTouchStart={handleSeekStart}
+          onChange={(e) => handleSeekChange(Number(e.target.value))}
+          onMouseUp={(e) => handleSeekEnd(Number((e.target as HTMLInputElement).value))}
+          onTouchEnd={(e) => handleSeekEnd(Number((e.target as HTMLInputElement).value))}
+          className={PLAYER_RANGE_OVERLAY}
+          aria-label="播放进度"
+        />
+      </div>
 
+      <div className="mt-0.5 flex items-center gap-0.5 sm:mt-1 sm:gap-1">
         {/* 播放 / 暂停 */}
         <button
           onClick={togglePlay}
-          className="rounded-full p-1.5 transition hover:bg-white/15"
+          className={`${PLAYER_ICON_BUTTON} h-8 w-8 sm:h-9 sm:w-9`}
           title={playing ? '暂停 (Space)' : '播放 (Space)'}
         >
-          {playing ? <Pause size={20} /> : <Play size={20} />}
+          {playing ? <Pause size={19} /> : <Play size={19} />}
         </button>
 
-        {/* 下一集 */}
+        {/* 上一集 / 下一集：单条媒体（电影）没有上下集时整组隐藏，少两个死按钮 */}
+        {(hasPrevEpisode || hasNextEpisode) && (
+          <>
+            <button
+              onClick={onPrevEpisode}
+              disabled={!hasPrevEpisode}
+              className={PLAYER_ICON_BUTTON}
+              title={
+                hasPrevEpisode
+                  ? prevEpisodeTitle
+                    ? `上一集：${prevEpisodeTitle} ([)`
+                    : '上一集 ([)'
+                  : '没有上一集'
+              }
+            >
+              <SkipBack size={16} />
+            </button>
+            <button
+              onClick={onNextEpisode}
+              disabled={!hasNextEpisode}
+              className={PLAYER_ICON_BUTTON}
+              title={
+                hasNextEpisode
+                  ? nextEpisodeTitle
+                    ? `下一集：${nextEpisodeTitle} (])`
+                    : '下一集 (])'
+                  : '没有下一集'
+              }
+            >
+              <SkipForward size={16} />
+            </button>
+          </>
+        )}
+
+        <span className="ml-1 shrink-0 font-mono text-[11px] tabular-nums text-white/90 sm:text-xs">
+          {formatTime(displayTime)} / {formatTime(duration)}
+        </span>
+
+        <div className="min-w-0 flex-1" />
+
+        {/* 清晰度：文字按钮直接显示当前档位（B 站也是这么做的） */}
+        {showQuality && hasQualityGroups && (
+          <div className="relative hidden sm:block" ref={qualityMenuRef}>
+            <button
+              onClick={() => {
+                setSubtitleMenuOpen(false)
+                setSpeedMenuOpen(false)
+                setSettingsMenuOpen(false)
+                setQualityMenuOpen((v) => !v)
+              }}
+              className={`${PLAYER_TEXT_BUTTON} max-w-[7rem] ${qualityMenuOpen ? 'bg-white/15 text-white' : ''}`}
+              title="清晰度"
+            >
+              <span className="truncate">{qualityLabel}</span>
+            </button>
+            {qualityMenuOpen && (
+              <div className={`${PLAYER_POPOVER} absolute bottom-11 right-0 min-w-[11rem]`}>
+                <QualityItems
+                  groups={qualityGroups}
+                  selectedQuality={selectedQuality}
+                  onSelect={(quality) => {
+                    onSelectQuality?.(quality)
+                    setQualityMenuOpen(false)
+                  }}
+                />
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 倍速 */}
+        <div className="relative hidden sm:block" ref={speedMenuRef}>
+          <button
+            onClick={() => {
+              setSubtitleMenuOpen(false)
+              setQualityMenuOpen(false)
+              setSettingsMenuOpen(false)
+              setSpeedMenuOpen((v) => !v)
+            }}
+            className={`${PLAYER_TEXT_BUTTON} ${speedMenuOpen ? 'bg-white/15 text-white' : ''}`}
+            title="播放速度（↑/↓ 调节）"
+          >
+            {formatPlaybackRate(playbackRateProp)}
+          </button>
+          {speedMenuOpen && (
+            <div className={`${PLAYER_POPOVER} absolute bottom-11 right-0 min-w-[9rem]`}>
+              <p className={PLAYER_MENU_LABEL}>播放速度</p>
+              <SpeedItems
+                playbackRate={playbackRateProp}
+                onSelect={(rate) => {
+                  selectPlaybackRate(rate)
+                  setSpeedMenuOpen(false)
+                }}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* 选集 / 版本切换（多版本条目也在这里换） */}
+        {onTogglePlaylist && (
+          <button
+            onClick={onTogglePlaylist}
+            disabled={!hasPlaylist}
+            className={`${PLAYER_TEXT_BUTTON} hidden sm:flex ${
+              playlistOpen ? 'bg-rose-500/90 text-white hover:bg-rose-500' : ''
+            }`}
+            title={
+              !hasPlaylist ? '当前无更多剧集' : hasVersions ? '选集与版本切换' : '选集列表'
+            }
+          >
+            <ListVideo size={15} />
+            <span>选集</span>
+            {hasPlaylist && hasVersions && (
+              <span className="flex items-center gap-0.5 rounded-full bg-black/25 px-1 py-px text-[9px] leading-none">
+                <Layers size={9} />
+                版本
+              </span>
+            )}
+          </button>
+        )}
+
+        {/* 弹幕开关：只负责开/关，「弹幕设置」在设置面板里 */}
         <button
-          onClick={onNextEpisode}
-          disabled={!hasNextEpisode}
-          className={`rounded-full p-1.5 transition ${
-            hasNextEpisode
-              ? 'hover:bg-white/15 text-white cursor-pointer'
-              : 'text-white/30 cursor-not-allowed opacity-40'
-          }`}
-          title={hasNextEpisode ? (nextEpisodeTitle ? `下一集：${nextEpisodeTitle} (])` : '下一集 (])') : '没有下一集'}
+          type="button"
+          onClick={() => onToggleDanmakuEnabled?.(!danmakuEnabled)}
+          disabled={!onToggleDanmakuEnabled}
+          className={PLAYER_ICON_BUTTON}
+          title={danmakuEnabled ? '关闭弹幕显示' : '开启弹幕显示'}
         >
-          <SkipForward size={18} />
+          <span
+            className={`flex h-[18px] w-[18px] items-center justify-center rounded-[4px] text-[10px] font-bold leading-none transition ${
+              danmakuEnabled
+                ? 'bg-rose-500 text-white'
+                : 'border border-white/40 text-white/45'
+            }`}
+          >
+            弹
+          </span>
         </button>
 
-        <div className="order-2 flex min-w-0 basis-full items-center gap-2 sm:order-none sm:basis-auto sm:flex-1">
-          <input
-            type="range"
-            data-player-seek-range="true"
-            min={0}
-            max={duration || 0}
-            step={0.1}
-            value={displayTime}
-            onMouseDown={handleSeekStart}
-            onTouchStart={handleSeekStart}
-            onChange={(e) => handleSeekChange(Number(e.target.value))}
-            onMouseUp={(e) => handleSeekEnd(Number((e.target as HTMLInputElement).value))}
-            onTouchEnd={(e) => handleSeekEnd(Number((e.target as HTMLInputElement).value))}
-            className="min-w-0 flex-1 cursor-pointer accent-rose-500"
-            aria-label="播放进度"
-          />
-          <span className="shrink-0 font-mono text-[10px] tabular-nums text-white/85 sm:text-xs">
-            {formatTime(displayTime)} / {formatTime(duration)}
-          </span>
+        {/* 音量：图标管静音，悬停展开滑条 */}
+        <div className="group/volume flex shrink-0 items-center">
+          <button
+            onClick={toggleMute}
+            className={PLAYER_ICON_BUTTON}
+            title={muted || volume === 0 ? '取消静音 (M)' : '静音 (M)'}
+          >
+            {muted || volume === 0 ? <VolumeX size={17} /> : <Volume2 size={17} />}
+          </button>
+          <div className="hidden w-0 overflow-hidden transition-[width] duration-200 ease-out group-hover/volume:w-[76px] group-focus-within/volume:w-[76px] sm:block">
+            <div className="relative mx-1.5 flex h-4 w-16 items-center">
+              <div className={`${PLAYER_TRACK} h-[3px]`}>
+                <div
+                  className={`${PLAYER_TRACK_FILL} bg-white`}
+                  style={{ width: `${volumeRatio * 100}%` }}
+                />
+              </div>
+              <div
+                className="pointer-events-none absolute h-3 w-3 -translate-x-1/2 rounded-full bg-white opacity-0 shadow-md transition-opacity group-hover/volume:opacity-100"
+                style={{ left: `${volumeRatio * 100}%` }}
+              />
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={muted ? 0 : volume}
+                onChange={(e) => changeVolume(Number(e.target.value))}
+                onPointerUp={commitVolume}
+                onKeyUp={commitVolume}
+                onTouchEnd={commitVolume}
+                className={PLAYER_RANGE_OVERLAY}
+                aria-label="音量"
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* 字幕 */}
+        {subs.length > 0 && (
+          <div className="relative hidden sm:block" ref={subtitleMenuRef}>
+            <button
+              onClick={() => {
+                setQualityMenuOpen(false)
+                setSpeedMenuOpen(false)
+                setSettingsMenuOpen(false)
+                setSubtitleMenuOpen((v) => !v)
+              }}
+              className={`${PLAYER_ICON_BUTTON} ${subtitleMenuOpen ? 'bg-white/15 text-white' : ''}`}
+              title="字幕"
+            >
+              {subtitleIndex >= 0 ? (
+                <Captions size={17} className="text-rose-400" />
+              ) : (
+                <CaptionsOff size={17} />
+              )}
+            </button>
+            {subtitleMenuOpen && (
+              <div className={`${PLAYER_POPOVER} absolute bottom-11 right-0 max-h-[70vh] min-w-[12rem] overflow-y-auto`}>
+                <SubtitleItems
+                  subs={subs}
+                  subtitleIndex={subtitleIndex}
+                  onSelectSubtitle={(index) => {
+                    onSelectSubtitle(index)
+                    setSubtitleMenuOpen(false)
+                  }}
+                  canAdjustSelectedSubtitle={canAdjustSelectedSubtitle}
+                  subtitlePosition={subtitlePosition}
+                  onSubtitlePositionChange={onSubtitlePositionChange}
+                  subtitleStyle={subtitleStyle}
+                  onSubtitleStyleChange={onSubtitleStyleChange}
+                  usesOriginalASS={usesOriginalASS}
+                  canConvertSelectedSubtitle={canConvertSelectedSubtitle}
+                  subtitleChineseMode={subtitleChineseMode}
+                  onSubtitleChineseModeChange={(mode) => {
+                    onSubtitleChineseModeChange(mode)
+                    setSubtitleMenuOpen(false)
+                  }}
+                />
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 设置：播放方式 / VR / 弹幕设置，小屏下再收进清晰度、倍速、选集、字幕 */}
+        <div className="relative" ref={settingsMenuRef}>
+          <button
+            onClick={() => {
+              setQualityMenuOpen(false)
+              setSpeedMenuOpen(false)
+              setSubtitleMenuOpen(false)
+              setSettingsMenuOpen((v) => !v)
+            }}
+            className={`${PLAYER_ICON_BUTTON} ${settingsMenuOpen ? 'bg-white/15 text-white' : ''}`}
+            title="播放器设置"
+          >
+            <Settings2 size={17} />
+          </button>
+          {/* 识别到 VR 素材但还没进 VR 时，用一个小圆点提示设置里有东西可开 */}
+          {vr360Detected && !vr360 && (
+            <span className="pointer-events-none absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-amber-300" />
+          )}
+          {settingsMenuOpen && (
+            <div className={`${PLAYER_POPOVER} absolute bottom-11 right-0 max-h-[70vh] w-[15rem] overflow-y-auto`}>
+              {settingsPanel}
+            </div>
+          )}
         </div>
 
         {pipSupported && (
           <button
             onClick={togglePip}
-            className="rounded-full p-1.5 transition hover:bg-white/15"
+            className={`${PLAYER_ICON_BUTTON} hidden sm:flex`}
             title={pip ? '退出画中画' : '画中画'}
           >
-            <PictureInPicture size={18} className={pip ? 'text-rose-400' : ''} />
+            <PictureInPicture size={17} className={pip ? 'text-rose-400' : ''} />
           </button>
         )}
-
-        {showQuality && qualities.length > 0 && onSelectQuality && (
-          <div className="relative" ref={qualityMenuRef}>
-            <button
-              onClick={() => {
-                setSubtitleMenuOpen(false)
-                setSpeedMenuOpen(false)
-                setQualityMenuOpen((v) => !v)
-              }}
-              className="flex items-center gap-1 rounded-full p-1.5 transition hover:bg-white/15"
-              title="画质"
-            >
-              <Gauge size={18} className={qualityMenuOpen ? 'text-rose-400' : 'text-white/80'} />
-              <span className="hidden text-[10px] font-medium text-white/80 sm:inline">
-                {selectedQualityLabel || '画质'}
-              </span>
-            </button>
-            {qualityMenuOpen && (
-              <div className="absolute bottom-11 right-0 z-30 min-w-48 overflow-hidden rounded-xl border border-white/15 bg-black/85 p-1 shadow-2xl backdrop-blur">
-                {qualityGroups.map((group) => (
-                  <div key={group.key}>
-                    <p className="px-3 pb-1 pt-2 text-[10px] uppercase tracking-wide text-white/40">
-                      {group.label}
-                    </p>
-                    {group.items.map((quality) => {
-                      const current = quality.id === selectedQuality
-                      return (
-                        <button
-                          key={`${quality.source}-${quality.id}`}
-                          type="button"
-                          onClick={() => {
-                            onSelectQuality(quality)
-                            setQualityMenuOpen(false)
-                          }}
-                          className={`flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-xs transition ${
-                            current
-                              ? 'text-rose-400 hover:bg-white/10'
-                              : quality.requires_vip
-                                ? 'text-white/55 hover:bg-white/10'
-                                : 'text-white/85 hover:bg-white/10'
-                          }`}
-                          title={quality.note || quality.label}
-                        >
-                          <span className="truncate">{quality.label}</span>
-                          {quality.requires_transcode && (
-                            <span className="ml-auto flex items-center gap-1 rounded bg-white/10 px-1.5 py-0.5 text-[9px] text-amber-300">
-                              <Loader2 size={10} />
-                              转码
-                            </span>
-                          )}
-                          {quality.requires_vip && <Lock size={11} className="ml-auto text-amber-300" />}
-                          {current && !quality.requires_transcode && (
-                            <Check size={13} className="ml-auto text-rose-400" />
-                          )}
-                        </button>
-                      )
-                    })}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        <div className="relative" ref={speedMenuRef}>
-          <button
-            onClick={() => {
-              setSubtitleMenuOpen(false)
-              setQualityMenuOpen(false)
-              setSpeedMenuOpen((v) => !v)
-            }}
-            className="flex items-center gap-1 rounded-full p-1.5 transition hover:bg-white/15"
-            title="播放速度（↑/↓ 调节）"
-          >
-            <Timer size={18} className={speedMenuOpen ? 'text-rose-400' : 'text-white/80'} />
-            <span className="text-[10px] font-semibold tabular-nums text-white/80">
-              {formatPlaybackRate(playbackRateProp)}
-            </span>
-          </button>
-          {speedMenuOpen && (
-            <div className="absolute bottom-11 right-0 z-30 min-w-36 overflow-hidden rounded-xl border border-white/15 bg-black/85 p-1 shadow-2xl backdrop-blur">
-              <p className="px-3 pb-1 pt-2 text-[10px] uppercase tracking-wide text-white/40">
-                播放速度
-              </p>
-              {PLAYBACK_RATE_OPTIONS.map((rate) => {
-                const current = normalizePlaybackRate(playbackRateProp) === rate
-                return (
-                  <button
-                    key={rate}
-                    type="button"
-                    onClick={() => {
-                      selectPlaybackRate(rate)
-                      setSpeedMenuOpen(false)
-                    }}
-                    className={`flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-xs transition ${
-                      current ? 'text-rose-400 hover:bg-white/10' : 'text-white/85 hover:bg-white/10'
-                    }`}
-                  >
-                    <span className="tabular-nums">{formatPlaybackRate(rate)}</span>
-                    {current && <Check size={13} className="ml-auto text-rose-400" />}
-                  </button>
-                )
-              })}
-            </div>
-          )}
-        </div>
-
-        {subs.length > 0 && (
-          <div className="relative" ref={subtitleMenuRef}>
-            <button
-              onClick={() => {
-                setQualityMenuOpen(false)
-                setSpeedMenuOpen(false)
-                setSubtitleMenuOpen((v) => !v)
-              }}
-              className="rounded-full p-1.5 transition hover:bg-white/15"
-              title="字幕"
-            >
-              {subtitleIndex >= 0 ? (
-                <Captions size={18} className="text-rose-400" />
-              ) : (
-                <CaptionsOff size={18} className="text-white/70" />
-              )}
-            </button>
-            {subtitleMenuOpen && (
-              <div className="absolute bottom-11 right-0 z-30 max-h-[70vh] min-w-44 overflow-y-auto rounded-xl border border-white/15 bg-black/85 p-1 shadow-2xl backdrop-blur">
-                <button
-                  type="button"
-                  onClick={() => {
-                    onSelectSubtitle(-1)
-                    setSubtitleMenuOpen(false)
-                  }}
-                  className={`flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-xs transition hover:bg-white/10 ${
-                    subtitleIndex < 0 ? 'text-rose-400' : 'text-white/85'
-                  }`}
-                >
-                  关闭字幕
-                </button>
-                {subs.map((track, index) => (
-                  <button
-                    key={track.path}
-                    type="button"
-                    onClick={() => {
-                      onSelectSubtitle(index)
-                      setSubtitleMenuOpen(false)
-                    }}
-                    className={`flex w-full items-center gap-2 truncate rounded-lg px-3 py-1.5 text-left text-xs transition hover:bg-white/10 ${
-                      subtitleIndex === index ? 'text-rose-400' : 'text-white/85'
-                    }`}
-                    title={track.label || track.lang}
-                  >
-                    <span className="truncate">
-                      {track.label || track.lang || `字幕 ${index + 1}`}
-                      {track.delivery === 'ass' ? ' · ASS' : ''}
-                    </span>
-                    {subtitleIndex === index && <span className="ml-auto text-rose-400">●</span>}
-                  </button>
-                ))}
-                {canAdjustSelectedSubtitle && (
-                  <div className="mt-1 border-t border-white/10 pt-1">
-                    <p className="px-3 py-1 text-[10px] text-white/45">字幕位置</p>
-                    <div className="flex flex-wrap gap-1 px-2 pb-1">
-                      {SUBTITLE_POSITION_OPTIONS.map(([value, label]) => (
-                        <button
-                          key={value}
-                          type="button"
-                          onClick={() => onSubtitlePositionChange(value)}
-                          className={`rounded-md px-2 py-1 text-[10px] transition ${
-                            subtitlePosition === value
-                              ? 'bg-rose-500/20 text-rose-300'
-                              : 'bg-white/5 text-white/70 hover:bg-white/10'
-                          }`}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                    <p className="px-3 py-1 text-[10px] text-white/45">字幕样式</p>
-                    <div className="flex flex-wrap gap-1 px-2 pb-1">
-                      {SUBTITLE_STYLE_OPTIONS.map(([value, label]) => (
-                        <button
-                          key={value}
-                          type="button"
-                          onClick={() => onSubtitleStyleChange(value)}
-                          className={`rounded-md px-2 py-1 text-[10px] transition ${
-                            subtitleStyle === value
-                              ? 'bg-rose-500/20 text-rose-300'
-                              : 'bg-white/5 text-white/70 hover:bg-white/10'
-                          }`}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {usesOriginalASS && (
-                  <p className="mx-2 mt-1 border-t border-white/10 px-1 pt-2 text-[10px] leading-relaxed text-white/45">
-                    ASS/SSA 使用字幕文件自带的样式与位置，不做统一覆盖。
-                  </p>
-                )}
-                {canConvertSelectedSubtitle && (
-                  <div className="mt-1 border-t border-white/10 pt-1">
-                    <p className="px-3 py-1 text-[10px] text-white/45">外挂字幕简繁转换</p>
-                    {(
-                      [
-                        ['original', '保持原文'],
-                        ['simplified', '转换为简体'],
-                        ['traditional', '转换为繁体'],
-                      ] as const
-                    ).map(([mode, label]) => (
-                      <button
-                        key={mode}
-                        type="button"
-                        onClick={() => {
-                          onSubtitleChineseModeChange(mode)
-                          setSubtitleMenuOpen(false)
-                        }}
-                        className={`flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-xs transition hover:bg-white/10 ${
-                          subtitleChineseMode === mode ? 'text-rose-400' : 'text-white/85'
-                        }`}
-                      >
-                        <span>{label}</span>
-                        {subtitleChineseMode === mode && (
-                          <span className="ml-auto text-rose-400">●</span>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* 选集 / 播放列表按钮 */}
-        {onTogglePlaylist && (
-          <button
-            onClick={onTogglePlaylist}
-            disabled={!hasPlaylist}
-            className={
-              'flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-medium transition ' +
-              (!hasPlaylist
-                ? 'bg-white/5 text-white/30 cursor-not-allowed opacity-50'
-                : playlistOpen
-                ? 'bg-rose-500 text-white hover:bg-rose-600'
-                : 'bg-white/10 text-white/80 hover:bg-white/20')
-            }
-            title={hasPlaylist ? '选集列表' : '当前无更多剧集'}
-          >
-            <ListVideo size={15} />
-              <span className="hidden sm:inline">选集</span>
-          </button>
-        )}
-
-        {/* 弹幕按钮 */}
-        <button
-          onClick={onToggleDanmaku}
-          className={
-            'flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-medium transition ' +
-            (danmakuOpen || danmakuEnabled
-              ? 'bg-rose-500/90 text-white hover:bg-rose-500'
-              : 'bg-white/10 text-white/80 hover:bg-white/20')
-          }
-          title="弹幕设置"
-        >
-          <MessageSquareText size={15} />
-          <span className="hidden sm:inline">弹幕</span>
-          {danmakuEnabled && <span className="h-1.5 w-1.5 rounded-full bg-lime-400" />}
-        </button>
-
-        {/* VR 全景播放开关 */}
-        {onToggleVr360 && (
-          <button
-            onClick={onToggleVr360}
-            className={
-              'flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-medium transition ' +
-              (vr360
-                ? 'bg-rose-500/90 text-white hover:bg-rose-500'
-                : 'bg-white/10 text-white/80 hover:bg-white/20')
-            }
-            title={vr360 ? '退出 VR 全景播放' : '切换到 VR 全景播放（可用鼠标或陀螺仪转动视角）'}
-          >
-            <Rotate3d size={15} />
-            <span className="hidden sm:inline">VR</span>
-            {vr360Detected && !vr360 && <span className="h-1.5 w-1.5 rounded-full bg-amber-300" />}
-          </button>
-        )}
-
-        <button
-          onClick={toggleMute}
-          className="rounded-full p-1.5 transition hover:bg-white/15"
-          title={muted || volume === 0 ? '取消静音 (M)' : '静音 (M)'}
-        >
-          {muted || volume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}
-        </button>
-        <input
-          type="range"
-          min={0}
-          max={1}
-          step={0.05}
-          value={muted ? 0 : volume}
-          onChange={(e) => changeVolume(Number(e.target.value))}
-          onPointerUp={commitVolume}
-          onKeyUp={commitVolume}
-          onTouchEnd={commitVolume}
-          className="hidden w-16 accent-rose-500 sm:block"
-          aria-label="音量"
-        />
 
         <button
           onClick={toggleFullscreen}
-          className="rounded-full p-1.5 transition hover:bg-white/15"
+          className={PLAYER_ICON_BUTTON}
           title={fullscreen ? '退出全屏 (F)' : '全屏 (F)'}
         >
-          {fullscreen ? <Minimize size={18} /> : <Maximize size={18} />}
+          {fullscreen ? <Minimize size={17} /> : <Maximize size={17} />}
         </button>
       </div>
     </div>
+    </>
+  )
+}
+
+/** 清晰度选项：115 云端与本地 HLS 分组展示，转码中的档位带等待标记。 */
+function QualityItems({
+  groups,
+  selectedQuality,
+  onSelect,
+}: {
+  groups: { key: string; label: string; items: PlaybackQuality[] }[]
+  selectedQuality: string
+  onSelect: (quality: PlaybackQuality) => void
+}) {
+  return (
+    <>
+      {groups.map((group) => (
+        <div key={group.key}>
+          <p className={PLAYER_MENU_LABEL}>{group.label}</p>
+          {group.items.map((quality) => {
+            const current = quality.id === selectedQuality
+            return (
+              <button
+                key={`${quality.source}-${quality.id}`}
+                type="button"
+                onClick={() => onSelect(quality)}
+                className={`${PLAYER_MENU_ITEM} ${current ? 'text-rose-400' : ''}`}
+                title={quality.note || quality.label}
+              >
+                <span className="min-w-0 flex-1 truncate">{quality.label}</span>
+                {quality.requires_transcode && (
+                  <span className="flex shrink-0 items-center gap-1 rounded bg-white/10 px-1.5 py-0.5 text-[9px] text-amber-300">
+                    <Loader2 size={10} />
+                    转码
+                  </span>
+                )}
+                {quality.requires_vip && <Lock size={11} className="shrink-0 text-amber-300" />}
+                {current && !quality.requires_transcode && (
+                  <Check size={13} className="shrink-0 text-rose-400" />
+                )}
+              </button>
+            )
+          })}
+        </div>
+      ))}
+    </>
+  )
+}
+
+function SpeedItems({
+  playbackRate,
+  onSelect,
+}: {
+  playbackRate: number
+  onSelect: (rate: number) => void
+}) {
+  return (
+    <>
+      {PLAYBACK_RATE_OPTIONS.map((rate) => {
+        const current = normalizePlaybackRate(playbackRate) === rate
+        return (
+          <button
+            key={rate}
+            type="button"
+            onClick={() => onSelect(rate)}
+            className={`${PLAYER_MENU_ITEM} ${current ? 'text-rose-400' : ''}`}
+          >
+            <span className="min-w-0 flex-1 tabular-nums">{formatPlaybackRate(rate)}</span>
+            {current && <Check size={13} className="shrink-0 text-rose-400" />}
+          </button>
+        )
+      })}
+    </>
+  )
+}
+
+type SubtitleItemsProps = {
+  subs: SubtitleTrack[]
+  subtitleIndex: number
+  onSelectSubtitle: (index: number) => void
+  canAdjustSelectedSubtitle: boolean
+  subtitlePosition: SubtitlePosition
+  onSubtitlePositionChange: (position: SubtitlePosition) => void
+  subtitleStyle: SubtitleStylePreset
+  onSubtitleStyleChange: (style: SubtitleStylePreset) => void
+  usesOriginalASS: boolean
+  canConvertSelectedSubtitle: boolean
+  subtitleChineseMode: SubtitleChineseMode
+  onSubtitleChineseModeChange: (mode: SubtitleChineseMode) => void
+}
+
+/** 字幕轨道列表 + 位置/样式/简繁设置。桌面端弹层与小屏设置面板共用同一份。 */
+function SubtitleItems({
+  subs,
+  subtitleIndex,
+  onSelectSubtitle,
+  canAdjustSelectedSubtitle,
+  subtitlePosition,
+  onSubtitlePositionChange,
+  subtitleStyle,
+  onSubtitleStyleChange,
+  usesOriginalASS,
+  canConvertSelectedSubtitle,
+  subtitleChineseMode,
+  onSubtitleChineseModeChange,
+}: SubtitleItemsProps) {
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => onSelectSubtitle(-1)}
+        className={`${PLAYER_MENU_ITEM} ${subtitleIndex < 0 ? 'text-rose-400' : ''}`}
+      >
+        <span className="min-w-0 flex-1">关闭字幕</span>
+        {subtitleIndex < 0 && <Check size={13} className="shrink-0 text-rose-400" />}
+      </button>
+      {subs.map((track, index) => {
+        const current = subtitleIndex === index
+        return (
+          <button
+            key={track.path}
+            type="button"
+            onClick={() => onSelectSubtitle(index)}
+            className={`${PLAYER_MENU_ITEM} ${current ? 'text-rose-400' : ''}`}
+            title={track.label || track.lang}
+          >
+            <span className="min-w-0 flex-1 truncate">
+              {track.label || track.lang || `字幕 ${index + 1}`}
+              {track.delivery === 'ass' ? ' · ASS' : ''}
+            </span>
+            {current && <Check size={13} className="shrink-0 text-rose-400" />}
+          </button>
+        )
+      })}
+
+      {canAdjustSelectedSubtitle && (
+        <>
+          {PLAYER_MENU_DIVIDER}
+          <p className={PLAYER_MENU_LABEL}>字幕位置</p>
+          <div className="flex flex-wrap gap-1 px-2.5 pb-1">
+            {SUBTITLE_POSITION_OPTIONS.map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => onSubtitlePositionChange(value)}
+                className={`rounded-md px-2 py-1 text-[10px] transition ${
+                  subtitlePosition === value
+                    ? 'bg-rose-500/20 text-rose-300'
+                    : 'bg-white/5 text-white/70 hover:bg-white/10'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className={PLAYER_MENU_LABEL}>字幕样式</p>
+          <div className="flex flex-wrap gap-1 px-2.5 pb-1">
+            {SUBTITLE_STYLE_OPTIONS.map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => onSubtitleStyleChange(value)}
+                className={`rounded-md px-2 py-1 text-[10px] transition ${
+                  subtitleStyle === value
+                    ? 'bg-rose-500/20 text-rose-300'
+                    : 'bg-white/5 text-white/70 hover:bg-white/10'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
+      {usesOriginalASS && (
+        <p className="mx-2.5 mt-1 border-t border-white/10 px-0.5 pt-2 text-[10px] leading-relaxed text-white/45">
+          ASS/SSA 使用字幕文件自带的样式与位置，不做统一覆盖。
+        </p>
+      )}
+
+      {canConvertSelectedSubtitle && (
+        <>
+          {PLAYER_MENU_DIVIDER}
+          <p className={PLAYER_MENU_LABEL}>外挂字幕简繁转换</p>
+          {(
+            [
+              ['original', '保持原文'],
+              ['simplified', '转换为简体'],
+              ['traditional', '转换为繁体'],
+            ] as const
+          ).map(([mode, label]) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => onSubtitleChineseModeChange(mode)}
+              className={`${PLAYER_MENU_ITEM} ${subtitleChineseMode === mode ? 'text-rose-400' : ''}`}
+            >
+              <span className="min-w-0 flex-1">{label}</span>
+              {subtitleChineseMode === mode && (
+                <Check size={13} className="shrink-0 text-rose-400" />
+              )}
+            </button>
+          ))}
+        </>
+      )}
     </>
   )
 }

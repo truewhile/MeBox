@@ -19,6 +19,7 @@ import { profileAPI } from '../api/profile'
 import { useAuthStore } from '../stores/auth'
 import type { Media, PlaybackInfo, PlaybackQuality } from '../types'
 import { getSeriesKey, seriesTitleFromPath } from '../utils/groupSeries'
+import { mediaVersionMatches, mediaVersionsOf } from '../utils/mediaVersion'
 import { normalizePlaybackRate } from '../utils/playbackRate'
 import { isRemoteEmbyID } from '../utils/remoteEmby'
 import {
@@ -40,8 +41,6 @@ import { PlayerTopBar } from './PlayerTopBar'
 import { PlayerVideoStage } from './PlayerVideoStage'
 import { PlayerDanmakuPanel } from '../components/PlayerDanmakuPanel'
 import { PlayerPlaylistPanel } from '../components/PlayerPlaylistPanel'
-import { MediaVersionSwitcher } from '../components/MediaVersionSwitcher'
-import { mediaVersionsOf } from '../utils/mediaVersion'
 import {
   detectVr360Profile,
   loadVr360Preference,
@@ -1184,9 +1183,12 @@ export function PlayerPage() {
     }
   }, [id, media])
 
+  // 选集列表按版本组折叠，行的 id 是组内最优版本；用户切到同一条目的其它
+  // 版本后 media.id 与行 id 不再相等，这里必须按版本组比对，否则上一集/下一集
+  // 与自动连播都会失效。
   const currentEpisodeIndex = useMemo(() => {
     if (!media || playlistEpisodes.length === 0) return -1
-    return playlistEpisodes.findIndex((e) => e.id === media.id)
+    return playlistEpisodes.findIndex((e) => mediaVersionMatches(e, media.id))
   }, [media, playlistEpisodes])
 
   const prevEpisode = useMemo(() => {
@@ -1224,8 +1226,8 @@ export function PlayerPage() {
     [navigate, location.search, location.state],
   )
 
-  // URL 已切换但新媒体尚未返回时，不渲染上一条媒体遗留的版本入口。
-  const versionList = useMemo(
+  // URL 已切换但新媒体尚未返回时，不渲染上一条媒体遗留的版本信息。
+  const currentVersions = useMemo(
     () => (media?.id === id ? mediaVersionsOf(media) : []),
     [id, media],
   )
@@ -1324,7 +1326,47 @@ export function PlayerPage() {
     playbackInfo?.provider === 'cloud115'
       ? [...(playbackInfo.cloud_qualities ?? []), ...(playbackInfo.local_qualities ?? [])]
       : (playbackInfo?.local_qualities ?? [])
-  const showQuality = mode !== 'direct' && qualityOptions.length > 0
+  // 直连解码模式下宿主机不转码，档位选择没有意义（远程 Emby 挂载同理）：直接隐藏。
+  const showQuality = !directOnly && qualityOptions.length > 0
+  // 清晰度按钮上显示的文字。直接播放时按「原画」呈现，和档位列表里的原画项一致，
+  // 避免出现「明明是原文件却显示 1080P」这种误导。
+  const originalQualityLabel =
+    qualityOptions.find((quality) => quality.source === 'original')?.label || '原画'
+  const selectedQualityLabel = findPlaybackQualityById(playbackInfo, selectedQuality)?.label || ''
+  const qualityLabel =
+    mode === 'direct' ? originalQualityLabel : selectedQualityLabel || '清晰度'
+  // 播放方式只描述状态，切换入口在控制栏的「设置」面板里（见 onTogglePlaybackMode）。
+  const playbackModeLabel = isDirectStream
+    ? isRemoteEmbyID(media?.id)
+      ? 'Emby 直连播放'
+      : '直连播放'
+    : directOnly
+      ? '客户端直连解码'
+      : mode === 'hls'
+        ? 'HLS 转码'
+        : '直接播放'
+  const canTogglePlaybackMode = !isDirectStream && !directOnly
+
+  // 顶栏标题下的次要信息：集数进度与版本数量，让用户一眼知道「在看什么、在哪」。
+  const topBarTitle = media?.title?.trim() || ''
+  const topBarSubtitle = useMemo(() => {
+    if (!media) return ''
+    const parts: string[] = []
+    if (prevEpisode || nextEpisode) {
+      const total = playlistEpisodes.length
+      const index = currentEpisodeIndex + 1
+      parts.push(total > 0 ? `第 ${index} / ${total} 集` : `第 ${index} 集`)
+    }
+    if (currentVersions.length > 1) parts.push(`${currentVersions.length} 个版本`)
+    return parts.join(' · ')
+  }, [
+    media,
+    currentEpisodeIndex,
+    currentVersions.length,
+    nextEpisode,
+    playlistEpisodes.length,
+    prevEpisode,
+  ])
 
   // 没有外挂字幕且第一条内嵌字幕是图片时，默认轨需要通过 HLS 烧录。
   useEffect(() => {
@@ -1616,20 +1658,14 @@ export function PlayerPage() {
   return (
     <div className="relative flex h-full w-full flex-1 flex-col overflow-hidden bg-black">
       <PlayerTopBar
+        title={topBarTitle}
+        subtitle={topBarSubtitle}
         directOnly={directOnly}
         isDirectStream={isDirectStream}
         directStreamLabel={isRemoteEmbyID(media?.id) ? 'Emby 直连播放' : undefined}
         mode={mode}
         onBack={goBack}
-        onToggleMode={toggleMode}
       />
-      {versionList.length > 1 && (
-        <div className="pointer-events-none absolute inset-x-0 top-16 z-20 flex justify-center px-4 sm:top-20">
-          <div className="pointer-events-auto max-w-3xl rounded-2xl border border-white/15 bg-black/70 px-3 py-2 shadow-xl backdrop-blur">
-            <MediaVersionSwitcher media={media!} mode="player" onSelect={switchVersion} className="text-white" />
-          </div>
-        </div>
-      )}
       <PlayerVideoStage
         media={media}
         loadError={loadError}
@@ -1659,7 +1695,8 @@ export function PlayerPage() {
         danmakuEpisodeId={danmakuEpisodeId}
         danmakuSearchTrigger={danmakuSearchTrigger}
         danmakuOpen={danmakuOpen}
-        onToggleDanmaku={toggleDanmakuOpen}
+        onOpenDanmaku={toggleDanmakuOpen}
+        onToggleDanmakuEnabled={danmakuChangeEnabled}
         onDanmakuLoaded={danmakuLoaded}
         onDanmakuCandidates={danmakuGotCandidates}
         onDanmakuAlternatives={danmakuGotAlternatives}
@@ -1670,15 +1707,19 @@ export function PlayerPage() {
         prevEpisodeTitle={prevEpisodeTitle}
         nextEpisodeTitle={nextEpisodeTitle}
         playlistOpen={playlistOpen}
-        hasPlaylist={playlistEpisodes.length > 0}
+        hasPlaylist={playlistEpisodes.length > 1 || currentVersions.length > 1}
+        hasVersions={currentVersions.length > 1}
         onTogglePlaylist={togglePlaylistOpen}
         knownDuration={media?.duration_sec || 0}
         streamOffset={mode === 'hls' && hlsSource === 'local' ? hlsStartSec : 0}
         onSeekAbsolute={mode === 'hls' && hlsSource === 'local' ? handleSeekAbsolute : undefined}
         qualities={qualityOptions}
+        qualityLabel={qualityLabel}
         selectedQuality={selectedQuality}
         onSelectQuality={selectPlaybackQuality}
         showQuality={showQuality}
+        playbackModeLabel={playbackModeLabel}
+        onTogglePlaybackMode={canTogglePlaybackMode ? toggleMode : undefined}
         waiting={cloudWaiting}
         waitingMessage={cloudWaitMessage}
         vr360={vr360}
@@ -1693,8 +1734,10 @@ export function PlayerPage() {
             open={playlistOpen}
             onClose={() => setPlaylistOpen(false)}
             currentMediaId={media?.id ?? ''}
+            currentVersions={currentVersions}
             episodes={playlistEpisodes}
             onSelectEpisode={playEpisode}
+            onSelectVersion={switchVersion}
           />
         }
         danmakuPanel={

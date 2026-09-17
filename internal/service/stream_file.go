@@ -33,8 +33,9 @@ func (s *StreamService) ServeFileWithCloudMode(w http.ResponseWriter, r *http.Re
 		if !cloudPlaybackModeEnabled(r.Context(), s.repo, cloudMode) {
 			return ErrCloudPlaybackDisabled
 		}
-		// 云盘播放 URL 先规范化为相对路径，免疫扫描时固化的旧 host。
-		target := normalizeCloudPlayTarget(strmURL)
+		// 云盘播放 URL 先规范化为相对路径，免疫扫描时固化的旧 host；
+		// 指向别的 MeBox 实例的地址保持原样，按第三方直链透传。
+		target := normalizeCloudPlayTarget(r.Context(), s.repo, s.cfg, r, strmURL)
 		target = withAuthTokenForInternalRedirect(target, r, PublicServerURL(r.Context(), s.repo, s.cfg))
 		setCloudRedirectNoStore(w)
 		http.Redirect(w, r, absoluteInternalRedirect(target, r), http.StatusFound)

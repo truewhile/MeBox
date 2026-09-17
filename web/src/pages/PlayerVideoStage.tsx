@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent, ReactNode, RefObject } from 'react'
 import {
+  CircleAlert,
   Hand,
   Loader2,
   Lock,
@@ -184,7 +185,10 @@ type PlayerVideoStageProps = {
   danmakuEpisodeId: number | string | null
   danmakuSearchTrigger?: number
   danmakuOpen: boolean
-  onToggleDanmaku: () => void
+  /** 打开弹幕设置面板（搜索弹幕库、调整渲染参数）。 */
+  onOpenDanmaku: () => void
+  /** 操作栏上的「弹」开关：只控制画面上的弹幕是否渲染。 */
+  onToggleDanmakuEnabled: (next: boolean) => void
   onDanmakuLoaded: (info: DanmakuLoadedInfo | null) => void
   onDanmakuCandidates: (candidates: DanmakuAnime[]) => void
   onDanmakuAlternatives: (alternatives: DanmakuAnime[]) => void
@@ -200,14 +204,22 @@ type PlayerVideoStageProps = {
   nextEpisodeTitle?: string
   playlistOpen?: boolean
   hasPlaylist?: boolean
+  /** 当前条目存在多个版本（选集面板里提供版本切换，按钮提示随之变化）。 */
+  hasVersions?: boolean
   onTogglePlaylist?: () => void
   knownDuration?: number
   streamOffset?: number
   onSeekAbsolute?: (seconds: number) => boolean
   qualities?: PlaybackQuality[]
+  /** 清晰度按钮上显示的文字（播放页按当前播放方式算好）。 */
+  qualityLabel?: string
   selectedQuality?: string
   onSelectQuality?: (quality: PlaybackQuality) => void
   showQuality?: boolean
+  /** 当前播放方式的文字描述，展示在设置面板里。 */
+  playbackModeLabel?: string
+  /** 可切换播放方式时提供；不提供则设置面板里只显示状态。 */
+  onTogglePlaybackMode?: () => void
   /** VR 全景播放配置；非 null 表示当前处于 VR 模式。 */
   vr360?: Vr360Profile | null
   /** 是否由文件名/画幅自动识别出 VR 素材（用于在菜单里提示）。 */
@@ -251,7 +263,8 @@ export function PlayerVideoStage({
   danmakuEpisodeId,
   danmakuSearchTrigger = 0,
   danmakuOpen,
-  onToggleDanmaku,
+  onOpenDanmaku,
+  onToggleDanmakuEnabled,
   onDanmakuLoaded,
   onDanmakuCandidates,
   onDanmakuAlternatives,
@@ -265,14 +278,18 @@ export function PlayerVideoStage({
   nextEpisodeTitle,
   playlistOpen,
   hasPlaylist,
+  hasVersions = false,
   onTogglePlaylist,
   knownDuration,
   streamOffset,
   onSeekAbsolute,
   qualities = [],
+  qualityLabel = '',
   selectedQuality = '',
   onSelectQuality,
   showQuality = false,
+  playbackModeLabel = '',
+  onTogglePlaybackMode,
   vr360 = null,
   vr360Detected = false,
   onToggleVr360,
@@ -780,6 +797,7 @@ export function PlayerVideoStage({
                 onReady={() => setVrReadyMediaId(media.id)}
                 onError={(message) => onVr360Error?.(message)}
                 onProfileChange={onVr360ProfileChange}
+                onExitVr={onToggleVr360}
                 onUiHoldChange={setVrUiHovered}
               />
             ) : null}
@@ -858,7 +876,8 @@ export function PlayerVideoStage({
             onSubtitleStyleChange={onSubtitleStyleChange}
             danmakuOpen={danmakuOpen}
             danmakuEnabled={danmakuEnabled}
-            onToggleDanmaku={onToggleDanmaku}
+            onToggleDanmakuEnabled={onToggleDanmakuEnabled}
+            onOpenDanmaku={onOpenDanmaku}
             hasPrevEpisode={hasPrevEpisode}
             hasNextEpisode={hasNextEpisode}
             onPrevEpisode={onPrevEpisode}
@@ -867,14 +886,18 @@ export function PlayerVideoStage({
             nextEpisodeTitle={nextEpisodeTitle}
             playlistOpen={playlistOpen}
             hasPlaylist={hasPlaylist}
+            hasVersions={hasVersions}
             onTogglePlaylist={onTogglePlaylist}
             knownDuration={knownDuration}
             streamOffset={streamOffset}
             onSeekAbsolute={onSeekAbsolute}
             qualities={qualities}
+            qualityLabel={qualityLabel}
             selectedQuality={selectedQuality}
             onSelectQuality={onSelectQuality}
             showQuality={showQuality}
+            playbackModeLabel={playbackModeLabel}
+            onTogglePlaybackMode={onTogglePlaybackMode}
             vr360={vr360}
             vr360Detected={vr360Detected}
             onToggleVr360={onToggleVr360}
@@ -889,7 +912,7 @@ export function PlayerVideoStage({
       )}
       {vr360 && media && !vrReady ? (
         <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-black/60">
-          <div className="flex items-center gap-2 rounded-full border border-white/15 bg-black/80 px-5 py-3 text-sm text-white shadow-2xl backdrop-blur">
+          <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-[#0d0e12]/95 px-4 py-3 text-sm text-white shadow-[0_10px_38px_rgba(0,0,0,0.6)] backdrop-blur-xl">
             <Loader2 className="animate-spin text-rose-400" size={18} />
             正在启动 VR 全景渲染…
           </div>
@@ -899,7 +922,7 @@ export function PlayerVideoStage({
           一边拖动画面试操作。 */}
       {vrGuideVisible ? (
         <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center px-4">
-          <div className="pointer-events-auto w-[min(92vw,400px)] rounded-2xl border border-white/15 bg-black/85 px-5 py-4 text-white shadow-2xl backdrop-blur">
+          <div className="pointer-events-auto w-[min(92vw,400px)] rounded-2xl border border-white/10 bg-[#0d0e12]/95 px-5 py-4 text-white shadow-[0_10px_38px_rgba(0,0,0,0.6)] backdrop-blur-xl">
             <p className="flex items-center gap-2 text-sm font-semibold">
               <Rotate3d size={16} className="text-rose-400" />
               VR 全景播放
@@ -915,7 +938,7 @@ export function PlayerVideoStage({
               </li>
               <li className="flex items-start gap-2">
                 <MousePointerClick size={14} className="mt-0.5 shrink-0 text-white/45" />
-                单击画面：显示或收起操作栏（进度条、音量、画质、倍速、VR 设置）
+                单击画面：显示或收起操作栏（进度条、清晰度、倍速、设置）
               </li>
               <li className="flex items-start gap-2">
                 <Lock size={14} className="mt-0.5 shrink-0 text-white/45" />
@@ -957,34 +980,35 @@ export function PlayerVideoStage({
         tabIndex={lockVisible ? 0 : -1}
         aria-label={locked ? '解锁画面，恢复操作栏' : '锁定画面，隐藏操作栏和进度框'}
         title={locked ? '点一下解锁，恢复操作栏与进度框' : '锁上后画面轻触无效，只留这个锁'}
-        className={`absolute left-2 top-1/2 z-30 -translate-y-1/2 rounded-full border p-3 shadow-2xl backdrop-blur transition-opacity duration-200 sm:left-4 ${
+        className={`absolute left-2.5 top-1/2 z-30 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border shadow-[0_6px_20px_rgba(0,0,0,0.45)] backdrop-blur transition-opacity duration-200 sm:left-4 ${
           lockVisible ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'
         } ${
           locked
             ? // 锁住时按钮退到很淡的状态：既提示「这里是锁」，又不打扰观看。
-              'border-white/10 bg-black/35 text-white/45 hover:bg-black/65 hover:text-white'
-            : 'border-white/15 bg-black/65 text-white hover:bg-black/85'
+              'border-white/5 bg-black/30 text-white/40 hover:bg-black/60 hover:text-white'
+            : 'border-white/10 bg-black/50 text-white/85 hover:bg-black/75 hover:text-white'
         }`}
       >
-        {locked ? <Lock size={20} /> : <LockOpen size={20} />}
+        {locked ? <Lock size={18} /> : <LockOpen size={18} />}
       </button>
       {/* 解锁提示：操作栏此时已经藏起来了，用户点锁之后需要知道发生了什么。 */}
       {lockHint ? (
-        <div className="pointer-events-none absolute left-16 top-1/2 z-30 -translate-y-1/2 rounded-full border border-white/15 bg-black/75 px-3 py-1.5 text-xs text-white/90 shadow-xl backdrop-blur sm:left-20">
+        <div className="pointer-events-none absolute left-16 top-1/2 z-30 -translate-y-1/2 rounded-lg border border-white/10 bg-[#0d0e12]/95 px-3 py-1.5 text-xs text-white/85 shadow-[0_10px_38px_rgba(0,0,0,0.6)] backdrop-blur-xl sm:left-20">
           已解锁，点画面可显示操作栏
         </div>
       ) : null}
       {playerError ? (
-        <div className="absolute bottom-20 left-1/2 w-[min(92vw,720px)] -translate-x-1/2 rounded-2xl border border-white/15 bg-black/75 px-5 py-4 text-sm text-white shadow-2xl backdrop-blur">
-          {playerError}
+        <div className="absolute bottom-20 left-1/2 flex w-[min(92vw,720px)] -translate-x-1/2 items-start gap-2.5 rounded-xl border border-rose-500/25 bg-[#0d0e12]/95 px-4 py-3 text-xs leading-relaxed text-white/85 shadow-[0_10px_38px_rgba(0,0,0,0.6)] backdrop-blur-xl">
+          <CircleAlert size={15} className="mt-0.5 shrink-0 text-rose-400" />
+          <span className="min-w-0 flex-1">{playerError}</span>
         </div>
       ) : null}
       {waiting ? (
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/60 px-4 backdrop-blur-sm">
-          <div className="max-w-md rounded-xl border border-white/15 bg-black/85 px-6 py-5 text-center text-white shadow-2xl">
-            <Loader2 className="mx-auto mb-3 animate-spin text-rose-400" size={28} />
+          <div className="max-w-md rounded-2xl border border-white/10 bg-[#0d0e12]/95 px-6 py-5 text-center text-white shadow-[0_10px_38px_rgba(0,0,0,0.6)]">
+            <Loader2 className="mx-auto mb-3 animate-spin text-rose-400" size={26} />
             <p className="text-sm font-medium">{waitingMessage || '115 正在转码…'}</p>
-            <p className="mt-1 text-xs text-white/60">转码完成后会自动播放</p>
+            <p className="mt-1 text-xs text-white/55">转码完成后会自动播放</p>
           </div>
         </div>
       ) : null}

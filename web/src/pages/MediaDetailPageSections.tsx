@@ -164,7 +164,7 @@ export function MediaDetailMainContent({
             onToggleFavourite={onToggleFavourite}
             playTargetId={playTargetId}
           />
-          <MediaVersionSwitcher media={media} mode="detail" />
+          <MediaVersionSwitcher media={media} />
           {isAdmin && (
             <MediaDetailAdminPanel
               media={media}

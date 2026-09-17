@@ -176,3 +176,30 @@ export function mediaVersionsOf(media: Media | null | undefined): Media[] {
   if (media.versions && media.versions.length > 1) return media.versions
   return [media]
 }
+
+/**
+ * media 自身或它的任一版本是否命中 id。
+ *
+ * 选集列表按「版本组」折叠后，行的 id 是该组首个（最优）版本；用户切到
+ * 组内其它版本时播放中的 id 与行 id 不再相等，必须连带比对 versions，
+ * 否则当前集高亮、上一集/下一集都会失效。
+ */
+export function mediaVersionMatches(media: Media | null | undefined, id: string): boolean {
+  if (!media || !id) return false
+  if (media.id === id) return true
+  return Boolean(media.versions?.some((version) => version.id === id))
+}
+
+/** 版本来源：云端（STRM / 网盘直链）或本地文件。 */
+export function mediaVersionSourceLabel(media: Media): string {
+  return isStrmMedia(media) ? '云端直链' : '本地文件'
+}
+
+/** 版本文件名（去掉目录，并剥掉 .strm 外层扩展名），用作版本选项的次要说明。 */
+export function mediaVersionFileName(media: Media): string {
+  const path = (media.path || '').replace(/\\/g, '/').trim()
+  if (!path) return ''
+  const base = path.split('/').filter(Boolean).pop() || ''
+  if (!base) return ''
+  return base.replace(/\.strm$/i, '')
+}
