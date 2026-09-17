@@ -410,13 +410,9 @@ func (s *SubtitleService) Serve(ctx context.Context, mediaID, sub string, w io.W
 		}
 		return s.serveEmbedded(ctx, m, index, w)
 	}
-	abs, err := filepath.Abs(sub)
+	abs, err := readExternalSubtitlePath(m, sub)
 	if err != nil {
 		return err
-	}
-	mediaDir, _ := filepath.Abs(filepath.Dir(m.Path))
-	if !pathWithin(abs, mediaDir) {
-		return fmt.Errorf("path escape")
 	}
 
 	f, err := os.Open(abs) // #nosec G304 -- abs is constrained to the media file directory with pathWithin.
@@ -428,14 +424,17 @@ func (s *SubtitleService) Serve(ctx context.Context, mediaID, sub string, w io.W
 	if err != nil {
 		return err
 	}
+	// 非 UTF-8 的外挂字幕（UTF-16、GBK/Big5 等）必须先归一化：浏览器只能按
+	// UTF-8 解析 <track> 内容，否则整篇都会变成替换字符。
+	text := decodeSubtitleText(body)
 
 	switch strings.ToLower(filepath.Ext(abs)) {
 	case ".vtt":
-		_, err = w.Write(body)
+		_, err = io.WriteString(w, text)
 	case ".srt":
-		_, err = w.Write([]byte(srtToVTT(string(body))))
+		_, err = io.WriteString(w, srtToVTT(text))
 	case ".ass", ".ssa":
-		_, err = w.Write([]byte(assToVTT(string(body))))
+		_, err = io.WriteString(w, assToVTT(text))
 	default:
 		return errors.New("unsupported subtitle format")
 	}
@@ -517,10 +516,40 @@ func (s *SubtitleService) ServeASS(ctx context.Context, mediaID, sub string, w i
 	}
 	switch strings.ToLower(filepath.Ext(sub)) {
 	case ".ass", ".ssa":
-		return s.ServeRaw(ctx, mediaID, sub, w)
+		// 外挂 ASS 同样要归一化成 UTF-8：libass 只认 UTF-8，UTF-16/GBK 的
+		// 字幕交给它会解析不到任何事件，表现为「字幕选中了却不显示」。
+		abs, err := readExternalSubtitlePath(m, sub)
+		if err != nil {
+			return err
+		}
+		f, err := os.Open(abs) // #nosec G304 -- abs is constrained to the media file directory with pathWithin.
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		body, err := io.ReadAll(f)
+		if err != nil {
+			return err
+		}
+		_, err = io.WriteString(w, decodeSubtitleText(body))
+		return err
 	default:
 		return errors.New("subtitle is not ASS/SSA")
 	}
+}
+
+// readExternalSubtitlePath 校验外挂字幕路径（必须落在媒体文件所在目录内）并返回
+// 绝对路径。Serve 与 ServeASS 共用，避免两处各自实现出现安全口径不一致。
+func readExternalSubtitlePath(m *model.Media, sub string) (string, error) {
+	abs, err := filepath.Abs(sub)
+	if err != nil {
+		return "", err
+	}
+	mediaDir, _ := filepath.Abs(filepath.Dir(m.Path))
+	if !pathWithin(abs, mediaDir) {
+		return "", fmt.Errorf("path escape")
+	}
+	return abs, nil
 }
 
 func (s *SubtitleService) serveEmbeddedASS(ctx context.Context, media *model.Media, streamIndex int, w io.Writer) error {
