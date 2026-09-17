@@ -37,15 +37,18 @@ type User struct {
 	// original / simplified / traditional。
 	SubtitleChineseMode string `gorm:"size:16;not null;default:original" json:"subtitle_chinese_mode"`
 	// 网页播放器偏好按用户存储，切换媒体对象后继续沿用。
-	PlayerVolume        float64 `gorm:"not null;default:1" json:"player_volume"`
-	PlayerPlaybackRate  float64 `gorm:"not null;default:1" json:"player_playback_rate"`
-	DanmakuEnabled      bool    `gorm:"not null;default:true" json:"danmaku_enabled"`
-	DanmakuOpacity      float64 `gorm:"not null;default:1" json:"danmaku_opacity"`
-	DanmakuFontSize     int     `gorm:"not null;default:24" json:"danmaku_font_size"`
-	DanmakuArea         float64 `gorm:"not null;default:1" json:"danmaku_area"`
-	DanmakuMergeSources bool    `gorm:"not null;default:false" json:"danmaku_merge_sources"`
-	DanmakuSource       string  `gorm:"size:512" json:"danmaku_source,omitempty"`
-	DanmakuAppID        string  `gorm:"size:128" json:"danmaku_app_id,omitempty"`
+	PlayerVolume       float64 `gorm:"not null;default:1" json:"player_volume"`
+	PlayerPlaybackRate float64 `gorm:"not null;default:1" json:"player_playback_rate"`
+	// PlayerVr360GuideSeen 记录用户是否已经看过 VR 全景播放的首次操作说明，
+	// 按用户保存：看过一次之后不再弹出。
+	PlayerVr360GuideSeen bool    `gorm:"not null;default:false" json:"player_vr360_guide_seen"`
+	DanmakuEnabled       bool    `gorm:"not null;default:true" json:"danmaku_enabled"`
+	DanmakuOpacity       float64 `gorm:"not null;default:1" json:"danmaku_opacity"`
+	DanmakuFontSize      int     `gorm:"not null;default:24" json:"danmaku_font_size"`
+	DanmakuArea          float64 `gorm:"not null;default:1" json:"danmaku_area"`
+	DanmakuMergeSources  bool    `gorm:"not null;default:false" json:"danmaku_merge_sources"`
+	DanmakuSource        string  `gorm:"size:512" json:"danmaku_source,omitempty"`
+	DanmakuAppID         string  `gorm:"size:128" json:"danmaku_app_id,omitempty"`
 	// DanmakuAppKey 只在服务端读取并用于请求签名，绝不通过用户资料接口下发。
 	DanmakuAppKey string `gorm:"size:256" json:"-"`
 	// ExpiredAt is the account expiry time. Nil means the account never

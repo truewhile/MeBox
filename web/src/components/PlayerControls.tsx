@@ -44,6 +44,10 @@ import {
 // controls> (which cannot host custom buttons). The danmaku toggle sits right
 // next to the volume control. The bar auto-hides while playing and reappears
 // on mouse movement; it stays visible while paused or when hovering/interacting.
+//
+// VR 全景播放里这条规则要反过来：按住拖动就是转动视角，属于观看动作而不是
+// 操作意图，所以这类鼠标/触摸移动既不唤出控制栏，还会在开始转视角时立刻把
+// 浮层收掉（见 onVrPointerDown / onVrPointerMove）。
 
 function formatTime(s: number): string {
   if (!Number.isFinite(s) || s < 0) s = 0
@@ -58,6 +62,12 @@ const SEEK_APPLY_MS = 220
 const SEEK_HINT_MS = 700
 const PLAYBACK_RATE_REPEAT_MS = 140
 const PLAYBACK_RATE_HINT_MS = 900
+/** 播放中控制栏无操作自动隐藏的延时。 */
+const CONTROLS_HIDE_DELAY_MS = 3000
+/** VR 全景播放的隐藏延时更短：浮层由单击唤出，收得越快越不打扰观看。 */
+const VR_CONTROLS_HIDE_DELAY_MS = 2000
+/** VR 视角拖拽超过这个距离才算「真的在转动视角」，轻触不受影响。 */
+const VR_VIEW_DRAG_DISTANCE = 6
 
 type SeekHint = {
   dir: 'back' | 'forward'
@@ -92,6 +102,8 @@ type PlayerControlsProps = {
   onPlaybackRateCommit?: (rate: number) => void
   uiVisible: boolean
   onUiVisibleChange: (visible: boolean) => void
+  /** 外部浮层（VR 工具条/设置面板）正被鼠标悬停：此时控制栏不自动隐藏。 */
+  uiHold?: boolean
   subs: SubtitleTrack[]
   /** 当前激活字幕轨道：-1=关闭，0..n-1=对应轨道。 */
   subtitleIndex: number
@@ -141,6 +153,7 @@ export function PlayerControls({
   onPlaybackRateCommit,
   uiVisible,
   onUiVisibleChange,
+  uiHold = false,
   subs,
   subtitleIndex,
   onSelectSubtitle,
@@ -196,13 +209,13 @@ export function PlayerControls({
   const [speedMenuOpen, setSpeedMenuOpen] = useState(false)
   const speedMenuRef = useRef<HTMLDivElement | null>(null)
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const controlsHoveredRef = useRef(false)
   const isScrubbingRef = useRef(false)
-  const subtitleMenuOpenRef = useRef(false)
-  const qualityMenuOpenRef = useRef(false)
-  const speedMenuOpenRef = useRef(false)
-  const danmakuOpenRef = useRef(false)
-  const playlistOpenRef = useRef(false)
+  /** 控制栏当前是否处于「必须保持显示」的状态（悬停/拖进度/菜单或面板打开）。 */
+  const holdControlsRef = useRef(false)
+  /** 当前是否在 VR 全景播放中。 */
+  const vr360ActiveRef = useRef(Boolean(vr360))
+  /** VR 画布上的按下状态：按住拖动 = 转动视角，不唤出控制栏。 */
+  const vrDragRef = useRef<{ x: number; y: number; moved: boolean } | null>(null)
   const pendingSeekRef = useRef<number | null>(null)
   const applySeekRef = useRef<(absolute: number) => void>(() => undefined)
   const durationRef = useRef(0)
@@ -218,32 +231,27 @@ export function PlayerControls({
   const [stageEl, setStageEl] = useState<HTMLElement | null>(null)
 
   useEffect(() => {
-    controlsHoveredRef.current = controlsHovered
-  }, [controlsHovered])
-
-  useEffect(() => {
     isScrubbingRef.current = isScrubbing
   }, [isScrubbing])
 
   useEffect(() => {
-    subtitleMenuOpenRef.current = subtitleMenuOpen
-  }, [subtitleMenuOpen])
+    vr360ActiveRef.current = Boolean(vr360)
+  }, [vr360])
 
+  // 「保持显示」条件集中在这里：悬停控制栏、拖动进度条、打开任何菜单或面板。
+  // 事件回调里读 ref，渲染里读派生值，两边始终一致。
+  const keepControlsVisible =
+    uiHold ||
+    controlsHovered ||
+    isScrubbing ||
+    subtitleMenuOpen ||
+    qualityMenuOpen ||
+    speedMenuOpen ||
+    danmakuOpen ||
+    playlistOpen
   useEffect(() => {
-    qualityMenuOpenRef.current = qualityMenuOpen
-  }, [qualityMenuOpen])
-
-  useEffect(() => {
-    speedMenuOpenRef.current = speedMenuOpen
-  }, [speedMenuOpen])
-
-  useEffect(() => {
-    danmakuOpenRef.current = danmakuOpen
-  }, [danmakuOpen])
-
-  useEffect(() => {
-    playlistOpenRef.current = playlistOpen
-  }, [playlistOpen])
+    holdControlsRef.current = keepControlsVisible
+  }, [keepControlsVisible])
 
   useEffect(() => {
     durationRef.current = duration
@@ -303,45 +311,64 @@ export function PlayerControls({
     const stage = container()
     if (!el || !stage) return
 
+    const holdControls = () => holdControlsRef.current
+
+    const hideDelay = () =>
+      vr360ActiveRef.current ? VR_CONTROLS_HIDE_DELAY_MS : CONTROLS_HIDE_DELAY_MS
+
     const resetTimer = () => {
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
-      if (
-        !el.paused &&
-        !controlsHoveredRef.current &&
-        !isScrubbingRef.current &&
-        !subtitleMenuOpenRef.current &&
-        !qualityMenuOpenRef.current &&
-        !speedMenuOpenRef.current &&
-        !danmakuOpenRef.current &&
-        !playlistOpenRef.current
-      ) {
-        hideTimerRef.current = setTimeout(() => {
-          if (
-            !controlsHoveredRef.current &&
-            !isScrubbingRef.current &&
-            !subtitleMenuOpenRef.current &&
-            !qualityMenuOpenRef.current &&
-            !speedMenuOpenRef.current &&
-            !danmakuOpenRef.current &&
-            !playlistOpenRef.current
-          ) {
-            onUiVisibleChange(false)
-          }
-        }, 3000)
-      }
+      if (el.paused || holdControls()) return
+      hideTimerRef.current = setTimeout(() => {
+        if (holdControls()) return
+        onUiVisibleChange(false)
+      }, hideDelay())
     }
 
+    // 通用「用户活动」入口：显示控制栏并重新计时。播放/暂停等事件也走这里。
     const onMove = () => {
       onUiVisibleChange(true)
       resetTimer()
     }
 
+    // VR 全景播放里鼠标/触摸移动是「转动视角」的观看动作，不是操作控制栏的意图：
+    //   · 移动一律不唤出控制栏（拖动结束后的轻微抖动、手机上轻触产生的兼容
+    //     mousemove 都不会让进度条又冒出来）；
+    //   · 一旦判定用户真的在转视角，就立刻收起浮层，还给用户一个干净的画面。
+    // 需要控制栏时用轻触/单击画面唤出（见 PlayerVideoStage 的 handleSurfaceActivate）。
+    const onStageMouseMove = () => {
+      if (vr360ActiveRef.current) return
+      onMove()
+    }
+
+    const onVrPointerDown = (event: PointerEvent) => {
+      if (!vr360ActiveRef.current) return
+      const target = event.target
+      if (!(target instanceof Element) || !target.closest('[data-vr360-surface]')) return
+      vrDragRef.current = { x: event.clientX, y: event.clientY, moved: false }
+    }
+
+    const onVrPointerMove = (event: PointerEvent) => {
+      const drag = vrDragRef.current
+      if (!drag || drag.moved) return
+      if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) <= VR_VIEW_DRAG_DISTANCE) return
+      drag.moved = true
+      if (holdControls()) return
+      if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
+      onUiVisibleChange(false)
+    }
+
+    const endVrDrag = () => {
+      vrDragRef.current = null
+    }
+
     const onLeave = (e: MouseEvent) => {
+      endVrDrag()
       // 仅当光标真正移出 stage 容器时才处理
       if (e.relatedTarget && stage.contains(e.relatedTarget as Node)) {
         return
       }
-      if (el.paused || controlsHoveredRef.current || isScrubbingRef.current || playlistOpenRef.current) return
+      if (el.paused || holdControls()) return
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
       onUiVisibleChange(false)
     }
@@ -381,8 +408,14 @@ export function PlayerControls({
     const syncFullscreen = () => setFullscreen(Boolean(document.fullscreenElement))
     const syncPip = () => setPip(document.pictureInPictureElement === el)
 
-    stage.addEventListener('mousemove', onMove)
+    stage.addEventListener('mousemove', onStageMouseMove)
     stage.addEventListener('mouseleave', onLeave)
+    // VR 视角拖拽：pointer 事件比 mouse 事件先到达，可以在同一次移动里
+    // 先判定「这是转动视角」，避免鼠标移动先把控制栏唤出来再收掉。
+    stage.addEventListener('pointerdown', onVrPointerDown)
+    stage.addEventListener('pointermove', onVrPointerMove)
+    stage.addEventListener('pointerup', endVrDrag)
+    stage.addEventListener('pointercancel', endVrDrag)
 
     el.addEventListener('play', syncPlay)
     el.addEventListener('playing', syncPlay)
@@ -399,8 +432,12 @@ export function PlayerControls({
     syncVolume()
     syncFullscreen()
     return () => {
-      stage.removeEventListener('mousemove', onMove)
+      stage.removeEventListener('mousemove', onStageMouseMove)
       stage.removeEventListener('mouseleave', onLeave)
+      stage.removeEventListener('pointerdown', onVrPointerDown)
+      stage.removeEventListener('pointermove', onVrPointerMove)
+      stage.removeEventListener('pointerup', endVrDrag)
+      stage.removeEventListener('pointercancel', endVrDrag)
       el.removeEventListener('play', syncPlay)
       el.removeEventListener('playing', syncPlay)
       el.removeEventListener('pause', syncPlay)
@@ -422,19 +459,23 @@ export function PlayerControls({
     setDuration(Math.max(knownDuration || 0, streamOffset + streamDur))
   }, [knownDuration, streamOffset, video])
 
-  // 当悬停或菜单状态改变时，更新控制栏计时器
+  // 控制栏的自动隐藏计时器：只要控制栏处于显示状态，就始终安排一次隐藏。
+  // 之前只在「悬停/菜单状态变化」时才安排，用轻触或点击唤出控制栏后如果没有
+  // 鼠标移动，计时器永远不会被安排，控制栏就会一直留在画面上。
   useEffect(() => {
-    if (controlsHovered || isScrubbing || subtitleMenuOpen || qualityMenuOpen || speedMenuOpen || danmakuOpen || playlistOpen) {
+    if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
+    if (keepControlsVisible) {
       onUiVisibleChange(true)
-      if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
-    } else {
-      const el = video()
-      if (el && !el.paused) {
-        if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
-        hideTimerRef.current = setTimeout(() => onUiVisibleChange(false), 3000)
-      }
+      return
     }
-  }, [controlsHovered, isScrubbing, subtitleMenuOpen, qualityMenuOpen, speedMenuOpen, danmakuOpen, playlistOpen, onUiVisibleChange, video])
+    if (!uiVisible) return
+    const el = video()
+    if (!el || el.paused) return
+    hideTimerRef.current = setTimeout(() => {
+      if (holdControlsRef.current) return
+      onUiVisibleChange(false)
+    }, vr360ActiveRef.current ? VR_CONTROLS_HIDE_DELAY_MS : CONTROLS_HIDE_DELAY_MS)
+  }, [uiVisible, keepControlsVisible, onUiVisibleChange, video])
 
   const togglePlay = () => {
     const el = video()
@@ -516,30 +557,13 @@ export function PlayerControls({
     onUiVisibleChange(true)
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
     const el = video()
-    if (
-      !el ||
-      el.paused ||
-      controlsHoveredRef.current ||
-      isScrubbingRef.current ||
-      subtitleMenuOpenRef.current ||
-      qualityMenuOpenRef.current ||
-      danmakuOpenRef.current ||
-      playlistOpenRef.current
-    ) {
+    if (!el || el.paused || holdControlsRef.current) {
       return
     }
     hideTimerRef.current = setTimeout(() => {
-      if (
-        !controlsHoveredRef.current &&
-        !isScrubbingRef.current &&
-        !subtitleMenuOpenRef.current &&
-        !qualityMenuOpenRef.current &&
-        !danmakuOpenRef.current &&
-        !playlistOpenRef.current
-      ) {
-        onUiVisibleChange(false)
-      }
-    }, 3000)
+      if (holdControlsRef.current) return
+      onUiVisibleChange(false)
+    }, vr360ActiveRef.current ? VR_CONTROLS_HIDE_DELAY_MS : CONTROLS_HIDE_DELAY_MS)
   }, [onUiVisibleChange, video])
 
   const queueRelativeSeek = useCallback((delta: number, immediate: boolean) => {

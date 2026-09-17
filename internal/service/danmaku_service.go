@@ -71,6 +71,8 @@ type DanmakuRenderConfig struct {
 	Volume   float64 `json:"volume"`
 	// PlaybackRate 是当前用户的播放倍速偏好（按用户存储）。
 	PlaybackRate float64 `json:"playback_rate"`
+	// Vr360GuideSeen 表示当前用户是否已经看过 VR 全景播放的首次操作说明。
+	Vr360GuideSeen bool `json:"vr360_guide_seen"`
 	// MergeSources 是当前用户的弹幕合并偏好（按用户存储）。
 	MergeSources bool `json:"merge_sources"`
 	// AppKeyConfigured 只表明用户是否保存了应用密钥，不回传密钥明文。
@@ -98,6 +100,8 @@ type DanmakuSettingsPatch struct {
 	MergeSources *bool    `json:"merge_sources"`
 	Volume       *float64 `json:"volume"`
 	PlaybackRate *float64 `json:"playback_rate"`
+	// Vr360GuideSeen 标记 VR 全景播放的首次操作说明是否已经看过。
+	Vr360GuideSeen *bool `json:"vr360_guide_seen"`
 }
 
 type danmakuUserContextKey struct{}
@@ -447,6 +451,7 @@ func danmakuConfigFromUser(user *model.User) DanmakuRenderConfig {
 		Area:             strconv.FormatFloat(area, 'f', -1, 64),
 		Volume:           volume,
 		PlaybackRate:     playbackRate,
+		Vr360GuideSeen:   user.PlayerVr360GuideSeen,
 		MergeSources:     user.DanmakuMergeSources,
 		AppKeyConfigured: strings.TrimSpace(user.DanmakuAppKey) != "",
 	}
@@ -527,6 +532,9 @@ func (s *DanmakuService) UpdateUserSettings(ctx context.Context, userID string, 
 			)
 		}
 		updates["player_playback_rate"] = *patch.PlaybackRate
+	}
+	if patch.Vr360GuideSeen != nil {
+		updates["player_vr360_guide_seen"] = *patch.Vr360GuideSeen
 	}
 	if len(updates) == 0 {
 		return DanmakuRenderConfig{}, ErrNoDanmakuSettings

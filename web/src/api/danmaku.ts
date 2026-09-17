@@ -72,6 +72,8 @@ export interface DanmakuConfig {
   area: string
   volume: number
   playback_rate: number
+  /** 当前用户是否已经看过 VR 全景播放的首次操作说明（按用户存储）。 */
+  vr360_guide_seen: boolean
   /** Per-user preference: merge the same episode's multiple sources. */
   merge_sources: boolean
 }
@@ -89,6 +91,8 @@ export interface DanmakuSettingsPatch {
   merge_sources?: boolean
   volume?: number
   playback_rate?: number
+  /** 看过 VR 操作说明后置为 true，之后不再弹出。 */
+  vr360_guide_seen?: boolean
 }
 
 // danmakuAPI fetches danmaku comments for a media item. The backend resolves

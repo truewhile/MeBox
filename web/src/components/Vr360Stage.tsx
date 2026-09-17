@@ -74,6 +74,11 @@ type Vr360StageProps = {
   onError: (message: string) => void
   /** 用户调整投影方式/立体布局时回调，由播放页保存为下次进入的默认值。 */
   onProfileChange?: (profile: Vr360Profile) => void
+  /**
+   * 鼠标是否停留在 VR 工具条/设置面板上。由播放页转给控制栏：悬停这些浮层时
+   * 控制栏不应该自动隐藏（否则设置面板会在点击前消失）。
+   */
+  onUiHoldChange?: (hold: boolean) => void
 }
 
 /** 每像素拖拽对应的转角（弧度）。视场角越小时画面越「拉近」，拖拽也应更细腻。 */
@@ -117,6 +122,7 @@ export function Vr360Stage({
   onReady,
   onError,
   onProfileChange,
+  onUiHoldChange,
 }: Vr360StageProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const rendererRef = useRef<Vr360Renderer | null>(null)
@@ -372,6 +378,15 @@ export function Vr360Stage({
 
   useEffect(() => () => stopGyro(), [stopGyro])
 
+  // 控制栏/浮层隐藏时收起「画面」设置面板：它属于同一套浮层，下次唤出控制栏时
+  // 不应该自动弹回来挡住画面。
+  useEffect(() => {
+    if (uiVisible) return
+    setSettingsOpen(false)
+    // 浮层不可见时鼠标离开事件不会再触发，这里主动解除「悬停保持显示」。
+    onUiHoldChange?.(false)
+  }, [uiVisible, onUiHoldChange])
+
   const zoomBy = useCallback(
     (factor: number) => {
       const view = viewRef.current
@@ -487,7 +502,10 @@ export function Vr360Stage({
       <canvas
         ref={canvasRef}
         data-vr360-surface
-        className="absolute inset-0 h-full w-full cursor-grab touch-none select-none active:cursor-grabbing"
+        className={`absolute inset-0 h-full w-full touch-none select-none ${
+          // 浮层隐藏时连鼠标指针一起藏起来：全景画面里光标一直悬在画面中间很出戏。
+          uiVisible ? 'cursor-grab active:cursor-grabbing' : 'cursor-none'
+        }`}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={endPointer}
@@ -501,7 +519,15 @@ export function Vr360Stage({
           uiVisible ? 'opacity-100' : 'opacity-0'
         }`}
       >
-        <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-1.5 rounded-2xl border border-white/15 bg-black/65 px-2 py-1.5 text-white shadow-2xl backdrop-blur">
+        <div
+          className={`flex flex-wrap items-center justify-center gap-1.5 rounded-2xl border border-white/15 bg-black/65 px-2 py-1.5 text-white shadow-2xl backdrop-blur ${
+            // 浮层隐藏时必须彻底不接收指针事件：否则看不见的按钮既会在画面顶部
+            // 抢走拖动转视角的手势，也可能被误点（例如误开陀螺仪、误开设置面板）。
+            uiVisible ? 'pointer-events-auto' : 'pointer-events-none'
+          }`}
+          onMouseEnter={() => onUiHoldChange?.(true)}
+          onMouseLeave={() => onUiHoldChange?.(false)}
+        >
           <button
             type="button"
             onClick={toggleGyro}
@@ -564,7 +590,13 @@ export function Vr360Stage({
           {hint || '拖动旋转视角 · 滚轮或双指缩放'}
         </p>
         {settingsOpen ? (
-          <div className="pointer-events-auto w-[min(92vw,420px)] rounded-2xl border border-white/15 bg-black/75 px-3 py-2.5 text-white shadow-2xl backdrop-blur">
+          <div
+            className={`w-[min(92vw,420px)] rounded-2xl border border-white/15 bg-black/75 px-3 py-2.5 text-white shadow-2xl backdrop-blur ${
+              uiVisible ? 'pointer-events-auto' : 'pointer-events-none'
+            }`}
+            onMouseEnter={() => onUiHoldChange?.(true)}
+            onMouseLeave={() => onUiHoldChange?.(false)}
+          >
             <p className="mb-1.5 text-[10px] uppercase tracking-wide text-white/45">投影方式</p>
             <div className="flex flex-wrap gap-1.5">
               {VR360_PROJECTION_OPTIONS.map(([value, label]) => (

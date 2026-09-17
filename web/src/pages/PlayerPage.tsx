@@ -138,6 +138,9 @@ export function PlayerPage() {
     normalizePlaybackRate(authUser?.player_playback_rate),
   )
   const persistedSubtitleChineseModeRef = useRef(subtitleChineseMode)
+  // VR 全景播放的首次操作说明是否已经看过：null = 服务端配置还没读回来，
+  // 这时不弹说明，避免给老用户闪一下。
+  const [vr360GuideSeen, setVr360GuideSeen] = useState<boolean | null>(null)
   const playerVolumeTouchedRef = useRef(false)
   const playerPlaybackRateTouchedRef = useRef(false)
   const playerPlaybackRateSaveSeqRef = useRef(0)
@@ -284,6 +287,7 @@ export function PlayerPage() {
         setDanmakuFontSize(Number(cfg.font_size) || 24)
         setDanmakuArea(Number(cfg.area) || 1)
         setDanmakuMergeSources(Boolean(cfg.merge_sources))
+        setVr360GuideSeen(Boolean(cfg.vr360_guide_seen))
         applyDanmakuConnectionConfig(cfg)
         if (!playerVolumeTouchedRef.current) {
           const current = useAuthStore.getState().user
@@ -648,6 +652,13 @@ export function PlayerPage() {
     vr360TouchedRef.current = true
     setVr360(profile)
     saveVr360Preference({ ...loadVr360Preference(), profile })
+  }, [])
+
+  // VR 操作说明是「按用户只弹一次」：用户关掉说明时就落库，之后进入 VR 不再显示。
+  // 保存失败只影响下次是否再弹一次，不打断播放，所以本地状态不回滚。
+  const dismissVr360Guide = useCallback(() => {
+    setVr360GuideSeen(true)
+    void danmakuAPI.updateSettings({ vr360_guide_seen: true }).catch(() => undefined)
   }, [])
 
   // Wire up the actual <video> element when we know the mode.
@@ -1675,6 +1686,8 @@ export function PlayerPage() {
         onToggleVr360={toggleVr360}
         onVr360ProfileChange={changeVr360Profile}
         onVr360Error={handleVr360Error}
+        showVr360Guide={Boolean(vr360) && vr360GuideSeen === false}
+        onDismissVr360Guide={dismissVr360Guide}
         playlistPanel={
           <PlayerPlaylistPanel
             open={playlistOpen}

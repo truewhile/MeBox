@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent, ReactNode, RefObject } from 'react'
-import { Loader2 } from 'lucide-react'
+import { Hand, Loader2, MousePointerClick, Rotate3d, Settings2, Smartphone, ZoomIn } from 'lucide-react'
 
 import { subtitlesAPI, type SubtitleTrack } from '../api/subtitles'
 import { type DanmakuAnime, type DanmakuLoadedInfo } from '../api/danmaku'
@@ -26,6 +26,13 @@ type SubtitleRenderGroup = {
   text: string
   style: CSSProperties
 }
+
+/** VR 模式下必须连续点击这么多次才唤出控制栏：单击太容易在转视角时误触。 */
+const VR_TAP_COUNT = 3
+/** 相邻两次点击间隔超过该毫秒数就重新开始计数。 */
+const VR_TAP_GAP_MS = 900
+/** 首次操作说明的最长停留时间：到这里仍未点「知道了」也自动收起并记录为已看过。 */
+const VR_GUIDE_AUTO_DISMISS_MS = 20_000
 
 function uniqueSubtitleCues(cues: SubtitleCue[]): SubtitleCue[] {
   const seen = new Set<string>()
@@ -195,6 +202,9 @@ type PlayerVideoStageProps = {
   onToggleVr360?: () => void
   onVr360ProfileChange?: (profile: Vr360Profile) => void
   onVr360Error?: (message: string) => void
+  /** 是否展示 VR 全景播放的首次操作说明（按用户只弹一次）。 */
+  showVr360Guide?: boolean
+  onDismissVr360Guide?: () => void
   waiting?: boolean
   waitingMessage?: string
 }
@@ -255,6 +265,8 @@ export function PlayerVideoStage({
   onToggleVr360,
   onVr360ProfileChange,
   onVr360Error,
+  showVr360Guide = false,
+  onDismissVr360Guide,
   waiting = false,
   waitingMessage = '',
 }: PlayerVideoStageProps) {
@@ -262,6 +274,13 @@ export function PlayerVideoStage({
   const [videoRatio, setVideoRatio] = useState<number | null>(null)
   const [stageRect, setStageRect] = useState<{ width: number; height: number } | null>(null)
   const [controlsVisible, setControlsVisible] = useState(true)
+  // 鼠标是否停在 VR 工具条/设置面板上：停住时控制栏不自动隐藏，否则设置面板会在点击前消失。
+  const [vrUiHovered, setVrUiHovered] = useState(false)
+  // VR 下「连续点击唤出控制栏」已累计的次数（0 表示没在计数）。
+  const [vrTapCount, setVrTapCount] = useState(0)
+  const vrTapCountRef = useRef(0)
+  const vrTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const vrActive = Boolean(vr360)
   // VR 渲染器是否已经画出第一帧（在此之前给出「正在启动」提示，避免只看到黑屏）。
   // 只按「媒体 ID」记录：切换投影方式/画幅布局不会重建画布，也就不能清掉这个
   // 状态——渲染器只在挂载后上报一次就绪，清掉之后提示会一直停在「正在启动」。
@@ -409,10 +428,23 @@ export function PlayerVideoStage({
     else video.pause()
   }
   const handleStagePointerDown = (event: PointerEvent<HTMLDivElement>) => {
-    revealControlsOnlyRef.current = event.pointerType === 'touch' && !controlsVisible
+    // VR 模式下单击不再负责唤出控制栏（改成连续 3 次点击），所以这里不预置开关。
+    revealControlsOnlyRef.current = !vrActive && event.pointerType === 'touch' && !controlsVisible
   }
+
+  const resetVrTapCount = useCallback(() => {
+    vrTapCountRef.current = 0
+    setVrTapCount(0)
+    if (vrTapTimerRef.current) {
+      clearTimeout(vrTapTimerRef.current)
+      vrTapTimerRef.current = null
+    }
+  }, [])
+
   // 舞台任意位置的「激活」（轻触/单击）：移动端控制栏隐藏时首次轻触只唤出
   // 控制栏，控制栏已显示时再次轻触才切换播放/暂停。
+  // VR 模式下单击不切换播放，也不唤出控制栏：单击太容易误触，必须连续点击
+  // VR_TAP_COUNT 次才会显示控制栏；控制栏已显示时单击即收起。
   const handleSurfaceActivate = () => {
     if (revealControlsOnlyRef.current) {
       revealControlsOnlyRef.current = false
@@ -420,8 +452,60 @@ export function PlayerVideoStage({
       return
     }
     revealControlsOnlyRef.current = false
+    if (vrActive) {
+      if (controlsVisible) {
+        resetVrTapCount()
+        setControlsVisible(false)
+        return
+      }
+      const next = vrTapCountRef.current + 1
+      vrTapCountRef.current = next
+      setVrTapCount(next)
+      if (vrTapTimerRef.current) {
+        clearTimeout(vrTapTimerRef.current)
+        vrTapTimerRef.current = null
+      }
+      if (next >= VR_TAP_COUNT) {
+        resetVrTapCount()
+        setControlsVisible(true)
+        return
+      }
+      // 相邻两次点击间隔超过 VR_TAP_GAP_MS 就重新计数，避免把零散点击累加起来。
+      vrTapTimerRef.current = setTimeout(() => {
+        vrTapTimerRef.current = null
+        vrTapCountRef.current = 0
+        setVrTapCount(0)
+      }, VR_TAP_GAP_MS)
+      return
+    }
     togglePlay()
   }
+  // 进入 VR 全景播放时先亮一次控制栏与 VR 工具条，让用户知道入口在哪；
+  // 之后完全由自动隐藏和「连点画面」控制。退出 VR 时要清掉 VR 浮层的悬停状态，
+  // 否则控制栏会以为还有浮层被悬停而一直不隐藏。
+  useEffect(() => {
+    resetVrTapCount()
+    if (vrActive) {
+      setControlsVisible(true)
+      return
+    }
+    setVrUiHovered(false)
+  }, [vrActive, resetVrTapCount])
+  useEffect(
+    () => () => {
+      if (vrTapTimerRef.current) clearTimeout(vrTapTimerRef.current)
+    },
+    [],
+  )
+
+  // 首次操作说明只出现一次：读完了点「知道了」会立即落库；放着不管也会在
+  // VR_GUIDE_AUTO_DISMISS_MS 之后自动收起并同样记录为已看过，避免每次进 VR 都弹。
+  const vrGuideVisible = vrActive && vrReady && showVr360Guide
+  useEffect(() => {
+    if (!vrGuideVisible) return
+    const timer = setTimeout(() => onDismissVr360Guide?.(), VR_GUIDE_AUTO_DISMISS_MS)
+    return () => clearTimeout(timer)
+  }, [vrGuideVisible, onDismissVr360Guide])
   const toggleFullscreen = () => {
     const stage = stageRef.current
     if (!stage) return
@@ -640,6 +724,7 @@ export function PlayerVideoStage({
                 onReady={() => setVrReadyMediaId(media.id)}
                 onError={(message) => onVr360Error?.(message)}
                 onProfileChange={onVr360ProfileChange}
+                onUiHoldChange={setVrUiHovered}
               />
             ) : null}
             <DanmakuStage
@@ -704,6 +789,7 @@ export function PlayerVideoStage({
             onPlaybackRateCommit={onPlayerPlaybackRateCommit}
             uiVisible={controlsVisible}
             onUiVisibleChange={setControlsVisible}
+            uiHold={vrUiHovered}
             subs={subs}
             subtitleIndex={subtitleIndex}
             onSelectSubtitle={onSelectSubtitle}
@@ -750,6 +836,53 @@ export function PlayerVideoStage({
             <Loader2 className="animate-spin text-rose-400" size={18} />
             正在启动 VR 全景渲染…
           </div>
+        </div>
+      ) : null}
+      {/* VR 首次操作说明：按用户只弹一次。刻意不铺全屏遮罩，用户可以一边看说明
+          一边拖动画面试操作。 */}
+      {vrGuideVisible ? (
+        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center px-4">
+          <div className="pointer-events-auto w-[min(92vw,400px)] rounded-2xl border border-white/15 bg-black/85 px-5 py-4 text-white shadow-2xl backdrop-blur">
+            <p className="flex items-center gap-2 text-sm font-semibold">
+              <Rotate3d size={16} className="text-rose-400" />
+              VR 全景播放
+            </p>
+            <ul className="mt-3 space-y-2 text-xs leading-relaxed text-white/80">
+              <li className="flex items-start gap-2">
+                <Hand size={14} className="mt-0.5 shrink-0 text-white/45" />
+                按住拖动画面：转动视角
+              </li>
+              <li className="flex items-start gap-2">
+                <ZoomIn size={14} className="mt-0.5 shrink-0 text-white/45" />
+                滚轮 / 双指捏合：缩放视野
+              </li>
+              <li className="flex items-start gap-2">
+                <MousePointerClick size={14} className="mt-0.5 shrink-0 text-white/45" />
+                连续点击画面 {VR_TAP_COUNT} 次：显示控制栏（进度条、音量、画质、倍速、VR 设置）
+              </li>
+              <li className="flex items-start gap-2">
+                <Settings2 size={14} className="mt-0.5 shrink-0 text-white/45" />
+                控制栏显示时单击画面即可收起
+              </li>
+              <li className="flex items-start gap-2">
+                <Smartphone size={14} className="mt-0.5 shrink-0 text-white/45" />
+                手机上点顶部「陀螺仪」：转动设备就能转动视角
+              </li>
+            </ul>
+            <button
+              type="button"
+              onClick={onDismissVr360Guide}
+              className="mt-4 w-full rounded-xl bg-rose-500 px-4 py-2 text-xs font-medium text-white transition hover:bg-rose-600"
+            >
+              知道了，不再提示
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {/* 连点计数反馈：没有反馈时用户连点两次会觉得没反应。 */}
+      {vrActive && !vrGuideVisible && !controlsVisible && vrTapCount > 0 ? (
+        <div className="pointer-events-none absolute bottom-24 left-1/2 z-30 -translate-x-1/2 rounded-full border border-white/15 bg-black/75 px-4 py-1.5 text-xs text-white/90 shadow-xl backdrop-blur">
+          再连点 {VR_TAP_COUNT - vrTapCount} 次显示控制栏
         </div>
       ) : null}
       {playerError ? (

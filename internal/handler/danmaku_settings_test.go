@@ -174,6 +174,39 @@ func TestUpdateDanmakuSettingsPersistsAllPlayerPreferences(t *testing.T) {
 	}
 }
 
+func TestUpdateDanmakuSettingsPersistsVr360GuideSeen(t *testing.T) {
+	svc := newDanmakuSettingsService(t)
+
+	// 默认未看过：配置接口必须先如实告知前端，否则首次操作说明会被跳过。
+	initial := svc.Danmaku.ConfigForUser(t.Context(), "user-1")
+	if initial.Vr360GuideSeen {
+		t.Fatal("vr360 guide should be unread for a fresh user")
+	}
+
+	c, w := newDanmakuSettingsContext(t, svc, http.MethodPut, "/danmaku/settings",
+		`{"vr360_guide_seen":true}`, "user-1")
+	updateDanmakuSettingsHandler(svc)(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", w.Code, w.Body.String())
+	}
+	var cfg service.DanmakuRenderConfig
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !cfg.Vr360GuideSeen {
+		t.Fatalf("config should reflect the persisted guide flag: %+v", cfg)
+	}
+
+	user, err := svc.Repo.User.FindByID(t.Context(), "user-1")
+	if err != nil || user == nil {
+		t.Fatalf("read persisted user: %v", err)
+	}
+	if !user.PlayerVr360GuideSeen {
+		t.Fatalf("guide flag not persisted on the user: %+v", user)
+	}
+}
+
 func TestUpdateDanmakuSettingsRejectsInvalidPlaybackRate(t *testing.T) {
 	svc := newDanmakuSettingsService(t)
 
