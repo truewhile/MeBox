@@ -1696,7 +1696,6 @@ export function PlayerPage() {
         danmakuSearchTrigger={danmakuSearchTrigger}
         danmakuOpen={danmakuOpen}
         onOpenDanmaku={toggleDanmakuOpen}
-        onToggleDanmakuEnabled={danmakuChangeEnabled}
         onDanmakuLoaded={danmakuLoaded}
         onDanmakuCandidates={danmakuGotCandidates}
         onDanmakuAlternatives={danmakuGotAlternatives}

@@ -187,8 +187,6 @@ type PlayerVideoStageProps = {
   danmakuOpen: boolean
   /** 打开弹幕设置面板（搜索弹幕库、调整渲染参数）。 */
   onOpenDanmaku: () => void
-  /** 操作栏上的「弹」开关：只控制画面上的弹幕是否渲染。 */
-  onToggleDanmakuEnabled: (next: boolean) => void
   onDanmakuLoaded: (info: DanmakuLoadedInfo | null) => void
   onDanmakuCandidates: (candidates: DanmakuAnime[]) => void
   onDanmakuAlternatives: (alternatives: DanmakuAnime[]) => void
@@ -264,7 +262,6 @@ export function PlayerVideoStage({
   danmakuSearchTrigger = 0,
   danmakuOpen,
   onOpenDanmaku,
-  onToggleDanmakuEnabled,
   onDanmakuLoaded,
   onDanmakuCandidates,
   onDanmakuAlternatives,
@@ -876,7 +873,6 @@ export function PlayerVideoStage({
             onSubtitleStyleChange={onSubtitleStyleChange}
             danmakuOpen={danmakuOpen}
             danmakuEnabled={danmakuEnabled}
-            onToggleDanmakuEnabled={onToggleDanmakuEnabled}
             onOpenDanmaku={onOpenDanmaku}
             hasPrevEpisode={hasPrevEpisode}
             hasNextEpisode={hasNextEpisode}

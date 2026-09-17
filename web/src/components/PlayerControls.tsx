@@ -10,7 +10,6 @@ import {
   Loader2,
   Lock,
   Maximize,
-  MessageSquareText,
   Minimize,
   Pause,
   PictureInPicture,
@@ -155,10 +154,12 @@ type PlayerControlsProps = {
   onSubtitleStyleChange: (style: SubtitleStylePreset) => void
   /** 弹幕设置面板是否打开。 */
   danmakuOpen: boolean
-  /** 弹幕当前是否渲染在画面上（操作栏上的「弹」开关）。 */
+  /** 弹幕当前是否渲染在画面上：操作栏的「弹」按钮用它显示开关状态。 */
   danmakuEnabled: boolean
-  onToggleDanmakuEnabled?: (next: boolean) => void
-  /** 打开弹幕设置面板（弹幕服务的搜索与参数都在那里）。 */
+  /**
+   * 打开弹幕设置面板。弹幕的加载开关、来源搜索、渲染参数都收在这个面板里，
+   * 所以「弹」按钮直接指向它——不再经过「设置」面板中转。
+   */
   onOpenDanmaku?: () => void
   hasPrevEpisode?: boolean
   hasNextEpisode?: boolean
@@ -217,7 +218,6 @@ export function PlayerControls({
   onSubtitleStyleChange,
   danmakuOpen,
   danmakuEnabled,
-  onToggleDanmakuEnabled,
   onOpenDanmaku,
   hasPrevEpisode = false,
   hasNextEpisode = false,
@@ -1021,27 +1021,6 @@ export function PlayerControls({
           </button>
         </div>
       )}
-
-      {onOpenDanmaku && (
-        <div>
-          <p className={PLAYER_MENU_LABEL}>弹幕</p>
-          <button
-            type="button"
-            onClick={() => {
-              setSettingsMenuOpen(false)
-              onOpenDanmaku()
-            }}
-            className={PLAYER_MENU_ITEM}
-            title="打开弹幕设置（搜索弹幕库、调整渲染参数）"
-          >
-            <MessageSquareText size={14} className="shrink-0 text-white/50" />
-            <span className="min-w-0 flex-1 truncate">弹幕设置</span>
-            {danmakuOpen ? (
-              <span className="shrink-0 text-[10px] text-rose-300">已打开</span>
-            ) : null}
-          </button>
-        </div>
-      )}
     </div>
   )
 
@@ -1237,13 +1216,15 @@ export function PlayerControls({
           </button>
         )}
 
-        {/* 弹幕开关：只负责开/关，「弹幕设置」在设置面板里 */}
+        {/* 弹幕：点开就是弹幕设置面板。弹幕的加载开关、来源搜索、渲染参数都在
+            那个面板里，所以这里不再做「先切设置再找弹幕」的中转；按钮上的方块
+            颜色仍然反映当前弹幕是否显示。 */}
         <button
           type="button"
-          onClick={() => onToggleDanmakuEnabled?.(!danmakuEnabled)}
-          disabled={!onToggleDanmakuEnabled}
-          className={PLAYER_ICON_BUTTON}
-          title={danmakuEnabled ? '关闭弹幕显示' : '开启弹幕显示'}
+          onClick={onOpenDanmaku}
+          disabled={!onOpenDanmaku}
+          className={`${PLAYER_ICON_BUTTON} ${danmakuOpen ? 'bg-white/15' : ''}`}
+          title={danmakuOpen ? '弹幕设置（已打开）' : '弹幕设置'}
         >
           <span
             className={`flex h-[18px] w-[18px] items-center justify-center rounded-[4px] text-[10px] font-bold leading-none transition ${

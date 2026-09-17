@@ -215,9 +215,10 @@ export function PlayerDanmakuPanel({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3.5">
-      {/* 是否加载弹幕 */}
+      {/* 弹幕总开关。从操作栏的「弹」按钮直接进来就到了这里，所以这一项就是
+          用户找的「开关弹幕」；文案跟旧的按钮提示保持一致，避免换个说法让人找不到。 */}
       <label className="mb-3 flex cursor-pointer items-center justify-between rounded-lg bg-white/5 px-2.5 py-2 text-sm transition hover:bg-white/10">
-        <span className="text-white/85">加载弹幕</span>
+        <span className="text-white/85">显示弹幕</span>
         <input
           type="checkbox"
           checked={enabled}
