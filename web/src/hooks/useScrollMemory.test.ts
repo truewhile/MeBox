@@ -1,4 +1,6 @@
 import {
+  isJumpIntentKey,
+  isScrollIntentKey,
   shouldPersistClampedSample,
   shouldPersistScrollSample,
   shouldRememberScroll,
@@ -11,6 +13,7 @@ function check(name: string, condition: boolean) {
 check('home remembers scroll', shouldRememberScroll('/'))
 check('library list remembers scroll', shouldRememberScroll('/libraries'))
 check('library detail remembers scroll', shouldRememberScroll('/library/lib-1'))
+check('library series panel remembers scroll', shouldRememberScroll('/library/lib-1'))
 check('media detail remembers scroll', shouldRememberScroll('/media/media-1'))
 check('settings does not remember scroll', !shouldRememberScroll('/settings'))
 check('player does not remember scroll', !shouldRememberScroll('/play/media-1'))
@@ -86,5 +89,14 @@ check(
   'unscrollable page without memory cannot persist',
   !shouldPersistClampedSample({ current: 0, maxScroll: 0, saved: 0 }),
 )
+
+check('page down counts as scroll intent', isScrollIntentKey('PageDown'))
+check('space counts as scroll intent', isScrollIntentKey(' '))
+check('typing does not count as scroll intent', !isScrollIntentKey('a'))
+check('shortcut does not count as scroll intent', !isScrollIntentKey('Meta'))
+check('page down allows a long jump', isJumpIntentKey('PageDown'))
+check('home allows a long jump', isJumpIntentKey('Home'))
+check('arrow key keeps smooth-only intent', !isJumpIntentKey('ArrowDown'))
+check('space keeps smooth-only intent', !isJumpIntentKey(' '))
 
 console.log('useScrollMemory.test.ts ok')

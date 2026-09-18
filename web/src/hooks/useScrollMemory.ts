@@ -3,6 +3,36 @@ import { useLayoutEffect } from 'react'
 const SCROLL_STORAGE_PREFIX = 'mebox.scroll.'
 const scrollPositions = new Map<string, number>()
 
+/**
+ * 用户滚动意图的有效期：滚轮 / 触摸 / 翻页键之后这段时间内的 scroll 事件才算
+ * “用户自己滚出来的位置”。连续滚动（含惯性）期间每个 scroll 事件都会续期，
+ * 所以正常滑动不会中途过期，而恢复回填 / 虚拟列表量高这类程序化位移会被排除。
+ */
+const USER_SCROLL_INTENT_TTL_MS = 800
+
+/** 平滑滚动（滚轮/触摸/方向键）单次采样允许的最大“向上跳”距离。 */
+function maxSmoothJumpUp(viewportHeight: number): number {
+  return Math.max(viewportHeight * 2, 1200)
+}
+
+/** 会滚动容器的按键。 */
+export function isScrollIntentKey(key: string): boolean {
+  return (
+    key === 'PageDown' ||
+    key === 'PageUp' ||
+    key === 'Home' ||
+    key === 'End' ||
+    key === 'ArrowDown' ||
+    key === 'ArrowUp' ||
+    key === ' '
+  )
+}
+
+/** 一次按键可能直接跳很远（首页/末页/翻页），这些不算异常向上跳。 */
+export function isJumpIntentKey(key: string): boolean {
+  return key === 'PageDown' || key === 'PageUp' || key === 'Home' || key === 'End'
+}
+
 function readScrollPosition(key: string): number {
   const cached = scrollPositions.get(key)
   if (cached !== undefined) return cached
@@ -85,18 +115,25 @@ export function shouldPersistClampedSample(input: {
  * 恢复还没完成时，容器里的 scrollTop 往往是浏览器钳制出来的值（内容还在加载
  * 占位，或被钳在变矮内容的底部）。这种采样既不写回存储，也不当成用户“接管”，
  * 否则一次误触的滚轮 / 触摸就会把记忆位置清成 0。
+ *
+ * 只有带“用户滚动意图”（滚轮 / 触摸 / 翻页键 / 拖滚动条）的 scroll 事件才会写
+ * 存储：恢复回填、虚拟列表挂载量高、浏览器钳制造成的位移都不算用户选择的位置。
+ *
+ * routeKey 允许包含 query：媒体库详情页的剧集面板（`/library/:id?series=...`）
+ * 与网格视图是两块不同内容，各自记一份位置，互不覆盖。
  */
-export function useScrollMemory(pathname: string, userKey = 'anonymous'): void {
+export function useScrollMemory(routeKey: string, userKey = 'anonymous'): void {
   useLayoutEffect(() => {
     const el = document.getElementById('app-main-scroll')
     if (!el) return
 
+    const pathname = routeKey.split('?')[0]
     if (!shouldRememberScroll(pathname)) {
       el.scrollTop = 0
       return
     }
 
-    const key = `${userKey}:${pathname}`
+    const key = `${userKey}:${routeKey}`
     const saved = readScrollPosition(key)
     let restoring = saved > 0
     let observer: ResizeObserver | null = null
@@ -105,6 +142,23 @@ export function useScrollMemory(pathname: string, userKey = 'anonymous'): void {
     let restorePumpUntil = 0
     let lastSaved = saved
     let lastHeight = el.scrollHeight
+    // 最近一次“用户主动滚动”的时间戳与类型（滚轮 / 触摸 / 翻页键 / 拖滚动条）。
+    // 只有用户自己滚出来的位置才写回存储：恢复逻辑、虚拟列表挂载量高、浏览器
+    // 钳制造成的 scrollTop 变化都不代表用户想要的位置，写进去就会把记忆抹掉。
+    let userScrollUntil = 0
+    let userScrollAllowsJump = false
+    const markUserScroll = (allowsJump = false) => {
+      const now = performance.now()
+      // 上一段意图已过期：新的一段从“只允许小幅向上跳”开始。
+      if (userScrollUntil <= now) {
+        userScrollAllowsJump = false
+      }
+      userScrollUntil = now + USER_SCROLL_INTENT_TTL_MS
+      if (allowsJump) {
+        userScrollAllowsJump = true
+      }
+    }
+    const userScrolling = () => userScrollUntil > performance.now()
 
     const currentMaxScroll = () => Math.max(0, el.scrollHeight - el.clientHeight)
 
@@ -169,11 +223,20 @@ export function useScrollMemory(pathname: string, userKey = 'anonymous'): void {
 
     const saveNow = () => {
       const current = Math.round(el.scrollTop)
+      const userDriven = userScrolling()
+      // 惯性/连续滚动期间持续续期，避免长距离滑动中途被判定为“非用户滚动”。
+      if (userDriven) markUserScroll(userScrollAllowsJump)
       // 内容还没长回来时读到的 scrollTop 不是用户选的位置，既不能写存储，
       // 也不能当成“用户接管”。
       if (!sampleIsTrustworthy(current)) return
+      // 一瞬间大幅向上跳（恢复回填、虚拟列表挂载量高、浏览器钳制）只有按键翻页 /
+      // 拖滚动条这类意图才可能是用户行为，否则直接丢弃。
+      const upJump = lastSaved > current ? lastSaved - current : 0
+      if (upJump > maxSmoothJumpUp(el.clientHeight) && !(userDriven && userScrollAllowsJump)) {
+        return
+      }
       if (restoring) {
-        if (Math.abs(current - saved) <= 1) return
+        if (!userDriven || Math.abs(current - saved) <= 1) return
         // 恢复途中用户真的滚到了别处：交还控制权并记录这个位置，避免恢复
         // 逻辑继续和用户抢滚动条。
         restoring = false
@@ -181,6 +244,8 @@ export function useScrollMemory(pathname: string, userKey = 'anonymous'): void {
         adoptScrollPosition(current)
         return
       }
+      // 非用户滚动（恢复逻辑回填、虚拟列表挂载/量高、浏览器钳制）不写存储。
+      if (!userDriven) return
       const height = el.scrollHeight
       if (
         !shouldPersistScrollSample({
@@ -190,7 +255,6 @@ export function useScrollMemory(pathname: string, userKey = 'anonymous'): void {
           lastHeight,
         })
       ) {
-        lastHeight = height
         return
       }
       lastHeight = height
@@ -199,15 +263,13 @@ export function useScrollMemory(pathname: string, userKey = 'anonymous'): void {
       writeScrollPosition(key, current)
     }
 
-    const cancelRestore = () => {
-      if (!restoring) return
-      const current = Math.round(el.scrollTop)
-      // 恢复期间用户滚轮 / 触摸 / 按键只是误触或惯性（内容还没长高时他也确实
-      // 滚不动）：继续完成恢复，并保留原来的记忆值。
-      if (!sampleIsTrustworthy(current)) return
-      restoring = false
-      stopRestore()
-      adoptScrollPosition(current)
+    // 用户滚动意图：滚轮 / 触摸 = 平滑滚动；翻页键 / 拖滚动条 = 允许直接跳很远。
+    const onScrollIntent = () => {
+      markUserScroll(false)
+    }
+
+    const onJumpIntent = () => {
+      markUserScroll(true)
     }
 
     if (saved <= 0) {
@@ -227,42 +289,37 @@ export function useScrollMemory(pathname: string, userKey = 'anonymous'): void {
     }
 
     const onPointerDown = (event: PointerEvent) => {
+      // 点在容器本身 = 拖滚动条或在空白处按下：允许大幅跳转。
       if (event.target === el) {
-        cancelRestore()
+        onJumpIntent()
       }
       saveNow()
     }
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (
-        event.key === 'PageDown' ||
-        event.key === 'PageUp' ||
-        event.key === 'Home' ||
-        event.key === 'End' ||
-        event.key === 'ArrowDown' ||
-        event.key === 'ArrowUp' ||
-        event.key === ' '
-      ) {
-        cancelRestore()
+      if (isJumpIntentKey(event.key)) {
+        onJumpIntent()
+      } else if (isScrollIntentKey(event.key)) {
+        onScrollIntent()
       }
       saveNow()
     }
 
     el.addEventListener('scroll', saveNow, { passive: true })
     el.addEventListener('pointerdown', onPointerDown, true)
-    window.addEventListener('wheel', cancelRestore, { passive: true, capture: true })
-    window.addEventListener('touchstart', cancelRestore, { passive: true, capture: true })
+    window.addEventListener('wheel', onScrollIntent, { passive: true, capture: true })
+    window.addEventListener('touchstart', onScrollIntent, { passive: true, capture: true })
     window.addEventListener('keydown', onKeyDown, true)
 
     return () => {
       el.removeEventListener('scroll', saveNow)
       el.removeEventListener('pointerdown', onPointerDown, true)
-      window.removeEventListener('wheel', cancelRestore, true)
-      window.removeEventListener('touchstart', cancelRestore, true)
+      window.removeEventListener('wheel', onScrollIntent, true)
+      window.removeEventListener('touchstart', onScrollIntent, true)
       window.removeEventListener('keydown', onKeyDown, true)
       stopRestore()
       // 清理时写入最后一次有效位置，避免依赖已被钳制的 el.scrollTop。
       writeScrollPosition(key, lastSaved)
     }
-  }, [pathname, userKey])
+  }, [routeKey, userKey])
 }

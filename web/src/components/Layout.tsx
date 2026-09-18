@@ -89,6 +89,7 @@ export function Layout() {
         )}
         <LayoutWorkspace
           routeKey={location.pathname}
+          scrollKey={`${location.pathname}${location.search}`}
           userKey={user?.id}
           showMobileBottomNav={showMobileBottomNav}
         />

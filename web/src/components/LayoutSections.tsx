@@ -31,6 +31,8 @@ type LayoutSidebarsProps = Omit<
 
 type LayoutWorkspaceProps = {
   routeKey: string
+  /** 滚动记忆的 key：含 query，让同一路径下的不同视图（如剧集面板）各记一份位置。 */
+  scrollKey?: string
   userKey?: string
   showMobileBottomNav?: boolean
 }
@@ -113,10 +115,11 @@ export function LayoutSidebars({
 
 export function LayoutWorkspace({
   routeKey,
+  scrollKey,
   userKey = 'anonymous',
   showMobileBottomNav = false,
 }: LayoutWorkspaceProps) {
-  useScrollMemory(routeKey, userKey)
+  useScrollMemory(scrollKey ?? routeKey, userKey)
 
   const bottomPad = showMobileBottomNav
     ? 'pb-[calc(3.75rem+env(safe-area-inset-bottom,0px))] lg:pb-10'
