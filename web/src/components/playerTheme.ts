@@ -29,20 +29,25 @@ export const PLAYER_DRAWER =
   `flex h-full w-[88%] flex-col border-white/10 ${PANEL_BG} text-white ${PANEL_SHADOW} backdrop-blur-xl sm:w-[380px] sm:border-l`
 
 /**
- * 底部动作面板（竖屏剧场模式）：贴着视频区底部向上弹出，内容最多占
- * 视频区高度的 72%，留出一些画面可见；底部垫上安全区高度，避免
- * iPhone 小横条遮挡最后一行选项。
+ * 底部动作面板（竖屏剧场模式）：贴着整个屏幕底部向上弹出，高度按视口
+ * 计算（最高 86dvh），因此手机上能容纳的选项远多于贴视频区弹出的版本。
+ *
+ * 用 fixed 而不是 absolute：播放区在竖屏剧场模式里只有 16:9 一小块，
+ * 若以它为定位基准，面板最高只能到视频高度的 72%，内容会被压得很窄。
  */
 export const PLAYER_SHEET =
-  `z-40 flex max-h-[72%] min-h-[8rem] w-full flex-col overflow-hidden rounded-t-2xl border border-white/10 border-b-0 ${PANEL_BG} text-white ${PANEL_SHADOW} backdrop-blur-xl`
+  `player-sheet-height fixed inset-x-0 bottom-0 z-40 flex min-h-[10rem] flex-col overflow-hidden rounded-t-2xl border border-b-0 border-white/10 ${PANEL_BG} text-white ${PANEL_SHADOW} backdrop-blur-xl`
 
 /** 底部动作面板的标题栏（带关闭按钮）。 */
 export const PLAYER_SHEET_HEADER =
   'flex shrink-0 items-center justify-between gap-2 border-b border-white/10 px-4 py-2.5'
 
-/** 底部动作面板的可滚动内容区，底部垫上安全区高度。 */
+/**
+ * 底部动作面板的可滚动内容区：底部垫上安全区高度避免 iPhone 小横条遮挡，
+ * 并把面板内所有按钮抬到 40px，手机上手指点得准。
+ */
 export const PLAYER_SHEET_BODY =
-  'min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))] pt-1'
+  'min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))] pt-2 [&_button]:min-h-10'
 
 /** 操作栏里的图标按钮。所有图标按钮共用同一尺寸与悬停反馈，排在一起才整齐。 */
 export const PLAYER_ICON_BUTTON =

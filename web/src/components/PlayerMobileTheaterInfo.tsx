@@ -1,4 +1,6 @@
-import { Layers, ListVideo } from 'lucide-react'
+import { useEffect, useRef } from 'react'
+import type { ReactNode } from 'react'
+import { ChevronDown, Layers, ListVideo } from 'lucide-react'
 
 import type { Media } from '../types'
 import { mediaVersionLabel, mediaVersionMatches } from '../utils/mediaVersion'
@@ -6,8 +8,11 @@ import { mediaVersionLabel, mediaVersionMatches } from '../utils/mediaVersion'
 // PlayerMobileTheaterInfo — 竖屏剧场模式下视频下方的可滚动内容区。
 //
 // 竖屏手机不再用全屏居中黑边布局：视频贴顶按 16:9 自适应高度，
-// 下面这块区域接管标题、选集横滑、版本切换和简介，信息密度与
+// 下面这块区域接管标题、选集、版本切换和简介，信息密度与
 // 主流手机视频应用保持一致。桌面端与横屏手机不渲染它。
+//
+// 选集刻意放在这里而不是弹层里：从操作栏点「选集」只做「展开 + 滚到这里」，
+// 播放画面始终可见，不会像浮层那样盖住正在看的内容。
 
 type PlayerMobileTheaterInfoProps = {
   media: Media | null
@@ -21,7 +26,15 @@ type PlayerMobileTheaterInfoProps = {
   currentVersions?: Media[]
   onSelectEpisode: (media: Media) => void
   onSelectVersion?: (media: Media) => void
-  onOpenPlaylist?: () => void
+  /** 选集列表是否展开（展开后由 playlistPanel 接管，提供季/搜索/版本）。 */
+  playlistOpen: boolean
+  onTogglePlaylist: () => void
+  /** 展开状态下的选集内容（复用播放器的选集面板，内嵌渲染）。 */
+  playlistPanel?: ReactNode
+  /**
+   * 每次从操作栏点「选集」都会 +1：即使列表已经展开，也要把这块滚回视野内。
+   */
+  revealToken?: number
 }
 
 function episodeShortLabel(ep: Media): string {
@@ -50,11 +63,21 @@ export function PlayerMobileTheaterInfo({
   currentVersions = [],
   onSelectEpisode,
   onSelectVersion,
-  onOpenPlaylist,
+  playlistOpen,
+  onTogglePlaylist,
+  playlistPanel,
+  revealToken = 0,
 }: PlayerMobileTheaterInfoProps) {
+  const episodeSectionRef = useRef<HTMLElement | null>(null)
   const hasEpisodeList = episodes.length > 1
   const versionsToSwitch = currentVersions.length > 1 ? currentVersions : []
   const overview = media?.overview?.trim() || ''
+
+  // 从操作栏点「选集」：把选集区滚回视野内，用户不用自己往上翻。
+  useEffect(() => {
+    if (!revealToken) return
+    episodeSectionRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+  }, [revealToken])
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-black px-4 pb-8 pt-3 text-white">
@@ -76,49 +99,59 @@ export function PlayerMobileTheaterInfo({
       )}
 
       {hasEpisodeList ? (
-        <section className="mt-4">
+        <section ref={episodeSectionRef} className="mt-4 scroll-mt-2">
           <div className="mb-2 flex items-center justify-between">
             <h2 className="flex items-center gap-1.5 text-[13px] font-semibold text-white/90">
               <ListVideo size={14} className="text-rose-400" />
               选集
               <span className="font-mono text-[11px] font-normal text-white/45">
-                {currentEpisodeIndex >= 0 ? `${currentEpisodeIndex + 1}/${episodes.length}` : `${episodes.length} 集`}
+                {currentEpisodeIndex >= 0
+                  ? `${currentEpisodeIndex + 1}/${episodes.length}`
+                  : `${episodes.length} 集`}
               </span>
             </h2>
-            {onOpenPlaylist ? (
-              <button
-                type="button"
-                onClick={onOpenPlaylist}
-                className="rounded-md px-2 py-1 text-[11px] text-white/55 transition hover:bg-white/10 hover:text-white"
-              >
-                全部 &gt;
-              </button>
-            ) : null}
+            <button
+              type="button"
+              onClick={onTogglePlaylist}
+              className="flex min-h-8 items-center gap-1 rounded-md px-2 text-[11px] text-white/60 transition hover:bg-white/10 hover:text-white"
+            >
+              {playlistOpen ? '收起' : '全部'}
+              <ChevronDown
+                size={13}
+                className={`transition-transform ${playlistOpen ? 'rotate-180' : ''}`}
+              />
+            </button>
           </div>
-          <div className="scrollbar-hide -mx-4 flex gap-1.5 overflow-x-auto px-4 pb-1">
-            {episodes.map((ep) => {
-              const active = mediaVersionMatches(ep, currentMediaId)
-              return (
-                <button
-                  key={ep.id}
-                  type="button"
-                  onClick={() => onSelectEpisode(ep)}
-                  title={episodeFullLabel(ep)}
-                  className={`flex h-10 min-w-12 shrink-0 items-center justify-center rounded-lg px-2 text-xs font-medium tabular-nums transition ${
-                    active
-                      ? 'bg-rose-500 text-white'
-                      : 'bg-white/[0.07] text-white/80 active:bg-white/15'
-                  }`}
-                >
-                  {episodeShortLabel(ep)}
-                </button>
-              )
-            })}
-          </div>
+
+          {playlistOpen && playlistPanel ? (
+            playlistPanel
+          ) : (
+            <div className="scrollbar-hide -mx-4 flex gap-1.5 overflow-x-auto px-4 pb-1">
+              {episodes.map((ep) => {
+                const active = mediaVersionMatches(ep, currentMediaId)
+                return (
+                  <button
+                    key={ep.id}
+                    type="button"
+                    onClick={() => onSelectEpisode(ep)}
+                    title={episodeFullLabel(ep)}
+                    className={`flex h-10 min-w-12 shrink-0 items-center justify-center rounded-lg px-2 text-xs font-medium tabular-nums transition ${
+                      active
+                        ? 'bg-rose-500 text-white'
+                        : 'bg-white/[0.07] text-white/80 active:bg-white/15'
+                    }`}
+                  >
+                    {episodeShortLabel(ep)}
+                  </button>
+                )
+              })}
+            </div>
+          )}
         </section>
       ) : null}
 
-      {versionsToSwitch.length > 0 ? (
+      {/* 多版本切换：展开选集后由选集面板顶部的版本区接管，这里不重复一份 */}
+      {versionsToSwitch.length > 0 && !playlistOpen ? (
         <section className="mt-4">
           <h2 className="mb-2 flex items-center gap-1.5 text-[13px] font-semibold text-white/90">
             <Layers size={13} className="text-rose-400" />

@@ -4,6 +4,7 @@ import {
   Captions,
   CaptionsOff,
   Check,
+  ChevronDown,
   FastForward,
   Layers,
   ListVideo,
@@ -281,6 +282,8 @@ export function PlayerControls({
   const speedMenuRef = useRef<HTMLDivElement | null>(null)
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false)
   const settingsMenuRef = useRef<HTMLDivElement | null>(null)
+  /** 竖屏剧场模式的设置面板（相对整个屏幕固定）——点击面板内部不应把它关掉。 */
+  const settingsSheetRef = useRef<HTMLDivElement | null>(null)
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const isScrubbingRef = useRef(false)
   /** 控制栏当前是否处于「必须保持显示」的状态（悬停/拖进度/菜单或面板打开）。 */
@@ -392,6 +395,10 @@ export function PlayerControls({
   useEffect(() => {
     if (!subtitleMenuOpen && !qualityMenuOpen && !speedMenuOpen && !settingsMenuOpen) return
     const onDocClick = (e: MouseEvent) => {
+      // 剧场模式的设置面板挂在操作栏之外，先判断：点面板内部不关任何弹层。
+      if (settingsSheetRef.current && settingsSheetRef.current.contains(e.target as Node)) {
+        return
+      }
       if (subtitleMenuRef.current && !subtitleMenuRef.current.contains(e.target as Node)) {
         setSubtitleMenuOpen(false)
       }
@@ -1040,29 +1047,24 @@ export function PlayerControls({
     {playbackRateOverlay}
     {theater && settingsMenuOpen ? (
       <div
-        className="absolute inset-x-0 bottom-0 z-40 flex items-end justify-center"
+        ref={settingsSheetRef}
+        className={PLAYER_SHEET}
         onClick={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
         onPointerUp={(e) => e.stopPropagation()}
       >
-        <div
-          className="absolute inset-0"
-          onClick={() => setSettingsMenuOpen(false)}
-          aria-hidden
-        />
-        <div className={`relative ${PLAYER_SHEET}`}>
-          <div className={PLAYER_SHEET_HEADER}>
-            <span className="text-[13px] font-semibold text-white/90">播放器设置</span>
-            <button
-              type="button"
-              onClick={() => setSettingsMenuOpen(false)}
-              className={PLAYER_ICON_BUTTON}
-              title="关闭设置"
-            >
-              <Minimize size={16} />
-            </button>
-          </div>
-          <div className={PLAYER_SHEET_BODY}>{settingsPanel}</div>
+        <div className={PLAYER_SHEET_HEADER}>
+          <span className="text-[13px] font-semibold text-white/90">播放器设置</span>
+          <button
+            type="button"
+            onClick={() => setSettingsMenuOpen(false)}
+            className={`${PLAYER_ICON_BUTTON} h-10 w-10`}
+            title="关闭设置"
+          >
+            <ChevronDown size={20} />
+          </button>
         </div>
+        <div className={PLAYER_SHEET_BODY}>{settingsPanel}</div>
       </div>
     ) : null}
     <div

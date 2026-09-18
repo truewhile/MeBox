@@ -10,7 +10,7 @@ import {
   mediaVersionMatches,
   mediaVersionSourceLabel,
 } from '../utils/mediaVersion'
-import { PLAYER_DRAWER, PLAYER_ICON_BUTTON, PLAYER_PANEL_HEADER, PLAYER_SHEET, PLAYER_SHEET_BODY, PLAYER_SHEET_HEADER } from './playerTheme'
+import { PLAYER_DRAWER, PLAYER_ICON_BUTTON, PLAYER_PANEL_HEADER } from './playerTheme'
 
 export type SeasonGroup = {
   season: number
@@ -28,10 +28,10 @@ type PlayerPlaylistPanelProps = {
   /** 切换到同一集/同一条目的另一个版本。 */
   onSelectVersion?: (media: Media) => void
   /**
-   * 竖屏剧场模式：选集面板改为视频区底部的动作面板，而不是右侧抽屉，
-   * 避免窄屏下抽屉遮挡返回按钮、宫格被压扁。
+   * 竖屏剧场模式：不再以浮层形式盖住播放画面，而是内嵌在视频下方的
+   * 内容区里（外层负责标题与「收起」按钮），选集不再遮挡播放器。
    */
-  theater?: boolean
+  inline?: boolean
 }
 
 /**
@@ -55,7 +55,7 @@ export function PlayerPlaylistPanel({
   episodes,
   onSelectEpisode,
   onSelectVersion,
-  theater = false,
+  inline = false,
 }: PlayerPlaylistPanelProps) {
   const [filterText, setFilterText] = useState('')
   /** 正在挑选版本的剧集 id；null = 宫格直接播放。 */
@@ -140,24 +140,28 @@ export function PlayerPlaylistPanel({
       onPointerDown={(e) => e.stopPropagation()}
       onPointerUp={(e) => e.stopPropagation()}
       className={
-        theater
-          ? `absolute inset-x-0 bottom-0 z-40 ${PLAYER_SHEET}`
+        inline
+          ? 'flex flex-col'
           : `absolute inset-y-0 right-0 z-30 ${PLAYER_DRAWER}`
       }
     >
-      <div className={theater ? PLAYER_SHEET_HEADER : PLAYER_PANEL_HEADER}>
-        <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
-          <span className="truncate">{hasEpisodeList ? '选集' : '版本'}</span>
-          <span className="shrink-0 font-mono text-[11px] font-normal text-white/45">
-            {hasEpisodeList ? `${episodes.length} 集` : `${versionsToSwitch.length} 个版本`}
-          </span>
+      {/* 内嵌在竖屏剧场布局的视频下方时不自带标题栏：外层已经提供了
+          「选集 / 收起」标题，重复一层只会挤掉内容。 */}
+      {inline ? null : (
+        <div className={PLAYER_PANEL_HEADER}>
+          <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+            <span className="truncate">{hasEpisodeList ? '选集' : '版本'}</span>
+            <span className="shrink-0 font-mono text-[11px] font-normal text-white/45">
+              {hasEpisodeList ? `${episodes.length} 集` : `${versionsToSwitch.length} 个版本`}
+            </span>
+          </div>
+          <button onClick={onClose} className={PLAYER_ICON_BUTTON} title="关闭 (Esc)">
+            <X size={16} />
+          </button>
         </div>
-        <button onClick={onClose} className={PLAYER_ICON_BUTTON} title="关闭 (Esc)">
-          <X size={16} />
-        </button>
-      </div>
+      )}
 
-      <div className={theater ? PLAYER_SHEET_BODY : 'flex min-h-0 flex-1 flex-col overflow-hidden'}>
+      <div className={inline ? undefined : 'flex min-h-0 flex-1 flex-col overflow-hidden'}>
 
       {/* 当前条目的版本切换：多版本时置顶，随时可换 */}
       {versionsToSwitch.length > 0 && (
@@ -218,7 +222,7 @@ export function PlayerPlaylistPanel({
 
       {/* 季选择 Tabs（若有多季） */}
       {hasEpisodeList && seasonGroups.length > 1 && (
-        <div className="no-scrollbar flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-white/10 px-3 py-2">
+        <div className="scrollbar-hide flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-white/10 px-3 py-2">
           {seasonGroups.map(({ season, episodes: sesEps }) => {
             const isSelected = selectedSeason === season
             const isPlayingThisSeason = sesEps.some((e) => mediaVersionMatches(e, currentMediaId))
@@ -267,15 +271,21 @@ export function PlayerPlaylistPanel({
         </div>
       )}
 
-      {/* 集数宫格：剧场模式下底部面板只做单层滚动，宫格区不再自己滚动 */}
+      {/* 集数宫格：内嵌模式整块跟着外层一起滚动，不再自己滚 */}
       {hasEpisodeList ? (
-        <div className={theater ? 'p-3 select-none' : 'min-h-0 flex-1 overflow-y-auto p-3 select-none'}>
+        <div className={inline ? 'p-3 select-none' : 'min-h-0 flex-1 overflow-y-auto p-3 select-none'}>
           {filteredEpisodes.length === 0 ? (
             <div className="py-10 text-center text-xs text-white/40">
               {filterText ? '未找到匹配的剧集' : '暂无剧集列表'}
             </div>
           ) : (
-            <div className="grid grid-cols-5 gap-1.5 sm:grid-cols-6">
+            <div
+              className={
+                inline
+                  ? 'grid grid-cols-6 gap-1.5'
+                  : 'grid grid-cols-5 gap-1.5 sm:grid-cols-6'
+              }
+            >
               {filteredEpisodes.map((ep) => {
                 const isPlaying = mediaVersionMatches(ep, currentMediaId)
                 const versions = ep.versions && ep.versions.length > 1 ? ep.versions : []
@@ -297,7 +307,7 @@ export function PlayerPlaylistPanel({
                       ref={isPlaying ? activeItemRef : null}
                       onClick={() => onSelectEpisode(ep)}
                       title={cellTitle}
-                      className={`flex h-9 w-full items-center justify-center rounded-md text-xs font-medium tabular-nums transition ${
+                      className={`flex ${inline ? 'h-10' : 'h-9'} w-full items-center justify-center rounded-md text-xs font-medium tabular-nums transition ${
                         isPlaying
                           ? 'bg-rose-500 text-white shadow-[0_0_0_1px_rgba(255,255,255,0.2)_inset]'
                           : 'bg-white/[0.06] text-white/80 hover:bg-white/15 hover:text-white'
@@ -320,7 +330,7 @@ export function PlayerPlaylistPanel({
                             current === ep.id ? null : ep.id,
                           )
                         }}
-                        className={`absolute right-0 top-0 flex h-3.5 w-3.5 items-center justify-center rounded-bl-md rounded-tr-md text-[9px] font-semibold leading-none transition ${
+                        className={`absolute right-0 top-0 flex ${inline ? 'h-5 w-5 text-[10px]' : 'h-3.5 w-3.5 text-[9px]'} items-center justify-center rounded-bl-md rounded-tr-md font-semibold leading-none transition ${
                           versionsForEpisodeId === ep.id
                             ? 'bg-amber-300 text-black'
                             : 'bg-black/45 text-amber-200 hover:bg-black/70'

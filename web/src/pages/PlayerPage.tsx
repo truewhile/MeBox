@@ -199,6 +199,8 @@ export function PlayerPage() {
   // 选集 / 播放列表状态
   const [playlistEpisodes, setPlaylistEpisodes] = useState<Media[]>([])
   const [playlistOpen, setPlaylistOpen] = useState(false)
+  // 竖屏剧场模式：每次从操作栏点「选集」都 +1，把视频下方的选集区滚回视野。
+  const [episodeRevealToken, setEpisodeRevealToken] = useState(0)
 
   const teardownHls = useCallback(() => {
     if (hlsRef.current) {
@@ -1259,6 +1261,16 @@ export function PlayerPage() {
       if (next) setDanmakuOpen(false)
       return next
     })
+    setEpisodeRevealToken((token) => token + 1)
+  }, [])
+
+  // 操作栏 / 设置面板里的「选集」入口。竖屏剧场模式下选集区就在视频下方，
+  // 这里只负责展开并滚过去，不把已经展开的列表收起来（收起由选集区自己的
+  // 「收起」按钮负责），这样播放画面永远不会被浮层挡住。
+  const openPlaylistEntry = useCallback(() => {
+    setPlaylistOpen(true)
+    setDanmakuOpen(false)
+    setEpisodeRevealToken((token) => token + 1)
   }, [])
 
   const toggleDanmakuOpen = useCallback(() => {
@@ -1715,7 +1727,7 @@ export function PlayerPage() {
         playlistOpen={playlistOpen}
         hasPlaylist={playlistEpisodes.length > 1 || currentVersions.length > 1}
         hasVersions={currentVersions.length > 1}
-        onTogglePlaylist={togglePlaylistOpen}
+        onTogglePlaylist={isMobileTheater ? openPlaylistEntry : togglePlaylistOpen}
         knownDuration={media?.duration_sec || 0}
         streamOffset={mode === 'hls' && hlsSource === 'local' ? hlsStartSec : 0}
         onSeekAbsolute={mode === 'hls' && hlsSource === 'local' ? handleSeekAbsolute : undefined}
@@ -1736,16 +1748,17 @@ export function PlayerPage() {
         showVr360Guide={Boolean(vr360) && vr360GuideSeen === false}
         onDismissVr360Guide={dismissVr360Guide}
         playlistPanel={
-          <PlayerPlaylistPanel
-            theater={isMobileTheater}
-            open={playlistOpen}
-            onClose={() => setPlaylistOpen(false)}
-            currentMediaId={media?.id ?? ''}
-            currentVersions={currentVersions}
-            episodes={playlistEpisodes}
-            onSelectEpisode={playEpisode}
-            onSelectVersion={switchVersion}
-          />
+          isMobileTheater
+            ? undefined
+            : <PlayerPlaylistPanel
+                open={playlistOpen}
+                onClose={() => setPlaylistOpen(false)}
+                currentMediaId={media?.id ?? ''}
+                currentVersions={currentVersions}
+                episodes={playlistEpisodes}
+                onSelectEpisode={playEpisode}
+                onSelectVersion={switchVersion}
+              />
         }
         danmakuPanel={
           <PlayerDanmakuPanel
@@ -1797,7 +1810,21 @@ export function PlayerPage() {
           currentVersions={currentVersions}
           onSelectEpisode={playEpisode}
           onSelectVersion={switchVersion}
-          onOpenPlaylist={togglePlaylistOpen}
+          playlistOpen={playlistOpen}
+          onTogglePlaylist={togglePlaylistOpen}
+          revealToken={episodeRevealToken}
+          playlistPanel={
+            <PlayerPlaylistPanel
+              inline
+              open={playlistOpen}
+              onClose={() => setPlaylistOpen(false)}
+              currentMediaId={media?.id ?? ''}
+              currentVersions={currentVersions}
+              episodes={playlistEpisodes}
+              onSelectEpisode={playEpisode}
+              onSelectVersion={switchVersion}
+            />
+          }
         />
       ) : null}
     </div>

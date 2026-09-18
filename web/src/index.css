@@ -272,6 +272,14 @@ body {
 }
 .scrollbar-hide::-webkit-scrollbar { display: none; }
 
+/* ── 播放器底部动作面板的高度上限 ──
+   手机上按视口高度算（86%），老浏览器不认识 dvh 时退回 vh，避免面板
+   在 flex 容器里被内容撑出屏幕。 */
+.player-sheet-height {
+  max-height: 86vh;
+  max-height: 86dvh;
+}
+
 /* ─── Reduced Motion ─── */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

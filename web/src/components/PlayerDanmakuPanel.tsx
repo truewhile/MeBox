@@ -208,9 +208,7 @@ export function PlayerDanmakuPanel({
       onPointerDown={(e) => e.stopPropagation()}
       onPointerUp={(e) => e.stopPropagation()}
       className={
-        theater
-          ? `absolute inset-x-0 bottom-0 z-40 ${PLAYER_SHEET}`
-          : `absolute inset-y-0 right-0 z-30 ${PLAYER_DRAWER}`
+        theater ? PLAYER_SHEET : `absolute inset-y-0 right-0 z-30 ${PLAYER_DRAWER}`
       }
     >
       <div className={theater ? PLAYER_SHEET_HEADER : PLAYER_PANEL_HEADER}>
@@ -219,8 +217,12 @@ export function PlayerDanmakuPanel({
           <span className="truncate">弹幕设置</span>
           {settingsSaving && <Loader2 size={12} className="shrink-0 animate-spin text-rose-300" />}
         </div>
-        <button onClick={onClose} className={PLAYER_ICON_BUTTON} title="关闭 (Esc)">
-          <X size={16} />
+        <button
+          onClick={onClose}
+          className={`${PLAYER_ICON_BUTTON} ${theater ? 'h-10 w-10' : ''}`}
+          title="关闭 (Esc)"
+        >
+          <X size={theater ? 20 : 16} />
         </button>
       </div>
 
