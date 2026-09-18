@@ -57,8 +57,34 @@ export function shouldPersistScrollSample(input: {
 }
 
 /**
+ * 判断一次滚动采样是不是“用户真正选中的位置”。
+ *
+ * 内容还在加载（容器根本滚不动）或被钳在“变矮内容”的底部时，scrollTop 是浏览器
+ * 钳制出来的值：恢复途中任何一次滚轮 / 触摸 / 按键都会读到这个值，写回存储就会把
+ * 记忆位置抹成 0（表现为返回媒体库时永远停在顶部，且之后再也不会记录）。
+ */
+export function shouldPersistClampedSample(input: {
+  current: number
+  maxScroll: number
+  saved: number
+}): boolean {
+  const { current, maxScroll, saved } = input
+  if (maxScroll <= 0) {
+    return false
+  }
+  if (current >= maxScroll && current < saved) {
+    return false
+  }
+  return true
+}
+
+/**
  * 记住列表页的滚动位置。页面内容会异步长高，因此恢复期间会监听内容高度，
  * 直到目标位置可达；期间用户主动滚动会立即接管，避免和恢复逻辑抢滚动条。
+ *
+ * 恢复还没完成时，容器里的 scrollTop 往往是浏览器钳制出来的值（内容还在加载
+ * 占位，或被钳在变矮内容的底部）。这种采样既不写回存储，也不当成用户“接管”，
+ * 否则一次误触的滚轮 / 触摸就会把记忆位置清成 0。
  */
 export function useScrollMemory(pathname: string, userKey = 'anonymous'): void {
   useLayoutEffect(() => {
@@ -80,6 +106,19 @@ export function useScrollMemory(pathname: string, userKey = 'anonymous'): void {
     let lastSaved = saved
     let lastHeight = el.scrollHeight
 
+    const currentMaxScroll = () => Math.max(0, el.scrollHeight - el.clientHeight)
+
+    // 只有“用户真正能滚到”的位置才算有效采样：内容还在加载占位（滚不动）或
+    // 被钳在变矮内容的底部时，scrollTop 都是浏览器钳制出来的值。
+    const sampleIsTrustworthy = (current: number) =>
+      shouldPersistClampedSample({ current, maxScroll: currentMaxScroll(), saved })
+
+    const adoptScrollPosition = (current: number) => {
+      lastSaved = current
+      lastHeight = el.scrollHeight
+      writeScrollPosition(key, current)
+    }
+
     const stopRestore = () => {
       if (restoreFrame) {
         window.cancelAnimationFrame(restoreFrame)
@@ -97,14 +136,18 @@ export function useScrollMemory(pathname: string, userKey = 'anonymous'): void {
       if (!restoring) return
       restoring = false
       stopRestore()
-      lastSaved = Math.round(el.scrollTop)
-      lastHeight = el.scrollHeight
-      writeScrollPosition(key, lastSaved)
+      const current = Math.round(el.scrollTop)
+      if (!sampleIsTrustworthy(current)) {
+        // 目标一直不可达（内容仍比记忆位置矮 / 还在加载）：保留原记忆值，
+        // 不要把钳制出来的位置写回去。
+        return
+      }
+      adoptScrollPosition(current)
     }
 
     const tryRestore = () => {
       if (!restoring) return
-      const max = Math.max(0, el.scrollHeight - el.clientHeight)
+      const max = currentMaxScroll()
       const target = Math.min(saved, max)
       if (target > 0 && Math.abs(el.scrollTop - target) > 1) {
         el.scrollTop = target
@@ -125,8 +168,19 @@ export function useScrollMemory(pathname: string, userKey = 'anonymous'): void {
     }
 
     const saveNow = () => {
-      if (restoring) return
       const current = Math.round(el.scrollTop)
+      // 内容还没长回来时读到的 scrollTop 不是用户选的位置，既不能写存储，
+      // 也不能当成“用户接管”。
+      if (!sampleIsTrustworthy(current)) return
+      if (restoring) {
+        if (Math.abs(current - saved) <= 1) return
+        // 恢复途中用户真的滚到了别处：交还控制权并记录这个位置，避免恢复
+        // 逻辑继续和用户抢滚动条。
+        restoring = false
+        stopRestore()
+        adoptScrollPosition(current)
+        return
+      }
       const height = el.scrollHeight
       if (
         !shouldPersistScrollSample({
@@ -147,11 +201,13 @@ export function useScrollMemory(pathname: string, userKey = 'anonymous'): void {
 
     const cancelRestore = () => {
       if (!restoring) return
+      const current = Math.round(el.scrollTop)
+      // 恢复期间用户滚轮 / 触摸 / 按键只是误触或惯性（内容还没长高时他也确实
+      // 滚不动）：继续完成恢复，并保留原来的记忆值。
+      if (!sampleIsTrustworthy(current)) return
       restoring = false
       stopRestore()
-      lastSaved = Math.round(el.scrollTop)
-      lastHeight = el.scrollHeight
-      writeScrollPosition(key, lastSaved)
+      adoptScrollPosition(current)
     }
 
     if (saved <= 0) {

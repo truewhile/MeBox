@@ -1,4 +1,8 @@
-import { shouldPersistScrollSample, shouldRememberScroll } from './useScrollMemory.ts'
+import {
+  shouldPersistClampedSample,
+  shouldPersistScrollSample,
+  shouldRememberScroll,
+} from './useScrollMemory.ts'
 
 function check(name: string, condition: boolean) {
   if (!condition) throw new Error(`useScrollMemory: ${name}`)
@@ -46,6 +50,41 @@ check(
     height: 5200,
     lastHeight: 4200,
   }),
+)
+
+// 恢复途中内容还没长出来（滚不动）或被钳在矮内容底部时，scrollTop 是浏览器钳制
+// 出来的值，不能写回存储，否则一次误触就把记忆位置清成 0。
+check(
+  'clamped sample while list is still loading is ignored',
+  !shouldPersistClampedSample({ current: 0, maxScroll: 0, saved: 1800 }),
+)
+check(
+  'clamped sample at the bottom of a shrunken list is ignored',
+  !shouldPersistClampedSample({ current: 1200, maxScroll: 1200, saved: 1800 }),
+)
+check(
+  'sample at the bottom of a completely scrolled list stays persistable',
+  shouldPersistClampedSample({ current: 1800, maxScroll: 1800, saved: 1800 }),
+)
+check(
+  'reachable scroll position is persisted',
+  shouldPersistClampedSample({ current: 900, maxScroll: 1200, saved: 1800 }),
+)
+check(
+  'reaching the remembered target is persisted',
+  shouldPersistClampedSample({ current: 1800, maxScroll: 2600, saved: 1800 }),
+)
+check(
+  'deeper than the remembered target is persisted',
+  shouldPersistClampedSample({ current: 3000, maxScroll: 4000, saved: 1800 }),
+)
+check(
+  'intentional scroll to top of a tall list is persisted',
+  shouldPersistClampedSample({ current: 0, maxScroll: 4000, saved: 1800 }),
+)
+check(
+  'unscrollable page without memory cannot persist',
+  !shouldPersistClampedSample({ current: 0, maxScroll: 0, saved: 0 }),
 )
 
 console.log('useScrollMemory.test.ts ok')
