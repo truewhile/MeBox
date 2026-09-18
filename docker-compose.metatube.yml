@@ -1,16 +1,34 @@
-# MeBox 第二档完整 Docker Compose 部署文件
+# MeBox + MetaTube 一体部署 Docker Compose 部署文件
 #
 # 组件：
-#   MeBox + PostgreSQL + Redis
+#   MeBox + PostgreSQL + Redis + MetaTube
+#
+# 与 docker-compose.standard.yml 的区别：
+#   额外内置一个 MetaTube 后端（番号元数据刮削 / 封面人脸裁剪），
+#   并与 MeBox 共用同一个 PostgreSQL 实例，不需要再单独起一套数据库。
 #
 # 使用方式二选一：
 #   1. 保存为 docker-compose.yml 后执行：
 #        docker compose up -d
 #   2. 保留本文件名时执行：
-#        docker compose -f docker-compose.standard.yml up -d
+#        docker compose -f docker-compose.metatube.yml up -d
 #
-# 适合：
-#   多用户、第三方 Emby 客户端频繁刷新、媒体列表/首页访问较多的 NAS。
+# 首次启动后需要做一次配置（只有这一处是手动的）：
+#   登录 MeBox → 设置 → 番号刮削：
+#     - 番号刮削引擎：MetaTube 后端服务，或 智能混合
+#     - MetaTube 服务端地址：http://metatube:8080
+#     - 访问 Token：留空（仅内部网络，未启用认证；如需认证两边填同一个值）
+#
+# 说明：
+#   - MetaTube 使用独立数据库 metatube，由 metatube-db-init 一次性容器自动创建；
+#     和 MeBox 的 mebox 库共用同一个 PostgreSQL 实例，只是分成两个库。
+#   - MetaTube 不向宿主机映射端口，只在本 Compose 内部网络提供服务。
+#   - MeBox 故意不依赖 MetaTube：MetaTube 未就绪或挂掉时，智能混合模式会自动回退到内置刮削源。
+#   - 更新全部组件：
+#       docker compose -f docker-compose.metatube.yml pull
+#       docker compose -f docker-compose.metatube.yml up -d
+#     保留本文件名时，管理面板「系统更新」需要把「Compose 安装目录」指向本文件所在目录，
+#     或把更新命令改成带 -f docker-compose.metatube.yml 的形式。
 #
 # 默认账号：
 #   admin / admin123
@@ -102,6 +120,7 @@ services:
   postgres:
     image: postgres:16-alpine
     # 首次部署允许拉取；日常更新请只 pull mebox。
+    # MetaTube 与 MeBox 共用本实例（不同数据库），无需第二套 PostgreSQL。
     pull_policy: missing
     restart: unless-stopped
     environment:
@@ -110,12 +129,61 @@ services:
       POSTGRES_PASSWORD: mebox
       TZ: Asia/Shanghai
     volumes:
+      # 同时存放 mebox 与 metatube 两个数据库，备份这一个目录即可。
       - ./postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U mebox -d mebox"]
       interval: 10s
       timeout: 5s
       retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # 一次性容器：确保 metatube 库存在。
+  # MetaTube 自己的 -db-auto-migrate 只建表不建库，所以必须先建库。
+  # 数据库已存在时它会直接退出，重复执行无副作用。
+  metatube-db-init:
+    image: postgres:16-alpine
+    pull_policy: missing
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: mebox
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        psql -h postgres -U mebox -d mebox -tAc "SELECT 1 FROM pg_database WHERE datname='metatube'" | grep -q 1 || psql -h postgres -U mebox -d mebox -c "CREATE DATABASE metatube OWNER mebox"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "1"
+
+  metatube:
+    image: ghcr.io/metatube-community/metatube-server:latest
+    restart: unless-stopped
+    depends_on:
+      metatube-db-init:
+        condition: service_completed_successfully
+    environment:
+      TZ: Asia/Shanghai
+      # 需要走代理时在这里填写，例如 http://192.168.1.2:7890
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+    # 不需要 ports：MeBox 通过内部网络访问 http://metatube:8080。
+    # 只有想让局域网内其他工具直连时才映射，且建议只映射到 127.0.0.1。
+    command:
+      - -dsn
+      - postgres://mebox:mebox@postgres:5432/metatube?sslmode=disable
+      - -port
+      - "8080"
+      - -db-auto-migrate
+      - -db-prepared-stmt
     logging:
       driver: json-file
       options:
