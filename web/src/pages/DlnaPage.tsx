@@ -20,7 +20,7 @@ export function DlnaPage() {
     dlnaAPI
       .list(force)
       .then(setDevices)
-      .catch(() => toast.error('设备发现失败,容器网络可能不支持组播'))
+      .catch(() => toast.error('设备发现失败，容器网络可能不支持组播'))
       .finally(() => setScanning(false))
   }
 
@@ -94,7 +94,7 @@ export function DlnaPage() {
       {devices.length === 0 && !scanning && (
         <div className="glass-panel">
           <p className="text-ink-100">
-            未发现任何 DLNA 设备。请确保:服务器与设备在同一局域网,容器使用 host 网络模式,
+            未发现任何 DLNA 设备。请确保：服务器与设备在同一局域网，容器使用 host 网络模式，
             目标设备已开启 DLNA / 屏幕镜像。
           </p>
         </div>

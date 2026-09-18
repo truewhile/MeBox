@@ -12,10 +12,10 @@ func TestCleanQueryKeepsCommonEnglishTitleWords(t *testing.T) {
 		wantTitle string
 		wantYear  int
 	}{
-		{"Mad.Max.1979.1080p.BluRay.mkv", "mad max", 1979},
-		{"Max.Payne.2008.1080p.WEB-DL.mkv", "max payne", 2008},
-		{"Web.Therapy.S01E01.1080p.WEB-DL.mkv", "web therapy", 0},
-		{"The.Web.2019.1080p.mkv", "the web", 2019},
+		{"Mad.Max.1979.1080p.BluRay.mkv", "Mad Max", 1979},
+		{"Max.Payne.2008.1080p.WEB-DL.mkv", "Max Payne", 2008},
+		{"Web.Therapy.S01E01.1080p.WEB-DL.mkv", "Web Therapy", 0},
+		{"The.Web.2019.1080p.mkv", "The Web", 2019},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
@@ -43,8 +43,8 @@ func TestCleanQueryDoesNotTruncateAmbiguousTagToNothing(t *testing.T) {
 // truncation but must not discard the real title words that follow it.
 func TestCleanQueryKeepsTitleAfterYearPrefix(t *testing.T) {
 	cases := map[string]string{
-		"2019.Avatar.1080p.BluRay.mkv":     "avatar",
-		"2024.Dune.Part.Two.2160p.WEB.mkv": "dune part two",
+		"2019.Avatar.1080p.BluRay.mkv":     "Avatar",
+		"2024.Dune.Part.Two.2160p.WEB.mkv": "Dune Part Two",
 	}
 	for in, want := range cases {
 		t.Run(in, func(t *testing.T) {
@@ -62,9 +62,9 @@ func TestCleanQueryKeepsTitleAfterYearPrefix(t *testing.T) {
 func TestCleanQueryStillDropsTagsAfterReleaseSignal(t *testing.T) {
 	cases := map[string]string{
 		"复仇者联盟4.2019.BD.1080p.mkv":               "复仇者联盟4",
-		"The.Matrix.1999.1080p.WEB-DL.H265.mp4":  "the matrix",
-		"Oppenheimer.2023.2160p.UHD.BluRay.mkv":  "oppenheimer",
-		"Interstellar.2014.4k.hdr.dts.atmos.mkv": "interstellar",
+		"The.Matrix.1999.1080p.WEB-DL.H265.mp4":  "The Matrix",
+		"Oppenheimer.2023.2160p.UHD.BluRay.mkv":  "Oppenheimer",
+		"Interstellar.2014.4k.hdr.dts.atmos.mkv": "Interstellar",
 	}
 	for in, want := range cases {
 		t.Run(in, func(t *testing.T) {

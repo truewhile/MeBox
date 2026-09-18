@@ -82,14 +82,6 @@ export const MediaCard = memo(function MediaCard({
             </div>
           )}
 
-          {/* Episode count badge：统一放右下角（桌面端与移动端一致），与左上角评分彻底错开 */}
-          {(count !== undefined && count > 1) || (count === undefined && versionCount > 1) ? (
-            <span className="absolute bottom-2 right-2 inline-flex items-center gap-1 rounded-lg border border-white/15 bg-[#111827]/90 px-1.5 py-0.5 text-[10px] font-bold text-white shadow-sm">
-              <Layers size={10} className="shrink-0 text-[#c9954a]" />
-              <span>{count !== undefined && count > 1 ? `${count} 集` : `${versionCount} 版本`}</span>
-            </span>
-          ) : null}
-
           {/* Rating Badge */}
           {displayRating > 0 && (
             <span className="absolute left-2 top-2 inline-flex items-center gap-0.5 rounded-lg border border-white/15 bg-[#111827]/90 px-1.5 py-0.5 text-[10px] font-bold text-[#c9954a] shadow-sm">
@@ -137,13 +129,23 @@ export const MediaCard = memo(function MediaCard({
           }`}>
             {media.title}
           </p>
-          <div className="flex items-center justify-between text-[11px] font-bold uppercase tracking-wider text-[var(--app-muted)]">
+          <div className="flex items-center justify-between gap-2 text-[11px] font-bold uppercase tracking-wider text-[var(--app-muted)]">
             <span>{media.year > 0 ? media.year : "未知年份"}</span>
-            {media.video_codec && (
-              <span className="rounded-xl border border-[var(--app-border)] bg-[var(--app-panel-soft)] px-1.5 py-0.5 text-[var(--app-subtle)]">
-                {media.video_codec}
-              </span>
-            )}
+            <span className="flex items-center gap-1.5">
+              {/* 集数/版本数徽标：放在海报下方的信息行而不是压在画面上。海报底部通常
+                  自带片名，角标会盖住它（Game of Thrones / Breaking Bad 都很明显）。 */}
+              {(count !== undefined && count > 1) || (count === undefined && versionCount > 1) ? (
+                <span className="inline-flex items-center gap-1 rounded-xl border border-[var(--app-border)] bg-[var(--app-panel-soft)] px-1.5 py-0.5 text-[var(--app-subtle)]">
+                  <Layers size={10} className="shrink-0 text-[#c9954a]" />
+                  <span>{count !== undefined && count > 1 ? `${count} 集` : `${versionCount} 版本`}</span>
+                </span>
+              ) : null}
+              {media.video_codec && (
+                <span className="rounded-xl border border-[var(--app-border)] bg-[var(--app-panel-soft)] px-1.5 py-0.5 text-[var(--app-subtle)]">
+                  {media.video_codec}
+                </span>
+              )}
+            </span>
           </div>
         </div>
       </div>

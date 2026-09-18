@@ -199,7 +199,7 @@ func TestManualSearchFallsBackToMovieFolderForGenericQuery(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		if r.URL.Query().Get("query") != "inception" {
+		if !strings.EqualFold(r.URL.Query().Get("query"), "inception") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}})
 			return
 		}
@@ -248,7 +248,7 @@ func TestManualSearchFallsBackToMovieFolderForGenericQuery(t *testing.T) {
 	if len(results) != 1 || results[0].TMDbID != 27205 {
 		t.Fatalf("manual search results=%#v, want folder fallback candidate; queries=%v", results, queries)
 	}
-	if len(queries) < 2 || queries[0] != "00000" || queries[len(queries)-1] != "inception" {
+	if len(queries) < 2 || queries[0] != "00000" || !strings.EqualFold(queries[len(queries)-1], "inception") {
 		t.Fatalf("manual search queries=%v, want explicit query then folder fallback", queries)
 	}
 }

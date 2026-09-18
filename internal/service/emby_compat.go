@@ -141,6 +141,10 @@ type ItemsParams struct {
 	SortOrder        string
 	Limit            int
 	StartIndex       int
+	// SeasonIndex 对应客户端的 Season / SeasonIndex 查询参数（季序号，0 为特别篇）。
+	// nil 表示不按季过滤；非 nil 时只返回该季的剧集。客户端普遍用季序号而不是
+	// 虚拟季 ID 请求剧集，缺了它 /Shows/{id}/Episodes?Season=N 会返回整部剧。
+	SeasonIndex *int
 }
 
 const (

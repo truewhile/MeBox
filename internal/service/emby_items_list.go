@@ -121,16 +121,31 @@ func (e *EmbyService) mediaItems(ctx context.Context, p ItemsParams) (map[string
 
 func (e *EmbyService) episodeItems(ctx context.Context, rows []model.Media, p ItemsParams) (map[string]any, error) {
 	rows = e.filterMediaRowsForUser(ctx, rows, p.UserID)
-	if p.SearchTerm != "" {
-		filtered := rows[:0]
-		needle := strings.ToLower(p.SearchTerm)
-		for _, row := range rows {
-			if strings.Contains(strings.ToLower(row.Title), needle) || strings.Contains(strings.ToLower(row.OriginalName), needle) {
-				filtered = append(filtered, row)
+	// rows 可能来自 series 分组的内存 memo（embySeriesGroup.Episodes）。过滤必须
+	// 分配新切片：就地复用 rows[:0] 会覆写 memo 里的元素，让后续请求看到被前一次
+	// 过滤污染的剧集列表（例如按季筛选一次之后，特别篇就从缓存分组里消失了）。
+	if p.SeasonIndex != nil {
+		filtered := make([]model.Media, 0, len(rows))
+		for i := range rows {
+			if embyRowMatchesSeasonIndex(&rows[i], p.SeasonIndex) {
+				filtered = append(filtered, rows[i])
 			}
 		}
 		rows = filtered
 	}
+	if p.SearchTerm != "" {
+		needle := strings.ToLower(p.SearchTerm)
+		filtered := make([]model.Media, 0, len(rows))
+		for i := range rows {
+			if strings.Contains(strings.ToLower(rows[i].Title), needle) || strings.Contains(strings.ToLower(rows[i].OriginalName), needle) {
+				filtered = append(filtered, rows[i])
+			}
+		}
+		rows = filtered
+	}
+	// sort.SliceStable 同样会就地重排：先拷贝一份，避免把 memo 分组里的剧集顺序
+	// 按每次请求的分页/筛选结果固定下来。
+	rows = append([]model.Media(nil), rows...)
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].SeasonNum != rows[j].SeasonNum {
 			return rows[i].SeasonNum < rows[j].SeasonNum

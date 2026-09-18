@@ -1539,6 +1539,13 @@ export function PlayerPage() {
       setHlsSource('local')
       setCloudWaiting(false)
       setCloudWaitMessage('')
+      // 本地档位不可用（宿主机没有可用的 ffmpeg）时不要进入必然失败的 HLS：
+      // 保持直连播放并说明怎么修，避免播放器先打一个 500 再回退。
+      if (!quality.available) {
+        setPlaybackMode('direct')
+        toast.error(quality.note || '当前无法进行 HLS 转码，请在「系统设置 → 常规」安装 ffmpeg 后重试')
+        return
+      }
       if (position > 2) setHlsStartSec(position)
       setPlaybackMode('hls')
     },

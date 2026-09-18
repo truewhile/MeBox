@@ -172,8 +172,51 @@ func CleanQuery(raw string) (title string, year int) {
 		}
 		out = append(out, w)
 	}
-	title = strings.TrimSpace(strings.Join(out, " "))
+	title = strings.TrimSpace(strings.Join(restoreQueryTokenCase(name, out), " "))
 	return title, year
+}
+
+// queryTokenSeparators mirrors the separator split used while tokenising a
+// cleaned filename.
+var queryTokenSeparators = []string{".", "_", "-", "[", "]", "(", ")", "×"}
+
+// restoreQueryTokenCase maps the surviving lowercase tokens of a cleaned
+// filename back onto the spelling used in the original name.
+//
+// Tokenisation itself stays case-insensitive: the release-tag rules in this file
+// rely on lowercased tokens (and patEP's [^a-z] boundary would misfire on
+// "SE7EN"-style names if it ran on mixed case). Rebuilding the display title from
+// the original tokens afterwards keeps "The.Matrix.1999.1080p..." as "The Matrix"
+// instead of overwriting the user's media with a lowercased title — the lowercased
+// form also used to poison metadata lookups. Tokens with no original counterpart
+// (fragments produced by a removal) fall back to their lowercase form.
+func restoreQueryTokenCase(name string, tokens []string) []string {
+	if len(tokens) == 0 {
+		return tokens
+	}
+	originalByLower := make(map[string]string, len(tokens))
+	normalized := bracketedTag.ReplaceAllString(name, " ")
+	for _, sep := range queryTokenSeparators {
+		normalized = strings.ReplaceAll(normalized, sep, " ")
+	}
+	for _, token := range strings.Fields(normalized) {
+		key := strings.ToLower(token)
+		if key == "" || key == releaseSignalToken {
+			continue
+		}
+		if _, exists := originalByLower[key]; !exists {
+			originalByLower[key] = token
+		}
+	}
+	cased := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		if original, ok := originalByLower[token]; ok {
+			cased = append(cased, original)
+			continue
+		}
+		cased = append(cased, token)
+	}
+	return cased
 }
 
 func isASCIIWord(s string) bool {

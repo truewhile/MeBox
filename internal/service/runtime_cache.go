@@ -36,6 +36,16 @@ type RuntimeCacheService struct {
 	limit     int
 	maxBytes  int64
 	bytesUsed int64
+	// seq stamps every insert/access with a strictly increasing number. Two
+	// entries written or touched inside the same clock tick carry an identical
+	// lastUsed, and Go map iteration order is random, so eviction used to pick an
+	// arbitrary "oldest" entry. seq turns recency into a total order.
+	seq uint64
+}
+
+func (c *RuntimeCacheService) nextSeqLocked() uint64 {
+	c.seq++
+	return c.seq
 }
 
 type runtimeCacheItem struct {
@@ -43,6 +53,7 @@ type runtimeCacheItem struct {
 	expiresAt  time.Time
 	staleUntil time.Time
 	lastUsed   time.Time
+	seq        uint64
 	size       int64
 }
 
@@ -55,6 +66,7 @@ type runtimeObjectItem struct {
 	value     any
 	expiresAt time.Time
 	lastUsed  time.Time
+	seq       uint64
 	size      int64
 }
 
@@ -225,6 +237,7 @@ func (c *RuntimeCacheService) GetObject(key string) (any, bool) {
 		return nil, false
 	}
 	item.lastUsed = now
+	item.seq = c.nextSeqLocked()
 	c.obj[fullKey] = item
 	c.mu.Unlock()
 	return item.value, true
@@ -252,6 +265,7 @@ func (c *RuntimeCacheService) SetObject(key string, value any, ttl time.Duration
 		value:     value,
 		expiresAt: now.Add(ttl),
 		lastUsed:  now,
+		seq:       c.nextSeqLocked(),
 		size:      size,
 	}
 	c.bytesUsed += size
@@ -334,6 +348,7 @@ func (c *RuntimeCacheService) getMemoryWithStale(key string) ([]byte, bool, bool
 		return nil, false, false
 	}
 	item.lastUsed = now
+	item.seq = c.nextSeqLocked()
 	c.memory[key] = item
 	return item.raw, true, !now.Before(item.expiresAt)
 }
@@ -376,6 +391,7 @@ func (c *RuntimeCacheService) setMemoryBytesWithStale(key string, raw []byte, fr
 		expiresAt:  now.Add(freshTTL),
 		staleUntil: now.Add(staleTTL),
 		lastUsed:   now,
+		seq:        c.nextSeqLocked(),
 		size:       size,
 	}
 	c.bytesUsed += size
@@ -424,20 +440,36 @@ func (c *RuntimeCacheService) evictExpiredLocked(now time.Time) {
 	}
 }
 
+// evictOldestLocked removes the least recently used entry across both caches.
+//
+// Recency is ordered by (lastUsed, seq): entries written within the same clock
+// tick share lastUsed, and map iteration order is randomized, so comparing
+// timestamps alone let eviction drop a just-written entry instead of the older
+// one. seq breaks those ties deterministically.
 func (c *RuntimeCacheService) evictOldestLocked() bool {
 	var (
 		oldestKey  string
 		oldestKind byte
 		oldestAt   time.Time
+		oldestSeq  uint64
 	)
+	older := func(at time.Time, seq uint64) bool {
+		if oldestKind == 0 {
+			return true
+		}
+		if at.Equal(oldestAt) {
+			return seq < oldestSeq
+		}
+		return at.Before(oldestAt)
+	}
 	for key, item := range c.memory {
-		if oldestKind == 0 || item.lastUsed.Before(oldestAt) {
-			oldestKey, oldestKind, oldestAt = key, 'm', item.lastUsed
+		if older(item.lastUsed, item.seq) {
+			oldestKey, oldestKind, oldestAt, oldestSeq = key, 'm', item.lastUsed, item.seq
 		}
 	}
 	for key, item := range c.obj {
-		if oldestKind == 0 || item.lastUsed.Before(oldestAt) {
-			oldestKey, oldestKind, oldestAt = key, 'o', item.lastUsed
+		if older(item.lastUsed, item.seq) {
+			oldestKey, oldestKind, oldestAt, oldestSeq = key, 'o', item.lastUsed, item.seq
 		}
 	}
 	switch oldestKind {

@@ -74,7 +74,9 @@ func TestOrganizeDirectoryUsesAdultMetadataBeforeRename(t *testing.T) {
 
 func TestOrganizeDirectoryUsesBangumiForAnimeRename(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/search/subject/frieren" {
+		// Bangumi takes the keyword in the path; compare case-insensitively so the
+		// stub does not pin the query spelling (titles now keep their original case).
+		if !strings.EqualFold(r.URL.Path, "/search/subject/frieren") {
 			http.NotFound(w, r)
 			return
 		}

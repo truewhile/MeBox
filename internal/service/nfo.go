@@ -76,7 +76,10 @@ type episodeNFO struct {
 }
 
 // ExportOne writes a movie.nfo file next to the media file. Existing files
-// are overwritten so a re-scrape always reflects the latest metadata.
+// are overwritten so a re-scrape always reflects the latest metadata. When the
+// folder already holds a sidecar the reader would pick (movie.nfo /
+// <dirname>.nfo), that file is updated in place instead of adding a second,
+// divergent NFO.
 func (s *NFOService) ExportOne(ctx context.Context, mediaID string) (string, error) {
 	m, err := s.repo.Media.FindByID(ctx, mediaID)
 	if err != nil {
@@ -191,10 +194,47 @@ func WriteMediaNFO(m *model.Media) (string, error) {
 		return "", err
 	}
 	dst := nfoPath(resolveMappedDestinationPath(m.Path))
+	if m.SeasonNum <= 0 && m.EpisodeNum <= 0 {
+		dst = nfoExportTarget(dst)
+	}
 	if err := os.WriteFile(dst, []byte(xml.Header+string(out)+"\n"), 0o644); err != nil { // #nosec G306 -- NFO sidecars must remain readable by media players.
 		return "", err
 	}
 	return dst, nil
+}
+
+// nfoExportTarget picks the file an export should write for a movie.
+//
+// Besides the canonical "<base>.nfo", the reader (findMovieNFO) also accepts
+// movie.nfo and "<dirname>.nfo". Writing the canonical name into a folder that
+// already carries one of those left two divergent NFOs for the same movie, and
+// because the reader prefers the canonical one the pre-existing file quietly went
+// stale. Reuse whichever file the reader would already have picked, in the same
+// precedence order, so an export updates the existing sidecar in place.
+//
+// Episodes are deliberately excluded by the caller: for an episode the
+// alternatives are series-level files, and writing episode metadata there would
+// corrupt the series identity.
+func nfoExportTarget(canonical string) string {
+	dir := filepath.Dir(canonical)
+	candidates := []string{
+		filepath.Base(canonical),
+		"movie.nfo",
+		filepath.Base(dir) + ".nfo",
+	}
+	for _, name := range candidates {
+		if name == "" || name == "." {
+			continue
+		}
+		candidate := filepath.Join(dir, name)
+		if candidate == canonical {
+			continue
+		}
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return canonical
 }
 
 func splitNFOList(value string) []string {

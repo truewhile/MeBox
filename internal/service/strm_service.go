@@ -892,6 +892,10 @@ func truncateStringRuneSafe(s string, maxBytes int) string {
 
 // cleanEntryName 清理单个目录名或文件名中的非法字符、控制字符、尾部点空格及 Windows 保留字，
 // 确保在 Windows (NTFS/FAT)、Linux (ext4/btrfs/xfs) 及 NAS/SMB 挂载环境下均安全可用。
+//
+// 只裁剪**尾部**的点与空格：那是 Windows 明确禁止的部分。前导点是合法且常见的
+// （隐藏目录/文件、.staging 之类），早先按 ". " 双向裁剪会把 `.media` 静默改写成
+// `media`，导致刮削海报边车被写到去掉点后的平行目录、媒体目录反而拿不到图。
 func cleanEntryName(name string, isDir bool) string {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -900,7 +904,7 @@ func cleanEntryName(name string, isDir bool) string {
 
 	if isDir {
 		clean := sanitizeFilename(name)
-		clean = strings.Trim(clean, ". ")
+		clean = strings.TrimRight(clean, ". ")
 		if clean == "" {
 			return "unnamed"
 		}
@@ -921,7 +925,7 @@ func cleanEntryName(name string, isDir bool) string {
 	}
 
 	cleanBase := sanitizeFilename(base)
-	cleanBase = strings.Trim(cleanBase, ". ")
+	cleanBase = strings.TrimRight(cleanBase, ". ")
 	if cleanBase == "" {
 		cleanBase = "unnamed"
 	}

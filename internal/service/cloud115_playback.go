@@ -58,10 +58,30 @@ type Cloud115PlaybackService struct {
 	repo *repository.Container
 	strm *StrmService
 
+	// transcoder 用于判断本地 HLS 档位此刻是否真的可用；未注入时按"不可用"处理，
+	// 避免向播放器推荐必然 500 的转码档位。
+	transcoder *TranscoderService
+
 	mu        sync.Mutex
 	pushState map[string]cloud115PushAttempt
 
 	proxy *Cloud115HLSProxy
+}
+
+// SetTranscoder 注入转码服务，用于标注本地 HLS 档位的可用性。
+func (s *Cloud115PlaybackService) SetTranscoder(transcoder *TranscoderService) *Cloud115PlaybackService {
+	if s != nil {
+		s.transcoder = transcoder
+	}
+	return s
+}
+
+// localTranscodeAvailable 报告本地 HLS 此刻是否可用。
+func (s *Cloud115PlaybackService) localTranscodeAvailable() bool {
+	if s == nil || s.transcoder == nil {
+		return false
+	}
+	return s.transcoder.Available()
 }
 
 func NewCloud115PlaybackService(cfg *config.Config, log *zap.Logger, repo *repository.Container, strm *StrmService) *Cloud115PlaybackService {
@@ -101,7 +121,7 @@ func (s *Cloud115PlaybackService) PlaybackInfo(ctx context.Context, mediaID stri
 	}
 
 	provider := MediaPlaybackProvider(m)
-	localQualities := LocalQualityOptions(m)
+	localQualities := LocalQualityOptions(m, s.localTranscodeAvailable())
 	localDefault := DefaultLocalHLSQualityID(m)
 	info := &PlaybackInfo{
 		MediaID:        m.ID,

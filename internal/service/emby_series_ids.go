@@ -154,6 +154,16 @@ func embySeasonNumForMedia(m *model.Media) int {
 	return m.SeasonNum
 }
 
+// embyRowMatchesSeasonIndex 判断某条剧集是否属于客户端请求的季序号。
+// seasonIndex 为 nil 时不参与过滤。判定复用 embySeasonNumForMedia，保证与
+// /Shows/{id}/Seasons 暴露的 IndexNumber 完全一致（含特别篇的负数分类）。
+func embyRowMatchesSeasonIndex(m *model.Media, seasonIndex *int) bool {
+	if seasonIndex == nil {
+		return true
+	}
+	return embySeasonNumForMedia(m) == *seasonIndex
+}
+
 func embySeasonCandidates(seasonNum int) []int {
 	if seasonNum > 0 {
 		return []int{seasonNum}

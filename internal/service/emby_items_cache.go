@@ -47,8 +47,18 @@ func (e *EmbyService) embyItemsCacheKey(kind string, p ItemsParams) string {
 		p.SortOrder,
 		strconv.Itoa(p.StartIndex),
 		strconv.Itoa(p.Limit),
+		formatSeasonIndexCacheKeyPart(p.SeasonIndex),
 	}, "|")))
 	return "media:emby:" + hex.EncodeToString(sum[:])
+}
+
+// formatSeasonIndexCacheKeyPart keeps "no season filter" distinct from "season 0"
+// so a client's Season=0 (specials) request never reuses an unfiltered response.
+func formatSeasonIndexCacheKeyPart(seasonIndex *int) string {
+	if seasonIndex == nil {
+		return "season:*"
+	}
+	return "season:" + strconv.Itoa(*seasonIndex)
 }
 
 func (e *EmbyService) embyLatestCacheKey(userID, parentID string, limit int) string {

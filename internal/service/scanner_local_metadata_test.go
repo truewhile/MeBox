@@ -263,7 +263,7 @@ func TestScanLibraryRefreshesStaleNoMatchDerivedMetadata(t *testing.T) {
 	if err := db.First(&media, "path = ?", mediaPath).Error; err != nil {
 		t.Fatal(err)
 	}
-	if media.Title != "hntv spring festival gala" || media.SeasonNum != 1 || media.EpisodeNum != 202 || media.ScrapeStatus != "pending" {
+	if media.Title != "Hntv Spring Festival Gala" || media.SeasonNum != 1 || media.EpisodeNum != 202 || media.ScrapeStatus != "pending" {
 		t.Fatalf("stale no_match row was not refreshed: title=%q s=%d e=%d status=%q", media.Title, media.SeasonNum, media.EpisodeNum, media.ScrapeStatus)
 	}
 }

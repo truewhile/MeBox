@@ -120,6 +120,8 @@ func (b *serviceContainerBuilder) initContentServices() {
 	b.c.Audit = NewAuditService(b.log, b.repos)
 	b.c.Strm = NewStrmService(b.cfg, b.log, b.repos, b.c.Crypto)
 	b.c.Cloud115 = NewCloud115PlaybackService(b.cfg, b.log, b.repos, b.c.Strm)
+	// 本地 HLS 档位的可用性取决于 ffmpeg 是否可用；未注入时按不可用处理。
+	b.c.Cloud115.SetTranscoder(b.c.Transcoder)
 	// ffmpeg/ffprobe 一键下载安装（data/tools/ffmpeg/）。
 	b.c.FFTools = NewFFmpegToolsService(b.cfg, b.log, b.repos)
 	// 弹幕 hash 识别需要把 strm 指向解析成可拉取的直链/本地路径。

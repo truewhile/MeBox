@@ -40,7 +40,26 @@ func parseEmbyItemsParams(c *gin.Context) service.ItemsParams {
 		SortOrder:        firstQueryValue(c, "SortOrder", "sortOrder", "sortorder"),
 		Limit:            limit,
 		StartIndex:       offset,
+		SeasonIndex:      parseEmbySeasonIndexQuery(c),
 	}
+}
+
+// parseEmbySeasonIndexQuery 读取客户端请求的季序号。
+//
+// Emby 客户端有两种表达方式：SeasonId（虚拟季 ID）与 Season / SeasonIndex
+// （季序号，特别篇为 0）。两者都是合法入参，SeasonId 更精确。这里只解析季序号，
+// 返回 nil 表示客户端没有按季过滤（区别于 Season=0 的特别篇）。
+func parseEmbySeasonIndexQuery(c *gin.Context) *int {
+	raw := firstQueryValue(c, "Season", "season", "SeasonIndex", "seasonIndex", "seasonindex")
+	if raw == "" {
+		return nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		// 客户端偶尔传入季名称之类的非数字值；按「未过滤」处理，避免整季空结果。
+		return nil
+	}
+	return &value
 }
 
 func embyFirstNonEmptyString(values ...string) string {
@@ -199,8 +218,15 @@ func embyShowSeasonsHandler(svc *service.Container) gin.HandlerFunc {
 func embyShowEpisodesHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		parentID := firstQueryValue(c, "SeasonId", "seasonId")
+		// 客户端常用季序号而不是虚拟季 ID 请求剧集。缺了这层过滤，
+		// /Shows/{id}/Episodes?Season=2 会把整部剧的所有季都返回。
+		seasonIndex := parseEmbySeasonIndexQuery(c)
 		if parentID == "" {
 			parentID = c.Param("id")
+		} else {
+			// SeasonId 已经限定了具体季，忽略同时传来的季序号，避免两者
+			// 不一致时把结果过滤成空集。
+			seasonIndex = nil
 		}
 		params := service.ItemsParams{
 			UserID:           embyEffectiveUserID(c),
@@ -208,6 +234,7 @@ func embyShowEpisodesHandler(svc *service.Container) gin.HandlerFunc {
 			IncludeItemTypes: []string{"Episode"},
 			Recursive:        true,
 			Limit:            500,
+			SeasonIndex:      seasonIndex,
 		}
 		out, err := svc.Emby.Items(c.Request.Context(), params)
 		if err != nil {

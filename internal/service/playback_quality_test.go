@@ -61,17 +61,42 @@ func TestCloud115QualityOptionsListsAvailableOnlyOnce(t *testing.T) {
 
 func TestLocalQualityOptionsFollowSourceHeight(t *testing.T) {
 	media := &model.Media{Height: 720}
-	options := LocalQualityOptions(media)
+	options := LocalQualityOptions(media, true)
 	if _, ok := findPlaybackQuality(options, "1080"); ok {
 		t.Fatal("720p source should not list 1080P")
 	}
 	for _, id := range []string{"source", "720", "480"} {
-		if _, ok := findPlaybackQuality(options, id); !ok {
+		quality, ok := findPlaybackQuality(options, id)
+		if !ok {
 			t.Fatalf("local quality %s missing", id)
+		}
+		if !quality.Available {
+			t.Fatalf("local quality %s should be available while transcoding works", id)
 		}
 	}
 	if got := DefaultLocalHLSQualityID(media); got != "720" {
 		t.Fatalf("default local quality = %q, want 720", got)
+	}
+}
+
+// Without a usable ffmpeg the local HLS renditions must not advertise themselves
+// as available: the player would request /api/hls/... and take a guaranteed 500
+// before falling back to direct play.
+func TestLocalQualityOptionsMarkUnavailableWithoutTranscoder(t *testing.T) {
+	media := &model.Media{Height: 1080}
+	for _, id := range []string{"source", "1080", "720", "480"} {
+		for _, available := range []bool{true, false} {
+			quality, ok := findPlaybackQuality(LocalQualityOptions(media, available), id)
+			if !ok {
+				t.Fatalf("local quality %s missing", id)
+			}
+			if quality.Available != available {
+				t.Fatalf("quality %s availability = %v, want %v", id, quality.Available, available)
+			}
+			if !available && !quality.RequiresTranscode {
+				t.Fatalf("unavailable quality %s should be flagged as requiring transcoding", id)
+			}
+		}
 	}
 }
 

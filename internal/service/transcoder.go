@@ -54,6 +54,11 @@ type TranscoderService struct {
 	startGates  sync.Map // mediaID -> *sync.Mutex
 	strmResolve func(ctx context.Context, raw string) (*StrmPlayResult, error)
 	probe       *FFprobeService
+
+	// availMu guards the cached ffmpeg availability used by Available().
+	availMu        sync.Mutex
+	availCheckedAt time.Time
+	availValue     bool
 }
 
 // hlsJob holds the live state of one ffmpeg run.
@@ -97,6 +102,37 @@ func NewTranscoderService(cfg *config.Config, log *zap.Logger, repo *repository.
 		hub:  hub,
 		jobs: make(map[string]*hlsJob),
 	}
+}
+
+// transcodeAvailabilityTTL bounds how long an Available() result is reused.
+// Validating ffmpeg actually spawns it, and /playback is polled on every player
+// load, so the answer is cached briefly. It stays short so a freshly installed
+// ffmpeg becomes usable without restarting the server.
+const transcodeAvailabilityTTL = 20 * time.Second
+
+// Available reports whether HLS transcoding can run right now: transcoding must
+// be enabled by configuration and a usable ffmpeg must resolve. Callers use it to
+// stop advertising local HLS renditions that would only fail with a 500.
+func (t *TranscoderService) Available() bool {
+	if t == nil || t.cfg == nil {
+		return false
+	}
+	if !t.cfg.Transcoder.Enabled {
+		return false
+	}
+	t.availMu.Lock()
+	defer t.availMu.Unlock()
+	if !t.availCheckedAt.IsZero() && time.Since(t.availCheckedAt) < transcodeAvailabilityTTL {
+		return t.availValue
+	}
+	_, err := t.resolveFFmpegPath()
+	available := err == nil
+	if !available && t.log != nil {
+		t.log.Debug("local HLS renditions unavailable", zap.Error(err))
+	}
+	t.availValue = available
+	t.availCheckedAt = time.Now()
+	return available
 }
 
 // HLSDir is the per-media directory that holds index.m3u8 + segment files.

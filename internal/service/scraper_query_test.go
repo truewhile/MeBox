@@ -23,19 +23,19 @@ func TestCleanQuery(t *testing.T) {
 		wantTitle string
 		wantYear  int
 	}{
-		{"Inception.2010.1080p.BluRay.x264.mkv", "inception", 2010},
-		{"The_Matrix_(1999).1080p.WEB-DL.H265.mp4", "the matrix", 1999},
+		{"Inception.2010.1080p.BluRay.x264.mkv", "Inception", 2010},
+		{"The_Matrix_(1999).1080p.WEB-DL.H265.mp4", "The Matrix", 1999},
 		{"interstellar.2014.4k.hdr.dts.atmos.mkv", "interstellar", 2014},
-		{"My Movie 2022 [HDR] (1080p) [TGx].mp4", "my movie", 2022},
-		{"NoYearOrTags.mkv", "noyearortags", 0},
-		{"亏成首富从游戏开始 The Richest in Game - S01E11 - 4K.mp4", "亏成首富从游戏开始 the richest in game", 0},
+		{"My Movie 2022 [HDR] (1080p) [TGx].mp4", "My Movie", 2022},
+		{"NoYearOrTags.mkv", "NoYearOrTags", 0},
+		{"亏成首富从游戏开始 The Richest in Game - S01E11 - 4K.mp4", "亏成首富从游戏开始 The Richest in Game", 0},
 		{"紫川.2024.S02E24.第24集.2160p.WEB-DL.H.265-ColorTV.mkv", "紫川", 2024},
 		{"紫川 (2024) {tmdb-247590}", "紫川", 2024},
-		{"HNTV.Spring.Festival.Gala.FPS.HLG-QHStudio.S01E202-DD5.QHstudIo.6.4K.ts", "hntv spring festival gala", 0},
-		{"Hntv Spring Festival Gala S01e (2026)", "hntv spring festival gala", 2026},
-		{"Motherhood Of Taihang Aac2 Mweb - S01E01-Aac2.Mweb.mkv", "motherhood of taihang", 0},
-		{"For All Mankind Atvp Hhweb - S05E06-DDP5.HHWEB.4K.mkv", "for all mankind", 0},
-		{"Hntv Spring Festival Gala Fps Hlg Qhstudio S01e (2026)", "hntv spring festival gala", 2026},
+		{"HNTV.Spring.Festival.Gala.FPS.HLG-QHStudio.S01E202-DD5.QHstudIo.6.4K.ts", "HNTV Spring Festival Gala", 0},
+		{"Hntv Spring Festival Gala S01e (2026)", "Hntv Spring Festival Gala", 2026},
+		{"Motherhood Of Taihang Aac2 Mweb - S01E01-Aac2.Mweb.mkv", "Motherhood Of Taihang", 0},
+		{"For All Mankind Atvp Hhweb - S05E06-DDP5.HHWEB.4K.mkv", "For All Mankind", 0},
+		{"Hntv Spring Festival Gala Fps Hlg Qhstudio S01e (2026)", "Hntv Spring Festival Gala", 2026},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
@@ -75,7 +75,7 @@ func TestScrapeQueryCandidatesCleanDirtySeriesFolder(t *testing.T) {
 	if len(got) == 0 {
 		t.Fatal("scrapeQueryCandidates returned no candidates")
 	}
-	if got[0] != "motherhood of taihang" {
+	if got[0] != "Motherhood Of Taihang" {
 		t.Fatalf("first query candidate = %q, want cleaned series title; all candidates=%#v", got[0], got)
 	}
 	for _, candidate := range got {

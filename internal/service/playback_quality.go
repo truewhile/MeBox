@@ -211,13 +211,25 @@ func DefaultCloud115Quality(options []PlaybackQuality) string {
 }
 
 // LocalQualityOptions 返回 MeBox 本地 HLS 可用的画质档位。
-func LocalQualityOptions(m *model.Media) []PlaybackQuality {
+//
+// transcodeAvailable 为 false（未装 ffmpeg、或转码被全局关闭）时档位仍然返回，
+// 但 Available 为 false：播放器据此直接走直连播放，而不是先请求 /api/hls 拿到
+// 一个必然失败的 500 再回退。档位列表保留是为了让前端仍能展示"需要转码"的说明。
+func LocalQualityOptions(m *model.Media, transcodeAvailable bool) []PlaybackQuality {
 	sourceHeight := mediaSourceHeight(m)
 	presets := []PlaybackQuality{
-		{ID: "source", Label: "原画", Height: sourceHeight, Source: "local", Available: true, Note: "本地 HLS，保持源分辨率"},
-		{ID: "1080", Label: "1080P", Height: 1080, Source: "local", Available: true},
-		{ID: "720", Label: "720P", Height: 720, Source: "local", Available: true},
-		{ID: "480", Label: "480P", Height: 480, Source: "local", Available: true},
+		{ID: "source", Label: "原画", Height: sourceHeight, Source: "local", Available: transcodeAvailable, Note: "本地 HLS，保持源分辨率"},
+		{ID: "1080", Label: "1080P", Height: 1080, Source: "local", Available: transcodeAvailable},
+		{ID: "720", Label: "720P", Height: 720, Source: "local", Available: transcodeAvailable},
+		{ID: "480", Label: "480P", Height: 480, Source: "local", Available: transcodeAvailable},
+	}
+	if !transcodeAvailable {
+		for i := range presets {
+			presets[i].RequiresTranscode = true
+			if presets[i].Note == "" {
+				presets[i].Note = "需要 ffmpeg，当前不可用"
+			}
+		}
 	}
 	out := make([]PlaybackQuality, 0, len(presets))
 	for _, preset := range presets {
