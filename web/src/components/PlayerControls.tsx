@@ -46,6 +46,9 @@ import {
   PLAYER_MENU_LABEL,
   PLAYER_POPOVER,
   PLAYER_RANGE_OVERLAY,
+  PLAYER_SHEET,
+  PLAYER_SHEET_BODY,
+  PLAYER_SHEET_HEADER,
   PLAYER_TEXT_BUTTON,
   PLAYER_TRACK,
   PLAYER_TRACK_FILL,
@@ -193,10 +196,17 @@ type PlayerControlsProps = {
   streamOffset?: number
   /** Absolute seek on the full timeline; return true when handled (e.g. HLS restart). */
   onSeekAbsolute?: (seconds: number) => boolean
+  /**
+   * 竖屏剧场模式：控制栏按钮放大到触控尺寸（44px 起），清晰度/倍速/
+   * 选集/字幕弹层改为视频区底部的动作面板，避免右侧抽屉与悬浮小弹层
+   * 在窄屏下被裁剪。桌面端保持原样。
+   */
+  theater?: boolean
 }
 
 export function PlayerControls({
   videoRef,
+  theater = false,
   volume: volumeProp = 1,
   onVolumeChange,
   onVolumeCommit,
@@ -910,7 +920,7 @@ export function PlayerControls({
   const compactOnlySections = (
     <>
       {showQuality && hasQualityGroups && (
-        <div className="sm:hidden">
+        <div className={theater ? undefined : 'sm:hidden'}>
           <p className={PLAYER_MENU_LABEL}>清晰度</p>
           <QualityItems
             groups={qualityGroups}
@@ -919,7 +929,7 @@ export function PlayerControls({
           />
         </div>
       )}
-      <div className="sm:hidden">
+      <div className={theater ? undefined : 'sm:hidden'}>
         <p className={PLAYER_MENU_LABEL}>播放速度</p>
         <SpeedItems
           playbackRate={playbackRateProp}
@@ -927,7 +937,7 @@ export function PlayerControls({
         />
       </div>
       {onTogglePlaylist && (
-        <div className="sm:hidden">
+        <div className={theater ? undefined : 'sm:hidden'}>
           <p className={PLAYER_MENU_LABEL}>选集</p>
           <button
             type="button"
@@ -947,7 +957,7 @@ export function PlayerControls({
         </div>
       )}
       {subs.length > 0 && (
-        <div className="sm:hidden">
+        <div className={theater ? undefined : 'sm:hidden'}>
           <p className={PLAYER_MENU_LABEL}>字幕</p>
           <SubtitleItems
             subs={subs}
@@ -965,7 +975,7 @@ export function PlayerControls({
           />
         </div>
       )}
-      <div className={`sm:hidden ${PLAYER_MENU_DIVIDER}`} />
+      <div className={theater ? PLAYER_MENU_DIVIDER : `sm:hidden ${PLAYER_MENU_DIVIDER}`} />
     </>
   )
 
@@ -1028,6 +1038,33 @@ export function PlayerControls({
     <>
     {seekOverlay}
     {playbackRateOverlay}
+    {theater && settingsMenuOpen ? (
+      <div
+        className="absolute inset-x-0 bottom-0 z-40 flex items-end justify-center"
+        onClick={(e) => e.stopPropagation()}
+        onPointerUp={(e) => e.stopPropagation()}
+      >
+        <div
+          className="absolute inset-0"
+          onClick={() => setSettingsMenuOpen(false)}
+          aria-hidden
+        />
+        <div className={`relative ${PLAYER_SHEET}`}>
+          <div className={PLAYER_SHEET_HEADER}>
+            <span className="text-[13px] font-semibold text-white/90">播放器设置</span>
+            <button
+              type="button"
+              onClick={() => setSettingsMenuOpen(false)}
+              className={PLAYER_ICON_BUTTON}
+              title="关闭设置"
+            >
+              <Minimize size={16} />
+            </button>
+          </div>
+          <div className={PLAYER_SHEET_BODY}>{settingsPanel}</div>
+        </div>
+      </div>
+    ) : null}
     <div
       className={`pointer-events-auto absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-black/85 via-black/45 to-transparent px-2.5 pb-1.5 pt-12 transition-opacity duration-300 sm:px-3.5 sm:pb-2.5 ${
         uiVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
@@ -1042,11 +1079,11 @@ export function PlayerControls({
     >
       {/* 进度条：单独占一行贴着画面底部，轨道只有 3px，悬停才变粗并露出圆点手柄 */}
       <div
-        className="group/seek relative flex h-5 w-full items-center"
+        className={`group/seek relative flex w-full items-center ${theater ? 'h-9' : 'h-5'}`}
         onMouseMove={handleSeekHover}
         onMouseLeave={() => setSeekHover(null)}
       >
-        <div className={`${PLAYER_TRACK} group-hover/seek:h-[5px]`}>
+        <div className={`${PLAYER_TRACK} ${theater ? 'h-[5px]' : ''} group-hover/seek:h-[5px]`}>
           <div
             className={`${PLAYER_TRACK_FILL} bg-white/30`}
             style={{ width: `${bufferedRatio * 100}%` }}
@@ -1057,7 +1094,7 @@ export function PlayerControls({
           />
         </div>
         <div
-          className="pointer-events-none absolute h-3 w-3 -translate-x-1/2 rounded-full bg-white opacity-0 shadow-md transition-opacity duration-150 group-hover/seek:opacity-100"
+          className={`pointer-events-none absolute h-3 w-3 -translate-x-1/2 rounded-full bg-white shadow-md transition-opacity duration-150 group-hover/seek:opacity-100 ${theater ? 'opacity-100' : 'opacity-0'}`}
           style={{ left: `${playedRatio * 100}%` }}
         />
         {tooltipVisible && durationSafe > 0 ? (
@@ -1085,14 +1122,14 @@ export function PlayerControls({
         />
       </div>
 
-      <div className="mt-0.5 flex items-center gap-0.5 sm:mt-1 sm:gap-1">
+      <div className={`flex items-center ${theater ? 'mt-1 gap-1' : 'mt-0.5 gap-0.5 sm:mt-1 sm:gap-1'}`}>
         {/* 播放 / 暂停 */}
         <button
           onClick={togglePlay}
-          className={`${PLAYER_ICON_BUTTON} h-8 w-8 sm:h-9 sm:w-9`}
+          className={`${PLAYER_ICON_BUTTON} ${theater ? 'h-11 w-11' : 'h-8 w-8 sm:h-9 sm:w-9'}`}
           title={playing ? '暂停 (Space)' : '播放 (Space)'}
         >
-          {playing ? <Pause size={19} /> : <Play size={19} />}
+          {playing ? <Pause size={theater ? 24 : 19} /> : <Play size={theater ? 24 : 19} />}
         </button>
 
         {/* 上一集 / 下一集：单条媒体（电影）没有上下集时整组隐藏，少两个死按钮 */}
@@ -1101,7 +1138,7 @@ export function PlayerControls({
             <button
               onClick={onPrevEpisode}
               disabled={!hasPrevEpisode}
-              className={PLAYER_ICON_BUTTON}
+              className={`${PLAYER_ICON_BUTTON} ${theater ? 'h-11 w-11' : ''}`}
               title={
                 hasPrevEpisode
                   ? prevEpisodeTitle
@@ -1115,7 +1152,7 @@ export function PlayerControls({
             <button
               onClick={onNextEpisode}
               disabled={!hasNextEpisode}
-              className={PLAYER_ICON_BUTTON}
+              className={`${PLAYER_ICON_BUTTON} ${theater ? 'h-11 w-11' : ''}`}
               title={
                 hasNextEpisode
                   ? nextEpisodeTitle
@@ -1223,7 +1260,7 @@ export function PlayerControls({
           type="button"
           onClick={onOpenDanmaku}
           disabled={!onOpenDanmaku}
-          className={`${PLAYER_ICON_BUTTON} ${danmakuOpen ? 'bg-white/15' : ''}`}
+          className={`${PLAYER_ICON_BUTTON} ${theater ? 'h-11 w-11' : ''} ${danmakuOpen ? 'bg-white/15' : ''}`}
           title={danmakuOpen ? '弹幕设置（已打开）' : '弹幕设置'}
         >
           <span
@@ -1330,16 +1367,16 @@ export function PlayerControls({
               setSubtitleMenuOpen(false)
               setSettingsMenuOpen((v) => !v)
             }}
-            className={`${PLAYER_ICON_BUTTON} ${settingsMenuOpen ? 'bg-white/15 text-white' : ''}`}
+            className={`${PLAYER_ICON_BUTTON} ${theater ? 'h-11 w-11' : ''} ${settingsMenuOpen ? 'bg-white/15 text-white' : ''}`}
             title="播放器设置"
           >
-            <Settings2 size={17} />
+            <Settings2 size={theater ? 21 : 17} />
           </button>
           {/* 识别到 VR 素材但还没进 VR 时，用一个小圆点提示设置里有东西可开 */}
           {vr360Detected && !vr360 && (
             <span className="pointer-events-none absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-amber-300" />
           )}
-          {settingsMenuOpen && (
+          {settingsMenuOpen && !theater && (
             <div className={`${PLAYER_POPOVER} absolute bottom-11 right-0 max-h-[70vh] w-[15rem] overflow-y-auto`}>
               {settingsPanel}
             </div>
@@ -1358,10 +1395,10 @@ export function PlayerControls({
 
         <button
           onClick={toggleFullscreen}
-          className={PLAYER_ICON_BUTTON}
+          className={`${PLAYER_ICON_BUTTON} ${theater ? 'h-11 w-11' : ''}`}
           title={fullscreen ? '退出全屏 (F)' : '全屏 (F)'}
         >
-          {fullscreen ? <Minimize size={17} /> : <Maximize size={17} />}
+          {fullscreen ? <Minimize size={theater ? 21 : 17} /> : <Maximize size={theater ? 21 : 17} />}
         </button>
       </div>
     </div>

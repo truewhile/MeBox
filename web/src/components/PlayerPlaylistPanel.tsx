@@ -10,7 +10,7 @@ import {
   mediaVersionMatches,
   mediaVersionSourceLabel,
 } from '../utils/mediaVersion'
-import { PLAYER_DRAWER, PLAYER_ICON_BUTTON, PLAYER_PANEL_HEADER } from './playerTheme'
+import { PLAYER_DRAWER, PLAYER_ICON_BUTTON, PLAYER_PANEL_HEADER, PLAYER_SHEET, PLAYER_SHEET_BODY, PLAYER_SHEET_HEADER } from './playerTheme'
 
 export type SeasonGroup = {
   season: number
@@ -27,6 +27,11 @@ type PlayerPlaylistPanelProps = {
   onSelectEpisode: (media: Media) => void
   /** 切换到同一集/同一条目的另一个版本。 */
   onSelectVersion?: (media: Media) => void
+  /**
+   * 竖屏剧场模式：选集面板改为视频区底部的动作面板，而不是右侧抽屉，
+   * 避免窄屏下抽屉遮挡返回按钮、宫格被压扁。
+   */
+  theater?: boolean
 }
 
 /**
@@ -50,6 +55,7 @@ export function PlayerPlaylistPanel({
   episodes,
   onSelectEpisode,
   onSelectVersion,
+  theater = false,
 }: PlayerPlaylistPanelProps) {
   const [filterText, setFilterText] = useState('')
   /** 正在挑选版本的剧集 id；null = 宫格直接播放。 */
@@ -133,9 +139,13 @@ export function PlayerPlaylistPanel({
       // 舞台用 pointerdown/pointerup 判断「移动端轻触画面」，抽屉上的触摸不该参与。
       onPointerDown={(e) => e.stopPropagation()}
       onPointerUp={(e) => e.stopPropagation()}
-      className={`absolute inset-y-0 right-0 z-30 ${PLAYER_DRAWER}`}
+      className={
+        theater
+          ? `absolute inset-x-0 bottom-0 z-40 ${PLAYER_SHEET}`
+          : `absolute inset-y-0 right-0 z-30 ${PLAYER_DRAWER}`
+      }
     >
-      <div className={PLAYER_PANEL_HEADER}>
+      <div className={theater ? PLAYER_SHEET_HEADER : PLAYER_PANEL_HEADER}>
         <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
           <span className="truncate">{hasEpisodeList ? '选集' : '版本'}</span>
           <span className="shrink-0 font-mono text-[11px] font-normal text-white/45">
@@ -146,6 +156,8 @@ export function PlayerPlaylistPanel({
           <X size={16} />
         </button>
       </div>
+
+      <div className={theater ? PLAYER_SHEET_BODY : 'flex min-h-0 flex-1 flex-col overflow-hidden'}>
 
       {/* 当前条目的版本切换：多版本时置顶，随时可换 */}
       {versionsToSwitch.length > 0 && (
@@ -255,9 +267,9 @@ export function PlayerPlaylistPanel({
         </div>
       )}
 
-      {/* 集数宫格 */}
+      {/* 集数宫格：剧场模式下底部面板只做单层滚动，宫格区不再自己滚动 */}
       {hasEpisodeList ? (
-        <div className="min-h-0 flex-1 overflow-y-auto p-3 select-none">
+        <div className={theater ? 'p-3 select-none' : 'min-h-0 flex-1 overflow-y-auto p-3 select-none'}>
           {filteredEpisodes.length === 0 ? (
             <div className="py-10 text-center text-xs text-white/40">
               {filterText ? '未找到匹配的剧集' : '暂无剧集列表'}
@@ -326,11 +338,12 @@ export function PlayerPlaylistPanel({
         </div>
       ) : (
         versionsToSwitch.length === 0 && (
-          <div className="flex flex-1 items-center justify-center px-4 text-center text-xs text-white/40">
+          <div className="flex items-center justify-center px-4 py-8 text-center text-xs text-white/40">
             暂无可切换的内容
           </div>
         )
       )}
+      </div>
     </div>
   )
 }

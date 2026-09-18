@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Check, ChevronDown, ChevronRight, Eye, EyeOff, Film, Hash, KeyRound, Loader2, MessageSquareText, RefreshCw, Search, Server, Settings2, Sparkles, Tag, X } from 'lucide-react'
 
 import type { DanmakuAnime, DanmakuEpisode, DanmakuLoadedInfo } from '../api/danmaku'
-import { PLAYER_DRAWER, PLAYER_ICON_BUTTON, PLAYER_PANEL_HEADER } from './playerTheme'
+import { PLAYER_DRAWER, PLAYER_ICON_BUTTON, PLAYER_PANEL_HEADER, PLAYER_SHEET, PLAYER_SHEET_BODY, PLAYER_SHEET_HEADER } from './playerTheme'
 
 // PlayerDanmakuPanel — the on-player danmaku control panel. It displays
 // the matched danmaku details (anime title, episode title, comment count,
@@ -56,6 +56,11 @@ type PlayerDanmakuPanelProps = {
   danmakuInfo?: DanmakuLoadedInfo | null
   onSelectEpisode: (episodeId: number, animeTitle: string, episodeTitle: string) => void
   onResetAuto: () => void
+  /**
+   * 竖屏剧场模式：弹幕面板改为视频区底部的动作面板，而不是右侧抽屉，
+   * 窄屏下搜索框与滑杆不再被压扁。
+   */
+  theater?: boolean
 }
 
 export function PlayerDanmakuPanel({
@@ -90,6 +95,7 @@ export function PlayerDanmakuPanel({
   danmakuInfo,
   onSelectEpisode,
   onResetAuto,
+  theater = false,
 }: PlayerDanmakuPanelProps) {
   const [draft, setDraft] = useState(search)
   const [advancedOpen, setAdvancedOpen] = useState(false)
@@ -201,9 +207,13 @@ export function PlayerDanmakuPanel({
       onClick={(e) => e.stopPropagation()}
       onPointerDown={(e) => e.stopPropagation()}
       onPointerUp={(e) => e.stopPropagation()}
-      className={`absolute inset-y-0 right-0 z-30 ${PLAYER_DRAWER}`}
+      className={
+        theater
+          ? `absolute inset-x-0 bottom-0 z-40 ${PLAYER_SHEET}`
+          : `absolute inset-y-0 right-0 z-30 ${PLAYER_DRAWER}`
+      }
     >
-      <div className={PLAYER_PANEL_HEADER}>
+      <div className={theater ? PLAYER_SHEET_HEADER : PLAYER_PANEL_HEADER}>
         <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
           <MessageSquareText size={16} className="shrink-0 text-rose-400" />
           <span className="truncate">弹幕设置</span>
@@ -214,7 +224,7 @@ export function PlayerDanmakuPanel({
         </button>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3.5">
+      <div className={theater ? PLAYER_SHEET_BODY : 'min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3.5'}>
       {/* 弹幕总开关。从操作栏的「弹」按钮直接进来就到了这里，所以这一项就是
           用户找的「开关弹幕」；文案跟旧的按钮提示保持一致，避免换个说法让人找不到。 */}
       <label className="mb-3 flex cursor-pointer items-center justify-between rounded-lg bg-white/5 px-2.5 py-2 text-sm transition hover:bg-white/10">

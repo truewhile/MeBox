@@ -28,6 +28,22 @@ export const PLAYER_POPOVER =
 export const PLAYER_DRAWER =
   `flex h-full w-[88%] flex-col border-white/10 ${PANEL_BG} text-white ${PANEL_SHADOW} backdrop-blur-xl sm:w-[380px] sm:border-l`
 
+/**
+ * 底部动作面板（竖屏剧场模式）：贴着视频区底部向上弹出，内容最多占
+ * 视频区高度的 72%，留出一些画面可见；底部垫上安全区高度，避免
+ * iPhone 小横条遮挡最后一行选项。
+ */
+export const PLAYER_SHEET =
+  `z-40 flex max-h-[72%] min-h-[8rem] w-full flex-col overflow-hidden rounded-t-2xl border border-white/10 border-b-0 ${PANEL_BG} text-white ${PANEL_SHADOW} backdrop-blur-xl`
+
+/** 底部动作面板的标题栏（带关闭按钮）。 */
+export const PLAYER_SHEET_HEADER =
+  'flex shrink-0 items-center justify-between gap-2 border-b border-white/10 px-4 py-2.5'
+
+/** 底部动作面板的可滚动内容区，底部垫上安全区高度。 */
+export const PLAYER_SHEET_BODY =
+  'min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))] pt-1'
+
 /** 操作栏里的图标按钮。所有图标按钮共用同一尺寸与悬停反馈，排在一起才整齐。 */
 export const PLAYER_ICON_BUTTON =
   'flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-white/85 transition hover:bg-white/15 hover:text-white disabled:cursor-not-allowed disabled:text-white/30 disabled:hover:bg-transparent sm:h-8 sm:w-8'

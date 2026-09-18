@@ -156,6 +156,11 @@ function buildSubtitleRenderGroups(
 
 type PlayerVideoStageProps = {
   media: Media | null
+  /**
+   * 竖屏剧场模式：舞台不再全屏居中，而是贴顶按 16:9 自适应高度；
+   * 弹层改为底部动作面板，避免右侧抽屉与悬浮小弹层在窄屏下被裁剪。
+   */
+  theater?: boolean
   /** 媒体元数据加载失败提示（非空时替代「加载中」展示）。 */
   loadError?: string
   playerError: string
@@ -234,6 +239,7 @@ type PlayerVideoStageProps = {
 
 export function PlayerVideoStage({
   media,
+  theater = false,
   loadError,
   playerError,
   subs,
@@ -725,12 +731,22 @@ export function PlayerVideoStage({
   const assTrack = subtitleIndex >= 0 ? subs[subtitleIndex] : undefined
   // VR 模式下画面由 WebGL 画布输出，舞台窗口本身就是「镜头」，
   // 不再按视频宽高比留黑边。
+  //
+  // 竖屏剧场模式（theater）：舞台不再全屏居中，视频贴顶按容器宽度
+  // 16:9 自适应高度，下方留给标题/选集/简介内容区。stage 本体的
+  // 高度只包住视频区，控制栏与弹层都相对这块区域定位。
   const wrapperStyle = vr360
     ? {
         width: '100%',
         height: '100%',
       }
-    : videoRatio
+    : theater
+      ? {
+          aspectRatio: '16 / 9',
+          width: '100%',
+          maxHeight: '100%',
+        }
+      : videoRatio
       ? {
           aspectRatio: `${videoRatio}`,
           width: isWiderThanStage ? '100%' : 'auto',
@@ -747,7 +763,11 @@ export function PlayerVideoStage({
     <div
       ref={stageRef}
       data-player-stage
-      className="relative flex h-full w-full flex-1 items-center justify-center overflow-hidden bg-black"
+      className={
+        theater
+          ? 'relative flex w-full shrink-0 items-start justify-center overflow-hidden bg-black'
+          : 'relative flex h-full w-full flex-1 items-center justify-center overflow-hidden bg-black'
+      }
       onPointerDown={handleStagePointerDown}
       onPointerMove={handleStagePointerMove}
       onMouseLeave={() => setLockHovered(false)}
@@ -851,6 +871,7 @@ export function PlayerVideoStage({
             ) : null}
           </div>
           <PlayerControls
+            theater={theater}
             videoRef={videoRef}
             volume={playerVolume}
             onVolumeChange={onPlayerVolumeChange}

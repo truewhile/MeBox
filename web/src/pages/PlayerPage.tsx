@@ -39,6 +39,8 @@ import { classifyDirectPlayError } from './directPlayError'
 import { apiErrorMessage } from './StrmManagePage'
 import { PlayerTopBar } from './PlayerTopBar'
 import { PlayerVideoStage } from './PlayerVideoStage'
+import { PlayerMobileTheaterInfo } from '../components/PlayerMobileTheaterInfo'
+import { useIsMobileTheater } from '../hooks/useIsMobileTheater'
 import { PlayerDanmakuPanel } from '../components/PlayerDanmakuPanel'
 import { PlayerPlaylistPanel } from '../components/PlayerPlaylistPanel'
 import {
@@ -1655,6 +1657,10 @@ export function PlayerPage() {
     media?.title?.trim() ||
     ''
 
+  // 竖屏手机走剧场布局：视频贴顶按 16:9 自适应，下方是标题/选集/简介。
+  // 桌面端与横屏手机保持原来的全屏居中沉浸式布局。
+  const isMobileTheater = useIsMobileTheater()
+
   return (
     <div className="relative flex h-full w-full flex-1 flex-col overflow-hidden bg-black">
       <PlayerTopBar
@@ -1667,6 +1673,7 @@ export function PlayerPage() {
         onBack={goBack}
       />
       <PlayerVideoStage
+        theater={isMobileTheater}
         media={media}
         loadError={loadError}
         playerError={playerError}
@@ -1730,6 +1737,7 @@ export function PlayerPage() {
         onDismissVr360Guide={dismissVr360Guide}
         playlistPanel={
           <PlayerPlaylistPanel
+            theater={isMobileTheater}
             open={playlistOpen}
             onClose={() => setPlaylistOpen(false)}
             currentMediaId={media?.id ?? ''}
@@ -1741,6 +1749,7 @@ export function PlayerPage() {
         }
         danmakuPanel={
           <PlayerDanmakuPanel
+            theater={isMobileTheater}
             open={danmakuOpen}
             onClose={() => setDanmakuOpen(false)}
             enabled={danmakuEnabled}
@@ -1775,6 +1784,22 @@ export function PlayerPage() {
           />
         }
       />
+      {isMobileTheater ? (
+        <PlayerMobileTheaterInfo
+          media={media?.id === id ? media : null}
+          title={topBarTitle}
+          subtitle={topBarSubtitle}
+          playbackModeLabel={playbackModeLabel}
+          qualityLabel={showQuality ? qualityLabel : undefined}
+          episodes={playlistEpisodes}
+          currentMediaId={media?.id ?? ''}
+          currentEpisodeIndex={currentEpisodeIndex}
+          currentVersions={currentVersions}
+          onSelectEpisode={playEpisode}
+          onSelectVersion={switchVersion}
+          onOpenPlaylist={togglePlaylistOpen}
+        />
+      ) : null}
     </div>
   )
 }
