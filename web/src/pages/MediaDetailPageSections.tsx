@@ -85,7 +85,7 @@ export function MediaDetailBackButton({ onBack }: { onBack: () => void }) {
         className="btn-ghost gap-2 bg-white/80 shadow-sm backdrop-blur hover:bg-white"
       >
         <ArrowLeft size={16} />
-        <span>返回媒体库</span>
+        <span>返回</span>
       </button>
     </div>
   )

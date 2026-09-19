@@ -74,7 +74,7 @@ export function FavouritesPage() {
       {items.length > 0 && (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
           {items.map((m) => (
-            <MediaCard key={m.id} media={m} />
+            <MediaCard key={m.id} media={m} linkState={{ from: '/favourites' }} />
           ))}
         </div>
       )}

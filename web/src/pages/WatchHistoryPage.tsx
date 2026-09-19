@@ -127,6 +127,7 @@ export function WatchHistoryPage() {
               <div className="min-w-0 flex-1 space-y-1">
                 <Link
                   to={`/media/${m.id}`}
+                  state={{ from: '/history' }}
                   className="block truncate font-medium text-ink-600 transition hover:text-brand-500"
                 >
                   {m.title}
@@ -150,6 +151,7 @@ export function WatchHistoryPage() {
               <div className="flex w-full items-center gap-2 sm:w-auto sm:shrink-0">
                 <Link
                   to={`/play/${m.id}`}
+                  state={{ from: '/history' }}
                   className="neon-button !px-3 !py-1 !text-xs"
                 >
                   <Play size={12} /> 继续

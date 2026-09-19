@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react'
-import type { NavigateFunction } from 'react-router-dom'
+import { useLocation, type NavigateFunction } from 'react-router-dom'
 import toast from 'react-hot-toast'
 
 import { api } from '../api/client'
@@ -10,6 +10,8 @@ import { useEpisodeArtworkPreference } from '../hooks/useEpisodeArtworkPreferenc
 import type { Media } from '../types'
 import { seasonSortOrder } from '../utils/groupSeries'
 import { mediaLibraryBackTarget } from './MediaDetailPageModel'
+
+type MediaDetailLocationState = { from?: string } | null
 
 interface MediaDetailPageStateParams {
   id: string
@@ -29,6 +31,7 @@ interface MediaDetailActionsParams {
   media: Media | null
   scrapeEpisodeArtwork: boolean
   navigate: NavigateFunction
+  backFrom: string | undefined
   refresh: () => Promise<void>
   setFavourite: Dispatch<SetStateAction<boolean>>
 }
@@ -54,10 +57,13 @@ export function useMediaDetailPageState({ id, navigate }: MediaDetailPageStatePa
     setEpisodes,
     setLoadingEpisodes,
   })
+  const location = useLocation()
+  const backFrom = (location.state as MediaDetailLocationState)?.from
   const actions = useMediaDetailActions({
     media,
     scrapeEpisodeArtwork,
     navigate,
+    backFrom,
     refresh,
     setFavourite,
   })
@@ -173,10 +179,14 @@ function useMediaDetailActions({
   media,
   scrapeEpisodeArtwork,
   navigate,
+  backFrom,
   refresh,
   setFavourite,
 }: MediaDetailActionsParams) {
-  const goBack = useCallback(() => goBackFromMediaDetail(media, navigate), [media, navigate])
+  const goBack = useCallback(
+    () => goBackFromMediaDetail(media, navigate, backFrom),
+    [backFrom, media, navigate],
+  )
   const toggleFavourite = useCallback(
     () => toggleMediaFavourite(media, setFavourite),
     [media, setFavourite],
@@ -188,13 +198,34 @@ function useMediaDetailActions({
   const reprobe = useCallback(() => reprobeMedia(media, refresh), [media, refresh])
   const exportNFO = useCallback(() => exportMediaNFO(media), [media])
   const deleteMedia = useCallback(
-    () => deleteMediaFromLibrary(media, navigate),
-    [media, navigate],
+    () => deleteMediaFromLibrary(media, navigate, backFrom),
+    [backFrom, media, navigate],
   )
   return { goBack, toggleFavourite, rescrape, reprobe, exportNFO, deleteMedia }
 }
 
-function goBackFromMediaDetail(media: Media | null, navigate: NavigateFunction, replace = false): void {
+function canNavigateHistoryBack(): boolean {
+  if (typeof window === 'undefined') return false
+  const idx = (window.history.state as { idx?: number } | null)?.idx
+  return typeof idx === 'number' ? idx > 0 : window.history.length > 1
+}
+
+function goBackFromMediaDetail(
+  media: Media | null,
+  navigate: NavigateFunction,
+  from: string | undefined,
+  replace = false,
+): void {
+  // Prefer the explicit return path (e.g. Favourites → Detail), then browser
+  // history, and only fall back to the owning library for direct/deep links.
+  if (typeof from === 'string' && from.length > 0) {
+    navigate(from, replace ? { replace: true } : undefined)
+    return
+  }
+  if (canNavigateHistoryBack()) {
+    navigate(-1)
+    return
+  }
   if (!media) {
     navigate('/libraries')
     return
@@ -259,7 +290,11 @@ async function exportMediaNFO(media: Media | null): Promise<void> {
   }
 }
 
-async function deleteMediaFromLibrary(media: Media | null, navigate: NavigateFunction): Promise<void> {
+async function deleteMediaFromLibrary(
+  media: Media | null,
+  navigate: NavigateFunction,
+  from: string | undefined,
+): Promise<void> {
   if (!media) return
   const result = await confirmActionResult({
     title: '删除媒体',
@@ -275,7 +310,7 @@ async function deleteMediaFromLibrary(media: Media | null, navigate: NavigateFun
     return
   }
   toast.success(result.checked ? '已删除媒体及本地文件' : '已从媒体库删除')
-  goBackFromMediaDetail(media, navigate, true)
+  goBackFromMediaDetail(media, navigate, from, true)
 }
 
 function apiErrorMessage(err: unknown, fallback: string): string {

@@ -10,13 +10,14 @@ const ACTION_OVERLAY_CLASS =
 // memo：父级状态变化（如轮播切图、其它卡片操作）不再级联重渲染所有卡片。
 // 注意 actions/renderActions 必须引用稳定（用 renderActions 传函数）memo 才生效。
 export const MediaCard = memo(function MediaCard({
-  media, progress, count, rating, linkTo, onClick, actions, renderActions, compact,
+  media, progress, count, rating, linkTo, linkState, onClick, actions, renderActions, compact,
 }: {
   media: Media
   progress?: number
   count?: number
   rating?: number
   linkTo?: string
+  linkState?: { from?: string }
   onClick?: () => void
   actions?: ReactNode
   renderActions?: (media: Media) => ReactNode
@@ -169,7 +170,7 @@ export const MediaCard = memo(function MediaCard({
   if (actionContent) {
     return (
       <div className="group relative block">
-        <Link to={href} className="block">
+        <Link to={href} state={linkState} className="block">
           {card}
         </Link>
         <div className={ACTION_OVERLAY_CLASS}>
@@ -180,7 +181,7 @@ export const MediaCard = memo(function MediaCard({
   }
 
   return (
-    <Link to={href} className="group block">
+    <Link to={href} state={linkState} className="group block">
         {card}
     </Link>
   )
