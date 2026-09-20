@@ -54,38 +54,63 @@ func (p *ImageProxy) canUseExternalImageFallback() bool {
 	return ok
 }
 
-func (p *ImageProxy) fetchRemoteImageOnce(ctx context.Context, raw, host string, candidate remoteImageFetchClient) ([]byte, string, string, error) {
+// remoteImageFetchResult 是一次成功拉取的结果。正常路径图片已经流式落盘
+// （data 为空，调用方从缓存文件下发/缩放）；只有缓存目录不可写、退回内存
+// 缓冲时才带 data，保证图片仍能发给客户端。
+type remoteImageFetchResult struct {
+	data        []byte
+	contentType string
+}
+
+// fetchRemoteImageOnce 拉取一次上游图片并写入 cachePath。响应体直接流式落盘，
+// 不再整张读进内存。
+func (p *ImageProxy) fetchRemoteImageOnce(ctx context.Context, raw, host string, candidate remoteImageFetchClient, cachePath, failPath string) (remoteImageFetchResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, raw, nil)
 	if err != nil {
 		p.log.Warn("imageproxy: build request failed", zap.String("url", redactSensitiveURL(raw)), zap.Error(redactSensitiveError(err)))
-		return nil, "", "", errImageProxyRequestSetup
+		return remoteImageFetchResult{}, errImageProxyRequestSetup
 	}
 	applyRemoteImageHeaders(req, host, raw)
 
 	resp, err := candidate.client.Do(req)
 	if err != nil {
 		logImageFetchError(p.log, "imageproxy: upstream fetch failed", host, candidate.name, err)
-		return nil, "", "", err
+		return remoteImageFetchResult{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		p.log.Warn("imageproxy: upstream returned non-OK", zap.String("host", host), zap.String("client", candidate.name), zap.String("status", resp.Status))
-		return nil, "", "", errors.New("upstream returned " + resp.Status)
+		return remoteImageFetchResult{}, errors.New("upstream returned " + resp.Status)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if err := p.streamImageToCache(cachePath, failPath, resp.Body); err != nil {
+		if errors.Is(err, errImageCacheUnavailable) {
+			// 缓存目录不可写：响应体还没读，退回内存缓冲。
+			return p.bufferRemoteImage(resp, host, candidate.name, cachePath, failPath)
+		}
+		logImageFetchError(p.log, "imageproxy: stream image failed", host, candidate.name, err)
+		return remoteImageFetchResult{}, err
+	}
+	return remoteImageFetchResult{}, nil
+}
+
+// bufferRemoteImage 在缓存不可用时把响应体读进内存，校验为图片后尽力写入
+// 缓存（失败也不影响本次下发）。
+func (p *ImageProxy) bufferRemoteImage(resp *http.Response, host, client, cachePath, failPath string) (remoteImageFetchResult, error) {
+	data, err := io.ReadAll(io.LimitReader(resp.Body, imageProxyMaxDownloadBytes))
 	if err != nil || len(data) == 0 {
-		p.log.Warn("imageproxy: read upstream body failed", zap.String("host", host), zap.String("client", candidate.name), zap.Error(redactSensitiveError(err)))
+		p.log.Warn("imageproxy: read upstream body failed", zap.String("host", host), zap.String("client", client), zap.Error(redactSensitiveError(err)))
 		if err == nil {
 			err = errors.New("upstream image body is empty")
 		}
-		return nil, "", "", err
+		return remoteImageFetchResult{}, err
 	}
 	ctype, ok := validImageContentType(data)
 	if !ok {
-		p.log.Warn("imageproxy: upstream returned non-image content", zap.String("host", host), zap.String("client", candidate.name), zap.String("content_type", resp.Header.Get("Content-Type")))
-		return nil, "", "", errImageProxyNonImageContent
+		p.log.Warn("imageproxy: upstream returned non-image content", zap.String("host", host), zap.String("client", client), zap.String("content_type", resp.Header.Get("Content-Type")))
+		return remoteImageFetchResult{}, errImageProxyNonImageContent
 	}
-	return data, ctype, resp.Header.Get("Content-Length"), nil
+	p.writeImageCache(cachePath, failPath, "img-*.tmp", data)
+	return remoteImageFetchResult{data: data, contentType: ctype}, nil
 }
 
 func logImageFetchError(log *zap.Logger, message, host, client string, err error) {

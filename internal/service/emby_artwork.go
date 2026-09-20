@@ -147,10 +147,18 @@ func (e *EmbyService) ImageInfos(ctx context.Context, id string) []map[string]an
 			continue
 		}
 		seen[raw] = true
+		// ImageTag 让客户端判断自己缓存的图片是否还有效：远程条目的真实
+		// ImageTags 会随远端换图变化，拿不到时才退化为条目 ID（恒定值）。
+		tag := id
+		if e.remote != nil {
+			if remoteTag := e.remote.RemoteImageTagOfEncodedID(ctx, id, imageType); remoteTag != "" {
+				tag = remoteTag
+			}
+		}
 		out = append(out, map[string]any{
 			"ImageType":  imageType,
 			"ImageIndex": 0,
-			"ImageTag":   id,
+			"ImageTag":   tag,
 		})
 	}
 	return out

@@ -39,7 +39,7 @@ type SchedulerService struct {
 	cacheDir         string
 	now              func() time.Time
 
-	imagesMaxSizeMBProvider func() int
+	imagesPolicyProvider func() ImageCachePolicy
 
 	mu     sync.Mutex
 	stopCh chan struct{}
@@ -59,15 +59,22 @@ func (s *SchedulerService) SetOrganizePipeline(pipeline *OrganizePipelineService
 	s.organizePipeline = pipeline
 }
 
-func (s *SchedulerService) SetImagesMaxSizeMBProvider(fn func() int) {
-	s.imagesMaxSizeMBProvider = fn
+// ImageCachePolicy 是一次图片缓存清理要用的策略（全部为 0 表示不做任何清理）。
+type ImageCachePolicy struct {
+	TotalBytes     int64
+	OriginalsBytes int64
+	OriginalsAge   time.Duration
 }
 
-func (s *SchedulerService) imagesMaxSizeMB() int {
-	if s.imagesMaxSizeMBProvider != nil {
-		return s.imagesMaxSizeMBProvider()
+func (s *SchedulerService) SetImageCachePolicyProvider(fn func() ImageCachePolicy) {
+	s.imagesPolicyProvider = fn
+}
+
+func (s *SchedulerService) imageCachePolicy() ImageCachePolicy {
+	if s.imagesPolicyProvider != nil {
+		return s.imagesPolicyProvider()
 	}
-	return 0
+	return ImageCachePolicy{}
 }
 
 // scheduledJob is one recurring task.

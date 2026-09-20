@@ -4,53 +4,80 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
-
-	"go.uber.org/zap"
 )
 
 var errImageProxyRequestSetup = errors.New("image proxy request setup failed")
 var errImageProxyNonImageContent = errors.New("upstream returned non-image content")
+
+// prefetchCardResizeOptions 对应前端 ARTWORK.posterCard（见 web/src/api/client.ts）：
+// 卡片是海报墙最常请求的档位，刮削阶段预生成它能让首个列表请求直接命中缓存。
+// 若前端调整该预设，这里只是白生成一份用不到的档位（约几十 KB），不影响正确性。
+var prefetchCardResizeOptions = imageResizeOptions{MaxWidth: 480, MaxHeight: 600, Quality: 80}
 
 func (p *ImageProxy) PrefetchRemote(ctx context.Context, raw string) error {
 	_, _, err := p.Fetch(ctx, raw)
 	return err
 }
 
+// PrefetchCardVariant 预取原图后再离线生成卡片档位的缩略图。刮削是后台任务，
+// 在这里做掉解码可以把海报墙首屏的 CPU 抖动移到请求路径之外。
+//
+// 预生成失败不影响预取结果：预取的成功含义是「图片可达」（刮削据此决定是否
+// 替换旧图），而缩略图只是优化，客户端首次请求时会自己生成。
+func (p *ImageProxy) PrefetchCardVariant(ctx context.Context, raw string) error {
+	if err := p.PrefetchRemote(ctx, raw); err != nil {
+		return err
+	}
+	if !isHTTPish(raw) {
+		return nil
+	}
+	_, cachePath, _ := p.remoteImageCachePathsForValidated(raw)
+	if err := p.ensureResizeCache(ctx, cachePath, prefetchCardResizeOptions); err != nil {
+		p.warn("imageproxy: prefetch card variant failed", err)
+	}
+	return nil
+}
+
 func (p *ImageProxy) RemoveCached(raw string) error {
 	if !isHTTPish(raw) {
 		return nil
 	}
-	_, cachePath, failPath, err := p.remoteImageCachePaths(raw)
-	if err != nil {
+	if _, err := p.validateURL(raw); err != nil {
 		return nil
 	}
-	if err := os.Remove(cachePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+	var firstErr error
+	for _, paths := range p.remoteImageCachePathsEveryPool(raw) {
+		cachePath, failPath := paths[1], paths[2]
+		if err := os.Remove(cachePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			firstErr = err
+		}
+		if err := os.Remove(failPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			firstErr = err
+		}
 	}
-	if err := os.Remove(failPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
+	return firstErr
 }
 
 func (p *ImageProxy) RemoveFailed(raw string) error {
 	if !isHTTPish(raw) {
 		return nil
 	}
-	_, _, failPath, err := p.remoteImageCachePaths(raw)
-	if err != nil {
+	if _, err := p.validateURL(raw); err != nil {
 		return nil
 	}
-	if err := os.Remove(failPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+	var firstErr error
+	for _, paths := range p.remoteImageCachePathsEveryPool(raw) {
+		failPath := paths[2]
+		if err := os.Remove(failPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			firstErr = err
+		}
 	}
-	return nil
+	return firstErr
 }
 
 // Serve writes the requested image to w. Caller is expected to validate
@@ -90,7 +117,14 @@ func (p *ImageProxy) serveRemoteImage(ctx context.Context, w http.ResponseWriter
 	// 已配置的远程 Emby 挂载：把尺寸直接转发给远端生成缩略图，缓存键也用
 	// 带尺寸的地址，这样不同尺寸各自缓存互不覆盖。
 	fetchURL := p.upstreamImageFetchURL(raw, opts)
-	key, cachePath, failPath := p.remoteImageCachePathsForValidated(fetchURL)
+	// 尺寸被转发给挂载的远端时，上游返回的就是客户端要的最终尺寸成品，归入
+	// 成品池长期保留；其他上游返回的是原图，只是生成各种尺寸的原料，归入
+	// 原图池（小配额 + 短保留）。
+	pool := imageOriginalCacheSubdir
+	if fetchURL != raw {
+		pool = imageRenditionCacheSubdir
+	}
+	key, cachePath, failPath := p.remoteImageCachePathsInPool(fetchURL, pool)
 	forceRefresh := r.URL.Query().Get("refresh") != ""
 	p.removeUnusableImageCache(cachePath, failPath)
 	if !forceRefresh && p.serveCachedImage(w, r, key, cachePath, opts) {
@@ -98,7 +132,7 @@ func (p *ImageProxy) serveRemoteImage(ctx context.Context, w http.ResponseWriter
 	}
 	// No negative caching: a previously failed fetch is retried on every
 	// subsequent request, so the image recovers as soon as upstream does.
-	data, ctype, contentLength, err := p.fetchAndCacheRemoteImageShared(ctx, fetchURL, host, cachePath, failPath)
+	result, err := p.fetchAndCacheRemoteImageShared(ctx, fetchURL, host, cachePath, failPath)
 	if err != nil {
 		if forceRefresh && p.serveCachedImage(w, r, key, cachePath, opts) {
 			return nil
@@ -114,17 +148,16 @@ func (p *ImageProxy) serveRemoteImage(ctx context.Context, w http.ResponseWriter
 	if opts.active() && p.serveResizedFromFile(w, r, cachePath, opts) {
 		return nil
 	}
-	w.Header().Set("Content-Type", ctype)
-	if contentLength != "" {
-		w.Header().Set("Content-Length", contentLength)
+	// 缓存目录不可写时的内存兜底：图片只在本次响应里直出，不落盘。
+	if len(result.data) > 0 {
+		w.Header().Set("Content-Type", result.contentType)
+		w.Header().Set("Cache-Control", imageBrowserCacheControl)
+		http.ServeContent(w, r, key, time.Now(), bytes.NewReader(result.data))
+		return nil
 	}
-	modTime := time.Now()
-	if stat, err := os.Stat(cachePath); err == nil && stat.Size() > 0 {
-		modTime = stat.ModTime()
-		w.Header().Set("ETag", imageFileETag(key, stat))
+	if !p.serveCachedImage(w, r, key, cachePath, opts) {
+		serveCachedPlaceholder(w)
 	}
-	w.Header().Set("Cache-Control", imageBrowserCacheControl)
-	http.ServeContent(w, r, key, modTime, bytes.NewReader(data))
 	return nil
 }
 
@@ -140,64 +173,32 @@ func (p *ImageProxy) serveCachedImage(w http.ResponseWriter, r *http.Request, ke
 func (p *ImageProxy) removeUnusableImageCache(cachePath, failPath string) {
 	// 只读取文件头判断缓存是否可用。旧实现每次命中远程图片缓存都会把整个
 	// 原图读进内存再丢弃，电视端批量加载海报时会产生大量无意义的磁盘 I/O。
-	file, err := os.Open(cachePath) // #nosec G304 -- cachePath is SHA-derived under cacheDir.
-	if err != nil {
+	if _, err := os.Stat(cachePath); err != nil {
 		return
 	}
-	stat, err := file.Stat()
-	if err != nil || stat.IsDir() || stat.Size() <= 0 {
-		_ = file.Close()
+	if err := cachedImageFileValid(cachePath); err != nil {
 		_ = os.Remove(cachePath)
 		_ = os.Remove(failPath)
-		return
 	}
-	headerSize := 512
-	if stat.Size() < int64(headerSize) {
-		headerSize = int(stat.Size())
-	}
-	header := make([]byte, headerSize)
-	n, readErr := io.ReadFull(file, header)
-	_ = file.Close()
-	if readErr != nil && readErr != io.ErrUnexpectedEOF {
-		_ = os.Remove(cachePath)
-		_ = os.Remove(failPath)
-		return
-	}
-	header = header[:n]
-	// A transparent placeholder is exactly 67 bytes; checking the header alone
-	// is enough for the normal image cache entries (they are much larger but
-	// detectContentType only inspects the same leading 512 bytes anyway).
-	// Close the handle before deleting: Windows refuses to delete an open file.
-	if n > 0 && isImageContentType(detectContentType(header)) &&
-		!(n == len(transparent1x1PNG) && bytes.Equal(header, transparent1x1PNG)) {
-		return
-	}
-	_ = os.Remove(cachePath)
-	_ = os.Remove(failPath)
 }
 
-func (p *ImageProxy) fetchAndCacheRemoteImage(ctx context.Context, raw, host, cachePath, failPath string) ([]byte, string, string, error) {
-	if err := os.MkdirAll(p.cacheDir, 0o750); err != nil {
-		p.log.Warn("imageproxy: mkdir failed", zap.String("dir", p.cacheDir), zap.Error(err))
-		return nil, "", "", errImageProxyRequestSetup
-	}
+func (p *ImageProxy) fetchAndCacheRemoteImage(ctx context.Context, raw, host, cachePath, failPath string) (remoteImageFetchResult, error) {
 	var lastErr error
 	for _, candidate := range p.remoteImageFetchClients(host) {
-		data, ctype, contentLength, err := p.fetchRemoteImageOnce(ctx, raw, host, candidate)
+		result, err := p.fetchRemoteImageOnce(ctx, raw, host, candidate, cachePath, failPath)
 		if err == nil {
-			p.writeImageCache(cachePath, failPath, "img-*.tmp", data)
-			return data, ctype, contentLength, nil
+			return result, nil
 		}
 		if errors.Is(err, errImageProxyRequestSetup) {
-			return nil, "", "", err
+			return remoteImageFetchResult{}, err
 		}
 		lastErr = err
 	}
 	if p.canUseExternalImageFallback() && isDoubanImageHost(host) {
-		data, ctype, contentLength, err := fetchRemoteImageWithCurl(ctx, raw, host)
+		data, ctype, _, err := fetchRemoteImageWithCurl(ctx, raw, host)
 		if err == nil {
 			p.writeImageCache(cachePath, failPath, "img-*.tmp", data)
-			return data, ctype, contentLength, nil
+			return remoteImageFetchResult{data: data, contentType: ctype}, nil
 		}
 		logImageFetchError(p.log, "imageproxy: curl fallback failed", host, "curl", err)
 		lastErr = err
@@ -206,41 +207,27 @@ func (p *ImageProxy) fetchAndCacheRemoteImage(ctx context.Context, raw, host, ca
 	if lastErr == nil {
 		lastErr = errors.New("upstream image fetch failed")
 	}
-	return nil, "", "", redactSensitiveError(lastErr)
-}
-
-type sharedRemoteImageResult struct {
-	data          []byte
-	contentType   string
-	contentLength string
+	return remoteImageFetchResult{}, redactSensitiveError(lastErr)
 }
 
 // fetchAndCacheRemoteImageShared coalesces concurrent requests for the same
 // upstream image. A poster can appear in the hero, a shelf and the detail page
 // at the same time; without this guard every resize variant may fetch the same
 // original before the first cache write finishes.
-func (p *ImageProxy) fetchAndCacheRemoteImageShared(ctx context.Context, raw, host, cachePath, failPath string) ([]byte, string, string, error) {
+func (p *ImageProxy) fetchAndCacheRemoteImageShared(ctx context.Context, raw, host, cachePath, failPath string) (remoteImageFetchResult, error) {
 	value, err, _ := p.fetchGroup.Do(cachePath, func() (any, error) {
 		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
 		defer cancel()
-		data, contentType, contentLength, err := p.fetchAndCacheRemoteImage(loadCtx, raw, host, cachePath, failPath)
-		if err != nil {
-			return nil, err
-		}
-		return sharedRemoteImageResult{
-			data:          data,
-			contentType:   contentType,
-			contentLength: contentLength,
-		}, nil
+		return p.fetchAndCacheRemoteImage(loadCtx, raw, host, cachePath, failPath)
 	})
 	if err != nil {
-		return nil, "", "", err
+		return remoteImageFetchResult{}, err
 	}
-	result, ok := value.(sharedRemoteImageResult)
+	result, ok := value.(remoteImageFetchResult)
 	if !ok {
-		return nil, "", "", errors.New("upstream image fetch failed")
+		return remoteImageFetchResult{}, errors.New("upstream image fetch failed")
 	}
-	return result.data, result.contentType, result.contentLength, nil
+	return result, nil
 }
 
 // Fetch pulls a remote image and returns bytes plus Content-Type using cache.
@@ -262,8 +249,19 @@ func (p *ImageProxy) Fetch(ctx context.Context, raw string) ([]byte, string, err
 	}
 	// No negative caching: a previously failed fetch is retried on every
 	// subsequent request, so the image recovers as soon as upstream does.
-	data, ctype, _, err := p.fetchAndCacheRemoteImage(ctx, raw, host, cachePath, failPath)
-	return data, ctype, err
+	result, err := p.fetchAndCacheRemoteImage(ctx, raw, host, cachePath, failPath)
+	if err != nil {
+		return nil, "", err
+	}
+	// 正常路径只落盘，这里按需读回（调用方需要字节）。
+	if len(result.data) > 0 {
+		return result.data, result.contentType, nil
+	}
+	data, err := os.ReadFile(cachePath) // #nosec G304 -- cachePath is SHA-derived under cacheDir.
+	if err != nil || len(data) == 0 {
+		return nil, "", errors.New("cached image is unreadable")
+	}
+	return data, detectContentType(data), nil
 }
 
 // writeImageCache atomically writes the fetched original. The global mutex is
@@ -271,6 +269,9 @@ func (p *ImageProxy) Fetch(ctx context.Context, raw string) ([]byte, string, err
 // os.Rename is atomic, so the lock only serialized multi-megabyte disk writes
 // and made one poster's write block every other image in flight.
 func (p *ImageProxy) writeImageCache(cachePath, failPath, pattern string, data []byte) {
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o750); err != nil {
+		return
+	}
 	tmp, tmpErr := os.CreateTemp(p.cacheDir, pattern)
 	if tmpErr != nil {
 		return

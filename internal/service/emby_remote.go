@@ -79,12 +79,22 @@ type EmbyRemoteService struct {
 
 	personMu     sync.RWMutex
 	personImages map[string]embyRemotePersonImageRef
+
+	// imageTagMu 保护 imageTags：远程条目图片标签缓存，键为
+	// imageTagKey(accountID, remoteID, imageType)。它让图片 URL 带上远端
+	// ImageTags，从而在远端换图后让本地磁盘缓存与客户端缓存一起失效
+	// （没有它时 URL 恒定，缩略图会永久停留在旧版本）。
+	imageTagMu sync.RWMutex
+	imageTags  map[string]string
 }
 
 type embyRemotePersonImageRef struct {
 	accountID string
 	remoteID  string
 }
+
+// embyRemoteMaxImageTags 限制图片标签映射的条目数，避免长期运行后无界增长。
+const embyRemoteMaxImageTags = 20000
 
 // NewEmbyRemoteService 构造远程 Emby 聚合服务。
 func NewEmbyRemoteService(cfg *config.Config, log *zap.Logger, repo *repository.Container, crypto *CryptoService) *EmbyRemoteService {
@@ -819,6 +829,7 @@ func (r *EmbyRemoteService) RemoteItem(ctx context.Context, mount *model.EmbyMou
 		var cached map[string]any
 		if r.cache.GetJSON(ctx, cacheKey, &cached) && len(cached) > 0 {
 			r.rememberRemotePeople(mount, cached)
+			r.rememberRemoteImageTags(embyRemoteAccountID(acct), cached)
 			return cached, nil
 		}
 	}
@@ -833,6 +844,7 @@ func (r *EmbyRemoteService) RemoteItem(ctx context.Context, mount *model.EmbyMou
 		return nil, err
 	}
 	r.rememberRemotePeople(mount, out)
+	r.rememberRemoteImageTags(embyRemoteAccountID(acct), out)
 	RewriteEmbyRemoteIDs(out, mount.ID)
 	if cacheKey != "" && len(out) > 0 {
 		r.cache.SetJSON(ctx, cacheKey, out, r.remoteMediaCacheTTL())
@@ -1153,6 +1165,150 @@ func rewriteSubtitleDeliveryURLs(src map[string]any, playURL string, cfg *EmbyRe
 	}
 }
 
+// embyRemoteImageTagType 归一化图片类型：Emby 的 Art 与 Backdrop 指同一张图，
+// 载荷里的 ImageTags 只会有 Primary / Backdrop 两个键。
+func embyRemoteImageTagType(imageType string) string {
+	switch strings.ToLower(strings.TrimSpace(imageType)) {
+	case "primary", "poster":
+		return "Primary"
+	case "backdrop", "art", "background":
+		return "Backdrop"
+	default:
+		return ""
+	}
+}
+
+// remoteItemImageTag 从远程条目载荷读取某一类图片的原始 tag。载荷可能已被
+// RewriteEmbyRemoteIDs 伪装过（tag 变成 embyremote~scope~tag），此处会还原。
+func remoteItemImageTag(item map[string]any, imageType string) string {
+	typ := embyRemoteImageTagType(imageType)
+	if item == nil || typ == "" {
+		return ""
+	}
+	var raw string
+	switch tags := item["ImageTags"].(type) {
+	case map[string]any:
+		raw = anyString(tags[typ])
+	case map[string]string:
+		raw = tags[typ]
+	}
+	if raw == "" && typ == "Backdrop" {
+		switch tags := item["BackdropImageTags"].(type) {
+		case []any:
+			if len(tags) > 0 {
+				raw = anyString(tags[0])
+			}
+		case []string:
+			if len(tags) > 0 {
+				raw = tags[0]
+			}
+		}
+	}
+	if _, original, ok := DecodeEmbyRemoteID(raw); ok {
+		return original
+	}
+	return strings.TrimSpace(raw)
+}
+
+// imageTagKey 是图片标签映射的键；不认识的图片类型返回空串（不记录）。
+func imageTagKey(accountID, remoteID, imageType string) string {
+	typ := embyRemoteImageTagType(imageType)
+	if typ == "" || strings.TrimSpace(remoteID) == "" || strings.TrimSpace(accountID) == "" {
+		return ""
+	}
+	return accountID + "|" + remoteID + "|" + typ
+}
+
+// rememberRemoteImageTagValue 记录单条图片标签（供 SeriesPrimaryImageTag 这类
+// 散落在载荷其他字段里的标签使用）。
+func (r *EmbyRemoteService) rememberRemoteImageTagValue(accountID, remoteID, imageType, tag string) {
+	if r == nil || strings.TrimSpace(tag) == "" {
+		return
+	}
+	if _, original, ok := DecodeEmbyRemoteID(tag); ok {
+		tag = original
+	}
+	key := imageTagKey(accountID, remoteID, imageType)
+	if key == "" {
+		return
+	}
+	r.imageTagMu.Lock()
+	defer r.imageTagMu.Unlock()
+	if r.imageTags == nil || len(r.imageTags) > embyRemoteMaxImageTags {
+		r.imageTags = make(map[string]string, 256)
+	}
+	r.imageTags[key] = tag
+}
+
+// rememberRemoteImageTags 记录载荷里出现的图片标签。载荷可以已被伪装。
+func (r *EmbyRemoteService) rememberRemoteImageTags(accountID string, item map[string]any) {
+	if r == nil || item == nil || strings.TrimSpace(accountID) == "" {
+		return
+	}
+	remoteID := remoteItemString(item, "Id")
+	if _, original, ok := DecodeEmbyRemoteID(remoteID); ok {
+		remoteID = original
+	}
+	if strings.TrimSpace(remoteID) == "" {
+		return
+	}
+	for _, imageType := range []string{"Primary", "Backdrop"} {
+		if tag := remoteItemImageTag(item, imageType); tag != "" {
+			r.rememberRemoteImageTagValue(accountID, remoteID, imageType, tag)
+		}
+	}
+}
+
+// remoteImageTag 查询已记录的图片标签；未知时返回空串（调用方退化为原行为）。
+func (r *EmbyRemoteService) remoteImageTag(accountID, remoteID, imageType string) string {
+	if r == nil {
+		return ""
+	}
+	key := imageTagKey(accountID, remoteID, imageType)
+	if key == "" {
+		return ""
+	}
+	r.imageTagMu.RLock()
+	defer r.imageTagMu.RUnlock()
+	return r.imageTags[key]
+}
+
+// remoteImageTagQuery 返回追加到远程图片地址后的 tag 查询片段（含 & 前缀）。
+// Emby 用 tag 作为图片 ETag/cache key：带上它之后，远端换图会改变 MeBox 的
+// 磁盘缓存键，缩略图与客户端缓存都会随之失效，而不是永久停留在旧版本。
+func (r *EmbyRemoteService) remoteImageTagQuery(accountID, remoteID, imageType string) string {
+	tag := r.remoteImageTag(accountID, remoteID, imageType)
+	if tag == "" {
+		return ""
+	}
+	return "&tag=" + url.QueryEscape(tag)
+}
+
+// RemoteImageTagOfEncodedID 按伪装 ID 解析已记录的图片标签，供兼容层
+// 回报 ImageTag（客户端据此决定是否复用自己缓存的图片）。
+func (r *EmbyRemoteService) RemoteImageTagOfEncodedID(ctx context.Context, encodedID, imageType string) string {
+	if r == nil {
+		return ""
+	}
+	mountID, remoteID, ok := DecodeEmbyRemoteID(encodedID)
+	if !ok {
+		return ""
+	}
+	_, acct, _ := r.ResolveMount(ctx, mountID)
+	if acct == nil {
+		return ""
+	}
+	return r.remoteImageTag(acct.ID, remoteID, imageType)
+}
+
+// embyRemoteAccountID 空值安全的账号 ID 读取（构建图片 URL 时可能只有账号对象）。
+func embyRemoteAccountID(acct *model.StrmAccount) string {
+	if acct == nil {
+		return ""
+	}
+	return acct.ID
+}
+
 // RemoteImageURL 构造远程图片绝对地址（由既有 ImageProxy 拉取透传）。
 func (r *EmbyRemoteService) RemoteImageURL(ctx context.Context, acct *model.StrmAccount, remoteID, imageType string) (string, error) {
 	cfg, err := r.configOf(acct)
@@ -1160,7 +1316,7 @@ func (r *EmbyRemoteService) RemoteImageURL(ctx context.Context, acct *model.Strm
 		return "", err
 	}
 	return r.embyBase(cfg) + "/Items/" + url.PathEscape(remoteID) + "/Images/" + url.PathEscape(strings.ToLower(imageType)) +
-		"?api_key=" + url.QueryEscape(cfg.Token), nil
+		"?api_key=" + url.QueryEscape(cfg.Token) + r.remoteImageTagQuery(embyRemoteAccountID(acct), remoteID, imageType), nil
 }
 
 // rememberRemotePeople 记录远程人物名称到远程人物 ID 的映射，供旧式

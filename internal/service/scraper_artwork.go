@@ -29,7 +29,7 @@ func (s *ScraperService) prepareScrapedArtworkURL(ctx context.Context, mediaID, 
 		timeout = 8 * time.Second
 	}
 	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
-	err := s.images.PrefetchRemote(fetchCtx, candidate)
+	err := s.images.PrefetchCardVariant(fetchCtx, candidate)
 	cancel()
 	if err != nil {
 		if originalSource != "" {

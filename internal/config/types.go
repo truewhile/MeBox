@@ -117,15 +117,17 @@ type LoggingConfig struct {
 type CacheConfig struct {
 	CacheDir        string `mapstructure:"cache_dir"`
 	ImagesMaxSizeMB int    `mapstructure:"images_max_size_mb"`
+	// ImagesOriginalsMaxSizeMB 限制 cache/images 下原图子配额（MB）。原图只是
+	// 生成缩略图的原料，丢了可以重新回源；0 表示不单独限制（只受总量约束）。
+	ImagesOriginalsMaxSizeMB int `mapstructure:"images_originals_max_size_mb"`
+	// ImagesOriginalsTTLHours 是原图的保留时长（小时），超过即删除；0 表示
+	// 不按时间淘汰。缩短它能让原图缓存保持在一个滚动窗口内。
+	ImagesOriginalsTTLHours int `mapstructure:"images_originals_ttl_hours"`
 	// MemoryMaxSizeMB 限制进程内 L1 缓存总字节数，JSON/对象缓存共用该预算。
-	MemoryMaxSizeMB    int    `mapstructure:"memory_max_size_mb"`
-	MaxDiskUsageMB     int    `mapstructure:"max_disk_usage_mb"`
-	TTLHours           int    `mapstructure:"ttl_hours"`
-	AutoCleanup        bool   `mapstructure:"auto_cleanup"`
-	CleanupIntervalMin int    `mapstructure:"cleanup_interval_min"`
-	RedisURL           string `mapstructure:"redis_url"`
-	RedisPrefix        string `mapstructure:"redis_prefix"`
-	MediaTTLSeconds    int    `mapstructure:"media_ttl_seconds"`
+	MemoryMaxSizeMB int    `mapstructure:"memory_max_size_mb"`
+	RedisURL        string `mapstructure:"redis_url"`
+	RedisPrefix     string `mapstructure:"redis_prefix"`
+	MediaTTLSeconds int    `mapstructure:"media_ttl_seconds"`
 	// EmbyLatestTTLSeconds 是 Emby「最新添加」(Items/Latest) 的缓存时长。
 	// 客户端刷新首页时会并发请求全部媒体库的 Latest（生产环境观察到 73 个
 	// 并发），缓存过短会让这批请求同时穿透并各自重建 payload，在低配主机

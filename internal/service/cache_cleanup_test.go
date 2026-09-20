@@ -148,8 +148,8 @@ func TestSchedulerJobCleanImageCache(t *testing.T) {
 
 	scheduler := NewSchedulerService(zap.NewNop(), nil, nil, nil, nil, nil, cacheRoot)
 	// Set limit to 1MB; our file is 2MB -> should be pruned
-	scheduler.SetImagesMaxSizeMBProvider(func() int {
-		return 1
+	scheduler.SetImageCachePolicyProvider(func() ImageCachePolicy {
+		return ImageCachePolicy{TotalBytes: 1 * 1024 * 1024}
 	})
 
 	if err := scheduler.jobCleanImageCache(context.Background()); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -166,11 +167,20 @@ func (b *serviceContainerBuilder) initAccessAndStorageServices() {
 	)
 	b.c.Scheduler.SetTaskTracker(b.c.Tasks)
 	b.c.Scheduler.SetOrganizePipeline(b.c.OrganizePipeline)
-	b.c.Scheduler.SetImagesMaxSizeMBProvider(func() int {
+	b.c.Scheduler.SetImageCachePolicyProvider(func() ImageCachePolicy {
 		if b.cfg == nil {
-			return 0
+			return ImageCachePolicy{}
 		}
-		return b.cfg.Cache.ImagesMaxSizeMB
+		policy := ImageCachePolicy{
+			TotalBytes: int64(b.cfg.Cache.ImagesMaxSizeMB) * 1024 * 1024,
+		}
+		if b.cfg.Cache.ImagesOriginalsMaxSizeMB > 0 {
+			policy.OriginalsBytes = int64(b.cfg.Cache.ImagesOriginalsMaxSizeMB) * 1024 * 1024
+		}
+		if b.cfg.Cache.ImagesOriginalsTTLHours > 0 {
+			policy.OriginalsAge = time.Duration(b.cfg.Cache.ImagesOriginalsTTLHours) * time.Hour
+		}
+		return policy
 	})
 }
 

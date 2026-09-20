@@ -52,9 +52,9 @@ internal/model/book.go               ← GORM 模型，注册进 model.AllModels
 | `cloud.Provider.Resolve(ctx, fileRef) (*DirectLink, error)`（`internal/service/cloud/cloud.go`） | 网盘书源的直链解析入口，`DirectLink.Proxy` 决定 302 还是反代 |
 | `model.StorageConfig`（`internal/model/storage_assistant.go`） | 直接复用为网盘书源的账号凭据载体，**不新建凭据表** |
 | `service.ImageProxy`（`internal/service/image_proxy*.go`） | 漫画页与封面的磁盘缓存 + 远程拉取 + 缩放，复用其缓存目录与命名思路 |
-| `service.PruneImageCache`（`internal/service/cache_cleanup.go`） | 现成的「按总大小做 LRU 淘汰」助手，书籍缓存淘汰直接复用它 |
+| `service.PruneImageCache` / `PruneImageCachePools`（`internal/service/cache_cleanup.go`） | 现成的「按池做 LRU 淘汰 + 按保留时长淘汰」助手，书籍缓存淘汰直接复用它 |
 | `service/scheduler_local_jobs.go` | 本地定时任务的挂载点，书籍缓存清理与每日统计汇总都注册在这里 |
-| `config.CacheConfig`（`internal/config/types.go`） | 已有 `CacheDir` / `MaxDiskUsageMB` / `TTLHours` / `AutoCleanup` / `CleanupIntervalMin`，书籍缓存容量配置直接挂进去 |
+| `config.CacheConfig`（`internal/config/types.go`） | 已有 `CacheDir` / `ImagesMaxSizeMB` / `ImagesOriginalsMaxSizeMB` / `ImagesOriginalsTTLHours` / `MemoryMaxSizeMB`，书籍缓存容量配置直接挂进去 |
 | `service.FileManager`（`internal/service/filemanager.go`） | 本地书源目录浏览，前端复用 `LocalDirBrowserDialog.tsx` |
 | `service.Scheduler` | 书库定时扫描（默认关闭，管理员可开） |
 | `model.UserPermission` | 新增阅读权限位，见第 7 节 |

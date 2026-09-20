@@ -65,8 +65,10 @@ func updateSettingHandler(svc *service.Container) gin.HandlerFunc {
 		if req.Key == "transcode.hw_enabled" || req.Key == "transcode.hw_accel" || req.Key == "transcoder.hardware_accel" || req.Key == "transcoder.encoder" {
 			svc.Transcoder.StopAll()
 		}
-		if req.Key == "cache.images_max_size_mb" && svc.Scheduler != nil {
-			_ = svc.Scheduler.RunNowAsync(c.Request.Context(), "image_cache_cleanup")
+		if req.Key == "cache.images_max_size_mb" || req.Key == "cache.images_originals_max_size_mb" || req.Key == "cache.images_originals_ttl_hours" {
+			if svc.Scheduler != nil {
+				_ = svc.Scheduler.RunNowAsync(c.Request.Context(), "image_cache_cleanup")
+			}
 		}
 		if req.Key == "cache.memory_max_size_mb" && svc.Cache != nil {
 			svc.Cache.SetMaxSizeMB(svc.Cfg.Cache.MemoryMaxSizeMB)

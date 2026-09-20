@@ -158,7 +158,7 @@ func (r *EmbyRemoteService) mapRemoteMountToLibrary(mount *model.EmbyMount, acct
 	}
 	// 远程媒体库封面只有真实存在图片标签才下发。
 	if remoteItemHasImageTag(item, "Primary") {
-		lib.CoverURL = r.remoteItemImageURL(cfg, mount.RemoteViewID, "Primary")
+		lib.CoverURL = r.remoteItemImageURL(acct, cfg, mount.RemoteViewID, "Primary")
 	}
 	return lib
 }
@@ -176,6 +176,8 @@ func (r *EmbyRemoteService) MapRemoteItemToMedia(ctx context.Context, mount *mod
 	if _, rid, ok := DecodeEmbyRemoteID(remoteID); ok {
 		remoteID = rid
 	}
+	// 记录图片标签，使下发的图片 URL 带上 tag：远端换图后缓存随之失效。
+	r.rememberRemoteImageTags(embyRemoteAccountID(acct), item)
 	seriesID := remoteItemString(item, "SeriesId")
 	if _, rid, ok := DecodeEmbyRemoteID(seriesID); ok {
 		seriesID = rid
@@ -214,10 +216,10 @@ func (r *EmbyRemoteService) MapRemoteItemToMedia(ctx context.Context, mount *mod
 	}
 	// 只有远程明确存在图片标签才下发图片 URL。
 	if remoteItemHasImageTag(item, "Primary") {
-		media.PosterURL = r.remoteItemImageURL(cfg, remoteID, "Primary")
+		media.PosterURL = r.remoteItemImageURL(acct, cfg, remoteID, "Primary")
 	}
 	if remoteItemHasImageTag(item, "Backdrop") || len(remoteBackdropTags(item)) > 0 {
-		media.BackdropURL = r.remoteItemImageURL(cfg, remoteID, "Backdrop")
+		media.BackdropURL = r.remoteItemImageURL(acct, cfg, remoteID, "Backdrop")
 	}
 	if ticks := remoteItemInt64(item, "RunTimeTicks"); ticks > 0 {
 		media.DurationSec = int(ticks / 10_000_000)
@@ -307,9 +309,11 @@ func (r *EmbyRemoteService) MapRemoteItemToMedia(ctx context.Context, mount *mod
 		}
 		// 单集通常无独立海报：若远程返回 SeriesPrimaryImageTag（需要
 		// Fields=SeriesPrimaryImage）且系列有图，则回退到系列海报。
-		if media.PosterURL == "" && seriesID != "" &&
-			strings.TrimSpace(remoteItemString(item, "SeriesPrimaryImageTag")) != "" {
-			media.PosterURL = r.remoteItemImageURL(cfg, seriesID, "Primary")
+		if media.PosterURL == "" && seriesID != "" {
+			if seriesTag := strings.TrimSpace(remoteItemString(item, "SeriesPrimaryImageTag")); seriesTag != "" {
+				r.rememberRemoteImageTagValue(embyRemoteAccountID(acct), seriesID, "Primary", seriesTag)
+				media.PosterURL = r.remoteItemImageURL(acct, cfg, seriesID, "Primary")
+			}
 		}
 	default: // Movie / Series / Season / Folder
 		media.SeasonNum = 0
@@ -914,8 +918,9 @@ func remoteItemGenres(item map[string]any) string {
 	return strings.Join(parts, ",")
 }
 
-// remoteItemImageURL 构造远程条目图片绝对地址（带 api_key；前端经 /api/img 代理）。
-func (r *EmbyRemoteService) remoteItemImageURL(cfg *EmbyRemoteConfig, remoteID, imageType string) string {
+// remoteItemImageURL 构造远程条目图片绝对地址（带 api_key 与图片 tag；前端经
+// /api/img 代理）。tag 来自载荷的 ImageTags，用于远端换图后缓存失效。
+func (r *EmbyRemoteService) remoteItemImageURL(acct *model.StrmAccount, cfg *EmbyRemoteConfig, remoteID, imageType string) string {
 	if remoteID == "" {
 		return ""
 	}
@@ -924,7 +929,7 @@ func (r *EmbyRemoteService) remoteItemImageURL(cfg *EmbyRemoteConfig, remoteID, 
 		imageType = "primary"
 	}
 	return r.embyBase(cfg) + "/Items/" + url.PathEscape(remoteID) + "/Images/" + url.PathEscape(imageType) +
-		"?api_key=" + url.QueryEscape(cfg.Token)
+		"?api_key=" + url.QueryEscape(cfg.Token) + r.remoteImageTagQuery(embyRemoteAccountID(acct), remoteID, imageType)
 }
 
 // remoteItemHasImageTag 远程 item 是否带某类型图片标签（Emby 的 ImageTags map）。

@@ -71,6 +71,12 @@ const (
 	imageBrowserCacheControl     = "public, max-age=2592000, immutable"
 	imagePlaceholderCacheControl = "no-store"
 	imageMaxResizeConcurrency    = 4
+
+	// imageOriginalCacheSubdir 存放上游原图（生成各种尺寸的原料，可再生）。
+	imageOriginalCacheSubdir = "originals"
+	// imageRenditionCacheSubdir 存放挂载 Emby 直接按尺寸产出的成品图：它们
+	// 已经是客户端要的最终尺寸，和派生缩略图一样属于长期保留的热路径缓存。
+	imageRenditionCacheSubdir = "renditions"
 )
 
 // NewImageProxy is the constructor.
@@ -214,10 +220,20 @@ func imageResizeConcurrency() int {
 }
 
 // Prune removes oldest cached images until disk usage is within the configured limit.
+// 原图池按独立配额与保留时长优先淘汰，客户端热路径读取的成品图最后淘汰。
 func (p *ImageProxy) Prune() (PruneImageCacheResult, error) {
 	if p.cfg == nil || p.cfg.Cache.ImagesMaxSizeMB <= 0 {
 		return PruneImageCacheResult{}, nil
 	}
-	maxBytes := int64(p.cfg.Cache.ImagesMaxSizeMB) * 1024 * 1024
-	return PruneImageCache(p.cacheDir, maxBytes)
+	var originalsMaxBytes int64
+	if p.cfg.Cache.ImagesOriginalsMaxSizeMB > 0 {
+		originalsMaxBytes = int64(p.cfg.Cache.ImagesOriginalsMaxSizeMB) * 1024 * 1024
+	}
+	var originalsMaxAge time.Duration
+	if p.cfg.Cache.ImagesOriginalsTTLHours > 0 {
+		originalsMaxAge = time.Duration(p.cfg.Cache.ImagesOriginalsTTLHours) * time.Hour
+	}
+	totalBytes := int64(p.cfg.Cache.ImagesMaxSizeMB) * 1024 * 1024
+	pools := ImageCachePools(p.cacheDir, originalsMaxBytes, originalsMaxAge)
+	return PruneImageCachePools(pools, totalBytes)
 }

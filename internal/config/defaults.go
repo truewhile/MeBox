@@ -45,8 +45,9 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("cache.cache_dir", "./cache")
 	v.SetDefault("cache.images_max_size_mb", 2000)
+	v.SetDefault("cache.images_originals_max_size_mb", 256)
+	v.SetDefault("cache.images_originals_ttl_hours", 168)
 	v.SetDefault("cache.memory_max_size_mb", DefaultCacheMemoryMaxSizeMB)
-	v.SetDefault("cache.cleanup_interval_min", 60)
 	v.SetDefault("cache.redis_url", "")
 	v.SetDefault("cache.redis_prefix", "mebox")
 	v.SetDefault("cache.media_ttl_seconds", 90)
