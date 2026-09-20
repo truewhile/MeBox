@@ -344,14 +344,14 @@ func isCompactWebImage(header []byte) bool {
 }
 
 // writeResizeCache 原子写入缩放结果；失败只记日志，不影响本次响应。
+// 与 writeImageCache 一样不再持有全局锁：临时文件名唯一、rename 原子，
+// 持锁只会把缩略图的写盘和原图的写盘串成一条队。
 func (p *ImageProxy) writeResizeCache(cachePath string, data []byte) {
 	dir := filepath.Dir(cachePath)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		p.warn("imageproxy: resize cache mkdir failed", err)
 		return
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	tmp, err := os.CreateTemp(dir, "resized-*.tmp")
 	if err != nil {
 		p.warn("imageproxy: resize cache temp failed", err)

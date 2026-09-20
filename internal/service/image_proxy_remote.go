@@ -87,7 +87,10 @@ func (p *ImageProxy) serveRemoteImage(ctx context.Context, w http.ResponseWriter
 		return err
 	}
 	host := strings.ToLower(u.Host)
-	key, cachePath, failPath := p.remoteImageCachePathsForValidated(raw)
+	// 已配置的远程 Emby 挂载：把尺寸直接转发给远端生成缩略图，缓存键也用
+	// 带尺寸的地址，这样不同尺寸各自缓存互不覆盖。
+	fetchURL := p.upstreamImageFetchURL(raw, opts)
+	key, cachePath, failPath := p.remoteImageCachePathsForValidated(fetchURL)
 	forceRefresh := r.URL.Query().Get("refresh") != ""
 	p.removeUnusableImageCache(cachePath, failPath)
 	if !forceRefresh && p.serveCachedImage(w, r, key, cachePath, opts) {
@@ -95,7 +98,7 @@ func (p *ImageProxy) serveRemoteImage(ctx context.Context, w http.ResponseWriter
 	}
 	// No negative caching: a previously failed fetch is retried on every
 	// subsequent request, so the image recovers as soon as upstream does.
-	data, ctype, contentLength, err := p.fetchAndCacheRemoteImageShared(ctx, raw, host, cachePath, failPath)
+	data, ctype, contentLength, err := p.fetchAndCacheRemoteImageShared(ctx, fetchURL, host, cachePath, failPath)
 	if err != nil {
 		if forceRefresh && p.serveCachedImage(w, r, key, cachePath, opts) {
 			return nil
@@ -179,7 +182,7 @@ func (p *ImageProxy) fetchAndCacheRemoteImage(ctx context.Context, raw, host, ca
 		return nil, "", "", errImageProxyRequestSetup
 	}
 	var lastErr error
-	for _, candidate := range p.remoteImageFetchClients() {
+	for _, candidate := range p.remoteImageFetchClients(host) {
 		data, ctype, contentLength, err := p.fetchRemoteImageOnce(ctx, raw, host, candidate)
 		if err == nil {
 			p.writeImageCache(cachePath, failPath, "img-*.tmp", data)
@@ -263,9 +266,11 @@ func (p *ImageProxy) Fetch(ctx context.Context, raw string) ([]byte, string, err
 	return data, ctype, err
 }
 
+// writeImageCache atomically writes the fetched original. The global mutex is
+// deliberately not held: os.CreateTemp already yields a unique name and
+// os.Rename is atomic, so the lock only serialized multi-megabyte disk writes
+// and made one poster's write block every other image in flight.
 func (p *ImageProxy) writeImageCache(cachePath, failPath, pattern string, data []byte) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	tmp, tmpErr := os.CreateTemp(p.cacheDir, pattern)
 	if tmpErr != nil {
 		return

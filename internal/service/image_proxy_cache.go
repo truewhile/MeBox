@@ -88,7 +88,7 @@ func (p *ImageProxy) remoteImageCachePaths(raw string) (string, string, string, 
 }
 
 func (p *ImageProxy) remoteImageCachePathsForValidated(raw string) (string, string, string) {
-	sum := sha256.Sum256([]byte(raw))
+	sum := sha256.Sum256([]byte(imageCacheKeyURL(raw)))
 	key := hex.EncodeToString(sum[:])
 	cachePath := filepath.Join(p.cacheDir, key)
 	return key, cachePath, cachePath + ".fail"

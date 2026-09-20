@@ -38,6 +38,12 @@ type ImageProxy struct {
 	mu         sync.Mutex
 	fetchGroup singleflight.Group
 
+	// directClient bypasses HTTP_PROXY / OS proxy settings. It is built once and
+	// shared: rebuilding the transport on every fetch discarded all keep-alive
+	// connections, so every burst of poster requests paid a fresh TCP (and TLS)
+	// handshake per image.
+	directClient *http.Client
+
 	// resizeSem bounds concurrent decode/resize jobs. Emby TV clients request
 	// poster grids in bursts; letting every request decode a source image at
 	// once causes CPU and memory spikes that make the whole UI feel sluggish.
@@ -113,6 +119,7 @@ func NewImageProxy(cfg *config.Config, log *zap.Logger) *ImageProxy {
 	}
 
 	proxy.client = &http.Client{Timeout: 30 * time.Second, Transport: transport}
+	proxy.directClient = &http.Client{Timeout: 30 * time.Second, Transport: NewInternalTransport()}
 	return proxy
 }
 

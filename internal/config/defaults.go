@@ -44,7 +44,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("logging.max_backups", 10)
 
 	v.SetDefault("cache.cache_dir", "./cache")
-	v.SetDefault("cache.images_max_size_mb", 500)
+	v.SetDefault("cache.images_max_size_mb", 2000)
 	v.SetDefault("cache.memory_max_size_mb", DefaultCacheMemoryMaxSizeMB)
 	v.SetDefault("cache.cleanup_interval_min", 60)
 	v.SetDefault("cache.redis_url", "")

@@ -18,23 +18,32 @@ type remoteImageFetchClient struct {
 	client *http.Client
 }
 
-func (p *ImageProxy) remoteImageFetchClients() []remoteImageFetchClient {
+func (p *ImageProxy) remoteImageFetchClients(host string) []remoteImageFetchClient {
 	client := p.client
 	if client == nil {
 		client = NewExternalHTTPClient(30 * time.Second)
 	}
-	clients := []remoteImageFetchClient{{name: "default", client: client}}
-	if _, ok := client.Transport.(*http.Transport); ok {
-		timeout := client.Timeout
-		if timeout <= 0 {
-			timeout = 30 * time.Second
-		}
-		clients = append(clients, remoteImageFetchClient{
-			name:   "direct",
-			client: &http.Client{Timeout: timeout, Transport: NewInternalTransport()},
-		})
+	if _, ok := client.Transport.(*http.Transport); !ok {
+		return []remoteImageFetchClient{{name: "default", client: client}}
 	}
-	return clients
+	timeout := client.Timeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	direct := p.directClient
+	if direct == nil {
+		direct = &http.Client{Timeout: timeout, Transport: NewInternalTransport()}
+	}
+	directCandidate := remoteImageFetchClient{name: "direct", client: direct}
+	defaultCandidate := remoteImageFetchClient{name: "default", client: client}
+	// Hosts the user configured themselves — remote Emby mounts and their image
+	// endpoints — are reached over the LAN or a dedicated line. Routing those
+	// through the OS/env proxy first costs a failed attempt before every single
+	// image, so try the direct client first for them.
+	if p.isAllowedRemoteHost(host) {
+		return []remoteImageFetchClient{directCandidate, defaultCandidate}
+	}
+	return []remoteImageFetchClient{defaultCandidate, directCandidate}
 }
 
 func (p *ImageProxy) canUseExternalImageFallback() bool {
