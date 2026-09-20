@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -152,6 +153,13 @@ func (s *ScraperService) writeArtworkDataToPath(dir, name, ctype string, data []
 		return ""
 	}
 	dst := filepath.Join(dir, name+imageExtForContentType(ctype))
+	// 内容与现有文件完全一致时不重写：重写会刷新源文件 mtime，而缩略图缓存键
+	// 包含源文件大小与 mtime，一次「内容没变」的重新刮削会让该条目所有尺寸的
+	// 缩略图一并作废，下次浏览全部重新解码。
+	if artworkFileUnchanged(dst, data) {
+		s.log.Debug("scrape artwork unchanged", zap.String("dst", dst))
+		return dst
+	}
 	tmp, err := os.CreateTemp(dir, "img-*.tmp")
 	if err != nil {
 		s.log.Warn("scrape artwork temp create failed", zap.String("dir", dir), zap.Error(err))
@@ -184,6 +192,26 @@ func (s *ScraperService) writeArtworkDataToPath(dir, name, ctype string, data []
 	}
 	s.log.Debug("scrape artwork written", zap.String("dst", dst))
 	return dst
+}
+
+// artworkFileUnchanged 报告 path 是否已经就是 data 这些字节。
+//
+// 刮削在刷新海报地址时会无条件重写 sidecar 图片，即使下载回来的字节一模一样。
+// 缩略图缓存键包含源文件的大小与 mtime，因此这种无谓的重写会让该条目所有尺寸
+// 的缩略图一起失效；保持一致时直接复用原文件可以保住 mtime。
+func artworkFileUnchanged(path string, data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() || info.Size() != int64(len(data)) {
+		return false
+	}
+	existing, err := os.ReadFile(path) // #nosec G304 -- path is built from a sanitized media directory.
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(existing, data)
 }
 
 // imageExtForContentType maps a detected image MIME type to a file extension.

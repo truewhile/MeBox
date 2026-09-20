@@ -230,6 +230,27 @@ export type ImageURLOptions =
       quality?: number
     }
 
+// ARTWORK is the shared set of thumbnail sizes the whole app requests.
+//
+// The server caches thumbnails per (source file, maxWidth, maxHeight, quality):
+// every extra combination is another full decode of the original image (measured
+// at 60-120ms for a 1920x1080 backdrop, up to ~800ms for a large poster) plus
+// another cache file, so do not invent sizes at the call site — pick a preset.
+// Keeping this list short is what stops a single page from triggering a dozen
+// different decodes for the same artwork.
+export const ARTWORK = {
+  /** 最小一档（160px）：卡片的模糊占位图，以及 30-40px 级别的列表缩略图。 */
+  posterTiny: { maxWidth: 160, quality: 60 },
+  /** 海报列表与卡片（2:3 容器，紧凑布局共用同一份缓存）。 */
+  posterCard: { maxWidth: 480, maxHeight: 600, quality: 80 },
+  /** 海报详情页、剧集详情页头部与首页大图。 */
+  posterDetail: { maxWidth: 560, maxHeight: 840, quality: 80 },
+  /** 剧照大图：首页 hero、影片详情页背景。 */
+  backdropHero: { maxWidth: 1920, maxHeight: 1080, quality: 80 },
+  /** 剧照小图：媒体库封面、剧集条目、搜索结果等。 */
+  backdropStrip: { maxWidth: 480, maxHeight: 320, quality: 80 },
+}
+
 export function imageURL(remote?: string, version?: string, options: ImageURLOptions = false): string {
   if (!remote) return ''
   const versionQuery = version ? `v=${encodeURIComponent(version)}` : ''

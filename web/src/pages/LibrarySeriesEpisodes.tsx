@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom'
 import { Play, Search } from 'lucide-react'
 
-import { imageURL } from '../api/client'
+import { ARTWORK, imageURL } from '../api/client'
 import { ExternalPlayerButton } from '../components/ExternalPlayerButton'
 import type { Media } from '../types'
 import {
@@ -87,11 +87,7 @@ export function LibrarySeriesEpisodes({
                   >
                     {ep.backdrop_url || ep.poster_url ? (
                       <img
-                        src={imageURL(ep.backdrop_url || ep.poster_url || '', ep.updated_at, {
-                          maxWidth: 320,
-                          maxHeight: 180,
-                          quality: 76,
-                        })}
+                        src={imageURL(ep.backdrop_url || ep.poster_url || '', ep.updated_at, ARTWORK.backdropStrip)}
                         alt=""
                         loading="lazy"
                         decoding="async"

@@ -2,7 +2,7 @@ import { isRemoteEmbyID } from '../utils/remoteEmby'
 import { Link } from 'react-router-dom'
 import { ArrowLeft, Database, FileText, Film, FolderInput, Pencil, Play, Search, Sparkles, Trash2 } from 'lucide-react'
 
-import { imageURL } from '../api/client'
+import { ARTWORK, imageURL } from '../api/client'
 import { ExternalPlayerButton } from '../components/ExternalPlayerButton'
 import { MediaFavouriteButton } from '../components/MediaFavouriteButton'
 import type { Media } from '../types'
@@ -70,7 +70,7 @@ export function LibrarySeriesDetailHeader({
         <div className="w-40 shrink-0 overflow-hidden rounded-xl bg-sand-200 shadow-card">
           {series.rep.poster_url ? (
             <img
-              src={imageURL(series.rep.poster_url, series.rep.updated_at)}
+              src={imageURL(series.rep.poster_url, series.rep.updated_at, ARTWORK.posterDetail)}
               alt={series.rep.title}
               loading="lazy"
               decoding="async"

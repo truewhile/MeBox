@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom'
 import { AlertCircle, Ban, Copy, ExternalLink, RefreshCw, Sparkles, Trash2, X } from 'lucide-react'
 
-import { imageURL } from '../../api/client'
+import { ARTWORK, imageURL } from '../../api/client'
 import type { ScrapeTask } from '../../types/scraper'
 import { formatTime, taskStatusMeta } from '../StrmManagePage'
 import { PROVIDER_LABELS, TYPE_LABELS } from './scrapeLabels'
@@ -52,7 +52,7 @@ export function ScrapeDetailModal({
             <div className="flex gap-4 rounded-2xl border border-brand-500/20 bg-primary-400/5 p-4">
               {task.poster_url && (
                 <img
-                  src={imageURL(task.poster_url)}
+                  src={imageURL(task.poster_url, undefined, ARTWORK.posterTiny)}
                   alt=""
                   className="h-28 w-20 rounded-xl object-cover border border-brand-500/30 shadow-md shrink-0"
                 />

@@ -19,7 +19,7 @@ import {
   X,
 } from 'lucide-react'
 
-import { imageURL } from '../api/client'
+import { ARTWORK, imageURL } from '../api/client'
 import { scraperAPI } from '../api/scraper'
 import type { ScrapeQueueSnapshot, ScrapeTask, ScrapeTaskStatus } from '../types/scraper'
 import { apiErrorMessage, formatTime, taskStatusMeta } from './StrmManagePage'
@@ -756,7 +756,7 @@ export function ScraperQueuePage({ embedded = false }: { embedded?: boolean }) {
                           <div className="flex items-center gap-2">
                             {task.poster_url ? (
                               <img
-                                src={imageURL(task.poster_url)}
+                                src={imageURL(task.poster_url, undefined, ARTWORK.posterTiny)}
                                 alt=""
                                 className="h-10 w-7 rounded object-cover border border-gray-200 shrink-0"
                                 onError={(e) => {

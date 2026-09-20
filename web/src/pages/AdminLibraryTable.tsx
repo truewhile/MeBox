@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type DragEvent, type MouseEvent, type Reac
 import { createPortal } from 'react-dom'
 import { Folder, GripVertical, Image, MoreVertical, Plus, Power, PowerOff, RefreshCw, Save, Trash2 } from 'lucide-react'
 
-import { imageURL } from '../api/client'
+import { ARTWORK, imageURL } from '../api/client'
 import { LocalDirBrowserDialog } from '../components/LocalDirBrowserDialog'
 import type { Library, LibraryRoot } from '../types'
 import type { RootDraft } from './adminLibraryPanelModel'
@@ -172,7 +172,7 @@ function LibraryTableRow({ library, dragging, dragOver, onDragStart, onDragOver,
         <div className="flex items-center gap-2">
           {library.cover_url && (
             <img
-              src={imageURL(library.cover_url, library.updated_at)}
+              src={imageURL(library.cover_url, library.updated_at, ARTWORK.backdropStrip)}
               alt=""
               loading="lazy"
               decoding="async"

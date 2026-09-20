@@ -17,7 +17,7 @@ import {
   Tv,
 } from 'lucide-react'
 
-import { imageURL } from '../api/client'
+import { ARTWORK, imageURL } from '../api/client'
 import { useInViewOnce } from '../hooks/useInViewOnce'
 import { useLazyPreviewBatch } from '../hooks/useLazyPreviewBatch'
 import { useRememberedListPosition } from '../hooks/useListPositionMemory'
@@ -171,7 +171,7 @@ export function HomeCarouselSection({
         {visual && (
           <img
             key={visual + currentItem.id}
-            src={imageURL(visual, currentItem.updated_at, { maxWidth: 1920, maxHeight: 1080, quality: 78 })}
+            src={imageURL(visual, currentItem.updated_at, ARTWORK.backdropHero)}
             alt=""
             fetchPriority="high"
             decoding="async"
@@ -283,7 +283,7 @@ export function HomeCarouselSection({
             </div>
             {poster && (
               <img
-                src={imageURL(poster, currentItem.updated_at, { maxWidth: 560, quality: 84 })}
+                src={imageURL(poster, currentItem.updated_at, ARTWORK.posterDetail)}
                 alt={currentItem.title}
                 fetchPriority="high"
                 decoding="async"
@@ -516,7 +516,7 @@ export function HomeLibraryCard({
                 src={imageURL(
                   src,
                   version,
-                  library.cover_url ? undefined : { maxWidth: 480, maxHeight: 320, quality: 78 },
+                  library.cover_url ? undefined : ARTWORK.backdropStrip,
                 )}
                 alt=""
                 loading="lazy"
@@ -750,7 +750,7 @@ function ContinueCard({ media, progress }: { media: Media; progress: number }) {
       <div className="relative h-20 w-14 shrink-0 overflow-hidden rounded-xl bg-[var(--app-panel-soft)]">
         {media.poster_url ? (
           <img
-            src={imageURL(media.poster_url, media.updated_at, { maxWidth: 180, maxHeight: 240, quality: 78 })}
+            src={imageURL(media.poster_url, media.updated_at, ARTWORK.posterCard)}
             alt=""
             className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
             loading="lazy"

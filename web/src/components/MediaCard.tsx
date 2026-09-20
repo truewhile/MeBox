@@ -1,7 +1,7 @@
 import { memo, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { Film, Play, Layers, Star } from 'lucide-react'
-import { imageURL } from '../api/client'
+import { ARTWORK, imageURL } from '../api/client'
 import type { Media } from '../types'
 
 const ACTION_OVERLAY_CLASS =
@@ -26,12 +26,9 @@ export const MediaCard = memo(function MediaCard({
   const ref = useRef<HTMLDivElement>(null)
   const href = linkTo ?? `/media/${media.id}`
   const [posterFit, setPosterFit] = useState<'cover' | 'contain'>('cover')
-  const posterSrc = imageURL(media.poster_url, media.updated_at, {
-    maxWidth: compact ? 320 : 480,
-    maxHeight: compact ? 480 : 600,
-    quality: 82,
-  })
-  const blurredPosterSrc = imageURL(media.poster_url, media.updated_at, { maxWidth: 160, quality: 60 })
+  // 固定档位而不是在调用点拼尺寸：紧凑布局与普通卡片共用同一份缩略图缓存。
+  const posterSrc = imageURL(media.poster_url, media.updated_at, ARTWORK.posterCard)
+  const blurredPosterSrc = imageURL(media.poster_url, media.updated_at, ARTWORK.posterTiny)
   const displayRating = rating ?? media.rating
   const versionCount = media.versions?.length ?? 0
   // renderActions 延迟到卡片自身渲染时才调用，保证 memo 生效

@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Film, LoaderCircle, Menu, Search, Star, X } from 'lucide-react'
 
-import { imageURL } from '../api/client'
+import { ARTWORK, imageURL } from '../api/client'
 import { mediaAPI } from '../api/library'
 import type { Media, PlayProfile, User } from '../types'
 import { favouriteMediaLink } from '../utils/mediaNavigation'
@@ -368,7 +368,7 @@ function LayoutHeaderSearch() {
                     <div className="relative h-12 w-9 shrink-0 overflow-hidden rounded-lg bg-[var(--app-panel-soft)]">
                       {item.poster_url ? (
                         <img
-                          src={imageURL(item.poster_url, item.updated_at)}
+                          src={imageURL(item.poster_url, item.updated_at, ARTWORK.posterCard)}
                           alt=""
                           className="h-full w-full object-cover"
                           loading="lazy"

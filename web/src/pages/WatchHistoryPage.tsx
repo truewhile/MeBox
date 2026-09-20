@@ -4,7 +4,7 @@ import { Clock, Play, Trash2 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 import { historyAPI } from '../api/history'
-import { imageURL } from '../api/client'
+import { ARTWORK, imageURL } from '../api/client'
 import { confirmAction } from '../components/confirmAction'
 import { isRemoteEmbyID } from '../utils/remoteEmby'
 import type { HistoryItem, Media } from '../types'
@@ -117,7 +117,7 @@ export function WatchHistoryPage() {
               <div className="h-16 w-12 shrink-0 overflow-hidden rounded-lg bg-surface-900">
                 {m.poster_url ? (
                   <img
-                    src={imageURL(m.poster_url, m.updated_at)}
+                    src={imageURL(m.poster_url, m.updated_at, ARTWORK.posterCard)}
                     alt={m.title}
                     className="h-full w-full object-cover"
                     referrerPolicy="no-referrer"
