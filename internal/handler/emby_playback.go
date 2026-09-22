@@ -1,10 +1,13 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -24,8 +27,96 @@ func embyPlaybackInfoHandler(svc *service.Container) gin.HandlerFunc {
 			return
 		}
 		embyAttachRequestTokenToMediaSources(c, out)
+		// 在后台把本次条目的云盘直链换好：播放器拿到 PlaybackInfo 后通常还要
+		// 1–2 秒才请求 /Videos/{id}/stream，把换链开销落在这段等待里。
+		embyPrewarmPlaybackTargets(svc, c, out)
 		c.JSON(http.StatusOK, out)
 	}
+}
+
+// embyPrewarmTimeout 是单次预热的等待上限。115 开放平台在跨太平洋线路上单次
+// 换链实测 0.4–1.1s，这里给足余量；超时只是没预热成功，不影响后续播放。
+const embyPrewarmTimeout = 10 * time.Second
+
+// embyPrewarmInFlight 去重同一个条目的并发预热（首页刷新会并发请求多个接口，
+// 同一条目可能在短时间内被多次请求）。
+var embyPrewarmInFlight sync.Map
+
+// embyPrewarmSlots 限制同时进行的预热数量。客户端可能批量预取 PlaybackInfo
+// （逐个剧集的预取请求），预热只是优化，不能反过来把 115 换链接口打出突发。
+// 名额满时直接跳过：排队等待的预热往往等真正播放时已经没意义了。
+var embyPrewarmSlots = make(chan struct{}, 4)
+
+// embyPrewarmPlaybackTargets 在后台预热本次 PlaybackInfo 涉及条目的云盘直链。
+//
+// 起播链路里最贵的一步是「服务端拿 pickcode 去 115 开放平台换直链」：服务器在
+// 洛杉矶、115 接口在国内，冷启动实测 0.4–1.1s；之后 45 分钟内命中进程内缓存。
+// 播放器在 PlaybackInfo 与真正拉流之间有几秒间隔，这里把换链放到那段间隔里，
+// 起播时就只剩纯网络耗时。
+//
+// 只处理云盘/strm 条目，且失败一律静默忽略：预热是尽力而为的优化，不能影响
+// PlaybackInfo 的正常返回。
+func embyPrewarmPlaybackTargets(svc *service.Container, c *gin.Context, out map[string]any) {
+	if svc == nil || svc.Strm == nil || svc.Repo == nil || svc.Repo.Media == nil || out == nil {
+		return
+	}
+	ids := embyPrewarmMediaIDs(out)
+	if len(ids) == 0 {
+		return
+	}
+	userAgent := c.GetHeader("User-Agent")
+	// 预热是给「后续请求」用的：即便本次 PlaybackInfo 的连接断开，
+	// 也要把换链跑完。
+	base := context.WithoutCancel(c.Request.Context())
+	for _, mediaID := range ids {
+		if _, loaded := embyPrewarmInFlight.LoadOrStore(mediaID, struct{}{}); loaded {
+			continue
+		}
+		go func(id string) {
+			defer embyPrewarmInFlight.Delete(id)
+			select {
+			case embyPrewarmSlots <- struct{}{}:
+				defer func() { <-embyPrewarmSlots }()
+			default:
+				return
+			}
+			ctx, cancel := context.WithTimeout(base, embyPrewarmTimeout)
+			defer cancel()
+			m, err := svc.Repo.Media.FindByID(ctx, id)
+			if err != nil || m == nil {
+				return
+			}
+			raw := strings.TrimSpace(m.STRMURL)
+			if raw == "" || !service.IsStrmMediaRow(m) {
+				return
+			}
+			// 解析结果由 strm 层按 pickcode+UA 缓存；已缓存时这里是空转。
+			_, _ = svc.Strm.ResolvePlayTargetWithUA(ctx, raw, userAgent)
+		}(mediaID)
+	}
+}
+
+// embyPrewarmMediaIDs 取出 PlaybackInfo 载荷里 MediaSources 的条目 ID。
+func embyPrewarmMediaIDs(out map[string]any) []string {
+	sources, ok := out["MediaSources"].([]map[string]any)
+	if !ok || len(sources) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(sources))
+	seen := make(map[string]struct{}, len(sources))
+	for _, src := range sources {
+		id, _ := src["Id"].(string)
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // embySubtitleStreamHandler serves an external subtitle track advertised in a

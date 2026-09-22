@@ -86,6 +86,54 @@ type EmbyRemoteService struct {
 	// （没有它时 URL 恒定，缩略图会永久停留在旧版本）。
 	imageTagMu sync.RWMutex
 	imageTags  map[string]string
+
+	// remoteGate 是发往远程 Emby 的并发闸门。第三方客户端刷新首页时会为每个
+	// 远程媒体库各请求一次 /Items/Latest，挂着几十个库就是几十路并发（生产环境
+	// 实测 50 路同时打进来，单个请求被拖到 5s+）。限制在途请求数后单个请求的
+	// 等待时间反而下降，也不会把 2C 小机和对方服务器一起打满。
+	//
+	// nil 表示不限流（测试直接构造结构体时走这条路）。
+	remoteGate chan struct{}
+}
+
+// embyRemoteConcurrencyLimit 是同时发往远程 Emby 的请求数上限。
+const embyRemoteConcurrencyLimit = 8
+
+// enterRemoteGate 取得一个远程请求名额，返回释放函数。未配置闸门时返回空操作。
+func (r *EmbyRemoteService) enterRemoteGate(ctx context.Context) (func(), error) {
+	if r == nil || r.remoteGate == nil {
+		return func() {}, nil
+	}
+	select {
+	case r.remoteGate <- struct{}{}:
+		return func() { <-r.remoteGate }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// fetchRemoteBody 在并发闸门内发起请求并读完响应体，返回状态码与字节。
+func (r *EmbyRemoteService) fetchRemoteBody(ctx context.Context, req *http.Request, path string) (int, []byte, error) {
+	release, err := r.enterRemoteGate(ctx)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer release()
+	resp, err := r.http.Do(req)
+	if err != nil {
+		return 0, nil, redactSensitiveError(fmt.Errorf("请求远程 Emby 失败: %w", err))
+	}
+	defer resp.Body.Close()
+	// 读 8MB+1 以区分"刚好 8MB"与"被截断"：截断的 JSON 会让
+	// Unmarshal 报 unexpected end，难以定位；这里显式报错。
+	data, readErr := io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
+	if readErr != nil {
+		return resp.StatusCode, nil, readErr
+	}
+	if len(data) > 8<<20 {
+		return resp.StatusCode, data, fmt.Errorf("远程 Emby 响应超过 8MB 上限（路径 %s）：请减小分页或 Fields 字段", path)
+	}
+	return resp.StatusCode, data, nil
 }
 
 type embyRemotePersonImageRef struct {
@@ -113,6 +161,7 @@ func NewEmbyRemoteService(cfg *config.Config, log *zap.Logger, repo *repository.
 		stream: &http.Client{
 			Transport: &embyRemoteTransport{base: http.DefaultTransport},
 		},
+		remoteGate: make(chan struct{}, embyRemoteConcurrencyLimit),
 	}
 }
 
@@ -645,21 +694,11 @@ func (r *EmbyRemoteService) doGetOnLine(ctx context.Context, acct *model.StrmAcc
 			return err
 		}
 		req.Header.Set("X-Emby-Token", cfg.Token)
-		resp, err := r.http.Do(req)
+		status, data, err := r.fetchRemoteBody(ctx, req, path)
 		if err != nil {
-			return redactSensitiveError(fmt.Errorf("请求远程 Emby 失败: %w", err))
+			return err
 		}
-		// 读 8MB+1 以区分"刚好 8MB"与"被截断"：截断的 JSON 会让
-		// Unmarshal 报 unexpected end，难以定位；这里显式报错。
-		data, readErr := io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
-		resp.Body.Close()
-		if readErr != nil {
-			return readErr
-		}
-		if len(data) > 8<<20 {
-			return fmt.Errorf("远程 Emby 响应超过 8MB 上限（路径 %s）：请减小分页或 Fields 字段", path)
-		}
-		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
+		if status == http.StatusUnauthorized && attempt == 0 {
 			// 401：只清当前线路的内存 token 并立即重认证；不在此时删除
 			// DB 里的 api_key——①外层还会按线路故障转移（其他线路可能
 			// 存有自己的 token）；②纯 api_key 账号删除后无法再认证，一次
@@ -673,8 +712,8 @@ func (r *EmbyRemoteService) doGetOnLine(ctx context.Context, acct *model.StrmAcc
 			master.RemoteUserID = cfg.RemoteUserID
 			continue
 		}
-		if resp.StatusCode >= 300 {
-			return redactSensitiveError(fmt.Errorf("远程 Emby 请求失败(%d): %s", resp.StatusCode, strings.TrimSpace(string(data))))
+		if status >= 300 {
+			return redactSensitiveError(fmt.Errorf("远程 Emby 请求失败(%d): %s", status, strings.TrimSpace(string(data))))
 		}
 		if out == nil {
 			return nil
@@ -1617,6 +1656,12 @@ func (r *EmbyRemoteService) doMutateOnLine(ctx context.Context, cfg *EmbyRemoteC
 		return err
 	}
 	req.Header.Set("X-Emby-Token", cfg.Token)
+	// 状态同步同样走远程并发闸门：它和首页那批 Latest 请求共用对方服务器。
+	release, err := r.enterRemoteGate(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	resp, err := r.http.Do(req)
 	if err != nil {
 		return redactSensitiveError(fmt.Errorf("请求远程 Emby 失败: %w", err))

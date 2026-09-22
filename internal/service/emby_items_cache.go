@@ -67,6 +67,15 @@ func (e *EmbyService) embyLatestCacheKey(userID, parentID string, limit int) str
 	return "media:emby:" + hex.EncodeToString(sum[:])
 }
 
+// embySimilarCacheKey 是「相似推荐」结果的缓存键。
+//
+// userID 必须参与键名：候选集的可见性（AllowedLibraryIDs、NSFW）由用户决定，
+// 混用会把别的用户可见的条目推荐给当前用户。limit 同理影响结果条数与排序。
+func (e *EmbyService) embySimilarCacheKey(mediaID, userID string, limit int) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{"similar-v1", mediaID, userID, strconv.Itoa(limit)}, "|")))
+	return "media:emby:" + hex.EncodeToString(sum[:])
+}
+
 // defaultEmbyLatestCacheTTLSeconds 是 Emby「最新添加」缓存的兜底时长。
 const defaultEmbyLatestCacheTTLSeconds = 300
 

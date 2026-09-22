@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"strings"
+	"time"
 )
 
 // Emby 发现类接口：NextUp / Similar / Genres。
@@ -67,6 +68,19 @@ func (e *EmbyService) SimilarItems(ctx context.Context, mediaID, userID string, 
 		return emptyItemsEnvelope(0), nil
 	}
 
+	// 详情页每次打开都会请求相似推荐，而重建要走「取候选池 + 内存打分」
+	// （实测冷 340ms / 热 70ms）。推荐列表短暂陈旧无害，用短 TTL 缓存，
+	// 新建库或换用户都会因为键名不同而自然隔离。
+	cacheKey := e.embySimilarCacheKey(mediaID, userID, limit)
+	if e.cache != nil {
+		var cached map[string]any
+		if e.cache.GetJSON(ctx, cacheKey, &cached) && cached != nil {
+			if _, ok := cached["Items"]; ok {
+				return cached, nil
+			}
+		}
+	}
+
 	// Bug 2 fix: resolve virtual series IDs (msgo-series-*) and real series
 	// table IDs to a representative episode so SimilarCandidates (which calls
 	// Media.FindByID) can seed similarity from concrete media metadata.
@@ -109,11 +123,19 @@ func (e *EmbyService) SimilarItems(ctx context.Context, mediaID, userID string, 
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{
+	out := map[string]any{
 		"Items":            items,
 		"TotalRecordCount": int64(len(items)),
-	}, nil
+	}
+	if e.cache != nil {
+		e.cache.SetJSON(ctx, cacheKey, out, embySimilarCacheTTL)
+	}
+	return out, nil
 }
+
+// embySimilarCacheTTL 是「相似推荐」结果的缓存时长。列表只是推荐，短暂陈旧
+// 无害；TTL 取短一些，让新入库的内容尽快出现。
+const embySimilarCacheTTL = 2 * time.Minute
 
 // Genres 返回类型清单。parentID 非空时（客户端按媒体库浏览类型）只统计该库。
 func (e *EmbyService) Genres(ctx context.Context, userID, parentID string) (map[string]any, error) {

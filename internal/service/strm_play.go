@@ -124,6 +124,16 @@ func (s *StrmService) resolveLocalPlay(ctx context.Context, rawPath string) (*St
 //   - 绝对 http(s) 链接（直接透传，包含别的 MeBox / MediaStationGo 实例的播放端点）
 //   - 其余协议（webdav:// 等）返回错误，由调用方决定是否静默跳过
 func (s *StrmService) ResolvePlayTarget(ctx context.Context, raw string) (*StrmPlayResult, error) {
+	return s.ResolvePlayTargetWithUA(ctx, raw, "")
+}
+
+// ResolvePlayTargetWithUA 与 ResolvePlayTarget 相同，但会把调用方的 User-Agent
+// 透传给需要按 UA 换取直链的提供方（115 直链绑定换取时的 UA，换错会被 CDN 拒绝）。
+//
+// 用途：播放链路在服务端直接把 strm 目标解析成最终直链并 302（见
+// StreamService.resolveDirectPlayTargetURL），此时必须带上播放器的 UA，才能拿到
+// 与 /api/strm/play 端点一致的、按 UA 分键缓存的那条直链。
+func (s *StrmService) ResolvePlayTargetWithUA(ctx context.Context, raw, userAgent string) (*StrmPlayResult, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, errors.New("空播放目标")
@@ -150,14 +160,14 @@ func (s *StrmService) ResolvePlayTarget(ctx context.Context, raw string) (*StrmP
 		if len(segs) < 1 || strings.TrimSpace(segs[0]) == "" {
 			return nil, errors.New("无效的 strm 播放地址")
 		}
-		return s.ResolvePlay(ctx, segs[0], u.Query())
+		return s.ResolvePlay(ctx, segs[0], playbackQueryWithUA(u, userAgent))
 	case strings.HasPrefix(lowerPath, "/api/cloud/play/"):
 		typ := strings.TrimSpace(strings.TrimPrefix(u.Path, "/api/cloud/play/"))
 		acct, err := s.firstEnabledAccountOf(ctx, typ)
 		if err != nil || acct == nil {
 			return nil, errors.New("没有可用的网盘账号，无法解析直链")
 		}
-		q := u.Query()
+		q := playbackQueryWithUA(u, userAgent)
 		q.Set("acct", acct.ID)
 		return s.ResolvePlay(ctx, typ, q)
 	case u.Scheme == "http" || u.Scheme == "https":
@@ -165,6 +175,19 @@ func (s *StrmService) ResolvePlayTarget(ctx context.Context, raw string) (*StrmP
 	default:
 		return nil, fmt.Errorf("不支持的播放目标协议: %s", u.Scheme)
 	}
+}
+
+// playbackQueryWithUA 复制播放目标的查询串并注入 __ua。ResolvePlay 的云盘提供方
+// 据此按播放器 UA 换取直链，与 /api/strm/play 端点写入 __ua 的语义保持一致。
+func playbackQueryWithUA(u *url.URL, userAgent string) url.Values {
+	q := url.Values{}
+	if u != nil {
+		q = url.Values(u.Query())
+	}
+	if ua := strings.TrimSpace(userAgent); ua != "" {
+		q.Set("__ua", ua)
+	}
+	return q
 }
 
 // isLocalPlaybackTarget 报告播放地址是否属于本机。这里没有 HTTP 请求上下文，
