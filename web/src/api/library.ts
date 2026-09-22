@@ -1,6 +1,18 @@
 import { api, BATCH_REQUEST_TIMEOUT, LONG_REQUEST_TIMEOUT } from './client'
 import type { Library, LibraryRoot, Media, PlaybackInfo, ScanResult } from '../types'
 import type { SeriesCard } from '../utils/groupSeries'
+import {
+  EMPTY_LIBRARY_FILTERS,
+  toFilterQuery,
+  type LibraryFilterParams,
+} from '../utils/libraryFilters'
+
+/** 媒体库筛选面板的可选项。 */
+export interface LibraryFacets {
+  genres: Array<{ name: string; count: number }>
+  year_min: number
+  year_max: number
+}
 
 export interface MediaPage {
   items: Media[]
@@ -165,7 +177,12 @@ export const libraryAPI = {
     id: string,
     page = 1,
     pageSize = 50,
-    options?: { groupVersions?: boolean; sort?: string; order?: 'asc' | 'desc' },
+    options?: {
+      groupVersions?: boolean
+      sort?: string
+      order?: 'asc' | 'desc'
+      filters?: LibraryFilterParams
+    },
   ) =>
     api
       .get<MediaPage>(`/libraries/${id}/media`, {
@@ -175,7 +192,23 @@ export const libraryAPI = {
           group_versions: options?.groupVersions === false ? 0 : undefined,
           sort: options?.sort,
           order: options?.order,
+          ...toFilterQuery(options?.filters ?? EMPTY_LIBRARY_FILTERS),
         },
+        timeout: LONG_REQUEST_TIMEOUT,
+      })
+      .then((r) => r.data),
+
+  /** 媒体库筛选面板的可选项：类型清单与年份区间。 */
+  facets: (id: string) =>
+    api
+      .get<LibraryFacets>(`/libraries/${id}/facets`, { timeout: LONG_REQUEST_TIMEOUT })
+      .then((r) => r.data),
+
+  /** 「随便看看」：按同一套筛选条件随机取一条，无命中时抛 404。 */
+  random: (id: string, filters?: LibraryFilterParams) =>
+    api
+      .get<Media>(`/libraries/${id}/random`, {
+        params: toFilterQuery(filters ?? EMPTY_LIBRARY_FILTERS),
         timeout: LONG_REQUEST_TIMEOUT,
       })
       .then((r) => r.data),
@@ -184,11 +217,21 @@ export const libraryAPI = {
     id: string,
     page = 1,
     pageSize = 500,
-    options?: { sort?: string; order?: 'asc' | 'desc' },
+    options?: {
+      sort?: string
+      order?: 'asc' | 'desc'
+      filters?: LibraryFilterParams
+    },
   ) =>
     api
       .get<SeriesPage>(`/libraries/${id}/series`, {
-        params: { page, page_size: pageSize, sort: options?.sort, order: options?.order },
+        params: {
+          page,
+          page_size: pageSize,
+          sort: options?.sort,
+          order: options?.order,
+          ...toFilterQuery(options?.filters ?? EMPTY_LIBRARY_FILTERS),
+        },
         timeout: LONG_REQUEST_TIMEOUT,
       })
       .then((r) => r.data),

@@ -14,6 +14,8 @@ const MediaDetailPageLoader = () =>
 const PlayerPageLoader = () => import('./pages/PlayerPage').then((m) => ({ default: m.PlayerPage }))
 const WatchHistoryPageLoader = () =>
   import('./pages/WatchHistoryPage').then((m) => ({ default: m.WatchHistoryPage }))
+const WatchStatsPageLoader = () =>
+  import('./pages/WatchStatsPage').then((m) => ({ default: m.WatchStatsPage }))
 
 const HomePage = lazy(HomePageLoader)
 const LibraryPage = lazy(LibraryPageLoader)
@@ -30,6 +32,7 @@ const FileManagerPage = lazy(() =>
   import('./pages/FileManagerPage').then((m) => ({ default: m.FileManagerPage })),
 )
 const WatchHistoryPage = lazy(WatchHistoryPageLoader)
+const WatchStatsPage = lazy(WatchStatsPageLoader)
 const PosterWallPage = lazy(() => import('./pages/PosterWallPage').then((m) => ({ default: m.PosterWallPage })))
 const ProfileManagementPage = lazy(() =>
   import('./pages/ProfileManagementPage').then((m) => ({ default: m.ProfileManagementPage })),
@@ -105,6 +108,7 @@ export const appRoutes: AppRoute[] = [
   { path: 'profile', element: <ProfilePage /> },
   { path: 'dlna', element: <DlnaPage /> },
   { path: 'history', element: <WatchHistoryPage /> },
+  { path: 'history/stats', element: <WatchStatsPage /> },
   { path: 'poster-wall', element: <PosterWallPage /> },
   { path: 'play-profiles', element: <ProfileManagementPage /> },
   { path: 'api-configs', element: <Navigate to="/settings?group=api-configs" replace /> },

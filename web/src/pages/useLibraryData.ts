@@ -5,6 +5,11 @@ import { libraryAPI } from '../api/library'
 import type { Library, Media } from '../types'
 import { peekLibrary, resolveLibrary } from '../utils/libraryCache'
 import { groupSeries, isEpisodeLike, type SeriesCard } from '../utils/groupSeries'
+import {
+  EMPTY_LIBRARY_FILTERS,
+  serializeLibraryFilters,
+  type LibraryFilterParams,
+} from '../utils/libraryFilters'
 import type { SortField, SortOrder } from '../utils/mediaSort'
 import { MAX_RESTORE_PAGES, readListPosition, writeListPosition } from '../hooks/useListPositionMemory'
 
@@ -13,6 +18,7 @@ export function useLibraryData(
   selectedSeries: SeriesCard | null,
   sortField: SortField,
   sortOrder: SortOrder,
+  filters: LibraryFilterParams = EMPTY_LIBRARY_FILTERS,
 ) {
   const [library, setLibrary] = useState<Library | null>(null)
   const [items, setItems] = useState<Media[]>([])
@@ -44,9 +50,10 @@ export function useLibraryData(
   const modeRef = useRef<'media' | 'series'>('media')
   const moreInFlightRef = useRef(false)
 
-  // 分页位置按「媒体库 + 排序」记忆：详情页返回、甚至换完排序再切回来，
-  // 都能回到上次加载到的页数。
-  const positionKey = `library:${libraryID}:${sortField}:${sortOrder}`
+  // 分页位置按「媒体库 + 排序 + 筛选」记忆：详情页返回、甚至换完排序或筛选后
+  // 再切回来，都能回到上次加载到的页数。
+  const filterKey = serializeLibraryFilters(filters)
+  const positionKey = `library:${libraryID}:${sortField}:${sortOrder}:${filterKey}`
 
   // 拉取并追加下一页。滚动哨兵、按钮和首屏分页恢复共用这一条路径，
   // 避免两套分页逻辑各自算页码。
@@ -60,6 +67,7 @@ export function useLibraryData(
         const data = await libraryAPI.listSeries(libraryID, page, pageSizeFor(lib), {
           sort: sortField,
           order: sortOrder,
+          filters,
         })
         if (seq !== requestSeqRef.current) return false
         const pageItems = data.items ?? []
@@ -72,6 +80,7 @@ export function useLibraryData(
         const data = await libraryAPI.listMedia(libraryID, page, pageSizeFor(lib), {
           sort: sortField,
           order: sortOrder,
+          filters,
         })
         if (seq !== requestSeqRef.current) return false
         const pageItems = data.items ?? []
@@ -93,7 +102,7 @@ export function useLibraryData(
       }
       return false
     }
-  }, [libraryID, positionKey, sortField, sortOrder])
+  }, [libraryID, positionKey, sortField, sortOrder, filters])
 
   const loadMore = useCallback(async (options?: { remember?: boolean }) => {
     if (moreInFlightRef.current || !hasMoreRef.current) return
@@ -168,14 +177,22 @@ export function useLibraryData(
       const pageSize = pageSizeFor(lib)
       try {
         if (seriesMode) {
-          const data = await libraryAPI.listSeries(libraryID, 1, pageSize, { sort: sortField, order: sortOrder })
+          const data = await libraryAPI.listSeries(libraryID, 1, pageSize, {
+            sort: sortField,
+            order: sortOrder,
+            filters,
+          })
           if (cancelled || seq !== requestSeqRef.current) return
           const pageItems = data.items ?? []
           setServerSeriesCards(pageItems)
           loadedCountRef.current = pageItems.length
           totalRef.current = data.total ?? pageItems.length
         } else {
-          const data = await libraryAPI.listMedia(libraryID, 1, pageSize, { sort: sortField, order: sortOrder })
+          const data = await libraryAPI.listMedia(libraryID, 1, pageSize, {
+            sort: sortField,
+            order: sortOrder,
+            filters,
+          })
           if (cancelled || seq !== requestSeqRef.current) return
           const pageItems = data.items ?? []
           setItems(pageItems)
@@ -214,7 +231,7 @@ export function useLibraryData(
       cancelled = true
       requestSeqRef.current += 1
     }
-  }, [appendNextPage, libraryID, positionKey, reloadTick, sortField, sortOrder])
+  }, [appendNextPage, libraryID, positionKey, reloadTick, sortField, sortOrder, filters])
 
   useEffect(() => {
     if (!libraryID || !isSeriesLibrary || !selectedSeries) {

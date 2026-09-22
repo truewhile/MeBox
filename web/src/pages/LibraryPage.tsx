@@ -1,9 +1,17 @@
-import { useCallback, useMemo, useState, Fragment, type ReactNode } from 'react'
-import { useLocation, useParams, useSearchParams } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useState, Fragment, type ReactNode } from 'react'
+import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
+import toast from 'react-hot-toast'
 
 import type { Media } from '../types'
 import { useAuthStore } from '../stores/auth'
+import { libraryAPI, type LibraryFacets } from '../api/library'
+import {
+  EMPTY_LIBRARY_FILTERS,
+  parseLibraryFilters,
+  withFilterParams,
+  type LibraryFilterParams,
+} from '../utils/libraryFilters'
 import { isTheatricalFeature, type SeriesCard } from '../utils/groupSeries'
 import {
   sortMediaList,
@@ -15,6 +23,7 @@ import { LibraryPageDialogs } from './LibraryPageDialogs'
 import { PageBackButton } from '../components/PageBackButton'
 import { MediaFavouriteButton } from '../components/MediaFavouriteButton'
 import { LibraryPageHeader } from './LibraryPageHeader'
+import { LibraryFilterBar } from './LibraryFilterBar'
 import { LibraryMediaSections } from './LibraryMediaSections'
 import { LibrarySeriesDetailSection } from './LibrarySeriesDetailSection'
 import { useLibraryData } from './useLibraryData'
@@ -28,6 +37,7 @@ export function LibraryPage() {
   const { id = '' } = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
   const location = useLocation()
+  const navigate = useNavigate()
   const role = useAuthStore((s) => s.user?.role)
   const canFavorite = usePermission('can_favorite')
   const { isFavourite, toggleFavourite } = useFavourites()
@@ -57,6 +67,60 @@ export function LibraryPage() {
   const [selectedSeries, setSelectedSeries] = useState<SeriesCard | null>(null)
   const [selectedSeason, setSelectedSeason] = useState<number | null>(null)
 
+  // 筛选状态放在 URL：可分享、刷新保持、浏览器返回可撤销。
+  const libraryFilters = useMemo(
+    () => parseLibraryFilters(location.search),
+    [location.search],
+  )
+  const [facets, setFacets] = useState<LibraryFacets | null>(null)
+  const [loadingFacets, setLoadingFacets] = useState(true)
+  const [randomBusy, setRandomBusy] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoadingFacets(true)
+    libraryAPI
+      .facets(id)
+      .then((data) => {
+        if (!cancelled) setFacets(data)
+      })
+      .catch(() => {
+        if (!cancelled) setFacets(null)
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingFacets(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [id])
+
+  const applyFilters = (next: LibraryFilterParams) => {
+    navigate({ search: withFilterParams(location.search, next) }, { replace: true })
+  }
+
+  const resetFilters = () => {
+    navigate({ search: withFilterParams(location.search, EMPTY_LIBRARY_FILTERS) }, { replace: true })
+  }
+
+  // 「随便看看」直接进播放页：多一步详情页会削弱「随手看点什么」的意图。
+  // 接受来自 LibraryFilterBar 的有效草稿筛选（草稿与已应用不同时，面板已事先
+  // 调用 applyFilters 把草稿写入 URL，再用相同的条件发起随机请求以保证一致）。
+  const handleRandom = async (filters: LibraryFilterParams) => {
+    setRandomBusy(true)
+    try {
+      const media = await libraryAPI.random(id, filters)
+      navigate(`/play/${media.id}`)
+    } catch (err) {
+      const status = (err as { response?: { status?: number } })?.response?.status
+      toast.error(
+        status === 404 ? '没有符合当前筛选条件的媒体' : '随机播放失败，请稍后重试',
+      )
+    } finally {
+      setRandomBusy(false)
+    }
+  }
+
   const {
     library,
     items,
@@ -73,7 +137,7 @@ export function LibraryPage() {
     seriesCards,
     loadingAllText,
     reloadCurrentLibrary,
-  } = useLibraryData(id, selectedSeries, serverSortField, serverSortOrder)
+  } = useLibraryData(id, selectedSeries, serverSortField, serverSortOrder, libraryFilters)
 
   // 常规排序由服务端全局完成；只有 random 模式才在客户端洗牌。
   const displayedItems = useMemo(() => {
@@ -253,6 +317,16 @@ export function LibraryPage() {
           onRepairRescrape={handleRepairRescrape}
         />
       )}
+
+      <LibraryFilterBar
+        facets={facets}
+        loadingFacets={loadingFacets}
+        filters={libraryFilters}
+        onApply={applyFilters}
+        onReset={resetFilters}
+        onRandom={(f) => void handleRandom(f)}
+        randomBusy={randomBusy}
+      />
 
       <LibraryMediaSections
         isSeries={isSeries}

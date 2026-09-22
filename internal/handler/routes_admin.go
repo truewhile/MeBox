@@ -116,8 +116,13 @@ func registerAdminUserRoutes(admin *gin.RouterGroup, svc *service.Container) {
 	admin.PATCH("/users/:id/role", adminUpdateRoleHandler(svc))
 	admin.PATCH("/users/:id/libraries", updateUserLibrariesHandler(svc))
 	admin.DELETE("/users/:id", deleteUserHandler(svc))
+	// 设备代管：管理员可查看并踢掉任意用户的设备。
+	admin.GET("/users/:id/devices", adminUserDevicesHandler(svc))
+	admin.POST("/users/:id/devices/kick-all", adminKickAllUserDevicesHandler(svc))
+	admin.POST("/users/:id/devices/:deviceID/kick", adminKickUserDeviceHandler(svc))
 	admin.GET("/settings", listSettingsHandler(svc))
 	admin.PUT("/settings", updateSettingHandler(svc))
+	admin.POST("/telegram/test", testTelegramHandler(svc))
 	admin.POST("/adult/test-scraper", testAdultScraperHandler(svc))
 	admin.GET("/logs", recentLogsHandler(svc))
 }

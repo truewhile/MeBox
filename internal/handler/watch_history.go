@@ -11,8 +11,11 @@
 package handler
 
 import (
+	"context"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -48,11 +51,16 @@ func historyListHandler(svc *service.Container) gin.HandlerFunc {
 }
 
 // historyStatsHandler returns aggregate watch time + completion counts
-// for the caller. Used by the WatchHistoryPage hero card.
+// for the caller. Used by the WatchHistoryPage hero card and the dedicated
+// personal statistics page.
+//
+// 统计口径全部来自 PlaybackHistory 本身，不新增统计表：position_ms 是「已看
+// 时长」的近似值，足以支撑趋势图；精确到秒的播放时长另有会话统计负责。
 func historyStatsHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		uid, _ := c.Get(middleware.CtxUserID)
 		userID := toString(uid)
+		ctx := c.Request.Context()
 
 		var total int64
 		_ = svc.Repo.DB.Model(&model.PlaybackHistory{}).
@@ -77,14 +85,194 @@ func historyStatsHandler(svc *service.Container) gin.HandlerFunc {
 			last = &lastT
 		}
 
+		visibility := mediaVisibilityForRequest(c, svc)
+		daily, byType, recent := historyStatsBreakdowns(ctx, svc, userID, visibility)
+
+		inProgress := total - completed
+		if inProgress < 0 {
+			inProgress = 0
+		}
+
 		c.JSON(http.StatusOK, gin.H{
-			"total":         total,
-			"completed":     completed,
-			"watched_ms":    watchedMs,
-			"watched_hours": float64(watchedMs) / 1000.0 / 3600.0,
-			"last_watched":  last,
+			"total":           total,
+			"completed":       completed,
+			"in_progress":     inProgress,
+			"watched_ms":      watchedMs,
+			"watched_hours":   float64(watchedMs) / 1000.0 / 3600.0,
+			"last_watched":    last,
+			"daily":           daily,
+			"by_library_type": byType,
+			"recent":          recent,
 		})
 	}
+}
+
+// historyStatsDailyDays 是趋势图回看的天数。
+const historyStatsDailyDays = 30
+
+// historyStatsRecentLimit 是「最近看过」返回的条数。
+const historyStatsRecentLimit = 8
+
+type historyDailyStat struct {
+	Day     string `json:"day"`
+	WatchMs int64  `json:"watch_ms"`
+	Plays   int64  `json:"plays"`
+}
+
+type historyTypeStat struct {
+	Type    string `json:"type"`
+	WatchMs int64  `json:"watch_ms"`
+	Count   int64  `json:"count"`
+}
+
+// historyStatsBreakdowns 产出每日趋势、按媒体库类型分布与最近记录。
+//
+// 分桶在 Go 里做而不是用 SQL 的日期函数：SQLite 的 strftime 与 PostgreSQL 的
+// to_char 语法不同，写两份 SQL 会在方言差异上长期出错，而历史行数受用户规模
+// 约束（每人一行一部媒体），一次全量读取是可以接受的。
+//
+// visibility 控制哪些媒体对调用者可见（播放档案、成人锁等）。
+func historyStatsBreakdowns(ctx context.Context, svc *service.Container, userID string, visibility service.MediaVisibility) ([]historyDailyStat, []historyTypeStat, []map[string]any) {
+	daily := make([]historyDailyStat, 0, historyStatsDailyDays)
+	byType := make([]historyTypeStat, 0)
+	recent := make([]map[string]any, 0, historyStatsRecentLimit)
+
+	var rows []model.PlaybackHistory
+	if err := svc.Repo.DB.WithContext(ctx).
+		Where("user_id = ?", userID).
+		Order("watched_at desc").
+		Find(&rows).Error; err != nil || len(rows) == 0 {
+		return daily, byType, recent
+	}
+
+	// 每日趋势：只回看最近 N 天，且按「本地日」分桶，避免跨时区偏移。
+	now := time.Now()
+	cutoff := now.AddDate(0, 0, -(historyStatsDailyDays - 1))
+	startOfDay := func(t time.Time) time.Time {
+		local := t.In(time.Local)
+		return time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, time.Local)
+	}
+	buckets := make(map[string]*historyDailyStat, historyStatsDailyDays)
+	for i := 0; i < historyStatsDailyDays; i++ {
+		day := startOfDay(cutoff).AddDate(0, 0, i).Format("2006-01-02")
+		buckets[day] = &historyDailyStat{Day: day}
+	}
+	for _, r := range rows {
+		watched := r.WatchedAt.In(time.Local)
+		if watched.Before(startOfDay(cutoff)) {
+			continue
+		}
+		if bucket, ok := buckets[watched.Format("2006-01-02")]; ok {
+			bucket.WatchMs += r.PositionMs
+			bucket.Plays++
+		}
+	}
+	for i := 0; i < historyStatsDailyDays; i++ {
+		day := startOfDay(cutoff).AddDate(0, 0, i).Format("2006-01-02")
+		if bucket, ok := buckets[day]; ok && bucket.Plays > 0 {
+			daily = append(daily, *bucket)
+		}
+	}
+
+	mediaIDs := make([]string, 0, len(rows))
+	for _, r := range rows {
+		mediaIDs = append(mediaIDs, r.MediaID)
+	}
+	var medias []model.Media
+	_ = svc.Repo.DB.WithContext(ctx).Where("id IN ?", mediaIDs).Find(&medias).Error
+	mediaByID := make(map[string]*model.Media, len(medias))
+	for i := range medias {
+		mediaByID[medias[i].ID] = &medias[i]
+	}
+
+	libraryTypes := make(map[string]string)
+	var libraries []model.Library
+	if svc.Repo.Library != nil {
+		if libs, err := svc.Repo.Library.List(ctx); err == nil {
+			libraries = libs
+		}
+	}
+	for _, lib := range libraries {
+		libraryTypes[lib.ID] = lib.Type
+	}
+
+	typeAcc := make(map[string]*historyTypeStat)
+	order := make([]string, 0, 4)
+	for _, r := range rows {
+		media := mediaByID[r.MediaID]
+		var key string
+		if media == nil {
+			// 媒体记录已删除（含 Emby 远程缓存失效）：计入 "other" 桶而非丢弃，
+			// 这样类型分布总数才能与播放历史总数吻合。
+			key = "other"
+		} else {
+			// 如果调用者的可见性策略排除了该媒体，则跳过统计（visibility leak fix）。
+			if !visibility.Allows(media) {
+				continue
+			}
+			key = strings.TrimSpace(libraryTypes[media.LibraryID])
+			if key == "" {
+				key = "other"
+			}
+		}
+		acc, ok := typeAcc[key]
+		if !ok {
+			acc = &historyTypeStat{Type: key}
+			typeAcc[key] = acc
+			order = append(order, key)
+		}
+		acc.WatchMs += r.PositionMs
+		acc.Count++
+	}
+	// 顺序按观看时长降序，让「我主要在看什么」一眼可见。
+	for _, key := range order {
+		byType = append(byType, *typeAcc[key])
+	}
+	sort.SliceStable(byType, func(i, j int) bool {
+		if byType[i].WatchMs != byType[j].WatchMs {
+			return byType[i].WatchMs > byType[j].WatchMs
+		}
+		return byType[i].Type < byType[j].Type
+	})
+
+	for _, r := range rows {
+		if len(recent) >= historyStatsRecentLimit {
+			break
+		}
+		entry := map[string]any{"history": r}
+		if media := mediaByID[r.MediaID]; media != nil {
+			// 可见性检查：隐藏库或受档案限制的媒体不进入最近记录（visibility leak fix）。
+			if !visibility.Allows(media) {
+				continue
+			}
+			entry["media"] = media
+		} else if svc.EmbyRemote != nil && service.IsEmbyRemoteID(r.MediaID) {
+			// 尝试从 Emby 远端补全媒体详情，与 historyContinueHandler 保持相同策略。
+			mountID, remoteID, _ := service.DecodeEmbyRemoteID(r.MediaID)
+			mount, acct, resolveErr := svc.EmbyRemote.ResolveMount(ctx, mountID)
+			if resolveErr == nil && mount != nil && acct != nil {
+				remoteMedia, detailErr := svc.EmbyRemote.RemoteMediaDetail(ctx, mount, acct, remoteID)
+				if detailErr == nil && remoteMedia != nil {
+					if !visibility.Allows(remoteMedia) {
+						continue
+					}
+					entry["media"] = *remoteMedia
+				} else {
+					// 无法获取 Emby 媒体详情，跳过此条记录。
+					continue
+				}
+			} else {
+				// 挂载不可用，跳过。
+				continue
+			}
+		} else {
+			// 媒体记录不存在且无法 Emby 补全，跳过。
+			continue
+		}
+		recent = append(recent, entry)
+	}
+
+	return daily, byType, recent
 }
 
 // historyContinueHandler returns "Continue Watching" rows: incomplete

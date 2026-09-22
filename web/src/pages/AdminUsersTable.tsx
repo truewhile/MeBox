@@ -2,6 +2,7 @@ import {
   FolderLock,
   KeyRound,
   Loader2,
+  MonitorSmartphone,
   Pencil,
   ShieldCheck,
   Trash2,
@@ -23,6 +24,7 @@ type AdminUsersTableProps = {
   onStartEdit: (user: User) => void
   onResetPassword: (user: User) => void
   onConfigureLibraries: (user: User) => void
+  onManageDevices: (user: User) => void
   onToggleStatus: (user: User) => void
   onDeleteUser: (user: User) => void
 }
@@ -38,6 +40,7 @@ export function AdminUsersTable({
   onStartEdit,
   onResetPassword,
   onConfigureLibraries,
+  onManageDevices,
   onToggleStatus,
   onDeleteUser,
 }: AdminUsersTableProps) {
@@ -57,7 +60,7 @@ export function AdminUsersTable({
         </thead>
         <tbody>
           {users.map((u) => (
-            <tr key={u.id} className="border-t border-gray-200">
+            <tr key={u.id} id={`admin-user-${u.id}`} className="border-t border-gray-200">
               <td className="py-2 text-ink-600">
                 {editingID === u.id ? (
                   <input
@@ -146,6 +149,13 @@ export function AdminUsersTable({
                   onClick={() => onResetPassword(u)}
                 >
                   {resettingPasswordID === u.id ? <Loader2 size={12} className="animate-spin" /> : <KeyRound size={12} />}
+                </button>
+                <button
+                  className="rounded-lg border border-sky-400/40 px-2 py-1 text-xs text-sky-500 hover:bg-sky-400/10"
+                  title="登录设备管理"
+                  onClick={() => onManageDevices(u)}
+                >
+                  <MonitorSmartphone size={12} />
                 </button>
                 <button
                   className={

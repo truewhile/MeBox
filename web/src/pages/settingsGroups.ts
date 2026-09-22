@@ -1,5 +1,6 @@
 import { adultSettingsGroup } from './settingsGroupAccess'
 import { apiConfigsSettingsGroup } from './settingsGroupAPIConfigs'
+import { deviceNotifySettingsGroup } from './settingsGroupDeviceNotify'
 import { generalSettingsGroup } from './settingsGroupGeneral'
 import { recognitionWordsSettingsGroup } from './settingsGroupRecognitionWords'
 import type { SettingGroup } from './settingsGroupTypes'
@@ -22,6 +23,7 @@ export const aboutSettingsGroup: SettingGroup = {
 
 export const GROUPS: SettingGroup[] = [
   generalSettingsGroup,
+  deviceNotifySettingsGroup,
   databaseSettingsGroup,
   apiConfigsSettingsGroup,
   recognitionWordsSettingsGroup,

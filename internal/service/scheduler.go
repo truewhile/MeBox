@@ -36,6 +36,7 @@ type SchedulerService struct {
 	organizePipeline *OrganizePipelineService
 	hub              *Hub
 	tasks            *TaskTrackerService
+	expiryWatcher    *TelegramExpiryWatcher
 	cacheDir         string
 	now              func() time.Time
 
@@ -57,6 +58,11 @@ func (s *SchedulerService) SetTaskTracker(tasks *TaskTrackerService) {
 
 func (s *SchedulerService) SetOrganizePipeline(pipeline *OrganizePipelineService) {
 	s.organizePipeline = pipeline
+}
+
+// SetExpiryWatcher 注入账号到期巡检。未注入时（例如测试）该任务不注册。
+func (s *SchedulerService) SetExpiryWatcher(watcher *TelegramExpiryWatcher) {
+	s.expiryWatcher = watcher
 }
 
 // ImageCachePolicy 是一次图片缓存清理要用的策略（全部为 0 表示不做任何清理）。
@@ -138,6 +144,14 @@ func (s *SchedulerService) Start(ctx context.Context) {
 			interval: 1 * time.Hour,
 			run:      s.jobCleanImageCache,
 		},
+	}
+	// 到期提醒只在配置了巡检器时注册，避免测试与未启用通知的部署跑空转任务。
+	if s.expiryWatcher != nil {
+		s.jobs = append(s.jobs, &scheduledJob{
+			name:     "telegram_expiry_warning",
+			interval: 24 * time.Hour,
+			run:      s.jobTelegramExpiryWarning,
+		})
 	}
 	for _, j := range s.jobs {
 		initialDelay := 15 * time.Second

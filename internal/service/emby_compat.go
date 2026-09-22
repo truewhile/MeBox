@@ -76,6 +76,10 @@ type EmbyService struct {
 	adult         *AdultProvider
 	personImageMu sync.RWMutex
 	personImages  map[string]string
+
+	// discovery 提供 NextUp / Similar / Genres 的候选集。它只选候选，
+	// DTO 形状仍由本服务统一产出，避免同一部剧在不同接口上长得不一样。
+	discovery *MediaDiscoveryService
 }
 
 // NewEmbyService is the constructor.
@@ -89,6 +93,26 @@ func (e *EmbyService) SetEmbyRemote(remote *EmbyRemoteService) *EmbyService {
 		e.remote = remote
 	}
 	return e
+}
+
+// SetDiscovery 注入发现类查询服务（NextUp / Similar / Genres）。
+func (e *EmbyService) SetDiscovery(discovery *MediaDiscoveryService) *EmbyService {
+	if e != nil {
+		e.discovery = discovery
+	}
+	return e
+}
+
+// discoveryService 返回发现服务；未注入时按需构造，保证 Emby 接口在任何
+// 组装顺序下都不会因为缺少注入而返回空结果。
+func (e *EmbyService) discoveryService() *MediaDiscoveryService {
+	if e == nil {
+		return nil
+	}
+	if e.discovery == nil {
+		e.discovery = NewMediaDiscoveryService(e.log, e.repo)
+	}
+	return e.discovery
 }
 
 // SetTMDbProvider wires the TMDb client used for detail-time cast/crew lookup.

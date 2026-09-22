@@ -147,6 +147,98 @@ func (s *MediaService) ListLibrarySeriesCards(ctx context.Context, libraryID str
 	return cards, total, nil
 }
 
+// ListLibrarySeriesCardsFiltered 在系列卡片上应用筛选。
+//
+// 语义：先对原始剧集行做筛选，再分组 —— 于是「剧里任意一集命中条件」即可保留
+// 该剧。这比只筛代表行更符合直觉（用户勾选「动作」是想要动作剧，而不是
+// 「第一集恰好是动作的剧」）。
+//
+// 无筛选时直接走带缓存的原路径，避免平白多一次全库分组。
+func (s *MediaService) ListLibrarySeriesCardsFiltered(
+	ctx context.Context,
+	libraryID string,
+	visibility MediaVisibility,
+	filters MediaListFilters,
+) ([]SeriesCard, int64, error) {
+	if filters.empty() {
+		return s.ListLibrarySeriesCards(ctx, libraryID, visibility)
+	}
+	rows, err := s.libraryRowsWithIndex(ctx, libraryID, visibility)
+	if err != nil {
+		return nil, 0, err
+	}
+	completed := s.completedMediaIDSet(ctx, filters)
+	kept := make([]model.Media, 0, len(rows.Rows))
+	for _, row := range rows.Rows {
+		if !mediaRowMatchesFilters(&row, filters, completed) {
+			continue
+		}
+		kept = append(kept, row)
+	}
+	cards := groupMediaSeriesCards(kept)
+	if cards == nil {
+		cards = []SeriesCard{}
+	}
+	return cards, int64(len(cards)), nil
+}
+
+// mediaRowMatchesFilters 在内存里复现 SQL 层的筛选语义。
+//
+// 系列路径无法直接复用仓储过滤（它基于整库共享缓存），因此这里必须与
+// applyMediaQueryFilter 保持同一套判定，否则会出现「电影库能筛、剧集库不同」
+// 的行为差异。
+func mediaRowMatchesFilters(row *model.Media, filters MediaListFilters, completed map[string]bool) bool {
+	if row == nil {
+		return false
+	}
+	if filters.YearMin > 0 && row.Year < filters.YearMin {
+		return false
+	}
+	if filters.YearMax > 0 && row.Year > filters.YearMax {
+		return false
+	}
+	if filters.RatingMin > 0 && float64(row.Rating) < filters.RatingMin {
+		return false
+	}
+	if filters.Unwatched && completed[row.ID] {
+		return false
+	}
+	if len(filters.Genres) > 0 {
+		rowGenres := genreSet(row.Genres)
+		matched := false
+		for _, want := range filters.Genres {
+			if _, ok := rowGenres[strings.ToLower(strings.TrimSpace(want))]; ok {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+// completedMediaIDSet 返回该用户已标记看完的媒体 ID 集合（未启用未观看筛选时
+// 返回 nil，避免无谓查询）。
+func (s *MediaService) completedMediaIDSet(ctx context.Context, filters MediaListFilters) map[string]bool {
+	userID := strings.TrimSpace(filters.UserID)
+	if !filters.Unwatched || userID == "" {
+		return nil
+	}
+	var rows []model.PlaybackHistory
+	if err := s.repo.DB.WithContext(ctx).
+		Where("user_id = ? AND completed = ?", userID, true).
+		Find(&rows).Error; err != nil {
+		return nil
+	}
+	out := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		out[row.MediaID] = true
+	}
+	return out
+}
+
 func (s *MediaService) ListRecentSeriesCards(ctx context.Context, limit int, visibility MediaVisibility) ([]SeriesCard, error) {
 	if limit <= 0 {
 		limit = 24

@@ -44,6 +44,21 @@ type MediaQueryFilter struct {
 	AllowedLibraryIDs []string
 	HiddenLibraryIDs  []string
 	SeriesID          string
+	// LibraryID 是精确匹配的单个库过滤，用于库内场景（例如媒体库页筛选）。
+	// 它与 AllowedLibraryIDs 是「与」关系：可见性仍由后者兜底，避免越权。
+	LibraryID string
+	// Genres 是类型多选，之间为「或」。按整词匹配（见 genreMatchClause）。
+	Genres []string
+	// YearMin / YearMax 为 0 表示该端不限。
+	YearMin int
+	YearMax int
+	// RatingMin 为 0 表示不限。
+	RatingMin float64
+	// UnwatchedOnly 排除 UnwatchedUserID 已标记看完的条目。
+	// 「未观看」定义为「没有 completed=true 的记录」：看到一半的仍会出现，
+	// 与「继续观看」互补而不是重复。
+	UnwatchedOnly   bool
+	UnwatchedUserID string
 }
 
 func applyMediaQueryFilter(q *gorm.DB, filter MediaQueryFilter) *gorm.DB {
@@ -56,10 +71,111 @@ func applyMediaQueryFilter(q *gorm.DB, filter MediaQueryFilter) *gorm.DB {
 	if len(filter.AllowedLibraryIDs) > 0 {
 		q = q.Where("library_id IN ?", filter.AllowedLibraryIDs)
 	}
+	if libraryID := strings.TrimSpace(filter.LibraryID); libraryID != "" {
+		q = q.Where("library_id = ?", libraryID)
+	}
 	if seriesID := strings.TrimSpace(filter.SeriesID); seriesID != "" {
 		q = q.Where("series_id = ?", seriesID)
 	}
+	if len(filter.Genres) > 0 {
+		q = q.Where(genreMatchClause(filter.Genres), genreMatchArgs(filter.Genres)...)
+	}
+	if filter.YearMin > 0 {
+		q = q.Where("year >= ?", filter.YearMin)
+	}
+	if filter.YearMax > 0 {
+		q = q.Where("year <= ?", filter.YearMax)
+	}
+	if filter.RatingMin > 0 {
+		q = q.Where("rating >= ?", filter.RatingMin)
+	}
+	if filter.UnwatchedOnly {
+		userID := strings.TrimSpace(filter.UnwatchedUserID)
+		// 没有用户上下文时忽略该条件：否则会把整个库筛成空，看起来像「坏了」。
+		if userID != "" {
+			q = q.Where(
+				"id NOT IN (SELECT media_id FROM playback_histories WHERE user_id = ? AND completed = ?)",
+				userID, true,
+			)
+		}
+	}
 	return q
+}
+
+// genreMatchClause 生成类型整词匹配条件。
+//
+// genres 列是逗号分隔字符串，直接 LIKE '%Action%' 会把 "ActionComedy" 也命中。
+// 这里统一补上首尾逗号（并用空格容错）后再按 "%,Action,%" 匹配，实现整词语义；
+// 该写法在 SQLite 与 PostgreSQL 上行为一致，因此不需要方言分支。
+//
+// 注意写法：参数本身带上首尾逗号，SQL 里只做一次 REPLACE 来保证列值两端也有
+// 分隔符，避免 OR 链里重复拼接列表达式。
+func genreMatchClause(genres []string) string {
+	clauses := make([]string, 0, len(genres))
+	for range genres {
+		clauses = append(clauses, "',' || REPLACE(REPLACE(TRIM(genres), ' ', ''), '，', ',') || ',' LIKE ?")
+	}
+	return "(" + strings.Join(clauses, " OR ") + ")"
+}
+
+// genreMatchArgs 生成与 genreMatchClause 对应的参数，形如 "%,Action,%"。
+//
+// 必须与 genreMatchClause 的列端处理完全对称：
+//   - TRIM                   → TrimSpace
+//   - REPLACE(…, ' ', '')    → ReplaceAll(…, " ", "")   ← 多词类型（如 "Science Fiction"）
+//   - REPLACE(…, '，', ',')  → ReplaceAll(…, "，", ",")
+func genreMatchArgs(genres []string) []any {
+	args := make([]any, 0, len(genres))
+	for _, genre := range genres {
+		name := strings.ReplaceAll(strings.TrimSpace(genre), "，", ",")
+		name = strings.ReplaceAll(name, " ", "") // mirror REPLACE(…,' ','') in genreMatchClause
+		if name == "" {
+			name = "\x00" // 空类型不会命中任何行
+		}
+		args = append(args, "%,"+name+",%")
+	}
+	return args
+}
+
+// ListGenreValues 返回符合过滤条件的 media.genres 原始值（逗号分隔字符串）。
+//
+// 只取单列：类型聚合不需要整行 media，而一台大库的整行扫描会把海报 URL、
+// 简介等大字段一起读进内存。切分与去重交给调用方，SQL 层保持方言无关。
+func (r *MediaRepository) ListGenreValues(ctx context.Context, filter MediaQueryFilter) ([]string, error) {
+	var values []string
+	q := r.db.WithContext(ctx).
+		Model(&model.Media{}).
+		Where("genres IS NOT NULL AND genres <> ''")
+	q = applyMediaQueryFilter(q, filter)
+	if err := q.Pluck("genres", &values).Error; err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+// YearRange 返回符合过滤条件的年份区间（两端都为 0 表示没有可用年份）。
+// 供媒体库筛选面板生成年份上下限，避免前端硬编码或先取全量再自己算。
+func (r *MediaRepository) YearRange(ctx context.Context, filter MediaQueryFilter) (int, int, error) {
+	var bounds struct {
+		MinYear *int
+		MaxYear *int
+	}
+	q := r.db.WithContext(ctx).
+		Model(&model.Media{}).
+		Where("year > 0").
+		Select("MIN(year) AS min_year, MAX(year) AS max_year")
+	q = applyMediaQueryFilter(q, filter)
+	if err := q.Scan(&bounds).Error; err != nil {
+		return 0, 0, err
+	}
+	min, max := 0, 0
+	if bounds.MinYear != nil {
+		min = *bounds.MinYear
+	}
+	if bounds.MaxYear != nil {
+		max = *bounds.MaxYear
+	}
+	return min, max, nil
 }
 
 func (r *MediaRepository) indexMediaBestEffort(ctx context.Context, media model.Media) {

@@ -8,6 +8,10 @@ import { getActivePlayProfileId, getActivePlayProfilePinToken } from '../stores/
 export const api = axios.create({
   baseURL: '/api',
   timeout: 30000,
+  // Serialize arrays as repeated params without brackets: genre=a&genre=b
+  // instead of axios's default genre[]=a&genre[]=b which Gin's QueryArray
+  // does not recognise.
+  paramsSerializer: { indexes: null },
 })
 
 export const LONG_REQUEST_TIMEOUT = 120_000

@@ -55,6 +55,9 @@ type User struct {
 	// expires. When set and in the past, the account is treated as expired
 	// (login blocked) until an admin or a redemption code renews it.
 	ExpiredAt *time.Time `json:"expired_at,omitempty"`
+	// TelegramChatID 是用户绑定的 Telegram 会话 ID，用于接收账号与设备通知。
+	// 为空表示未绑定；绑定走个人资料页生成的一次性码 + Bot /bind 命令。
+	TelegramChatID string `gorm:"size:64" json:"telegram_chat_id,omitempty"`
 	// ShareWarnings counts anti-account-sharing warnings, mainly device
 	// fingerprint mismatches. Once it exceeds the configured threshold a
 	// re-offence disables the account until an admin re-enables it.

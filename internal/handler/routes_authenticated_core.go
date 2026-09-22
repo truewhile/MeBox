@@ -19,6 +19,16 @@ func registerAuthedUserAndLicenseRoutes(authed *gin.RouterGroup, svc *service.Co
 	authed.GET("/me/temporary-password", temporaryPasswordHandler(svc))
 	authed.POST("/me/temporary-password", temporaryPasswordHandler(svc))
 
+	// 设备管理：路由挂在 /me 下，用户 ID 一律取自会话，天然只能管自己的设备。
+	authed.GET("/me/devices", myDevicesHandler(svc))
+	authed.POST("/me/devices/kick-all", myKickAllDevicesHandler(svc))
+	authed.POST("/me/devices/:deviceID/kick", myKickDeviceHandler(svc))
+
+	// Telegram 通知绑定：一次性码 + Bot /bind <code>。
+	authed.GET("/me/telegram", getTelegramStatusHandler(svc))
+	authed.POST("/me/telegram/bind-code", startTelegramBindHandler(svc))
+	authed.DELETE("/me/telegram", unbindTelegramHandler(svc))
+
 	authed.GET("/auth/permissions", getMyPermissionsHandler(svc))
 }
 
@@ -38,6 +48,8 @@ func registerAuthedLibraryRoutes(authed *gin.RouterGroup, svc *service.Container
 	authed.POST("/libraries/:id/scrape", middleware.AdminRequired(), scrapeLibraryHandler(svc))
 
 	authed.GET("/libraries/:id/media", listMediaHandler(svc))
+	authed.GET("/libraries/:id/facets", libraryFacetsHandler(svc))
+	authed.GET("/libraries/:id/random", libraryRandomHandler(svc))
 	authed.GET("/libraries/:id/series", listLibrarySeriesHandler(svc))
 	authed.GET("/libraries/:id/series/episodes", listLibrarySeriesEpisodesHandler(svc))
 	authed.GET("/libraries/:id/seasons", listSeasonsHandler(svc))

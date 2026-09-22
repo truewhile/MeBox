@@ -21,14 +21,24 @@ func (s *DeviceService) KickDevice(ctx context.Context, userID, deviceID string)
 		return fmt.Errorf("device not found")
 	}
 	if fp := strings.TrimSpace(d.Fingerprint); fp != "" {
-		return s.repo.UserDevice.SetKickedByFingerprint(ctx, userID, fp, true)
+		err = s.repo.UserDevice.SetKickedByFingerprint(ctx, userID, fp, true)
+	} else {
+		err = s.repo.UserDevice.SetKicked(ctx, d.ID, true)
 	}
-	return s.repo.UserDevice.SetKicked(ctx, d.ID, true)
+	if err != nil {
+		return err
+	}
+	s.notify(ctx, userID, fmt.Sprintf("🔌 设备已下线：<b>%s</b>\n该终端需要重新登录后才能继续使用。", deviceLabel(d.DeviceName, d.Client)))
+	return nil
 }
 
 // KickAllDevices marks all devices for a user as kicked.
 func (s *DeviceService) KickAllDevices(ctx context.Context, userID string) error {
-	return s.repo.UserDevice.SetKickedByUser(ctx, userID, true)
+	if err := s.repo.UserDevice.SetKickedByUser(ctx, userID, true); err != nil {
+		return err
+	}
+	s.notify(ctx, userID, "🔌 你名下的全部设备已下线，需要重新登录后才能继续使用。")
+	return nil
 }
 
 // ListDevices returns the device sessions for a user.

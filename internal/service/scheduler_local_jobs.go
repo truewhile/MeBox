@@ -169,6 +169,14 @@ func (s *SchedulerService) organizeSourceInterval(ctx context.Context) time.Dura
 	return time.Duration(seconds) * time.Second
 }
 
+// jobTelegramExpiryWarning 每日巡检即将到期的账号并提醒用户。
+func (s *SchedulerService) jobTelegramExpiryWarning(ctx context.Context) error {
+	if s.expiryWatcher == nil {
+		return nil
+	}
+	return s.expiryWatcher.RunOnce(ctx)
+}
+
 // jobCleanTranscodeCache deletes HLS artefacts older than 24h.
 func (s *SchedulerService) jobCleanTranscodeCache(ctx context.Context) error {
 	if s.cacheDir == "" {

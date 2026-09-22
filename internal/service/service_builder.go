@@ -42,9 +42,20 @@ func newServiceContainer(cfg *config.Config, log *zap.Logger, repos *repository.
 	builder.initContentServices()
 	builder.initAccessAndStorageServices()
 	builder.initIdentityServices()
+	// Telegram 在 initIdentityServices 里构建，这里把失败告警接到任务状态机上。
+	builder.wireTaskNotifications()
 	builder.initImageProxy()
 	builder.attachRuntimeContext()
 	return builder.c
+}
+
+// wireTaskNotifications 把任务失败通知接到 Telegram。必须在 Tasks 与 Telegram
+// 都已构建之后调用：早于两者其一会静默漏接。
+func (b *serviceContainerBuilder) wireTaskNotifications() {
+	if b.c.Tasks == nil || b.c.Telegram == nil {
+		return
+	}
+	b.c.Tasks.SetFailureNotifier(b.c.Telegram.SendToAdmin)
 }
 
 func (b *serviceContainerBuilder) startRealtimeServices() {
@@ -110,6 +121,9 @@ func (b *serviceContainerBuilder) initContentServices() {
 	b.c.DLNA = NewDLNAService(b.log)
 	b.c.Storage = NewStorageService(b.log, b.repos)
 	b.c.Emby = NewEmbyService(b.cfg, b.log, b.repos).SetTMDbProvider(b.c.TMDb).SetAdultProvider(b.c.Scraper.adult)
+	// 发现类查询（NextUp / Similar / Genres）：Emby 兼容层与媒体库筛选共用。
+	b.c.Discovery = NewMediaDiscoveryService(b.log, b.repos)
+	b.c.Emby.SetDiscovery(b.c.Discovery)
 	b.c.EmbyRemote = NewEmbyRemoteService(b.cfg, b.log, b.repos, b.c.Crypto).SetRuntimeCache(b.c.Cache)
 	b.c.Emby.SetEmbyRemote(b.c.EmbyRemote)
 	b.c.Backup = NewBackupService(b.cfg, b.log, b.repos.DB)
@@ -161,6 +175,7 @@ func (b *serviceContainerBuilder) initAccessAndStorageServices() {
 	b.c.Database = NewDatabaseAdminService(b.cfg, b.log, b.repos, b.repos.DB)
 	b.c.Emby.SetRuntimeCache(b.c.Cache)
 	b.c.Emby.SetSubtitleService(b.c.Subtitle)
+	b.c.Emby.SetDiscovery(b.c.Discovery)
 	b.c.Scheduler = NewSchedulerService(
 		b.log, b.repos, b.c.Scan, b.c.Transcoder,
 		b.c.Organizer, b.c.WSHub, b.cfg.Cache.CacheDir,
@@ -190,6 +205,15 @@ func (b *serviceContainerBuilder) initIdentityServices() {
 	b.c.Sessions = NewSessionTrackerService(b.log)
 	b.c.Device = NewDeviceService(b.log, b.repos)
 	b.c.Device.SetSessionTracker(b.c.Sessions)
+	// Telegram 通知：未启用时 Start 不会占用 goroutine，SendToUser 静默跳过。
+	b.c.Telegram = NewTelegramService(b.log, b.repos)
+	b.c.Device.SetNotifier(b.c.Telegram.SendToUser)
+	b.c.Device.SetAdminNotifier(b.c.Telegram.SendToAdmin)
+	// 账号到期巡检：只负责发现与去重，发送复用同一个 Telegram 通道。
+	b.c.TelegramExpiry = NewTelegramExpiryWatcher(b.log, b.repos)
+	b.c.TelegramExpiry.SetUserNotifier(b.c.Telegram.SendToUser)
+	// SetExpiryWatcher must run AFTER TelegramExpiry is constructed.
+	b.c.Scheduler.SetExpiryWatcher(b.c.TelegramExpiry)
 	b.c.ApiConfig = NewApiConfigService(b.cfg, b.log, b.repos, b.c.Crypto)
 }
 

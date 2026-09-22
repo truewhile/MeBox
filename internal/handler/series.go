@@ -124,7 +124,9 @@ func listLibrarySeriesHandler(svc *service.Container) gin.HandlerFunc {
 				return
 			}
 		}
-		items, total, err := svc.Media.ListLibrarySeriesCards(c.Request.Context(), libID, mediaVisibilityForRequest(c, svc))
+		items, total, err := svc.Media.ListLibrarySeriesCardsFiltered(
+			c.Request.Context(), libID, mediaVisibilityForRequest(c, svc), parseLibraryFilters(c),
+		)
 		if err != nil {
 			writeInternalOrCanceled(c, err)
 			return

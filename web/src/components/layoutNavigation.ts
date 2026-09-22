@@ -127,6 +127,10 @@ export function resolveHeaderBack(pathname: string): HeaderBackTarget | null {
   if (pathname.startsWith('/library/')) {
     return { to: '/libraries', label: '媒体库' }
   }
+  // 统计页从观看历史进入，返回链也回到那里，而不是一路跳回首页。
+  if (pathname === '/history/stats') {
+    return { to: '/history', label: '观看历史' }
+  }
   if (pathname === '/playlists' || pathname === '/favourites' || pathname === '/history') {
     return { to: '/', label: '首页' }
   }

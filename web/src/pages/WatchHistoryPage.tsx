@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Clock, Play, Trash2 } from 'lucide-react'
+import { BarChart3, Clock, Play, Trash2 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 import { historyAPI } from '../api/history'
@@ -77,6 +77,13 @@ export function WatchHistoryPage() {
           <h1 className="font-display text-3xl font-bold text-ink-600">观看历史</h1>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <Link
+            to="/history/stats"
+            className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-bold text-gray-600 shadow-sm transition hover:border-brand-300 hover:text-brand-600"
+          >
+            <BarChart3 size={14} />
+            观看统计
+          </Link>
           <button
             onClick={() => clearByStatus('incomplete')}
             disabled={busy !== '' || items.every((item) => item.completed)}

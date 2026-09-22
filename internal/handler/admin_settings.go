@@ -20,6 +20,12 @@ type settingReq struct {
 	Value string `json:"value"`
 }
 
+// maskedSettingKeys 里的设置值绝不能被完整下发：它们是可用于对外操作的凭据。
+// 下发脱敏值，保存时再靠 isMaskedSettingValue 还原为「保持原值」。
+var maskedSettingKeys = map[string]bool{
+	service.SettingTelegramBotToken: true,
+}
+
 func listSettingsHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		settings, err := svc.Repo.Setting.All(c.Request.Context())
@@ -27,8 +33,19 @@ func listSettingsHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		for i := range settings {
+			if maskedSettingKeys[settings[i].Key] {
+				settings[i].Value = service.MaskSecret(settings[i].Value)
+			}
+		}
 		c.JSON(http.StatusOK, settings)
 	}
+}
+
+// isMaskedSettingValue 识别「前端把脱敏值原样提交回来」的情况。此时必须保留
+// 已存的真实值，否则一次保存就会把凭据覆盖成 ***。
+func isMaskedSettingValue(value string) bool {
+	return strings.Contains(value, "***")
 }
 
 func updateSettingHandler(svc *service.Container) gin.HandlerFunc {
@@ -36,6 +53,11 @@ func updateSettingHandler(svc *service.Container) gin.HandlerFunc {
 		var req settingReq
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		// 脱敏值回传 == 用户没改这个凭据，保留库里已存的真实值。
+		if maskedSettingKeys[req.Key] && isMaskedSettingValue(req.Value) {
+			c.Status(http.StatusNoContent)
 			return
 		}
 		oldValue := ""

@@ -32,8 +32,24 @@ func (s *MediaService) mediaListCacheKey(libraryID string, libraryIDs []string, 
 		strings.Join(allowed, ","),
 		strings.Join(hidden, ","),
 		filter.SeriesID,
+		filterFingerprint(filter),
 	}, "|")))
 	return "media:list:" + hex.EncodeToString(sum[:])
+}
+
+// filterFingerprint 把影响结果的筛选维度序列化成稳定字符串。
+//
+// 缓存键必须覆盖所有会改变结果的过滤条件：漏一个就会出现「先打开未筛选列表，
+// 再筛选时命中旧缓存」这类脏读（返回不带筛选的数据）。新增过滤字段时只改这里。
+func filterFingerprint(filter repository.MediaQueryFilter) string {
+	genres := append([]string(nil), filter.Genres...)
+	sort.Strings(genres)
+	return strings.Join([]string{
+		"genres=" + strings.Join(genres, ","),
+		fmt.Sprintf("year=%d-%d", filter.YearMin, filter.YearMax),
+		fmt.Sprintf("rating=%.2f", filter.RatingMin),
+		fmt.Sprintf("unwatched=%t:%s", filter.UnwatchedOnly, filter.UnwatchedUserID),
+	}, "&")
 }
 
 func (s *MediaService) libraryPreviewCacheKey(libraries []model.Library, cardLimit int, filter repository.MediaQueryFilter, includeCounts bool) string {
@@ -138,6 +154,7 @@ func (s *MediaService) groupedItemsCacheKey(libraryID string, libraryIDs []strin
 		strings.Join(allowed, ","),
 		strings.Join(hidden, ","),
 		filter.SeriesID,
+		filterFingerprint(filter),
 	})
 }
 

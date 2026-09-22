@@ -59,6 +59,9 @@ type Container struct {
 	Token            *TokenService
 	ApiConfig        *ApiConfigService
 	Device           *DeviceService
+	Telegram         *TelegramService
+	TelegramExpiry   *TelegramExpiryWatcher
+	Discovery        *MediaDiscoveryService
 	Cache            *RuntimeCacheService
 	Sessions         *SessionTrackerService
 	RecognitionWords *RecognitionWordsService
@@ -102,6 +105,11 @@ func (c *Container) Boot() {
 
 	// 启动调度器定时任务
 	c.Scheduler.Start(c.stopCtx)
+
+	// Telegram 通知轮询（未启用或未配置 Token 时直接返回）
+	if c.Telegram != nil {
+		c.Telegram.Start(c.stopCtx)
+	}
 
 	// 远程 Emby 挂载兼容迁移：清理已删账号的残留挂载；旧账号无挂载时自动全量挂载
 	if c.EmbyRemote != nil {

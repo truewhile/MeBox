@@ -4,6 +4,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -407,6 +408,92 @@ func deleteLibraryHandler(svc *service.Container) gin.HandlerFunc {
 	}
 }
 
+// parseLibraryFilters 解析媒体库列表的筛选查询参数。
+//
+// 全部参数都是可选的：缺省时返回零值，`MediaListFilters.empty()` 为真，列表
+// 行为与此前完全一致（不引入任何默认筛选）。
+//
+// 参数约定：
+//   - genre=Action&genre=Comedy  类型多选（或关系，整词匹配）
+//   - year_min / year_max        年份区间，0 或非法值表示不限
+//   - rating_min                 评分下限（浮点）
+//   - unwatched=1                仅显示未看完；用户 ID 取自会话
+func parseLibraryFilters(c *gin.Context) service.MediaListFilters {
+	filters := service.MediaListFilters{
+		Genres:    parseRepeatedQueryValues(c, "genre"),
+		YearMin:   parseNonNegativeInt(firstQueryValue(c, "year_min", "yearMin")),
+		YearMax:   parseNonNegativeInt(firstQueryValue(c, "year_max", "yearMax")),
+		RatingMin: parseNonNegativeFloat(firstQueryValue(c, "rating_min", "ratingMin")),
+	}
+	if isTruthyQuery(firstQueryValue(c, "unwatched", "unwatched_only", "unwatchedOnly")) {
+		filters.Unwatched = true
+		filters.UserID = toString(mustSessionUserID(c))
+	}
+	return filters
+}
+
+// parseRepeatedQueryValues 读取可重复出现的查询参数，去重并丢弃空值。
+// 同时接受 key[] 括号格式（axios 1.x 默认序列化方式）作为向后兼容回退，
+// 在前端 paramsSerializer 未正确配置时不会静默返回空结果。
+func parseRepeatedQueryValues(c *gin.Context, key string) []string {
+	raw := c.QueryArray(key)
+	if len(raw) == 0 {
+		// fallback: axios bracket format (e.g. genre[]=Action&genre[]=Comedy)
+		raw = c.QueryArray(key + "[]")
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, value := range raw {
+		// 客户端可能把多值拼成一次逗号分隔，两种形式都要接受。
+		for _, part := range strings.Split(value, ",") {
+			trimmed := strings.TrimSpace(part)
+			if trimmed == "" {
+				continue
+			}
+			if _, ok := seen[trimmed]; ok {
+				continue
+			}
+			seen[trimmed] = struct{}{}
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+func parseNonNegativeInt(raw string) int {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value < 0 {
+		return 0
+	}
+	return value
+}
+
+func parseNonNegativeFloat(raw string) float64 {
+	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || value < 0 || math.IsNaN(value) {
+		return 0
+	}
+	return value
+}
+
+func isTruthyQuery(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// mustSessionUserID 取会话用户 ID，缺失时返回空串（筛选逻辑会忽略它）。
+func mustSessionUserID(c *gin.Context) any {
+	uid, _ := c.Get(middleware.CtxUserID)
+	return uid
+}
+
 func listMediaHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
@@ -450,9 +537,10 @@ func listMediaHandler(svc *service.Container) gin.HandlerFunc {
 		if sortSpec.Field == "last_played" {
 			history = mediaHistoryMap(c, svc)
 		}
+		filters := parseLibraryFilters(c)
 		groupVersions := c.DefaultQuery("group_versions", "1") != "0"
 		if !groupVersions {
-			items, total, err := svc.Media.ListMediaVisible(ctx, id, page, size, mediaVisibilityForRequest(c, svc))
+			items, total, err := svc.Media.ListMediaVisibleFiltered(ctx, id, page, size, mediaVisibilityForRequest(c, svc), filters)
 			if err != nil {
 				writeInternalOrCanceled(c, err)
 				return
@@ -468,7 +556,7 @@ func listMediaHandler(svc *service.Container) gin.HandlerFunc {
 			})
 			return
 		}
-		grouped, err := svc.Media.GroupedMediaVisible(ctx, id, mediaVisibilityForRequest(c, svc))
+		grouped, err := svc.Media.GroupedMediaVisibleFiltered(ctx, id, mediaVisibilityForRequest(c, svc), filters)
 		if err != nil {
 			writeInternalOrCanceled(c, err)
 			return

@@ -15,7 +15,7 @@ func registerAuthedUISurfaceRoutes(authed *gin.RouterGroup, svc *service.Contain
 	authed.PUT("/danmaku/settings", updateDanmakuSettingsHandler(svc))
 
 	authed.GET("/watch-history", historyListHandler(svc))
-	authed.GET("/watch-history/stats", historyStatsHandler(svc))
+	authed.GET("/watch-history/stats", requirePermission(svc, "can_view_history"), historyStatsHandler(svc))
 	authed.GET("/watch-history/continue", historyContinueHandler(svc))
 	authed.DELETE("/watch-history", historyDeleteHandler(svc))
 	authed.DELETE("/watch-history/:id", historyDeleteOneHandler(svc))

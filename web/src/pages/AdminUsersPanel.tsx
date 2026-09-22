@@ -6,8 +6,10 @@ import type { User } from '../types'
 import { confirmAction } from '../components/confirmAction'
 import { requestPassword } from '../components/requestPassword'
 import { AdminUserLibrariesDialog } from '../components/AdminUserLibrariesDialog'
+import { AdminUserDevicesDialog } from './AdminUserDevicesDialog'
 import { AdminUsersForm } from './AdminUsersForm'
 import { AdminUsersTable } from './AdminUsersTable'
+import { ActiveUsersStrip } from './ActiveUsersStrip'
 
 const DEFAULT_MAX_USERS = 20
 
@@ -23,6 +25,7 @@ export function AdminUsersPanel() {
   const [editingUsername, setEditingUsername] = useState('')
   const [resettingPasswordID, setResettingPasswordID] = useState<string | null>(null)
   const [configuringLibrariesUser, setConfiguringLibrariesUser] = useState<User | null>(null)
+  const [managingDevicesUser, setManagingDevicesUser] = useState<User | null>(null)
 
   const refresh = async () => {
     const data = await adminAPI.listUsers()
@@ -187,6 +190,8 @@ export function AdminUsersPanel() {
         onSubmit={handleCreate}
       />
 
+      <ActiveUsersStrip users={users} />
+
       <AdminUsersTable
         users={users}
         editingID={editingID}
@@ -198,6 +203,7 @@ export function AdminUsersPanel() {
         onStartEdit={startEdit}
         onResetPassword={resetPassword}
         onConfigureLibraries={(u) => setConfiguringLibrariesUser(u)}
+        onManageDevices={(u) => setManagingDevicesUser(u)}
         onToggleStatus={toggleStatus}
         onDeleteUser={deleteUser}
       />
@@ -210,6 +216,12 @@ export function AdminUsersPanel() {
           setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)))
           await refresh()
         }}
+      />
+
+      <AdminUserDevicesDialog
+        user={managingDevicesUser}
+        isOpen={Boolean(managingDevicesUser)}
+        onClose={() => setManagingDevicesUser(null)}
       />
     </div>
   )
