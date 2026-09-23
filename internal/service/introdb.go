@@ -29,6 +29,15 @@ const (
 
 	introDBTimeout     = 8 * time.Second
 	introDBMaxBodySize = 1 << 20
+	// introDBMaxAttempts 是一次 Fetch 允许的请求次数（原请求 + 1 次重试）。
+	// 实测：短时间连发 45 个请求有 15 个被返回 429，加 1.2 秒间隔重试后
+	// 其中 10 个成功，所以限流是真实存在的、值得一次重试。
+	introDBMaxAttempts = 2
+	// introDBRetryDelay 是服务端没给 Retry-After 时的默认重试间隔。
+	introDBRetryDelay = time.Second
+	// introDBMaxRetryDelay 限制服务端要求的等待时间：一次播放不值得为它
+	// 挂住几十秒，等待超过这个值就按这个值等（然后可能再次被限流）。
+	introDBMaxRetryDelay = 3 * time.Second
 )
 
 // IntroDBSpan is one resolved skip range, still in provider terms.
@@ -42,18 +51,20 @@ type IntroDBSpan struct {
 
 // IntroDBService queries TheIntroDB for one media item.
 type IntroDBService struct {
-	log     *zap.Logger
-	client  *http.Client
-	baseURL string
+	log        *zap.Logger
+	client     *http.Client
+	baseURL    string
+	retryDelay time.Duration
 }
 
 // NewIntroDBService is the constructor. The client honours environment and OS
 // proxy settings so it behaves like the other third-party API clients.
 func NewIntroDBService(log *zap.Logger) *IntroDBService {
 	return &IntroDBService{
-		log:     log,
-		client:  NewExternalHTTPClient(introDBTimeout),
-		baseURL: IntroDBBaseURL,
+		log:        log,
+		client:     NewExternalHTTPClient(introDBTimeout),
+		baseURL:    IntroDBBaseURL,
+		retryDelay: introDBRetryDelay,
 	}
 }
 
@@ -61,6 +72,15 @@ func NewIntroDBService(log *zap.Logger) *IntroDBService {
 func (s *IntroDBService) SetBaseURL(base string) *IntroDBService {
 	if s != nil && strings.TrimSpace(base) != "" {
 		s.baseURL = strings.TrimRight(strings.TrimSpace(base), "/")
+	}
+	return s
+}
+
+// SetRetryDelay overrides the wait between attempts. Tests set it to 0 so a
+// retry does not really sleep.
+func (s *IntroDBService) SetRetryDelay(delay time.Duration) *IntroDBService {
+	if s != nil {
+		s.retryDelay = delay
 	}
 	return s
 }
@@ -86,6 +106,10 @@ type introDBResponse struct {
 // caller records it as a negative cache entry.
 //
 // season/episode are required for TV; pass 0/0 for movies.
+//
+// 429/503 会重试一次（社区库在短时间连发下确实会限流）。重试前会先确认调用方
+// 的 deadline 还够用；预算不够就直接返回错误，让调用方保留自己的缓存，
+// 把「拿不到片段」维持在「少一个跳过按钮」的量级。
 func (s *IntroDBService) Fetch(ctx context.Context, tmdbID, season, episode int) ([]IntroDBSpan, error) {
 	if s == nil || s.client == nil {
 		return nil, errors.New("introdb service nil")
@@ -94,28 +118,111 @@ func (s *IntroDBService) Fetch(ctx context.Context, tmdbID, season, episode int)
 		return nil, nil
 	}
 	endpoint := s.mediaURL(tmdbID, season, episode)
+	for attempt := 1; ; attempt++ {
+		result := s.fetchOnce(ctx, endpoint)
+		if result.err == nil {
+			return result.spans, nil
+		}
+		if !result.retryable || attempt >= introDBMaxAttempts {
+			return nil, result.err
+		}
+		if !waitForIntroDBRetry(ctx, s.retryWait(result.retryAfter)) {
+			return nil, result.err
+		}
+	}
+}
+
+// introDBFetchAttempt 是一次请求的结果：数据或错误，外加「值不值得重试」。
+type introDBFetchAttempt struct {
+	spans      []IntroDBSpan
+	err        error
+	retryable  bool
+	retryAfter time.Duration
+}
+
+func (s *IntroDBService) fetchOnce(ctx context.Context, endpoint string) introDBFetchAttempt {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, err
+		return introDBFetchAttempt{err: err}
 	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, err
+		return introDBFetchAttempt{err: err}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
-		return nil, nil
+		// 「查到但社区库里没有」不是错误，调用方据此写负缓存。
+		return introDBFetchAttempt{}
 	case resp.StatusCode < 200 || resp.StatusCode >= 300:
-		return nil, fmt.Errorf("introdb: unexpected status %d", resp.StatusCode)
+		return introDBFetchAttempt{
+			err:        fmt.Errorf("introdb: unexpected status %d", resp.StatusCode),
+			retryable:  introDBRetryableStatus(resp.StatusCode),
+			retryAfter: parseIntroDBRetryAfter(resp.Header.Get("Retry-After")),
+		}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, introDBMaxBodySize))
 	if err != nil {
-		return nil, err
+		return introDBFetchAttempt{err: err}
 	}
-	return parseIntroDBResponse(body)
+	spans, err := parseIntroDBResponse(body)
+	if err != nil {
+		return introDBFetchAttempt{err: err}
+	}
+	return introDBFetchAttempt{spans: spans}
+}
+
+// introDBRetryableStatus 只认明确的「稍后再来」状态。500 之类的服务端故障
+// 重试也不会变好，却会白占调用方的等待预算。
+func introDBRetryableStatus(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		return true
+	default:
+		return false
+	}
+}
+
+// parseIntroDBRetryAfter 解析 Retry-After 的秒数形式；HTTP-date 形式在限流
+// 场景很少见，解析不出来就退回默认间隔。
+func parseIntroDBRetryAfter(value string) time.Duration {
+	seconds, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (s *IntroDBService) retryWait(retryAfter time.Duration) time.Duration {
+	wait := retryAfter
+	if wait <= 0 {
+		wait = s.retryDelay
+	}
+	if wait > introDBMaxRetryDelay {
+		wait = introDBMaxRetryDelay
+	}
+	return wait
+}
+
+// waitForIntroDBRetry 睡到重试时刻，或调用方的 ctx 先结束。返回 false 表示
+// 预算已经用完，调用方不该再等。
+func waitForIntroDBRetry(ctx context.Context, wait time.Duration) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if wait <= 0 {
+		return true
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (s *IntroDBService) mediaURL(tmdbID, season, episode int) string {

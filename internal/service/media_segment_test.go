@@ -92,6 +92,131 @@ func TestQueryIDsIsNotResolvableBeforeScrape(t *testing.T) {
 	}
 }
 
+// 部分刮削路径（生产环境动漫库实测如此）不建 Series 行，而是把「剧集级」
+// TMDb id 直接写在 Media.TMDbID 上：同一剧名下各集共用同一个 id。
+// 原先这类行一律解析不出 id，整个动漫库等于查不到任何片段。
+func TestQueryIDsFallsBackToMediaTMDbWhenSiblingsShareIt(t *testing.T) {
+	repos := repository.New(newServiceTestDB(t))
+	svc := NewMediaSegmentService(zap.NewNop(), repos)
+	ctx := t.Context()
+
+	episodes := []*model.Media{
+		{Base: model.Base{ID: "ep-6"}, LibraryID: "lib-anime", Title: "便·当", Path: "/anime/ben-to/S01E06.mkv", SeasonNum: 1, EpisodeNum: 6, TMDbID: 61970},
+		{Base: model.Base{ID: "ep-7"}, LibraryID: "lib-anime", Title: "便·当", Path: "/anime/ben-to/S01E07.mkv", SeasonNum: 1, EpisodeNum: 7, TMDbID: 61970},
+	}
+	for _, ep := range episodes {
+		if err := repos.DB.Create(ep).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tmdbID, season, episode := svc.queryIDs(ctx, episodes[0])
+	if tmdbID != 61970 || season != 1 || episode != 6 {
+		t.Fatalf("query = (%d,%d,%d), want (61970,1,6): a shared id is a series id", tmdbID, season, episode)
+	}
+}
+
+// 反例（重要）：另一些刮削路径把「单集自己的」id 写在 Media.TMDbID 上，
+// 每集都不同。这种 id 不能当剧集 id 用——拿它去查会命中完全不相干的片子。
+func TestQueryIDsRejectsPerEpisodeTMDbWithoutSiblings(t *testing.T) {
+	repos := repository.New(newServiceTestDB(t))
+	svc := NewMediaSegmentService(zap.NewNop(), repos)
+	ctx := t.Context()
+
+	episodes := []*model.Media{
+		{Base: model.Base{ID: "ep-1"}, LibraryID: "lib-tv", Title: "某剧", Path: "/tv/some/S01E01.mkv", SeasonNum: 1, EpisodeNum: 1, TMDbID: 4_375_419},
+		{Base: model.Base{ID: "ep-2"}, LibraryID: "lib-tv", Title: "某剧", Path: "/tv/some/S01E02.mkv", SeasonNum: 1, EpisodeNum: 2, TMDbID: 4_375_420},
+	}
+	for _, ep := range episodes {
+		if err := repos.DB.Create(ep).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if tmdbID, _, _ := svc.queryIDs(ctx, episodes[0]); tmdbID != 0 {
+		t.Fatalf("tmdbID = %d, want 0: a per-episode id must not be used as a series id", tmdbID)
+	}
+}
+
+// Series 行存在时永远优先，哪怕 Media.TMDbID 看起来也像个共用 id。
+func TestQueryIDsPrefersSeriesTMDbOverSharedMediaTMDb(t *testing.T) {
+	repos := repository.New(newServiceTestDB(t))
+	svc := NewMediaSegmentService(zap.NewNop(), repos)
+	ctx := t.Context()
+
+	if err := repos.DB.Create(&model.Series{
+		Base: model.Base{ID: "s-1"}, Title: "便·当", TMDbID: 1396,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	episodes := []*model.Media{
+		{Base: model.Base{ID: "ep-a"}, SeriesID: "s-1", LibraryID: "lib-anime", Title: "便·当", Path: "/anime/ben-to/S01E06.mkv", SeasonNum: 1, EpisodeNum: 6, TMDbID: 61970},
+		{Base: model.Base{ID: "ep-b"}, SeriesID: "s-1", LibraryID: "lib-anime", Title: "便·当", Path: "/anime/ben-to/S01E07.mkv", SeasonNum: 1, EpisodeNum: 7, TMDbID: 61970},
+	}
+	for _, ep := range episodes {
+		if err := repos.DB.Create(ep).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if tmdbID, _, _ := svc.queryIDs(ctx, episodes[0]); tmdbID != 1396 {
+		t.Fatalf("tmdbID = %d, want the Series id 1396", tmdbID)
+	}
+}
+
+// 关联了 Series 但那条 Series 没刮到 id 时，仍然走 Media.TMDbID 兜底。
+func TestQueryIDsFallsBackWhenSeriesHasNoTMDb(t *testing.T) {
+	repos := repository.New(newServiceTestDB(t))
+	svc := NewMediaSegmentService(zap.NewNop(), repos)
+	ctx := t.Context()
+
+	if err := repos.DB.Create(&model.Series{
+		Base: model.Base{ID: "s-2"}, Title: "便·当", TMDbID: 0,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	episodes := []*model.Media{
+		{Base: model.Base{ID: "ep-c"}, SeriesID: "s-2", Path: "/anime/ben-to/S01E06.mkv", SeasonNum: 1, EpisodeNum: 6, TMDbID: 61970},
+		{Base: model.Base{ID: "ep-d"}, SeriesID: "s-2", Path: "/anime/ben-to/S01E07.mkv", SeasonNum: 1, EpisodeNum: 7, TMDbID: 61970},
+	}
+	for _, ep := range episodes {
+		if err := repos.DB.Create(ep).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if tmdbID, _, _ := svc.queryIDs(ctx, episodes[0]); tmdbID != 61970 {
+		t.Fatalf("tmdbID = %d, want the shared Media id 61970", tmdbID)
+	}
+}
+
+func TestListForPlaybackQueriesEpisodesWithSharedSeriesTMDb(t *testing.T) {
+	svc, repos, calls := newSegmentServiceFixture(t, writeJSONBody(introDBTVPayload))
+	ctx := t.Context()
+	episodes := []*model.Media{
+		{Base: model.Base{ID: "ep-x"}, LibraryID: "lib-anime", Title: "便·当",
+			Path: "/anime/ben-to/S01E06.mkv", SeasonNum: 1, EpisodeNum: 6, TMDbID: 61970},
+		{Base: model.Base{ID: "ep-y"}, LibraryID: "lib-anime", Title: "便·当",
+			Path: "/anime/ben-to/S01E07.mkv", SeasonNum: 1, EpisodeNum: 7, TMDbID: 61970},
+	}
+	for _, ep := range episodes {
+		if err := repos.DB.Create(ep).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rows, err := svc.ListForPlayback(ctx, episodes[0])
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %#v, want the two spans the provider returned", rows)
+	}
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Fatalf("provider calls = %d, want 1", got)
+	}
+}
+
 func TestListForPlaybackFetchesOnceThenServesCache(t *testing.T) {
 	svc, repos, calls := newSegmentServiceFixture(t, writeJSONBody(introDBMoviePayload))
 	ctx := t.Context()

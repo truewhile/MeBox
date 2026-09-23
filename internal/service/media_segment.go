@@ -6,6 +6,7 @@ package service
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -151,24 +152,59 @@ func (s *MediaSegmentService) refresh(ctx context.Context, m *model.Media) ([]mo
 	return rows, true, nil
 }
 
-// queryIDs resolves the provider query key. Movies use their own TMDb id;
-// episodes need the *series* TMDb id plus season/episode, because scraping
-// stores the episode-level TMDb id on Media.TMDbID.
+// queryIDs resolves the provider query key. Movies use their own TMDb id.
+//
+// 剧集需要「剧集级」TMDb id 加季/集。优先取 Series.TMDbID；但有些刮削路径
+// 不建 Series 行，而是把剧集级 id 直接写在 Media.TMDbID 上（生产环境动漫库
+// 实测如此：同一剧名下各集共用同一个 id，52/52 个剧名都唯一）。这类行原先
+// 一律解析不出 id，等于整库查不到任何片段，所以这里补一条兜底。
+//
+// 兜底必须验证「是不是剧集级 id」：Media.TMDbID 在另一些刮削路径下存的是
+// 单集自己的 id，拿它去查会命中别的片子。判据是多集共用（见
+// MediaRepository.ExistsSiblingWithTMDbID）——单集 id 不会在兄弟集上重复。
 func (s *MediaSegmentService) queryIDs(ctx context.Context, m *model.Media) (tmdbID, season, episode int) {
 	if m.SeasonNum > 0 || m.EpisodeNum > 0 {
-		if m.SeriesID == "" || m.SeasonNum <= 0 || m.EpisodeNum <= 0 {
-			return 0, 0, 0
-		}
-		series, err := s.repo.Series.FindByID(ctx, m.SeriesID)
-		if err != nil || series == nil || series.TMDbID <= 0 {
-			return 0, 0, 0
-		}
-		return series.TMDbID, m.SeasonNum, m.EpisodeNum
+		return s.episodeQueryIDs(ctx, m)
 	}
 	if m.TMDbID > 0 {
 		return m.TMDbID, 0, 0
 	}
 	return 0, 0, 0
+}
+
+func (s *MediaSegmentService) episodeQueryIDs(ctx context.Context, m *model.Media) (tmdbID, season, episode int) {
+	if m.SeasonNum <= 0 || m.EpisodeNum <= 0 {
+		return 0, 0, 0
+	}
+	if seriesTMDbID := s.seriesTMDbID(ctx, m); seriesTMDbID > 0 {
+		return seriesTMDbID, m.SeasonNum, m.EpisodeNum
+	}
+	if !s.mediaTMDbIDLooksLikeSeries(ctx, m) {
+		return 0, 0, 0
+	}
+	return m.TMDbID, m.SeasonNum, m.EpisodeNum
+}
+
+// seriesTMDbID returns the series-level TMDb id, or 0 when the row has no
+// Series association or that Series was never matched.
+func (s *MediaSegmentService) seriesTMDbID(ctx context.Context, m *model.Media) int {
+	if strings.TrimSpace(m.SeriesID) == "" {
+		return 0
+	}
+	series, err := s.repo.Series.FindByID(ctx, m.SeriesID)
+	if err != nil || series == nil || series.TMDbID <= 0 {
+		return 0
+	}
+	return series.TMDbID
+}
+
+// mediaTMDbIDLooksLikeSeries reports whether Media.TMDbID can stand in for the
+// series id: only an id shared by other episodes of the same show qualifies.
+func (s *MediaSegmentService) mediaTMDbIDLooksLikeSeries(ctx context.Context, m *model.Media) bool {
+	if s == nil || s.repo == nil || m == nil || m.TMDbID <= 0 {
+		return false
+	}
+	return s.repo.Media.ExistsSiblingWithTMDbID(ctx, m)
 }
 
 // ledgerFresh reports whether a previous lookup is still within its TTL.

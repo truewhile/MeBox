@@ -199,6 +199,39 @@ func (r *MediaRepository) FindByID(ctx context.Context, id string) (*model.Media
 	return &m, nil
 }
 
+// ExistsSiblingWithTMDbID reports whether another row of the same show carries
+// the same tm_db_id as m.
+//
+// 它的用途是把「剧集级 id」和「单集自己的 id」区分开：一部剧的多集共用一个
+// 剧集级 id，而单集各自的 id 不会重复。调用方据此决定能否把 Media.TMDbID
+// 当作 Series.TMDbID 的替代品（见 MediaSegmentService.queryIDs）。
+//
+// 同一部剧的判定优先用 series_id；没有 series_id 的行（部分刮削路径不写它）
+// 退回到「同一个库 + 同一个标题」。查询失败按「不共用」处理：宁可不查，
+// 也不能拿一个可能是单集的 id 去查错片。
+func (r *MediaRepository) ExistsSiblingWithTMDbID(ctx context.Context, m *model.Media) bool {
+	if r == nil || m == nil || m.TMDbID <= 0 || m.ID == "" {
+		return false
+	}
+	query := r.db.WithContext(ctx).Model(&model.Media{}).
+		Where("tm_db_id = ? AND id <> ?", m.TMDbID, m.ID)
+	if seriesID := strings.TrimSpace(m.SeriesID); seriesID != "" {
+		query = query.Where("series_id = ?", seriesID)
+	} else {
+		libraryID := strings.TrimSpace(m.LibraryID)
+		title := strings.TrimSpace(m.Title)
+		if libraryID == "" || title == "" {
+			return false
+		}
+		query = query.Where("library_id = ? AND title = ?", libraryID, title)
+	}
+	var count int64
+	if err := query.Limit(1).Count(&count).Error; err != nil {
+		return false
+	}
+	return count > 0
+}
+
 // ListByLibrary returns paginated media items for a library.
 func (r *MediaRepository) ListByLibrary(ctx context.Context, libraryID string, offset, limit int) ([]model.Media, int64, error) {
 	return r.ListByLibraryFiltered(ctx, libraryID, offset, limit, MediaQueryFilter{IncludeNSFW: true})
