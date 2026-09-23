@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -240,5 +241,89 @@ func TestEmbyNextUpRejectsForeignUserID(t *testing.T) {
 	}
 	if items := decodeItemsEnvelope(t, w.Body.Bytes()); len(items) != 0 {
 		t.Fatalf("items = %d, want 0", len(items))
+	}
+}
+
+// YamBy 等客户端进入剧集详情会带 SeriesId 调 NextUp；必须只返回该剧的下一集，
+// 不能回落成全站「继续观看」第一条，否则详情页播放会串到别的片子。
+func TestEmbyNextUpFiltersBySeriesID(t *testing.T) {
+	router, svc, userID := newEmbyDiscoveryEnv(t)
+	libID := seedEmbyLibrary(t, svc, "tv")
+	recent := time.Now().Add(-time.Minute)
+	older := time.Now().Add(-2 * time.Hour)
+
+	seedSeries := func(seriesID, title string, watchedAt time.Time) (watchedID, nextID string) {
+		t.Helper()
+		for ep := 1; ep <= 3; ep++ {
+			m := &model.Media{
+				LibraryID: libID, SeriesID: seriesID, Title: title,
+				SeasonNum: 1, EpisodeNum: ep,
+				Path: "/media/tv/" + seriesID + "/S1E" + strconv.Itoa(ep) + ".mkv",
+			}
+			if err := svc.Repo.DB.Create(m).Error; err != nil {
+				t.Fatal(err)
+			}
+			switch ep {
+			case 1:
+				watchedID = m.ID
+				h := &model.PlaybackHistory{
+					UserID: userID, MediaID: m.ID, PositionMs: 1000, DurationMs: 2000,
+					WatchedAt: watchedAt, Completed: false,
+				}
+				if err := svc.Repo.DB.Create(h).Error; err != nil {
+					t.Fatal(err)
+				}
+			case 2:
+				nextID = m.ID
+			}
+		}
+		return watchedID, nextID
+	}
+
+	_, _ = seedSeries("series-hot", "热门剧", recent)
+	_, wantNext := seedSeries("series-cold", "目标剧", older)
+
+	token := signedTestToken(t, "test-secret")
+	global := embyGet(t, router, "/emby/Shows/NextUp?Limit=10", token)
+	if global.Code != http.StatusOK {
+		t.Fatalf("global status = %d body=%s", global.Code, global.Body.String())
+	}
+	if items := decodeItemsEnvelope(t, global.Body.Bytes()); len(items) < 2 {
+		t.Fatalf("global items = %d, want >= 2 (body=%s)", len(items), global.Body.String())
+	}
+
+	scoped := embyGet(t, router, "/emby/Shows/NextUp?SeriesId=series-cold&Limit=10", token)
+	if scoped.Code != http.StatusOK {
+		t.Fatalf("scoped status = %d body=%s", scoped.Code, scoped.Body.String())
+	}
+	items := decodeItemsEnvelope(t, scoped.Body.Bytes())
+	if len(items) != 1 {
+		t.Fatalf("scoped items = %d, want 1 (body=%s)", len(items), scoped.Body.String())
+	}
+	if id, _ := items[0]["Id"].(string); id != wantNext {
+		t.Fatalf("scoped Id = %q, want %q (body=%s)", id, wantNext, scoped.Body.String())
+	}
+	if seriesID, _ := items[0]["SeriesId"].(string); seriesID != "series-cold" {
+		t.Fatalf("scoped SeriesId = %q, want series-cold", seriesID)
+	}
+
+	empty := embyGet(t, router, "/emby/Shows/NextUp?SeriesId=series-never-watched", token)
+	if empty.Code != http.StatusOK {
+		t.Fatalf("empty status = %d body=%s", empty.Code, empty.Body.String())
+	}
+	if items := decodeItemsEnvelope(t, empty.Body.Bytes()); len(items) != 0 {
+		t.Fatalf("never-watched items = %d, want 0 (body=%s)", len(items), empty.Body.String())
+	}
+
+	pathScoped := embyGet(t, router, "/emby/Shows/series-cold/NextUp?Limit=10", token)
+	if pathScoped.Code != http.StatusOK {
+		t.Fatalf("path scoped status = %d body=%s", pathScoped.Code, pathScoped.Body.String())
+	}
+	pathItems := decodeItemsEnvelope(t, pathScoped.Body.Bytes())
+	if len(pathItems) != 1 {
+		t.Fatalf("path scoped items = %d, want 1 (body=%s)", len(pathItems), pathScoped.Body.String())
+	}
+	if id, _ := pathItems[0]["Id"].(string); id != wantNext {
+		t.Fatalf("path scoped Id = %q, want %q", id, wantNext)
 	}
 }

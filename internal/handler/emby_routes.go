@@ -198,6 +198,9 @@ func registerEmbyAuthenticatedItemRoutes(auth *gin.RouterGroup, svc *service.Con
 	auth.GET("/Users/:userId/Shows/:id/Episodes", embyShowEpisodesHandler(svc))
 	auth.GET("/Shows/NextUp", embyNextUpHandler(svc))
 	auth.GET("/Users/:userId/Shows/NextUp", embyNextUpHandler(svc))
+	// 部分客户端用路径形式 /Shows/{seriesId}/NextUp，而不是 query SeriesId。
+	auth.GET("/Shows/:id/NextUp", embyShowNextUpHandler(svc))
+	auth.GET("/Users/:userId/Shows/:id/NextUp", embyShowNextUpHandler(svc))
 	auth.GET("/MediaSegments/:id", embyMediaSegmentsHandler(svc))
 	auth.GET("/Items/:id/MediaSegments", embyMediaSegmentsHandler(svc))
 	auth.GET("/Users/:userId/Items/:id/MediaSegments", embyMediaSegmentsHandler(svc))

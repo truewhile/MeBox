@@ -24,7 +24,42 @@ func embyNextUpHandler(svc *service.Container) gin.HandlerFunc {
 			return
 		}
 		limit, _ := strconv.Atoi(embyFirstNonEmptyString(firstQueryValue(c, "Limit", "limit"), ""))
-		out, err := svc.Emby.NextUp(c.Request.Context(), userID, limit)
+		// YamBy / Emby 进剧集详情会带 SeriesId 请求「本剧下一集」。
+		// 忽略该参数会把全站 NextUp 第一条塞进详情页「继续播放」。
+		// 注意：不要把普通 ParentId（媒体库）当成 SeriesId，否则首页 NextUp 会被滤空。
+		seriesID := firstQueryValue(c, "SeriesId", "seriesId", "seriesid")
+		if seriesID == "" {
+			if parentID := firstQueryValue(c, "ParentId", "parentId", "parentid"); parentID != "" {
+				if strings.HasPrefix(parentID, "msgo-series-") || service.IsEmbyRemoteID(parentID) {
+					seriesID = parentID
+				}
+			}
+		}
+		out, err := svc.Emby.NextUp(c.Request.Context(), userID, seriesID, limit)
+		if err != nil {
+			c.JSON(http.StatusOK, embyEmptyItemsPayload())
+			return
+		}
+		embyAttachRequestTokenToMediaSources(c, out)
+		c.JSON(http.StatusOK, out)
+	}
+}
+
+// embyShowNextUpHandler 处理 /Shows/{id}/NextUp：把路径上的剧集 ID 当作 SeriesId。
+func embyShowNextUpHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID := embyScopedUserID(c)
+		if userID == "" {
+			c.JSON(http.StatusOK, embyEmptyItemsPayload())
+			return
+		}
+		seriesID := strings.TrimSpace(c.Param("id"))
+		if seriesID == "" || strings.EqualFold(seriesID, "NextUp") {
+			c.JSON(http.StatusOK, embyEmptyItemsPayload())
+			return
+		}
+		limit, _ := strconv.Atoi(embyFirstNonEmptyString(firstQueryValue(c, "Limit", "limit"), ""))
+		out, err := svc.Emby.NextUp(c.Request.Context(), userID, seriesID, limit)
 		if err != nil {
 			c.JSON(http.StatusOK, embyEmptyItemsPayload())
 			return

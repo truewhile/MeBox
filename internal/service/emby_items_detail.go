@@ -299,8 +299,14 @@ func embyLatestSeriesRowLimit(limit int) int {
 }
 
 // ResumeItems 列出有未完成播放进度的媒体。
-func (e *EmbyService) ResumeItems(ctx context.Context, userID string, limit int) (map[string]any, error) {
-	return e.resumableItems(ctx, ItemsParams{UserID: userID, Limit: limit})
+// parentID 非空时收窄到该库 / 该剧（含虚拟 msgo-series-* ID）。
+func (e *EmbyService) ResumeItems(ctx context.Context, userID, parentID string, limit, startIndex int) (map[string]any, error) {
+	return e.resumableItems(ctx, ItemsParams{
+		UserID:     userID,
+		ParentID:   strings.TrimSpace(parentID),
+		Limit:      limit,
+		StartIndex: startIndex,
+	})
 }
 
 // favoriteItems returns favourited media for Emby clients, including mounted
@@ -434,6 +440,30 @@ func favoriteMatchesParent(ctx context.Context, e *EmbyService, parentID, mediaI
 	return wantMountID != "" && gotMountID == wantMountID
 }
 
+// resumeMatchesParent 判断续播条目是否属于 ParentId / SeriesId 作用域。
+// 本地剧集的 series_id 常为空，实际对外 ID 是 msgo-series-* 虚拟 ID，必须用
+// seriesIDForMedia 对齐，否则按剧收窄永远匹配不上。
+func resumeMatchesParent(ctx context.Context, e *EmbyService, parentID, libraryID, seriesID string, m *model.Media) bool {
+	if parentID == "" {
+		return true
+	}
+	if libraryID == parentID || seriesID == parentID {
+		return true
+	}
+	if m != nil && e.seriesIDForMedia(ctx, m) == parentID {
+		return true
+	}
+	if m != nil && e.seasonIDForMedia(ctx, m) == parentID {
+		return true
+	}
+	for _, id := range e.mergedLibraryIDs(ctx, parentID) {
+		if id == libraryID {
+			return true
+		}
+	}
+	return false
+}
+
 // resumableItems 返回未完成播放进度的媒体（包含本地媒体与挂载的远程媒体），支持分页。
 func (e *EmbyService) resumableItems(ctx context.Context, p ItemsParams) (map[string]any, error) {
 	if p.Limit <= 0 || p.Limit > 100 {
@@ -500,7 +530,7 @@ func (e *EmbyService) resumableItems(ctx context.Context, p ItemsParams) (map[st
 	localTotal, remoteTotal := 0, 0
 	for _, h := range hist {
 		if m, ok := byID[h.MediaID]; ok {
-			if p.ParentID != "" && m.LibraryID != p.ParentID && m.SeriesID != p.ParentID {
+			if p.ParentID != "" && !resumeMatchesParent(ctx, e, p.ParentID, m.LibraryID, m.SeriesID, m) {
 				continue
 			}
 			localTotal++

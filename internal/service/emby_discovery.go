@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"strings"
 	"time"
+
+	"github.com/truewhile/MeBox/internal/model"
 )
 
 // Emby 发现类接口：NextUp / Similar / Genres。
@@ -21,7 +23,8 @@ const (
 )
 
 // NextUp 返回「每部在看的剧的下一集」，即 Emby 客户端首页「接下来播放」的数据源。
-func (e *EmbyService) NextUp(ctx context.Context, userID string, limit int) (map[string]any, error) {
+// seriesID 非空时只返回该剧的下一集（剧集详情页「继续播放」）；空则返回全站列表。
+func (e *EmbyService) NextUp(ctx context.Context, userID, seriesID string, limit int) (map[string]any, error) {
 	if limit <= 0 {
 		limit = embyNextUpDefaultLimit
 	}
@@ -31,9 +34,14 @@ func (e *EmbyService) NextUp(ctx context.Context, userID string, limit int) (map
 	if strings.TrimSpace(userID) == "" {
 		return emptyItemsEnvelope(0), nil
 	}
+	seriesID = strings.TrimSpace(seriesID)
 	discovery := e.discoveryService()
 	if discovery == nil {
 		return emptyItemsEnvelope(0), nil
+	}
+
+	if seriesID != "" {
+		return e.nextUpForSeries(ctx, userID, seriesID, limit)
 	}
 
 	rows, err := discovery.NextUpCandidates(ctx, userID, limit, e.mediaVisibility(ctx, userID))
@@ -45,6 +53,138 @@ func (e *EmbyService) NextUp(ctx context.Context, userID string, limit int) (map
 	items, err := e.payloadsForMedia(ctx, rows, userID)
 	if err != nil {
 		return nil, err
+	}
+	return map[string]any{
+		"Items":            items,
+		"TotalRecordCount": int64(len(items)),
+	}, nil
+}
+
+// nextUpForSeries 只解析指定剧的下一集。远程挂载剧集按本机播放历史 + 远程
+// 分集列表计算，避免把其它本地剧的 NextUp 塞进详情页继续播放按钮。
+func (e *EmbyService) nextUpForSeries(ctx context.Context, userID, seriesID string, limit int) (map[string]any, error) {
+	if IsEmbyRemoteID(seriesID) {
+		return e.nextUpForRemoteSeries(ctx, userID, seriesID, limit)
+	}
+	discovery := e.discoveryService()
+	if discovery == nil {
+		return emptyItemsEnvelope(0), nil
+	}
+	// 多取候选再按 SeriesId 精确过滤，避免「全站 TopN」把目标剧挤掉。
+	scanLimit := embyNextUpMaxLimit
+	if limit > scanLimit {
+		scanLimit = limit
+	}
+	rows, err := discovery.NextUpCandidates(ctx, userID, scanLimit, e.mediaVisibility(ctx, userID))
+	if err != nil {
+		return nil, err
+	}
+	items, err := e.payloadsForMedia(ctx, rows, userID)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]map[string]any, 0, 1)
+	for _, item := range items {
+		itemSeries, _ := item["SeriesId"].(string)
+		if itemSeries == seriesID {
+			filtered = append(filtered, item)
+			if len(filtered) >= limit {
+				break
+			}
+		}
+	}
+	return map[string]any{
+		"Items":            filtered,
+		"TotalRecordCount": int64(len(filtered)),
+	}, nil
+}
+
+// nextUpForRemoteSeries 用 MeBox 本地播放历史在远程剧的分集里找「下一集」。
+// 不透传远程账号的 NextUp，避免多用户共用挂载账号时串进度。
+func (e *EmbyService) nextUpForRemoteSeries(ctx context.Context, userID, seriesID string, limit int) (map[string]any, error) {
+	if e == nil || e.remote == nil || strings.TrimSpace(userID) == "" {
+		return emptyItemsEnvelope(0), nil
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	mountID, remoteSeriesID, ok := DecodeEmbyRemoteID(seriesID)
+	if !ok {
+		return emptyItemsEnvelope(0), nil
+	}
+	mount, acct, err := e.remote.ResolveMount(ctx, mountID)
+	if err != nil || mount == nil || acct == nil {
+		return emptyItemsEnvelope(0), nil
+	}
+	if !EmbyMountLibraryAllowed(e.mediaVisibility(ctx, userID), mount) {
+		return emptyItemsEnvelope(0), nil
+	}
+
+	prefix := EmbyRemoteIDPrefix + mountID + "~"
+	var hist []model.PlaybackHistory
+	if err := e.repo.DB.WithContext(ctx).
+		Where("user_id = ? AND position_ms > 0 AND media_id LIKE ?", userID, prefix+"%").
+		Order("watched_at desc").
+		Limit(nextUpHistoryScanLimit).
+		Find(&hist).Error; err != nil {
+		return nil, err
+	}
+	if len(hist) == 0 {
+		return emptyItemsEnvelope(0), nil
+	}
+
+	episodes, err := e.remote.RemoteEpisodes(ctx, mount, acct, remoteSeriesID)
+	if err != nil || len(episodes) == 0 {
+		return emptyItemsEnvelope(0), nil
+	}
+	epByID := make(map[string]*model.Media, len(episodes))
+	for i := range episodes {
+		epByID[episodes[i].ID] = &episodes[i]
+	}
+
+	var current *model.Media
+	for i := range hist {
+		if m := epByID[hist[i].MediaID]; m != nil {
+			current = m
+			break
+		}
+	}
+	if current == nil {
+		return emptyItemsEnvelope(0), nil
+	}
+
+	completed := map[string]bool{}
+	epIDs := make([]string, 0, len(episodes))
+	for i := range episodes {
+		epIDs = append(epIDs, episodes[i].ID)
+	}
+	var done []model.PlaybackHistory
+	if err := e.repo.DB.WithContext(ctx).
+		Where("user_id = ? AND completed = ? AND media_id IN ?", userID, true, epIDs).
+		Find(&done).Error; err == nil {
+		for _, h := range done {
+			completed[h.MediaID] = true
+		}
+	}
+
+	next, ok := pickNextEpisode(episodes, current, completed)
+	if !ok {
+		return emptyItemsEnvelope(0), nil
+	}
+	_, remoteEpID, ok := DecodeEmbyRemoteID(next.ID)
+	if !ok {
+		return emptyItemsEnvelope(0), nil
+	}
+	item, err := e.remote.RemoteItem(ctx, mount, acct, remoteEpID)
+	if err != nil || item == nil {
+		return emptyItemsEnvelope(0), nil
+	}
+	if err := e.mergeRemoteUserData(ctx, userID, item); err != nil {
+		return nil, err
+	}
+	items := []map[string]any{item}
+	if limit < len(items) {
+		items = items[:limit]
 	}
 	return map[string]any{
 		"Items":            items,

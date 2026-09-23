@@ -132,7 +132,10 @@ func embyResumeItemsHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		uid := embyEffectiveUserID(c)
 		limit, _ := strconv.Atoi(embyFirstNonEmptyString(firstQueryValue(c, "Limit", "limit"), "20"))
-		out, err := svc.Emby.ResumeItems(c.Request.Context(), uid, limit)
+		startIndex, _ := strconv.Atoi(embyFirstNonEmptyString(firstQueryValue(c, "StartIndex", "startIndex", "startindex"), "0"))
+		// ParentId / SeriesId 收窄到当前库或当前剧，避免详情页继续播放串到全站历史。
+		parentID := firstQueryValue(c, "ParentId", "parentId", "parentid", "SeriesId", "seriesId", "seriesid")
+		out, err := svc.Emby.ResumeItems(c.Request.Context(), uid, parentID, limit, startIndex)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
