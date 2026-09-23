@@ -143,9 +143,11 @@ func (e *EmbyService) nextUpForRemoteSeries(ctx context.Context, userID, seriesI
 	}
 
 	var current *model.Media
+	currentCompleted := false
 	for i := range hist {
 		if m := epByID[hist[i].MediaID]; m != nil {
 			current = m
+			currentCompleted = hist[i].Completed
 			break
 		}
 	}
@@ -167,7 +169,7 @@ func (e *EmbyService) nextUpForRemoteSeries(ctx context.Context, userID, seriesI
 		}
 	}
 
-	next, ok := pickNextEpisode(episodes, current, completed)
+	next, ok := pickNextEpisode(episodes, current, currentCompleted, completed)
 	if !ok {
 		return emptyItemsEnvelope(0), nil
 	}

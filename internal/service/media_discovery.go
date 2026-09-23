@@ -212,10 +212,11 @@ func (s *MediaDiscoveryService) NextUpCandidates(ctx context.Context, userID str
 		byID[watchedRows[i].ID] = &watchedRows[i]
 	}
 
-	// 按最近观看顺序归并到「剧」维度，同时记住该剧最近的已看集。
+	// 按最近观看顺序归并到「剧」维度，同时记住该剧最近看的那一集以及它是否看完。
 	type seriesState struct {
-		key     string
-		current *model.Media
+		key       string
+		current   *model.Media
+		completed bool
 	}
 	states := make([]seriesState, 0, len(histories))
 	seen := make(map[string]bool, len(histories))
@@ -229,7 +230,7 @@ func (s *MediaDiscoveryService) NextUpCandidates(ctx context.Context, userID str
 			continue
 		}
 		seen[key] = true
-		states = append(states, seriesState{key: key, current: m})
+		states = append(states, seriesState{key: key, current: m, completed: h.Completed})
 	}
 	if len(states) == 0 {
 		return nil, nil
@@ -293,7 +294,7 @@ func (s *MediaDiscoveryService) NextUpCandidates(ctx context.Context, userID str
 		if len(out) >= limit {
 			break
 		}
-		next, ok := pickNextEpisode(bySeries[st.key], st.current, completed)
+		next, ok := pickNextEpisode(bySeries[st.key], st.current, st.completed, completed)
 		if !ok {
 			continue
 		}
@@ -341,16 +342,27 @@ func (s *MediaDiscoveryService) completedMediaIDs(ctx context.Context, userID st
 	return out
 }
 
-// pickNextEpisode 在候选集中选出严格晚于 current 的、编号最小的一集。
-// 比较顺序为 (季, 集)，因此跨季时自然落到下一季第一集。
-func pickNextEpisode(candidates []model.Media, current *model.Media, completed map[string]bool) (model.Media, bool) {
+// pickNextEpisode 选出这部剧「接下来该看的那一集」。
+//
+// anchor 是这部剧最近一次播放的那一集，anchorCompleted 表示那一集是否已看完：
+//   - 没看完（只播了几秒就退出、或中途暂停）时，接下来该看的仍是这一集本身。
+//     否则详情页的「继续播放」会直接跳到下一集，用户刚看的那一集被静默跳过。
+//   - 已看完时，才在候选集里取严格晚于它的、编号最小的一集；比较顺序为
+//     (季, 集)，因此跨季时自然落到下一季第一集。
+func pickNextEpisode(candidates []model.Media, anchor *model.Media, anchorCompleted bool, completed map[string]bool) (model.Media, bool) {
+	if anchor == nil {
+		return model.Media{}, false
+	}
+	if !anchorCompleted {
+		return *anchor, true
+	}
 	var best model.Media
 	found := false
 	for _, candidate := range candidates {
-		if candidate.ID == current.ID || completed[candidate.ID] {
+		if candidate.ID == anchor.ID || completed[candidate.ID] {
 			continue
 		}
-		if !episodeAfter(candidate, *current) {
+		if !episodeAfter(candidate, *anchor) {
 			continue
 		}
 		if !found || episodeBefore(candidate, best) {

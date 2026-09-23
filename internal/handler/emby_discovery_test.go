@@ -105,8 +105,8 @@ func TestEmbyNextUpReturnsNextEpisode(t *testing.T) {
 		}
 		if watched {
 			h := &model.PlaybackHistory{
-				UserID: userID, MediaID: m.ID, PositionMs: 1000, DurationMs: 2000,
-				WatchedAt: watchedAt, Completed: false,
+				UserID: userID, MediaID: m.ID, PositionMs: 2000, DurationMs: 2000,
+				WatchedAt: watchedAt, Completed: true, // 第 1 集已看完
 			}
 			if err := svc.Repo.DB.Create(h).Error; err != nil {
 				t.Fatal(err)
@@ -121,6 +121,49 @@ func TestEmbyNextUpReturnsNextEpisode(t *testing.T) {
 	items := decodeItemsEnvelope(t, w.Body.Bytes())
 	if len(items) != 1 {
 		t.Fatalf("items = %d, want 1 (body=%s)", len(items), w.Body.String())
+	}
+	if index, ok := items[0]["IndexNumber"].(float64); !ok || int(index) != 2 {
+		t.Fatalf("IndexNumber = %v, want 2 (body=%s)", items[0]["IndexNumber"], w.Body.String())
+	}
+}
+
+// 回归：用户在剧集详情页点播放、只看了几秒就退出（历史行 completed=false）后，
+// Yamby 再次进入详情页带的 NextUp 仍要指向那一集本身，否则「继续播放」会跳到下一集。
+func TestEmbyNextUpKeepsPartiallyWatchedEpisode(t *testing.T) {
+	router, svc, userID := newEmbyDiscoveryEnv(t)
+	libID := seedEmbyLibrary(t, svc, "tv")
+
+	episodeIDs := map[int]string{}
+	for ep := 1; ep <= 3; ep++ {
+		m := &model.Media{
+			LibraryID: libID, SeriesID: "series-1", Title: "剧一",
+			SeasonNum: 1, EpisodeNum: ep,
+			Path: "/media/tv/S1E" + strconv.Itoa(ep) + ".mkv",
+		}
+		if err := svc.Repo.DB.Create(m).Error; err != nil {
+			t.Fatal(err)
+		}
+		episodeIDs[ep] = m.ID
+	}
+
+	// 第 2 集播放了 3 秒后退出：有进度、未标记看完。
+	if err := svc.Repo.DB.Create(&model.PlaybackHistory{
+		UserID: userID, MediaID: episodeIDs[2], PositionMs: 3582, DurationMs: 1440064,
+		WatchedAt: time.Now(), Completed: false,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	w := embyGet(t, router, "/emby/Shows/NextUp?SeriesId=series-1&Limit=1", signedTestToken(t, "test-secret"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	items := decodeItemsEnvelope(t, w.Body.Bytes())
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want 1 (body=%s)", len(items), w.Body.String())
+	}
+	if id, _ := items[0]["Id"].(string); id != episodeIDs[2] {
+		t.Fatalf("Id = %q, want the partially watched episode %q (body=%s)", id, episodeIDs[2], w.Body.String())
 	}
 	if index, ok := items[0]["IndexNumber"].(float64); !ok || int(index) != 2 {
 		t.Fatalf("IndexNumber = %v, want 2 (body=%s)", items[0]["IndexNumber"], w.Body.String())
@@ -267,8 +310,8 @@ func TestEmbyNextUpFiltersBySeriesID(t *testing.T) {
 			case 1:
 				watchedID = m.ID
 				h := &model.PlaybackHistory{
-					UserID: userID, MediaID: m.ID, PositionMs: 1000, DurationMs: 2000,
-					WatchedAt: watchedAt, Completed: false,
+					UserID: userID, MediaID: m.ID, PositionMs: 2000, DurationMs: 2000,
+					WatchedAt: watchedAt, Completed: true, // 第 1 集已看完，下一集是 S1E2
 				}
 				if err := svc.Repo.DB.Create(h).Error; err != nil {
 					t.Fatal(err)

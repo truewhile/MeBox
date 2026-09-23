@@ -13,6 +13,9 @@ import (
 )
 
 // seedEpisode 插入一集，并把播放历史指向 `watched`（nil 表示没有历史）。
+//
+// position_ms / duration_ms 只是占位值，NextUp 只看历史行的 completed 字段：
+// 未看完的那一集本身就是「接下来该看的一集」。
 func seedEpisode(
 	t *testing.T,
 	repos *repository.Container,
@@ -78,9 +81,43 @@ func TestNextUpPicksNextEpisode(t *testing.T) {
 	libID := seedDiscoveryLibrary(t, repos, "tv")
 	watchedAt := time.Now().Add(-time.Hour)
 
-	seedEpisode(t, repos, libID, "series-1", "剧一", 1, 1, &watchedAt, false)
+	seedEpisode(t, repos, libID, "series-1", "剧一", 1, 1, &watchedAt, true) // 第 1 集已看完
 	seedEpisode(t, repos, libID, "series-1", "剧一", 1, 2, nil, false)
 	seedEpisode(t, repos, libID, "series-1", "剧一", 1, 3, nil, false)
+
+	svc := NewMediaDiscoveryService(zap.NewNop(), repos)
+	got := nextUpIDs(t, svc, MediaVisibility{IncludeNSFW: true})
+	if len(got) != 1 || got[0] != "S1E2" {
+		t.Fatalf("next up = %v, want [S1E2]", got)
+	}
+}
+
+// 回归：只播了几秒就退出（未看完）时，「接下来该看的一集」仍是这一集本身。
+// 客户端（Yamby 等）剧集详情页的「继续播放」直接取 NextUp 第一条，跳集会播错集。
+func TestNextUpKeepsPartiallyWatchedEpisode(t *testing.T) {
+	repos := newDiscoveryTestDB(t)
+	libID := seedDiscoveryLibrary(t, repos, "tv")
+	watchedAt := time.Now().Add(-time.Minute)
+
+	seedEpisode(t, repos, libID, "series-1", "剧一", 1, 1, nil, true)
+	seedEpisode(t, repos, libID, "series-1", "剧一", 1, 2, &watchedAt, false) // 第 2 集只看了几秒
+	seedEpisode(t, repos, libID, "series-1", "剧一", 1, 3, nil, false)
+
+	svc := NewMediaDiscoveryService(zap.NewNop(), repos)
+	got := nextUpIDs(t, svc, MediaVisibility{IncludeNSFW: true})
+	if len(got) != 1 || got[0] != "S1E2" {
+		t.Fatalf("next up = %v, want [S1E2] (未看完的那一集不能跳过)", got)
+	}
+}
+
+// 未看完的是这部剧的最后一集时也要返回它，不能因为「后面没有集了」而返回空。
+func TestNextUpKeepsPartiallyWatchedFinalEpisode(t *testing.T) {
+	repos := newDiscoveryTestDB(t)
+	libID := seedDiscoveryLibrary(t, repos, "tv")
+	watchedAt := time.Now().Add(-time.Minute)
+
+	seedEpisode(t, repos, libID, "series-1", "剧一", 1, 1, nil, true)
+	seedEpisode(t, repos, libID, "series-1", "剧一", 1, 2, &watchedAt, false) // 最后一集未看完
 
 	svc := NewMediaDiscoveryService(zap.NewNop(), repos)
 	got := nextUpIDs(t, svc, MediaVisibility{IncludeNSFW: true})
@@ -104,6 +141,10 @@ func TestNextUpSkipsMovies(t *testing.T) {
 }
 
 // 同一部剧有多条未看完历史时，只能出一条，且指向最靠后的已看集的下一集。
+// 同一部剧有多条未看完历史时只能出一条，且指向最近看过的那一集。
+//
+// 最近那一集（S1E2）本身还没看完，所以它就是「接下来该看的一集」；
+// S1E1 只是更早的中间进度，不能据此跳到 S1E3。
 func TestNextUpOneEntryPerSeries(t *testing.T) {
 	repos := newDiscoveryTestDB(t)
 	libID := seedDiscoveryLibrary(t, repos, "tv")
@@ -116,8 +157,8 @@ func TestNextUpOneEntryPerSeries(t *testing.T) {
 
 	svc := NewMediaDiscoveryService(zap.NewNop(), repos)
 	got := nextUpIDs(t, svc, MediaVisibility{IncludeNSFW: true})
-	if len(got) != 1 || got[0] != "S1E3" {
-		t.Fatalf("next up = %v, want [S1E3]", got)
+	if len(got) != 1 || got[0] != "S1E2" {
+		t.Fatalf("next up = %v, want [S1E2]", got)
 	}
 }
 
@@ -127,7 +168,7 @@ func TestNextUpCrossesSeason(t *testing.T) {
 	libID := seedDiscoveryLibrary(t, repos, "tv")
 	watchedAt := time.Now().Add(-time.Hour)
 
-	seedEpisode(t, repos, libID, "series-1", "剧一", 1, 12, &watchedAt, false)
+	seedEpisode(t, repos, libID, "series-1", "剧一", 1, 12, &watchedAt, true) // 第 1 季最后一集已看完
 	seedEpisode(t, repos, libID, "series-1", "剧一", 2, 1, nil, false)
 	seedEpisode(t, repos, libID, "series-1", "剧一", 2, 2, nil, false)
 
@@ -144,8 +185,8 @@ func TestNextUpSkipsCompletedEpisode(t *testing.T) {
 	libID := seedDiscoveryLibrary(t, repos, "tv")
 	watchedAt := time.Now().Add(-time.Hour)
 
-	seedEpisode(t, repos, libID, "series-1", "剧一", 1, 1, &watchedAt, false)
-	seedEpisode(t, repos, libID, "series-1", "剧一", 1, 2, nil, true) // 已看完
+	seedEpisode(t, repos, libID, "series-1", "剧一", 1, 1, &watchedAt, true) // 已看完，下一集是 S1E3
+	seedEpisode(t, repos, libID, "series-1", "剧一", 1, 2, nil, true)        // 已看完
 	seedEpisode(t, repos, libID, "series-1", "剧一", 1, 3, nil, false)
 
 	svc := NewMediaDiscoveryService(zap.NewNop(), repos)
@@ -155,13 +196,13 @@ func TestNextUpSkipsCompletedEpisode(t *testing.T) {
 	}
 }
 
-// 追到最后一集时没有下一集，结果为空而不是重复返回最后一集。
+// 追到最后一集且已看完时没有下一集，结果为空而不是重复返回最后一集。
 func TestNextUpEmptyAtSeriesEnd(t *testing.T) {
 	repos := newDiscoveryTestDB(t)
 	libID := seedDiscoveryLibrary(t, repos, "tv")
 	watchedAt := time.Now().Add(-time.Hour)
 
-	seedEpisode(t, repos, libID, "series-1", "剧一", 1, 3, &watchedAt, false)
+	seedEpisode(t, repos, libID, "series-1", "剧一", 1, 3, &watchedAt, true)
 
 	svc := NewMediaDiscoveryService(zap.NewNop(), repos)
 	if got := nextUpIDs(t, svc, MediaVisibility{IncludeNSFW: true}); len(got) != 0 {
@@ -176,7 +217,7 @@ func TestNextUpRespectsVisibility(t *testing.T) {
 	hiddenLib := seedDiscoveryLibrary(t, repos, "tv")
 	watchedAt := time.Now().Add(-time.Hour)
 
-	seedEpisode(t, repos, visibleLib, "series-1", "剧一", 1, 1, &watchedAt, false)
+	seedEpisode(t, repos, visibleLib, "series-1", "剧一", 1, 1, &watchedAt, true)
 	seedEpisode(t, repos, hiddenLib, "series-1", "剧一", 1, 2, nil, false)
 
 	svc := NewMediaDiscoveryService(zap.NewNop(), repos)
