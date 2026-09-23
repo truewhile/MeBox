@@ -53,21 +53,18 @@ type PlaylistItem struct {
 // AllowedLibraryIDs is a JSON array of library UUIDs (empty = all).
 type PlayProfile struct {
 	Base
-	UserID                string `gorm:"index;size:36;not null" json:"user_id"`
-	Name                  string `gorm:"size:64;not null" json:"name"`
-	IsDefault             bool   `gorm:"default:false" json:"is_default"`
-	ContentRatingLimit    string `gorm:"size:16" json:"content_rating_limit,omitempty"`
-	AllowAdult            bool   `gorm:"default:false" json:"allow_adult"`
-	RequirePIN            bool   `gorm:"default:false" json:"require_pin"`
-	PINHash               string `gorm:"size:128" json:"-"`
-	PreferredSubtitleLang string `gorm:"size:16" json:"preferred_subtitle_lang,omitempty"`
-	PreferredAudioLang    string `gorm:"size:16" json:"preferred_audio_lang,omitempty"`
-	AutoplayNext          bool   `gorm:"default:true" json:"autoplay_next"`
-	SkipIntro             bool   `gorm:"default:false" json:"skip_intro"`
-	// SegmentSource 决定片头/片尾数据从哪来：auto（优先文件内嵌章节，没有可用
-	// 章节时回落到 TheIntroDB）/ theintrodb / ffprobe。空值按 auto 处理。
-	SegmentSource     string     `gorm:"size:16;default:'auto'" json:"segment_source,omitempty"`
-	AllowedLibraryIDs string     `gorm:"type:text;default:'[]'" json:"allowed_library_ids"`
-	TotalWatchTime    int64      `gorm:"default:0" json:"total_watch_time"`
-	LastActiveAt      *time.Time `json:"last_active_at,omitempty"`
+	UserID                string     `gorm:"index;size:36;not null" json:"user_id"`
+	Name                  string     `gorm:"size:64;not null" json:"name"`
+	IsDefault             bool       `gorm:"default:false" json:"is_default"`
+	ContentRatingLimit    string     `gorm:"size:16" json:"content_rating_limit,omitempty"`
+	AllowAdult            bool       `gorm:"default:false" json:"allow_adult"`
+	RequirePIN            bool       `gorm:"default:false" json:"require_pin"`
+	PINHash               string     `gorm:"size:128" json:"-"`
+	PreferredSubtitleLang string     `gorm:"size:16" json:"preferred_subtitle_lang,omitempty"`
+	PreferredAudioLang    string     `gorm:"size:16" json:"preferred_audio_lang,omitempty"`
+	AutoplayNext          bool       `gorm:"default:true" json:"autoplay_next"`
+	SkipIntro             bool       `gorm:"default:false" json:"skip_intro"`
+	AllowedLibraryIDs     string     `gorm:"type:text;default:'[]'" json:"allowed_library_ids"`
+	TotalWatchTime        int64      `gorm:"default:0" json:"total_watch_time"`
+	LastActiveAt          *time.Time `json:"last_active_at,omitempty"`
 }

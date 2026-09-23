@@ -110,7 +110,7 @@ func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Fatal("condition was not met before the deadline")
 }
 
-func TestMediaProbeRunPersistsSegmentsAndProbeRow(t *testing.T) {
+func TestMediaProbeRunPersistsProbeRow(t *testing.T) {
 	svc, repos, m := newProbeFixture(t)
 	prober := &stubProber{result: chapterProbeResult()}
 	svc.probe = prober
@@ -121,17 +121,6 @@ func TestMediaProbeRunPersistsSegmentsAndProbeRow(t *testing.T) {
 
 	if got := prober.lastInput().Source; got != m.Path {
 		t.Fatalf("probe source = %q, want the local path %q", got, m.Path)
-	}
-
-	rows, err := repos.MediaSegment.ListByMediaSource(t.Context(), m.ID, SegmentSourceFFprobe)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 2 {
-		t.Fatalf("segments = %#v, want the 2 semantic chapters", rows)
-	}
-	if rows[0].Kind != model.SegmentKindIntro || rows[0].SeriesID != "s-1" {
-		t.Fatalf("segment[0] = %#v, want an intro carrying the series id", rows[0])
 	}
 
 	probe, err := repos.MediaProbe.Get(t.Context(), m.ID)
@@ -170,7 +159,7 @@ func TestMediaProbeRunPersistsSegmentsAndProbeRow(t *testing.T) {
 	}
 }
 
-func TestMediaProbeFailureKeepsPreviousProbeAndSegments(t *testing.T) {
+func TestMediaProbeFailureKeepsPreviousSummary(t *testing.T) {
 	svc, repos, m := newProbeFixture(t)
 	prober := &stubProber{result: chapterProbeResult()}
 	svc.probe = prober
@@ -186,16 +175,10 @@ func TestMediaProbeFailureKeepsPreviousProbeAndSegments(t *testing.T) {
 	if probe == nil || probe.LastError == "" {
 		t.Fatal("a failed re-probe must record the error")
 	}
-	// 关键：失败只更新时间与错误信息，上一次成功的媒体信息与片段必须留着。
-	if probe.DurationSec != 1451 || probe.Container != "matroska,webm" {
+	// 关键：失败只更新时间与错误信息，上一次成功的媒体信息必须留着——
+	// 否则一次失败的重探会把已经拿到的时长（片尾区间换算要用）抹掉。
+	if probe.DurationSec != 1451 || probe.Container != "matroska,webm" || probe.Payload == "" {
 		t.Fatalf("a failed re-probe wiped the previous summary: %#v", probe)
-	}
-	rows, err := repos.MediaSegment.ListByMediaSource(t.Context(), m.ID, SegmentSourceFFprobe)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 2 {
-		t.Fatalf("segments = %#v, want the previous 2 kept", rows)
 	}
 }
 

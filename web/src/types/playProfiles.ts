@@ -10,13 +10,9 @@ export interface PlayProfile {
   preferred_audio_lang?: string
   autoplay_next: boolean
   skip_intro: boolean
-  segment_source?: SegmentSource
   allowed_library_ids: string[]
   total_watch_time: number
   last_active_at?: string
   created_at: string
   updated_at: string
 }
-
-/** 片头/片尾数据来源：auto 优先文件内嵌章节，没有则回落 TheIntroDB。 */
-export type SegmentSource = 'auto' | 'theintrodb' | 'ffprobe'

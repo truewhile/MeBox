@@ -18,18 +18,7 @@ import (
 	"github.com/truewhile/MeBox/internal/repository"
 )
 
-// 播放档案里可选的片头/片尾数据来源。
-const (
-	// SegmentSourceAuto 优先用文件内嵌章节（对这个片源最准），没有可用章节时
-	// 回落到 TheIntroDB。
-	SegmentSourceAuto = "auto"
-	// SegmentSourceFFprobe 只用文件内嵌章节。
-	SegmentSourceFFprobe = "ffprobe"
-	// SegmentSourceTheIntroDB 只用社区数据库。它同时是 media_segments.source 的
-	// 取值——两处必须一致，所以直接复用提供方的常量。
-	SegmentSourceTheIntroDB = IntroDBSource
-)
-
+// 探测结果的缓存与预算策略。
 const (
 	// mediaProbeTimeout 是一次后台探测的总预算（含把 strm 目标解析成直链）。
 	mediaProbeTimeout = 90 * time.Second
@@ -41,31 +30,25 @@ const (
 	mediaProbeErrorLimit = 200
 )
 
-// NormalizeSegmentSource 把任意输入收敛到合法取值；未知值一律按 auto 处理
-// （历史档案里这一列可能还是空串）。
-func NormalizeSegmentSource(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case SegmentSourceFFprobe:
-		return SegmentSourceFFprobe
-	case SegmentSourceTheIntroDB:
-		return SegmentSourceTheIntroDB
-	default:
-		return SegmentSourceAuto
-	}
-}
-
 // mediaProber 是 MediaProbeService 需要的探测能力。抽成接口是为了在测试里注入
 // 桩，避免依赖真实 ffprobe 二进制。
 type mediaProber interface {
 	ProbeFull(ctx context.Context, input ProbeInput) (*FullProbeResult, error)
 }
 
-// MediaProbeService 用 ffprobe 提取媒体的完整信息（容器、每路轨道、内嵌章节），
-// 把结果落库缓存，并把章节映射成可跳过的片头/片尾区间。
+// MediaProbeService 用 ffprobe 提取媒体的基础信息（容器、每路轨道、内嵌章节）
+// 并落库缓存。
 //
-// 核心约束：一次探测要 3～4 秒（远端直链更慢，跨洋要跑三次 HTTP 事务），所以
-// 只允许异步跑。播放链路永远只读缓存，拿不到就下次再来——绝不能让一次探测挡在
-// 起播路径上。
+// 定位是「播放时顺带补齐媒体信息」：STRM / 云盘媒体在扫描阶段拿不到时长，而
+// 播放链路要用缓存里的时长来换算「延续到片尾」这类区间，详情页将来也直接读这份
+// 媒体信息。
+//
+// 它**不参与片头/片尾判定**：章节标题绝大多数没有语义（生产库实测抽样 64 个
+// 文件，命中 0 个），拿它去猜跳过点只会给出错误的位置，时间轴数据仍然只信
+// TheIntroDB。
+//
+// 核心约束：一次探测要 2～4.5 秒（远端直链要跨洋跑几次 HTTP 事务），所以只允许
+// 异步跑，播放链路永远只读缓存。
 type MediaProbeService struct {
 	log   *zap.Logger
 	repo  *repository.Container
@@ -200,21 +183,10 @@ func (s *MediaProbeService) probeInput(ctx context.Context, m *model.Media) (Pro
 	return ProbeInput{}, errors.New("strm probe source unavailable")
 }
 
-// persistProbe 把一次成功的探测落库：先写片段区间，再写探测行。
-//
-// 顺序很重要：探测行是「已经探过」的标记，客户端靠它决定要不要继续轮询。先写
-// 它会让客户端在区间还没落库时就停止等待。
+// persistProbe 把一次成功的探测落库。
 func (s *MediaProbeService) persistProbe(ctx context.Context, m *model.Media, result *FullProbeResult) error {
-	if s.repo == nil || s.repo.MediaProbe == nil || s.repo.MediaSegment == nil {
+	if s.repo == nil || s.repo.MediaProbe == nil {
 		return errors.New("media probe repository not wired")
-	}
-	rows := chaptersToSegments(result.Chapters)
-	for i := range rows {
-		rows[i].MediaID = m.ID
-		rows[i].SeriesID = m.SeriesID
-	}
-	if err := s.repo.MediaSegment.ReplaceForMedia(ctx, m.ID, SegmentSourceFFprobe, rows); err != nil {
-		return err
 	}
 	payload, err := result.PayloadJSON()
 	if err != nil {

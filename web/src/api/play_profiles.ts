@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { PlayProfile, SegmentSource } from '../types'
+import type { PlayProfile } from '../types'
 
 // Payload accepted by create / update.
 export interface PlayProfileInput {
@@ -14,7 +14,6 @@ export interface PlayProfileInput {
   preferred_audio_lang?: string
   autoplay_next: boolean
   skip_intro: boolean
-  segment_source: SegmentSource
   allowed_library_ids: string[]
 }
 

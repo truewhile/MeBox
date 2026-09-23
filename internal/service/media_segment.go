@@ -71,82 +71,53 @@ func (s *MediaSegmentService) SetProbe(p *MediaProbeService) *MediaSegmentServic
 	return s
 }
 
-// SegmentsResult 是播放器一次查询的结果。
-type SegmentsResult struct {
-	// Segments 是按当前来源选定、可以直接用来跳过的区间。
-	Segments []model.MediaSegment
-	// Pending 为 true 表示 ffprobe 提取还在后台跑：这次可能还没有章节数据，
-	// 客户端过几秒再拉一次就能拿到；那时如果片头还没播完，跳过按钮会自动出现。
-	Pending bool
-}
-
-// SegmentsForPlayback 返回播放器该用的片段，并按需触发数据补齐。
+// ListForPlayback returns the segments known for a media item, refreshing from
+// the provider when the cache is stale.
 //
-// 它绝不做阻塞起播的事：TheIntroDB 的抓取沿用原来的「以调用方 deadline 为预算」，
-// ffprobe 提取则完全异步。抓取或提取失败只是少一个「跳过片头」按钮、或晚几秒
-// 出现，绝不能让播放报错。
-func (s *MediaSegmentService) SegmentsForPlayback(ctx context.Context, m *model.Media, source string) (SegmentsResult, error) {
+// 它不做任何阻塞起播的事情——调用方是在播放已经开始之后用一次独立请求进来的，
+// 抓取失败也只是少一个「跳过片头」按钮，绝不能让播放报错。
+//
+// 时间轴数据只来自 TheIntroDB。顺带在返回前起一次异步探测补齐媒体信息（主要是
+// STRM 媒体的时长），但探测结果不参与片段判定，详见 MediaProbeService 的说明。
+func (s *MediaSegmentService) ListForPlayback(ctx context.Context, m *model.Media) ([]model.MediaSegment, error) {
 	if s == nil || s.repo == nil || m == nil || m.ID == "" {
-		return SegmentsResult{}, nil
+		return nil, nil
 	}
-	source = NormalizeSegmentSource(source)
-	result := SegmentsResult{}
-	// 只用社区库时连探测都不该触发：没必要为一次用不上的章节提取去跑 ffprobe。
-	var chapterRows []model.MediaSegment
-	needsProbe := false
-	if source != SegmentSourceTheIntroDB {
-		chapterRows, needsProbe = s.chapterSegments(ctx, m)
-	}
-	result.Pending = needsProbe
-	// 用 defer 保证无论走哪条分支、包括中途出错，后台提取都会排上队；同时它一定在
-	// 所有前台数据库读写之后才启动（见 triggerAsyncProbe 的说明）。
-	defer triggerAsyncProbe(s, m, needsProbe)
-
-	if source == SegmentSourceTheIntroDB {
-		introRows, err := s.introDBSegments(ctx, m)
-		if err != nil {
-			return result, err
-		}
-		result.Segments = introRows
-		return result, nil
-	}
-	// ffprobe 档、以及 auto 档下已经有可用章节的情况，都整体采用章节数据。
-	//
-	// 章节与社区库的数据刻意不合并：两边对同一集的判定会互相矛盾（同一集的片尾
-	// 起点能差上百秒），只能按 media 整体二选一。auto 走到这里说明章节可用，也就
-	// 不必再去打一次用不上的社区库。
-	if source == SegmentSourceFFprobe || len(chapterRows) > 0 {
-		result.Segments = chapterRows
-		return result, nil
-	}
-	// auto 且没有可用章节：回落到社区库；Pending 保留，客户端会再拉一次。
-	introRows, err := s.introDBSegments(ctx, m)
-	if err != nil {
-		return result, err
-	}
-	result.Segments = introRows
-	return result, nil
+	// 用 defer 保证探测一定在本次请求所有数据库读写之后才启动：后台探测自己也要
+	// 写库，若在本次写事务还没结束时启动，两个写事务会抢同一把锁（SQLite 下就是
+	// SQLITE_BUSY，实测能直接把社区库的落库打失败）。
+	defer s.ensureMediaProbe(ctx, m)
+	return s.introDBSegments(ctx, m)
 }
 
-// triggerAsyncProbe 在所有前台数据库读写都结束之后再起后台提取。
+// ensureMediaProbe 在还没探过（或上次失败已过冷却期）时起一次异步探测。
 //
-// 顺序很关键：后台探测自己也要写库，若在本次请求的写事务还没结束时启动，两个写
-// 事务会抢同一把锁（SQLite 下就是 SQLITE_BUSY）。
-func triggerAsyncProbe(s *MediaSegmentService, m *model.Media, needsProbe bool) {
-	if !needsProbe || s == nil || s.probe == nil {
+// 它只为「补齐媒体信息」服务：失败只是拿不到时长，不影响播放，也不影响片段。
+func (s *MediaSegmentService) ensureMediaProbe(ctx context.Context, m *model.Media) {
+	if s == nil || s.probe == nil || m == nil {
+		return
+	}
+	cached, err := s.repo.MediaProbe.Get(ctx, m.ID)
+	if err != nil {
+		s.debug("get media probe failed", m.ID, err)
+		return
+	}
+	if mediaProbeSettled(cached) {
 		return
 	}
 	s.probe.EnsureAsync(m)
 }
 
-// ListForPlayback 供 Emby / Jellyfin 兼容接口使用：按 auto 档取数据（章节优先，
-// 回落社区库）。第三方客户端不会轮询，所以这里只返回当前能拿到的部分。
-func (s *MediaSegmentService) ListForPlayback(ctx context.Context, m *model.Media) ([]model.MediaSegment, error) {
-	result, err := s.SegmentsForPlayback(ctx, m, SegmentSourceAuto)
-	if err != nil {
-		return nil, err
+// mediaProbeSettled 判断这部媒体的探测是否已经「有结论」——成功过，或者失败但还在
+// 冷却期内。有结论就不必再探；失败且已过冷却期时返回 false，让下一次播放重试。
+func mediaProbeSettled(row *model.MediaProbe) bool {
+	if row == nil {
+		return false
 	}
-	return result.Segments, nil
+	if strings.TrimSpace(row.LastError) == "" {
+		return true
+	}
+	return time.Since(row.ProbedAt) < mediaProbeFailureRetry
 }
 
 // introDBSegments 读社区库的片段，缓存过期时按调用方的预算抓一次并落库。
@@ -172,45 +143,6 @@ func (s *MediaSegmentService) introDBSegments(ctx context.Context, m *model.Medi
 		return cached, nil
 	}
 	return refreshed, nil
-}
-
-// chapterSegments 读 ffprobe 提取出的章节区间，并报告「是否还需要等一次提取结果」。
-//
-// 它只读、不启动提取：调用方要等所有前台数据库读写都结束之后再起后台任务，否则
-// 后台写事务会和本次请求的写事务抢同一把锁。探测失败的结果也会落库，所以不会
-// 每次播放都为同一个坏源重跑。
-func (s *MediaSegmentService) chapterSegments(ctx context.Context, m *model.Media) ([]model.MediaSegment, bool) {
-	if s == nil || s.probe == nil || s.repo == nil {
-		return nil, false
-	}
-	rows, err := s.repo.MediaSegment.ListByMediaSource(ctx, m.ID, SegmentSourceFFprobe)
-	if err != nil {
-		s.debug("list ffprobe segments failed", m.ID, err)
-		return nil, false
-	}
-	cached, err := s.repo.MediaProbe.Get(ctx, m.ID)
-	if err != nil {
-		s.debug("get media probe failed", m.ID, err)
-		return nil, false
-	}
-	if mediaProbeSettled(cached) {
-		return rows, false
-	}
-	// 还没探过、或失败已过冷却期：值得让客户端稍后再来一次。
-	return rows, true
-}
-
-// mediaProbeSettled 判断这部媒体的探测是否已经「有结论」——成功过，或者失败但还在
-// 冷却期内。有结论就不必再探，客户端也不用继续轮询；失败且已过冷却期时返回
-// false，让下一次播放重试。
-func mediaProbeSettled(row *model.MediaProbe) bool {
-	if row == nil {
-		return false
-	}
-	if strings.TrimSpace(row.LastError) == "" {
-		return true
-	}
-	return time.Since(row.ProbedAt) < mediaProbeFailureRetry
 }
 
 func (s *MediaSegmentService) debug(message, mediaID string, err error) {

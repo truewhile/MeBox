@@ -94,7 +94,6 @@ func (s *PlayProfileService) Create(ctx context.Context, in PlayProfileInput) (*
 		PreferredAudioLang:    in.PreferredAudioLang,
 		AutoplayNext:          in.AutoplayNext,
 		SkipIntro:             in.SkipIntro,
-		SegmentSource:         NormalizeSegmentSource(in.SegmentSource),
 		AllowedLibraryIDs:     string(libsBlob),
 	}
 	if in.RequirePIN && in.PIN != "" {
@@ -154,7 +153,6 @@ func (s *PlayProfileService) updateExisting(ctx context.Context, row *model.Play
 		"preferred_audio_lang":    in.PreferredAudioLang,
 		"autoplay_next":           in.AutoplayNext,
 		"skip_intro":              in.SkipIntro,
-		"segment_source":          NormalizeSegmentSource(in.SegmentSource),
 		"allowed_library_ids":     string(libsBlob),
 	}
 	if in.RequirePIN && in.PIN != "" {

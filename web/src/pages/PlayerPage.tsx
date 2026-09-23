@@ -75,13 +75,6 @@ type PlaybackProgressSession = {
 // 自动跳过片头后，「已跳过 · 撤销」提示停留的时长。
 const SKIP_NOTICE_MS = 6000
 
-// ffprobe 章节提取在服务端是异步的：pending 为 true 时按这个间隔重试，最多这么
-// 多次（远端探测实测 3～4 秒，本地更快；40 秒的预算足以覆盖慢速 CDN 与大文件）。
-// 重试期间播放完全不受影响；拿到数据时如果片头已经播过去了，resolveActiveSkip
-// 自然不会再提示，不会出现「点一下就跳过头」的按钮。
-const SKIP_SEGMENTS_POLL_MS = 4000
-const SKIP_SEGMENTS_MAX_POLLS = 10
-
 function normalizePlayerVolume(value: unknown): number {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) return 1
@@ -739,7 +732,6 @@ export function PlayerPage() {
   useEffect(() => {
     if (!mediaId) return
     let cancelled = false
-    let pollTimer: ReturnType<typeof setTimeout> | null = null
     setRawSkipSegments([])
     setAutoSkipIntro(false)
     setActiveSkip(null)
@@ -747,28 +739,16 @@ export function PlayerPage() {
     setDismissedSkipKinds([])
     setAutoSuppressedKinds([])
     // 片段数据与播放来源无关，播放开始后异步补抓即可，绝不挡在起播路径上。
-    //
-    // 服务端的 ffprobe 章节提取是异步的：pending 为 true 说明这次还没结果，隔几秒
-    // 再拉一次。提取完成后如果片头还没播完，跳过按钮会自己出现；已经过了片头时间
-    // 的话 resolveActiveSkip 不会提示，所以不会出现「点一下就跳过头」的按钮。
-    const load = (attempt: number) => {
-      playbackAPI
-        .segments(mediaId)
-        .then((res) => {
-          if (cancelled) return
-          setAutoSkipIntro(Boolean(res.auto_skip))
-          setRawSkipSegments(res.segments ?? [])
-          const hasSegments = (res.segments ?? []).length > 0
-          if (res.pending && !hasSegments && attempt < SKIP_SEGMENTS_MAX_POLLS) {
-            pollTimer = setTimeout(() => load(attempt + 1), SKIP_SEGMENTS_POLL_MS)
-          }
-        })
-        .catch(() => undefined)
-    }
-    load(0)
+    playbackAPI
+      .segments(mediaId)
+      .then((res) => {
+        if (cancelled) return
+        setAutoSkipIntro(Boolean(res.auto_skip))
+        setRawSkipSegments(res.segments ?? [])
+      })
+      .catch(() => undefined)
     return () => {
       cancelled = true
-      if (pollTimer) clearTimeout(pollTimer)
     }
   }, [mediaId])
 
