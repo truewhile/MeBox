@@ -13,18 +13,20 @@ import (
 // PlayProfileInput is the create/update payload accepted by the API.
 // PIN is hashed only when non-empty so omitting it preserves the existing PIN on update.
 type PlayProfileInput struct {
-	UserID                string   `json:"user_id"`
-	Name                  string   `json:"name"`
-	IsDefault             bool     `json:"is_default"`
-	ContentRatingLimit    string   `json:"content_rating_limit"`
-	AllowAdult            bool     `json:"allow_adult"`
-	RequirePIN            bool     `json:"require_pin"`
-	PIN                   string   `json:"pin,omitempty"`
-	PreferredSubtitleLang string   `json:"preferred_subtitle_lang"`
-	PreferredAudioLang    string   `json:"preferred_audio_lang"`
-	AutoplayNext          bool     `json:"autoplay_next"`
-	SkipIntro             bool     `json:"skip_intro"`
-	AllowedLibraryIDs     []string `json:"allowed_library_ids"`
+	UserID                string `json:"user_id"`
+	Name                  string `json:"name"`
+	IsDefault             bool   `json:"is_default"`
+	ContentRatingLimit    string `json:"content_rating_limit"`
+	AllowAdult            bool   `json:"allow_adult"`
+	RequirePIN            bool   `json:"require_pin"`
+	PIN                   string `json:"pin,omitempty"`
+	PreferredSubtitleLang string `json:"preferred_subtitle_lang"`
+	PreferredAudioLang    string `json:"preferred_audio_lang"`
+	AutoplayNext          bool   `json:"autoplay_next"`
+	SkipIntro             bool   `json:"skip_intro"`
+	// SegmentSource 是片头/片尾数据来源：auto | theintrodb | ffprobe。
+	SegmentSource     string   `json:"segment_source"`
+	AllowedLibraryIDs []string `json:"allowed_library_ids"`
 }
 
 // ProfileView is the public shape for React forms.

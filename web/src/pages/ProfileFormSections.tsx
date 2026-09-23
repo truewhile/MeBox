@@ -126,6 +126,17 @@ export function ProfilePreferenceFields({
         checked={form.skip_intro}
         onChange={(value) => update({ skip_intro: value })}
       />
+      <Field label="片头片尾数据来源">
+        <select
+          className="input-base"
+          value={form.segment_source}
+          onChange={(event) => update({ segment_source: event.target.value as PlayProfileInput['segment_source'] })}
+        >
+          <option value="auto">自动（优先用文件内嵌章节，没有可用章节时用 TheIntroDB）</option>
+          <option value="theintrodb">TheIntroDB 社区数据库（依赖刮削出的 TMDb ID）</option>
+          <option value="ffprobe">ffprobe 本地提取（读取文件内嵌章节，不联网）</option>
+        </select>
+      </Field>
     </>
   )
 }

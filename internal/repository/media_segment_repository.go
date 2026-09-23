@@ -23,6 +23,18 @@ func (r *MediaSegmentRepository) ListByMedia(ctx context.Context, mediaID string
 	return rows, err
 }
 
+// ListByMediaSource returns the segments contributed by one source only, ordered
+// by start. Used to read the ffprobe-extracted chapters independently of the
+// community-database rows, so the player can pick between them.
+func (r *MediaSegmentRepository) ListByMediaSource(ctx context.Context, mediaID, source string) ([]model.MediaSegment, error) {
+	rows := make([]model.MediaSegment, 0, 4)
+	err := r.db.WithContext(ctx).
+		Where("media_id = ? AND source = ?", mediaID, source).
+		Order("start_ms asc").
+		Find(&rows).Error
+	return rows, err
+}
+
 // ReplaceForMedia swaps the segments contributed by one source in a single
 // transaction, so a provider refresh can never leave a half-updated set.
 //

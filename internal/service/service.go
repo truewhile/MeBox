@@ -36,6 +36,7 @@ type Container struct {
 	Scraper          *ScraperService
 	Playback         *PlaybackService
 	Segments         *MediaSegmentService
+	MediaProbe       *MediaProbeService
 	ImageProxy       *ImageProxy
 	Watcher          *WatcherService
 	Subtitle         *SubtitleService

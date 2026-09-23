@@ -37,6 +37,7 @@ export function ProfileFormModal({
     preferred_audio_lang: editing?.preferred_audio_lang ?? '',
     autoplay_next: editing?.autoplay_next ?? true,
     skip_intro: editing?.skip_intro ?? false,
+    segment_source: editing?.segment_source ?? 'auto',
     allowed_library_ids: editing?.allowed_library_ids ?? [],
   }))
   const [saving, setSaving] = useState(false)

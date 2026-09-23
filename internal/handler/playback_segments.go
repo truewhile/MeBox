@@ -22,7 +22,9 @@ import (
 func playbackSegmentsHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		autoSkip := resolveAutoSkipFlag(c, svc)
+		source := resolveSegmentSource(c, svc)
 		segments := []service.SegmentView{}
+		pending := false
 
 		m, err := findMediaForPlaybackEndpoint(c, svc, c.Param("id"))
 		if err != nil || m == nil || !mediaVisibleForRequest(c, svc, m) {
@@ -31,14 +33,22 @@ func playbackSegmentsHandler(svc *service.Container) gin.HandlerFunc {
 		}
 		// 远程 Emby 挂载的条目是上游库的投影，本地没有可查询的外部 ID 关联。
 		if svc.Segments != nil && !service.IsEmbyRemoteID(m.ID) {
-			rows, listErr := svc.Segments.ListForPlayback(c.Request.Context(), m)
+			result, listErr := svc.Segments.SegmentsForPlayback(c.Request.Context(), m, source)
 			if listErr != nil && svc.Log != nil {
 				svc.Log.Debug("list media segments failed",
 					zap.String("media_id", m.ID), zap.Error(listErr))
 			}
-			segments = service.ToSegmentViews(rows)
+			segments = service.ToSegmentViews(result.Segments)
+			pending = result.Pending
 		}
-		c.JSON(http.StatusOK, gin.H{"segments": segments, "auto_skip": autoSkip})
+		// pending 告诉客户端「章节提取还在后台跑，过几秒再拉一次」；提取完成时
+		// 如果片头还没播完，跳过按钮就会自己出现，已经过了片头则不会提示。
+		c.JSON(http.StatusOK, gin.H{
+			"segments":  segments,
+			"auto_skip": autoSkip,
+			"pending":   pending,
+			"source":    source,
+		})
 	}
 }
 
@@ -52,4 +62,14 @@ func resolveAutoSkipFlag(c *gin.Context, svc *service.Container) bool {
 		return false
 	}
 	return profile.SkipIntro
+}
+
+// resolveSegmentSource reads the「片头片尾数据来源」choice off the active profile.
+// PIN-locked profiles fall back to auto rather than leaking the profile's setting.
+func resolveSegmentSource(c *gin.Context, svc *service.Container) string {
+	profile, locked := selectedPlayProfile(c, svc)
+	if locked || profile == nil {
+		return service.SegmentSourceAuto
+	}
+	return service.NormalizeSegmentSource(profile.SegmentSource)
 }

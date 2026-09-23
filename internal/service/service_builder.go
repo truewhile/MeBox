@@ -147,6 +147,11 @@ func (b *serviceContainerBuilder) initContentServices() {
 	b.c.Transcoder.SetStrmPlayTargetResolver(b.c.Strm.ResolvePlayTarget)
 	b.c.Transcoder.SetProbe(b.c.FFprobe)
 	b.c.Subtitle.SetStrmPlayTargetResolver(b.c.Strm.ResolvePlayTarget)
+	// 播放时的媒体信息提取（ffprobe 章节 → 跳过片头/片尾）：完全异步，播放链路
+	// 只读缓存。换链复用与转码/字幕同一条路径，避免 CDN 防盗链 403。
+	b.c.MediaProbe = NewMediaProbeService(b.log, b.repos, b.c.FFprobe).
+		SetPlayTargetResolver(b.c.Strm.ResolvePlayTargetWithUA)
+	b.c.Segments.SetProbe(b.c.MediaProbe)
 	// 播放链路：/Videos/{id}/stream 与 /api/stream/{id} 在服务端完成换链后直接
 	// 302 到最终直链，客户端少跟随一次 302（高延迟线路上省一个往返）。
 	b.c.Stream.SetStrmPlayTargetResolver(b.c.Strm.ResolvePlayTargetWithUA)
