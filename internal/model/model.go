@@ -38,6 +38,8 @@ func AllModels() []interface{} {
 		&Series{},
 		&Media{},
 		&PlaybackHistory{},
+		&MediaSegment{},
+		&MediaSegmentFetch{},
 		&Favorite{},
 		&Playlist{},
 		&PlaylistItem{},

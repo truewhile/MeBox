@@ -36,6 +36,7 @@ func TestAuthenticatedRouteSurfacesAreRegistered(t *testing.T) {
 		"GET /api/storage",
 		"GET /api/watch-history",
 		"GET /api/playback/:id/info",
+		"GET /api/playback/:id/segments",
 	} {
 		if !routes[want] {
 			t.Fatalf("%s route is not registered", want)

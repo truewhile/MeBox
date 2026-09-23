@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { Media, Playlist } from '../types'
+import type { Media, PlaybackSegmentsResponse, Playlist } from '../types'
 
 // History rows arrive joined with their Media row; the backend returns null
 // for orphaned rows whose media has been removed.
@@ -45,6 +45,13 @@ export const playbackAPI = {
   getResume: (mediaId: string) =>
     api
       .get<{ position_ms: number; duration_ms: number; completed: boolean }>(`/playback/${mediaId}/resume`)
+      .then((r) => r.data),
+
+  // 片头/片尾片段：播放开始后再调用，服务端可能需要几秒去外部数据库取数，
+  // 因此绝不能让它挡在起播路径上。
+  segments: (mediaId: string) =>
+    api
+      .get<PlaybackSegmentsResponse>(`/playback/${encodeURIComponent(mediaId)}/segments`)
       .then((r) => r.data),
 
   recordProgress: (payload: PlaybackProgressRequest) =>

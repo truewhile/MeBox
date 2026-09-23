@@ -35,6 +35,7 @@ type Container struct {
 	Fanart           *FanartProvider
 	Scraper          *ScraperService
 	Playback         *PlaybackService
+	Segments         *MediaSegmentService
 	ImageProxy       *ImageProxy
 	Watcher          *WatcherService
 	Subtitle         *SubtitleService

@@ -17,10 +17,11 @@ import { subtitlesAPI, type SubtitleTrack } from '../api/subtitles'
 import { systemAPI } from '../api/system'
 import { profileAPI } from '../api/profile'
 import { useAuthStore } from '../stores/auth'
-import type { Media, PlaybackInfo, PlaybackQuality } from '../types'
+import type { Media, PlaybackInfo, PlaybackQuality, PlaybackSegment, PlaybackSegmentKind } from '../types'
 import { getSeriesKey, seriesTitleFromPath } from '../utils/groupSeries'
 import { mediaVersionMatches, mediaVersionsOf } from '../utils/mediaVersion'
 import { normalizePlaybackRate } from '../utils/playbackRate'
+import { resolveActiveSkip, skippedNoticeText, toSkipSegments, type SkipPrompt } from '../utils/skipSegments'
 import { isRemoteEmbyID } from '../utils/remoteEmby'
 import {
   normalizeSubtitleChineseMode,
@@ -70,6 +71,9 @@ type PlaybackProgressSession = {
   startedAtMs: number
   sequence: number
 }
+
+// 自动跳过片头后，「已跳过 · 撤销」提示停留的时长。
+const SKIP_NOTICE_MS = 6000
 
 function normalizePlayerVolume(value: unknown): number {
   const parsed = Number(value)
@@ -697,6 +701,63 @@ export function PlayerPage() {
     cloudRetryRef.current = Math.max(3, playbackInfo?.transcode.retry_after_sec || 5)
   }, [playbackInfo])
 
+  // ── 片头/片尾跳过 ──────────────────────────────────────────────────────────
+  // 原始片段（服务端单位）与当前生效档案的「自动跳过片头」开关。
+  const [rawSkipSegments, setRawSkipSegments] = useState<PlaybackSegment[]>([])
+  const [autoSkipIntro, setAutoSkipIntro] = useState(false)
+  // 当前落进的跳过提示；不在任何区间时为 null。
+  const [activeSkip, setActiveSkip] = useState<SkipPrompt | null>(null)
+  // 自动跳过后的撤销提示。
+  const [skipNotice, setSkipNotice] = useState<{
+    text: string
+    startSec: number
+    kind: PlaybackSegmentKind
+  } | null>(null)
+  // 用户已经处理过的区间类型：本次播放内不再重复提示。
+  const [dismissedSkipKinds, setDismissedSkipKinds] = useState<PlaybackSegmentKind[]>([])
+  // 用户主动跳进过片头/片尾区间（多半是想重看）：本次播放不再自动跳过该类型，
+  // 但按钮保留，想跳随时可以点。
+  const [autoSuppressedKinds, setAutoSuppressedKinds] = useState<PlaybackSegmentKind[]>([])
+  const skipNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 标记「这次 seeked 是我们自己跳的」，避免把自己的跳转当成用户手动跳转。
+  const selfSkipSeekRef = useRef(false)
+
+  // end_ms 为 0 的区间要用媒体总时长补齐，而时长可能晚于片段到达（STRM/HLS 起播
+  // 后才回填 duration_sec），所以派生放在这里，时长更新后区间会自动重算。
+  const skipSegments = useMemo(
+    () => toSkipSegments(rawSkipSegments, media?.duration_sec || 0),
+    [rawSkipSegments, media?.duration_sec],
+  )
+
+  useEffect(() => {
+    if (!mediaId) return
+    let cancelled = false
+    setRawSkipSegments([])
+    setAutoSkipIntro(false)
+    setActiveSkip(null)
+    setSkipNotice(null)
+    setDismissedSkipKinds([])
+    setAutoSuppressedKinds([])
+    // 片段数据与播放来源无关，播放开始后异步补抓即可，绝不挡在起播路径上。
+    playbackAPI
+      .segments(mediaId)
+      .then((res) => {
+        if (cancelled) return
+        setAutoSkipIntro(Boolean(res.auto_skip))
+        setRawSkipSegments(res.segments ?? [])
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [mediaId])
+
+  useEffect(() => {
+    return () => {
+      if (skipNoticeTimerRef.current) clearTimeout(skipNoticeTimerRef.current)
+    }
+  }, [])
+
   const switchToLocalHLS = useCallback(
     (position = 0) => {
       setHlsSource('local')
@@ -1217,6 +1278,58 @@ export function PlayerPage() {
     return nextEpisode ? formatEpisodeDisplay(nextEpisode, playlistEpisodes) : ''
   }, [nextEpisode, playlistEpisodes])
 
+  // ── 片头/片尾跳过：位置判定 ────────────────────────────────────────────────
+  // 只记录「提示是否变化」，避免 timeupdate（约每秒 4 次）每次都写 state 重渲染。
+  const activeSkipKeyRef = useRef('')
+
+  // 监听播放位置，判断当前是否落在某个可跳过区间里。
+  useEffect(() => {
+    const video = ref.current
+    if (!video || skipSegments.length === 0) return
+    const sync = () => {
+      // HLS 转码时 <video>.currentTime 是相对转码起点的，必须把起点加回来。这里与
+      // 进度上报用的算法保持一致，否则转码场景下整段判断都会错位。
+      const offset = modeRef.current === 'hls' ? hlsStartSecRef.current : 0
+      const absolute = offset + (video.currentTime || 0)
+      const next = resolveActiveSkip(absolute, skipSegments, {
+        hasNextEpisode: Boolean(nextEpisode),
+        excludedKinds: dismissedSkipKinds,
+      })
+      const key = next ? `${next.kind}:${next.startSec}` : ''
+      if (key === activeSkipKeyRef.current) return
+      activeSkipKeyRef.current = key
+      setActiveSkip(next)
+    }
+    sync()
+    video.addEventListener('timeupdate', sync)
+    return () => video.removeEventListener('timeupdate', sync)
+  }, [skipSegments, nextEpisode, dismissedSkipKinds, mediaId])
+
+  // 用户主动跳进片头/回顾区间（多半是想重看）：本次播放不再自动跳过该类型，
+  // 但按钮保留。只关心会被自动跳过的两种类型。
+  useEffect(() => {
+    const video = ref.current
+    if (!video || skipSegments.length === 0) return
+    const onSeeked = () => {
+      if (selfSkipSeekRef.current) {
+        selfSkipSeekRef.current = false
+        return
+      }
+      const offset = modeRef.current === 'hls' ? hlsStartSecRef.current : 0
+      const absolute = offset + (video.currentTime || 0)
+      const hit = skipSegments.find(
+        (segment) =>
+          (segment.kind === 'intro' || segment.kind === 'recap') &&
+          absolute >= segment.startSec &&
+          absolute < segment.endSec,
+      )
+      if (!hit) return
+      setAutoSuppressedKinds((prev) => (prev.includes(hit.kind) ? prev : [...prev, hit.kind]))
+    }
+    video.addEventListener('seeked', onSeeked)
+    return () => video.removeEventListener('seeked', onSeeked)
+  }, [skipSegments, mediaId])
+
   const playEpisode = useCallback(
     (target: Media) => {
       navigate(
@@ -1486,6 +1599,88 @@ export function PlayerPage() {
     [hlsStartSec, mode],
   )
 
+  // ── 片头/片尾跳过：执行 ────────────────────────────────────────────────────
+  // 跳到源时间轴上的绝对秒数。HLS 转码时不能直接写 currentTime：本地 HLS 交给
+  // handleSeekAbsolute（超出缓冲窗口时会从头起一段新转码），云端 HLS 按转码起点换算。
+  const seekPlaybackTo = useCallback(
+    (absoluteSec: number) => {
+      const video = ref.current
+      if (!video) return
+      const target = Math.max(0, absoluteSec)
+      if (mode === 'hls') {
+        if (hlsSource === 'local') {
+          handleSeekAbsolute(target)
+          return
+        }
+        selfSkipSeekRef.current = true
+        video.currentTime = Math.max(0, target - hlsStartSec)
+        return
+      }
+      selfSkipSeekRef.current = true
+      video.currentTime = target
+    },
+    [handleSeekAbsolute, hlsSource, hlsStartSec, mode],
+  )
+
+  const showSkipNotice = useCallback(
+    (notice: { text: string; startSec: number; kind: PlaybackSegmentKind }) => {
+      setSkipNotice(notice)
+      if (skipNoticeTimerRef.current) clearTimeout(skipNoticeTimerRef.current)
+      skipNoticeTimerRef.current = setTimeout(() => setSkipNotice(null), SKIP_NOTICE_MS)
+    },
+    [],
+  )
+
+  // 执行一次跳过：片尾有下一集就直接进下一集，其余情况跳到区间终点。
+  const performSkip = useCallback(
+    (prompt: SkipPrompt) => {
+      setDismissedSkipKinds((prev) => (prev.includes(prompt.kind) ? prev : [...prev, prompt.kind]))
+      setActiveSkip(null)
+      activeSkipKeyRef.current = ''
+      const isOutro = prompt.kind === 'credits' || prompt.kind === 'preview'
+      if (isOutro && nextEpisode) {
+        toast.success(`正在播放下一集：${nextEpisodeTitle || '下一集'}`)
+        playEpisode(nextEpisode)
+        return
+      }
+      seekPlaybackTo(prompt.endSec)
+    },
+    [nextEpisode, nextEpisodeTitle, playEpisode, seekPlaybackTo],
+  )
+
+  const handleSkipClick = useCallback(() => {
+    if (activeSkip) performSkip(activeSkip)
+  }, [activeSkip, performSkip])
+
+  const handleUndoSkip = useCallback(() => {
+    const notice = skipNotice
+    setSkipNotice(null)
+    if (skipNoticeTimerRef.current) {
+      clearTimeout(skipNoticeTimerRef.current)
+      skipNoticeTimerRef.current = null
+    }
+    if (!notice) return
+    // 撤销后本次播放不再自动跳这一段，否则会被立刻再跳一次；同时恢复按钮，
+    // 用户改主意时还能手动跳。
+    setAutoSuppressedKinds((prev) => (prev.includes(notice.kind) ? prev : [...prev, notice.kind]))
+    setDismissedSkipKinds((prev) => prev.filter((kind) => kind !== notice.kind))
+    seekPlaybackTo(notice.startSec)
+  }, [seekPlaybackTo, skipNotice])
+
+  // 自动跳过只针对片头（含回顾）：档案里的开关本身就叫「自动跳过片头」，而且自动
+  // 跳到结尾会让没开自动连播的用户莫名其妙。片尾始终只提供按钮。
+  useEffect(() => {
+    if (!autoSkipIntro || !activeSkip) return
+    if (activeSkip.kind !== 'intro' && activeSkip.kind !== 'recap') return
+    if (autoSuppressedKinds.includes(activeSkip.kind)) return
+    performSkip(activeSkip)
+    showSkipNotice({
+      text: skippedNoticeText(activeSkip.kind),
+      startSec: activeSkip.startSec,
+      kind: activeSkip.kind,
+    })
+  }, [activeSkip, autoSkipIntro, autoSuppressedKinds, performSkip, showSkipNotice])
+
   // 用户切换图片字幕时从当前位置创建新的 HLS 烧录任务；文本字幕只在网页层切换。
   const selectSubtitle = useCallback((index: number) => {
     const oldTrack = subtitleIndex >= 0 ? subs[subtitleIndex] : undefined
@@ -1754,6 +1949,10 @@ export function PlayerPage() {
         onVr360Error={handleVr360Error}
         showVr360Guide={Boolean(vr360) && vr360GuideSeen === false}
         onDismissVr360Guide={dismissVr360Guide}
+        skipPrompt={activeSkip}
+        onSkipPrompt={handleSkipClick}
+        skipNotice={skipNotice ? { text: skipNotice.text } : null}
+        onUndoSkip={handleUndoSkip}
         playlistPanel={
           isMobileTheater
             ? undefined

@@ -346,6 +346,9 @@ func newPlaybackScopeTestRouter(t *testing.T) (*gin.Engine, *service.Container, 
 		&model.Library{},
 		&model.Media{},
 		&model.PlayProfile{},
+		&model.Series{},
+		&model.MediaSegment{},
+		&model.MediaSegmentFetch{},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -408,6 +411,7 @@ func newPlaybackScopeTestRouter(t *testing.T) (*gin.Engine, *service.Container, 
 	api := router.Group("/api")
 	api.Use(middleware.AuthRequired(cfg.Secrets.JWTSecret))
 	api.GET("/playback/:id/info", playbackInfoHandler(svc))
+	api.GET("/playback/:id/segments", playbackSegmentsHandler(svc))
 	api.GET("/playback/:id/external-url", externalURLHandler(svc))
 	api.GET("/playback/:id/external-players", externalPlayersHandler(svc))
 	api.GET("/stream/:id", streamHandler(svc))

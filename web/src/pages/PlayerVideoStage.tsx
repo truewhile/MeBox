@@ -8,7 +8,9 @@ import {
   LockOpen,
   MousePointerClick,
   Rotate3d,
+  SkipForward,
   Smartphone,
+  Undo2,
   ZoomIn,
 } from 'lucide-react'
 
@@ -30,6 +32,7 @@ import {
   type SubtitleStylePreset,
 } from '../utils/subtitleDisplay'
 import { isPointerInLockZone } from '../utils/playerLockZone'
+import type { SkipPrompt } from '../utils/skipSegments'
 import { parseWebVTTCues, type SubtitleCue } from '../utils/subtitleVTT'
 
 type SubtitleRenderGroup = {
@@ -233,6 +236,13 @@ type PlayerVideoStageProps = {
   /** 是否展示 VR 全景播放的首次操作说明（按用户只弹一次）。 */
   showVr360Guide?: boolean
   onDismissVr360Guide?: () => void
+  /** 当前落进的片头/片尾区间；null 表示不显示跳过按钮。 */
+  skipPrompt?: SkipPrompt | null
+  /** 点击跳过按钮。 */
+  onSkipPrompt?: () => void
+  /** 自动跳过后的撤销提示；null 表示不显示。 */
+  skipNotice?: { text: string } | null
+  onUndoSkip?: () => void
   waiting?: boolean
   waitingMessage?: string
 }
@@ -300,6 +310,10 @@ export function PlayerVideoStage({
   onVr360Error,
   showVr360Guide = false,
   onDismissVr360Guide,
+  skipPrompt = null,
+  onSkipPrompt,
+  skipNotice = null,
+  onUndoSkip,
   waiting = false,
   waitingMessage = '',
 }: PlayerVideoStageProps) {
@@ -919,6 +933,40 @@ export function PlayerVideoStage({
             vr360Detected={vr360Detected}
             onToggleVr360={onToggleVr360}
           />
+          {/* 跳过片头/片尾：贴在操作栏上方右侧。刻意不随操作栏一起自动隐藏——
+              用户想在「干净画面」下也能跳过；锁定画面时才一并藏起来。 */}
+          {!locked && skipPrompt ? (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation()
+                onSkipPrompt?.()
+              }}
+              onPointerDown={(event) => event.stopPropagation()}
+              className="absolute bottom-16 right-3 z-30 inline-flex items-center gap-2 rounded-xl border border-white/15 bg-black/70 px-4 py-2.5 text-sm font-semibold text-white shadow-[0_8px_28px_rgba(0,0,0,0.5)] backdrop-blur-md transition hover:bg-black/85 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-400 sm:bottom-20 sm:right-5"
+            >
+              <SkipForward size={16} />
+              <span>{skipPrompt.label}</span>
+            </button>
+          ) : null}
+          {/* 自动跳过的撤销入口：进度条自己动过之后必须给用户一条退路。 */}
+          {!locked && skipNotice ? (
+            <div className="absolute bottom-16 right-3 z-30 flex items-center gap-3 rounded-xl border border-white/15 bg-black/70 px-3.5 py-2 text-xs text-white/90 shadow-[0_8px_28px_rgba(0,0,0,0.5)] backdrop-blur-md sm:bottom-20 sm:right-5">
+              <span>{skipNotice.text}</span>
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onUndoSkip?.()
+                }}
+                onPointerDown={(event) => event.stopPropagation()}
+                className="inline-flex items-center gap-1 rounded-lg bg-white/15 px-2.5 py-1 font-semibold text-white transition hover:bg-white/25"
+              >
+                <Undo2 size={13} />
+                撤销
+              </button>
+            </div>
+          ) : null}
           {danmakuPanel}
           {playlistPanel}
         </>
