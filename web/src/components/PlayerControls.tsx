@@ -133,10 +133,9 @@ type PlayerControlsProps = {
   volume?: number
   onVolumeChange?: (volume: number) => void
   onVolumeCommit?: (volume: number) => void
-  /** 用户级播放倍速，由播放页从数据库读取。 */
+  /** 播放倍速（1x = 原速）。只作用于当前视频，不落库。 */
   playbackRate?: number
   onPlaybackRateChange?: (rate: number) => void
-  onPlaybackRateCommit?: (rate: number) => void
   uiVisible: boolean
   onUiVisibleChange: (visible: boolean) => void
   /** 外部浮层（VR 工具条/设置面板）正被鼠标悬停：此时控制栏不自动隐藏。 */
@@ -213,7 +212,6 @@ export function PlayerControls({
   onVolumeCommit,
   playbackRate: playbackRateProp = 1,
   onPlaybackRateChange,
-  onPlaybackRateCommit,
   uiVisible,
   onUiVisibleChange,
   uiHold = false,
@@ -381,7 +379,7 @@ export function PlayerControls({
     setMuted(next === 0)
   }, [video, volumeProp])
 
-  // 倍速由播放页按用户持久化；配置加载、切换剧集或切换播放源后同步到当前 video。
+  // 倍速只影响当前视频：挂载、切换剧集或切换播放源后同步到当前 video。
   useEffect(() => {
     const el = video()
     if (!el) return
@@ -626,15 +624,9 @@ export function PlayerControls({
     }, PLAYBACK_RATE_HINT_MS)
   }, [onPlaybackRateChange])
 
-  const commitPlaybackRate = useCallback(() => {
-    onPlaybackRateCommit?.(playbackRateRef.current)
-  }, [onPlaybackRateCommit])
-
   const selectPlaybackRate = useCallback((next: number) => {
-    const normalized = normalizePlaybackRate(next)
-    changePlaybackRate(normalized)
-    onPlaybackRateCommit?.(normalized)
-  }, [changePlaybackRate, onPlaybackRateCommit])
+    changePlaybackRate(normalizePlaybackRate(next))
+  }, [changePlaybackRate])
 
   const applyAbsoluteSeek = useCallback(
     (absolute: number) => {
@@ -786,18 +778,6 @@ export function PlayerControls({
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
   }, [changePlaybackRate, queueRelativeSeek])
-
-  useEffect(() => {
-    const onKeyUp = (e: KeyboardEvent) => {
-      if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return
-      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return
-      if (shouldIgnorePlayerSeekShortcut(e.target)) return
-      e.preventDefault()
-      commitPlaybackRate()
-    }
-    window.addEventListener('keyup', onKeyUp, true)
-    return () => window.removeEventListener('keyup', onKeyUp, true)
-  }, [commitPlaybackRate])
 
   useEffect(() => {
     return () => {

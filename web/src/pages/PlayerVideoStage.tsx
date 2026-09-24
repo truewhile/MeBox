@@ -184,7 +184,6 @@ type PlayerVideoStageProps = {
   onPlayerVolumeCommit: (volume: number) => void
   playerPlaybackRate: number
   onPlayerPlaybackRateChange: (rate: number) => void
-  onPlayerPlaybackRateCommit: (rate: number) => void
   danmakuEnabled: boolean
   danmakuOpacity: number
   danmakuFontSize: number
@@ -268,7 +267,6 @@ export function PlayerVideoStage({
   onPlayerVolumeCommit,
   playerPlaybackRate,
   onPlayerPlaybackRateChange,
-  onPlayerPlaybackRateCommit,
   danmakuEnabled,
   danmakuOpacity,
   danmakuFontSize,
@@ -892,7 +890,6 @@ export function PlayerVideoStage({
             onVolumeCommit={onPlayerVolumeCommit}
             playbackRate={playerPlaybackRate}
             onPlaybackRateChange={onPlayerPlaybackRateChange}
-            onPlaybackRateCommit={onPlayerPlaybackRateCommit}
             uiVisible={controlsVisible && !locked}
             onUiVisibleChange={setControlsVisible}
             uiHold={vrUiHovered}

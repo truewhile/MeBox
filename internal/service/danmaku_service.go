@@ -49,12 +49,6 @@ const (
 // dandanplay protocol (search/episodes + comment/{episodeId}) may be used.
 const DanmakuDefaultSource = "https://api.dandanplay.net"
 
-const (
-	minPlayerPlaybackRate     = 0.5
-	maxPlayerPlaybackRate     = 3.0
-	defaultPlayerPlaybackRate = 1.0
-)
-
 // danmakuOfficialBase is where identification (/api/v2/match) and the
 // comment/search fallback always go, regardless of the configured source.
 // A package var (not a const) so tests can point it at a local server.
@@ -69,8 +63,6 @@ type DanmakuRenderConfig struct {
 	FontSize string  `json:"font_size"`
 	Area     string  `json:"area"`
 	Volume   float64 `json:"volume"`
-	// PlaybackRate 是当前用户的播放倍速偏好（按用户存储）。
-	PlaybackRate float64 `json:"playback_rate"`
 	// Vr360GuideSeen 表示当前用户是否已经看过 VR 全景播放的首次操作说明。
 	Vr360GuideSeen bool `json:"vr360_guide_seen"`
 	// MergeSources 是当前用户的弹幕合并偏好（按用户存储）。
@@ -99,7 +91,6 @@ type DanmakuSettingsPatch struct {
 	Area         *float64 `json:"area"`
 	MergeSources *bool    `json:"merge_sources"`
 	Volume       *float64 `json:"volume"`
-	PlaybackRate *float64 `json:"playback_rate"`
 	// Vr360GuideSeen 标记 VR 全景播放的首次操作说明是否已经看过。
 	Vr360GuideSeen *bool `json:"vr360_guide_seen"`
 }
@@ -358,11 +349,10 @@ func cloneDanmakuAnimeList(in []DanmakuAnime) []DanmakuAnime {
 // Config reads danmaku settings from the runtime settings table.
 func (s *DanmakuService) Config(ctx context.Context) DanmakuRenderConfig {
 	cfg := DanmakuRenderConfig{
-		Opacity:      "1",
-		FontSize:     "24",
-		Area:         "1",
-		Volume:       1,
-		PlaybackRate: defaultPlayerPlaybackRate,
+		Opacity:  "1",
+		FontSize: "24",
+		Area:     "1",
+		Volume:   1,
 	}
 	if s == nil || s.repo == nil || s.repo.Setting == nil {
 		return cfg
@@ -414,12 +404,11 @@ func (s *DanmakuService) findUser(ctx context.Context, userID string) (*model.Us
 func danmakuConfigFromUser(user *model.User) DanmakuRenderConfig {
 	if user == nil {
 		return DanmakuRenderConfig{
-			Enabled:      true,
-			Opacity:      "1",
-			FontSize:     "24",
-			Area:         "1",
-			Volume:       1,
-			PlaybackRate: defaultPlayerPlaybackRate,
+			Enabled:  true,
+			Opacity:  "1",
+			FontSize: "24",
+			Area:     "1",
+			Volume:   1,
 		}
 	}
 	opacity := user.DanmakuOpacity
@@ -438,10 +427,6 @@ func danmakuConfigFromUser(user *model.User) DanmakuRenderConfig {
 	if volume < 0 || volume > 1 {
 		volume = 1
 	}
-	playbackRate := user.PlayerPlaybackRate
-	if playbackRate < minPlayerPlaybackRate || playbackRate > maxPlayerPlaybackRate {
-		playbackRate = defaultPlayerPlaybackRate
-	}
 	return DanmakuRenderConfig{
 		Enabled:          user.DanmakuEnabled,
 		Source:           strings.TrimSpace(user.DanmakuSource),
@@ -450,7 +435,6 @@ func danmakuConfigFromUser(user *model.User) DanmakuRenderConfig {
 		FontSize:         strconv.Itoa(fontSize),
 		Area:             strconv.FormatFloat(area, 'f', -1, 64),
 		Volume:           volume,
-		PlaybackRate:     playbackRate,
 		Vr360GuideSeen:   user.PlayerVr360GuideSeen,
 		MergeSources:     user.DanmakuMergeSources,
 		AppKeyConfigured: strings.TrimSpace(user.DanmakuAppKey) != "",
@@ -521,17 +505,6 @@ func (s *DanmakuService) UpdateUserSettings(ctx context.Context, userID string, 
 			return DanmakuRenderConfig{}, fmt.Errorf("%w: volume must be between 0 and 1", ErrInvalidDanmakuSettings)
 		}
 		updates["player_volume"] = *patch.Volume
-	}
-	if patch.PlaybackRate != nil {
-		if *patch.PlaybackRate < minPlayerPlaybackRate || *patch.PlaybackRate > maxPlayerPlaybackRate {
-			return DanmakuRenderConfig{}, fmt.Errorf(
-				"%w: playback_rate must be between %.2f and %.2f",
-				ErrInvalidDanmakuSettings,
-				minPlayerPlaybackRate,
-				maxPlayerPlaybackRate,
-			)
-		}
-		updates["player_playback_rate"] = *patch.PlaybackRate
 	}
 	if patch.Vr360GuideSeen != nil {
 		updates["player_vr360_guide_seen"] = *patch.Vr360GuideSeen

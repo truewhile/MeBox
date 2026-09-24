@@ -112,17 +112,13 @@ func TestGetDanmakuConfigIncludesPerUserMergePreference(t *testing.T) {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	var cfg struct {
-		MergeSources bool    `json:"merge_sources"`
-		PlaybackRate float64 `json:"playback_rate"`
+		MergeSources bool `json:"merge_sources"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if cfg.MergeSources {
 		t.Fatal("default merge preference should be false")
-	}
-	if cfg.PlaybackRate != 1 {
-		t.Fatalf("default playback rate = %v, want 1", cfg.PlaybackRate)
 	}
 
 	if err := svc.Danmaku.SetMergeSources(t.Context(), "user-1", true); err != nil {
@@ -141,7 +137,7 @@ func TestGetDanmakuConfigIncludesPerUserMergePreference(t *testing.T) {
 func TestUpdateDanmakuSettingsPersistsAllPlayerPreferences(t *testing.T) {
 	svc := newDanmakuSettingsService(t)
 
-	body := "{\"enabled\":false,\"opacity\":0.6,\"font_size\":32,\"area\":0.7,\"merge_sources\":true,\"volume\":0.35,\"playback_rate\":1.5,\"source\":\"https://dm.example/base/\",\"app_id\":\"my-app-id\",\"app_key\":\"my-app-secret\"}"
+	body := "{\"enabled\":false,\"opacity\":0.6,\"font_size\":32,\"area\":0.7,\"merge_sources\":true,\"volume\":0.35,\"source\":\"https://dm.example/base/\",\"app_id\":\"my-app-id\",\"app_key\":\"my-app-secret\"}"
 	c, w := newDanmakuSettingsContext(t, svc, http.MethodPut, "/danmaku/settings", body, "user-1")
 	updateDanmakuSettingsHandler(svc)(c)
 
@@ -158,7 +154,7 @@ func TestUpdateDanmakuSettingsPersistsAllPlayerPreferences(t *testing.T) {
 	if cfg.Enabled || cfg.Opacity != "0.6" || cfg.FontSize != "32" || cfg.Area != "0.7" {
 		t.Fatalf("unexpected render config: %+v", cfg)
 	}
-	if !cfg.MergeSources || cfg.Volume != 0.35 || cfg.PlaybackRate != 1.5 {
+	if !cfg.MergeSources || cfg.Volume != 0.35 {
 		t.Fatalf("unexpected user preferences: %+v", cfg)
 	}
 	if cfg.Source != "https://dm.example/base" || cfg.AppID != "my-app-id" || !cfg.AppKeyConfigured {
@@ -169,7 +165,7 @@ func TestUpdateDanmakuSettingsPersistsAllPlayerPreferences(t *testing.T) {
 	if err != nil || user == nil {
 		t.Fatalf("read persisted user: %v", err)
 	}
-	if user.DanmakuAppKey != "my-app-secret" || user.PlayerVolume != 0.35 || user.PlayerPlaybackRate != 1.5 || user.DanmakuSource != "https://dm.example/base" {
+	if user.DanmakuAppKey != "my-app-secret" || user.PlayerVolume != 0.35 || user.DanmakuSource != "https://dm.example/base" {
 		t.Fatalf("preferences not persisted: %+v", user)
 	}
 }
@@ -207,22 +203,36 @@ func TestUpdateDanmakuSettingsPersistsVr360GuideSeen(t *testing.T) {
 	}
 }
 
-func TestUpdateDanmakuSettingsRejectsInvalidPlaybackRate(t *testing.T) {
+// 播放倍速只作用于当前视频：接口既不下发也不保存它。老客户端仍可能带上
+// playback_rate，服务端应当忽略而不是报错。
+func TestDanmakuSettingsIgnorePlaybackRate(t *testing.T) {
 	svc := newDanmakuSettingsService(t)
 
-	c, w := newDanmakuSettingsContext(t, svc, http.MethodPut, "/danmaku/settings",
-		`{"playback_rate":4}`, "user-1")
-	updateDanmakuSettingsHandler(svc)(c)
+	c, w := newDanmakuSettingsContext(t, svc, http.MethodGet, "/danmaku/config", "", "user-1")
+	getDanmakuConfigHandler(svc)(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", w.Code, w.Body.String())
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte("playback_rate")) {
+		t.Fatalf("config must not expose playback rate: %s", w.Body.String())
+	}
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 (body=%s)", w.Code, w.Body.String())
+	c2, w2 := newDanmakuSettingsContext(t, svc, http.MethodPut, "/danmaku/settings",
+		`{"volume":0.5,"playback_rate":1.5}`, "user-1")
+	updateDanmakuSettingsHandler(svc)(c2)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", w2.Code, w2.Body.String())
+	}
+	if bytes.Contains(w2.Body.Bytes(), []byte("playback_rate")) {
+		t.Fatalf("settings response must not expose playback rate: %s", w2.Body.String())
 	}
 	user, err := svc.Repo.User.FindByID(t.Context(), "user-1")
 	if err != nil || user == nil {
 		t.Fatalf("read user: %v", err)
 	}
-	if user.PlayerPlaybackRate != 1 {
-		t.Fatalf("invalid playback rate was persisted: %v", user.PlayerPlaybackRate)
+	if user.PlayerVolume != 0.5 {
+		t.Fatalf("volume not persisted: %v", user.PlayerVolume)
 	}
 }
 

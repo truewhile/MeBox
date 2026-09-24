@@ -20,7 +20,7 @@ import { useAuthStore } from '../stores/auth'
 import type { Media, PlaybackInfo, PlaybackQuality, PlaybackSegment, PlaybackSegmentKind } from '../types'
 import { getSeriesKey, seriesTitleFromPath } from '../utils/groupSeries'
 import { mediaVersionMatches, mediaVersionsOf } from '../utils/mediaVersion'
-import { normalizePlaybackRate } from '../utils/playbackRate'
+import { DEFAULT_PLAYBACK_RATE, normalizePlaybackRate } from '../utils/playbackRate'
 import { resolveActiveSkip, skippedNoticeText, toSkipSegments, type SkipPrompt } from '../utils/skipSegments'
 import { isRemoteEmbyID } from '../utils/remoteEmby'
 import {
@@ -139,16 +139,13 @@ export function PlayerPage() {
   const [playerVolume, setPlayerVolume] = useState(() =>
     normalizePlayerVolume(authUser?.player_volume),
   )
-  const [playerPlaybackRate, setPlayerPlaybackRate] = useState(() =>
-    normalizePlaybackRate(authUser?.player_playback_rate),
-  )
+  // 播放倍速只作用于当前视频：不入库、不跨视频沿用（换集/换片会重置回 1x）。
+  const [playerPlaybackRate, setPlayerPlaybackRate] = useState(() => DEFAULT_PLAYBACK_RATE)
   const persistedSubtitleChineseModeRef = useRef(subtitleChineseMode)
   // VR 全景播放的首次操作说明是否已经看过：null = 服务端配置还没读回来，
   // 这时不弹说明，避免给老用户闪一下。
   const [vr360GuideSeen, setVr360GuideSeen] = useState<boolean | null>(null)
   const playerVolumeTouchedRef = useRef(false)
-  const playerPlaybackRateTouchedRef = useRef(false)
-  const playerPlaybackRateSaveSeqRef = useRef(0)
   const subtitlePreferenceTouchedRef = useRef(false)
   const subtitlePreferenceSaveQueueRef = useRef<Promise<void>>(Promise.resolve())
   const [hlsUnavailable, setHlsUnavailable] = useState(false)
@@ -285,10 +282,6 @@ export function PlayerPage() {
         if (!playerVolumeTouchedRef.current) {
           setPlayerVolume(volume)
         }
-        const playbackRate = normalizePlaybackRate(cfg.playback_rate)
-        if (!playerPlaybackRateTouchedRef.current) {
-          setPlayerPlaybackRate(playbackRate)
-        }
         setDanmakuEnabled(cfg.enabled)
         setDanmakuOpacity(Number(cfg.opacity) || 1)
         setDanmakuFontSize(Number(cfg.font_size) || 24)
@@ -299,10 +292,6 @@ export function PlayerPage() {
         if (!playerVolumeTouchedRef.current) {
           const current = useAuthStore.getState().user
           if (current) setAuthUser({ ...current, player_volume: volume })
-        }
-        if (!playerPlaybackRateTouchedRef.current) {
-          const current = useAuthStore.getState().user
-          if (current) setAuthUser({ ...current, player_playback_rate: playbackRate })
         }
       })
       .catch(() => {
@@ -338,33 +327,10 @@ export function PlayerPage() {
     [setAuthUser],
   )
 
+  // 倍速只改本机播放状态：不写回服务端，也不跨视频沿用。
   const changePlayerPlaybackRate = useCallback((next: number) => {
-    playerPlaybackRateTouchedRef.current = true
     setPlayerPlaybackRate(normalizePlaybackRate(next))
   }, [])
-
-  const commitPlayerPlaybackRate = useCallback(
-    (next: number) => {
-      playerPlaybackRateTouchedRef.current = true
-      const playbackRate = normalizePlaybackRate(next)
-      setPlayerPlaybackRate(playbackRate)
-      const saveSeq = ++playerPlaybackRateSaveSeqRef.current
-      void danmakuAPI
-        .updateSettings({ playback_rate: playbackRate })
-        .then((cfg) => {
-          if (saveSeq !== playerPlaybackRateSaveSeqRef.current) return
-          const saved = normalizePlaybackRate(cfg.playback_rate)
-          setPlayerPlaybackRate(saved)
-          const current = useAuthStore.getState().user
-          if (current) setAuthUser({ ...current, player_playback_rate: saved })
-        })
-        .catch(() => {
-          if (saveSeq !== playerPlaybackRateSaveSeqRef.current) return
-          toast.error('倍速保存失败，请重试')
-        })
-    },
-    [setAuthUser],
-  )
 
   const saveDanmakuAdvanced = useCallback(
     async (values: { source: string; appId: string; appKey: string; clearAppKey: boolean }) => {
@@ -673,6 +639,12 @@ export function PlayerPage() {
   // MANIFEST_PARSED must not remount HLS or it storms EnsureJob / DELETE.
   const mediaId = media?.id
   const playbackProvider = playbackInfo?.provider
+
+  // 倍速只影响当前视频：换到另一集/另一部片时回到 1x，避免上一个视频的
+  // 倍速被顺手带到下一集。
+  useEffect(() => {
+    setPlayerPlaybackRate(DEFAULT_PLAYBACK_RATE)
+  }, [mediaId])
 
   // 加载统一播放能力：115 云端清晰度 + 本地 HLS 清晰度。
   useEffect(() => {
@@ -1907,7 +1879,6 @@ export function PlayerPage() {
         onPlayerVolumeCommit={commitPlayerVolume}
         playerPlaybackRate={playerPlaybackRate}
         onPlayerPlaybackRateChange={changePlayerPlaybackRate}
-        onPlayerPlaybackRateCommit={commitPlayerPlaybackRate}
         danmakuEnabled={danmakuEnabled}
         danmakuOpacity={danmakuOpacity}
         danmakuFontSize={danmakuFontSize}

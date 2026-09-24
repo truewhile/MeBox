@@ -3,6 +3,9 @@ export const PLAYBACK_RATE_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3] 
 export const MIN_PLAYBACK_RATE = PLAYBACK_RATE_OPTIONS[0]
 export const MAX_PLAYBACK_RATE = PLAYBACK_RATE_OPTIONS[PLAYBACK_RATE_OPTIONS.length - 1]
 
+/** 默认倍速（1x）。倍速不落库，每个视频都从这个值开始。 */
+export const DEFAULT_PLAYBACK_RATE = 1
+
 export function normalizePlaybackRate(value: unknown): number {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) return 1

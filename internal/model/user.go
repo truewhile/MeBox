@@ -37,8 +37,8 @@ type User struct {
 	// original / simplified / traditional。
 	SubtitleChineseMode string `gorm:"size:16;not null;default:original" json:"subtitle_chinese_mode"`
 	// 网页播放器偏好按用户存储，切换媒体对象后继续沿用。
-	PlayerVolume       float64 `gorm:"not null;default:1" json:"player_volume"`
-	PlayerPlaybackRate float64 `gorm:"not null;default:1" json:"player_playback_rate"`
+	// 播放倍速不在此列：它只作用于当前视频，不进数据库。
+	PlayerVolume float64 `gorm:"not null;default:1" json:"player_volume"`
 	// PlayerVr360GuideSeen 记录用户是否已经看过 VR 全景播放的首次操作说明，
 	// 按用户保存：看过一次之后不再弹出。
 	PlayerVr360GuideSeen bool    `gorm:"not null;default:false" json:"player_vr360_guide_seen"`

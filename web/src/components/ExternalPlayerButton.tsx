@@ -52,7 +52,7 @@ export function ExternalPlayerButton({
         className={
           compact
             ? 'shrink-0 inline-flex items-center rounded-lg border border-primary-400/35 bg-white px-2 py-1 text-xs font-semibold text-brand-500 hover:bg-primary-400/10 disabled:opacity-50 transition-colors whitespace-nowrap'
-            : 'btn-outline border-brand-500/30 px-5 text-[#c9954a] hover:border-brand-500 hover:bg-brand-50'
+            : 'btn-outline h-11 border-brand-500/30 px-5 text-[#c9954a] hover:border-brand-500 hover:bg-brand-50'
         }
       >
         <PlaySquare size={compact ? 13 : 14} className="mr-1 inline" />
