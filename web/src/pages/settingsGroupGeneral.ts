@@ -24,6 +24,13 @@ export const generalSettingsGroup: SettingGroup = {
       defaultValue: 'false',
     },
     {
+      key: 'segment.prewarm_enabled',
+      label: '后台预热 IntroDB 片头片段',
+      type: 'toggle',
+      hint: '默认关闭。开启后每 6 小时在后台向 TheIntroDB 拉取可识别媒体的片头/片尾区间并写入本地；关闭时仅在播放时按需请求。',
+      defaultValue: 'false',
+    },
+    {
       key: 'transcode.enabled',
       label: '启用转码',
       type: 'toggle',

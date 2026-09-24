@@ -192,6 +192,7 @@ func (b *serviceContainerBuilder) initAccessAndStorageServices() {
 	)
 	b.c.Scheduler.SetTaskTracker(b.c.Tasks)
 	b.c.Scheduler.SetOrganizePipeline(b.c.OrganizePipeline)
+	b.c.Scheduler.SetSegments(b.c.Segments)
 	b.c.Scheduler.SetImageCachePolicyProvider(func() ImageCachePolicy {
 		if b.cfg == nil {
 			return ImageCachePolicy{}

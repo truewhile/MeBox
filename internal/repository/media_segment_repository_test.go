@@ -152,3 +152,56 @@ func TestUpsertFetchKeepsOneRowPerMediaAndSource(t *testing.T) {
 		t.Fatalf("ledger should be updated in place, got %#v", got)
 	}
 }
+
+func TestListSeasonSiblingsSharesLibraryTitleTMDb(t *testing.T) {
+	repos := newSegmentTestRepos(t)
+	ctx := t.Context()
+	eps := []*model.Media{
+		{Base: model.Base{ID: "a"}, LibraryID: "lib", Title: "Show", Path: "/a", SeasonNum: 1, EpisodeNum: 1, TMDbID: 99},
+		{Base: model.Base{ID: "b"}, LibraryID: "lib", Title: "Show", Path: "/b", SeasonNum: 1, EpisodeNum: 2, TMDbID: 99},
+		{Base: model.Base{ID: "c"}, LibraryID: "lib", Title: "Show", Path: "/c", SeasonNum: 2, EpisodeNum: 1, TMDbID: 99},
+	}
+	for _, ep := range eps {
+		if err := repos.DB.Create(ep).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := repos.Media.ListSeasonSiblings(ctx, eps[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "b" {
+		t.Fatalf("siblings = %#v, want only same-season ep b", got)
+	}
+}
+
+func TestListPrewarmCandidatesOrdersRecentPlaysFirst(t *testing.T) {
+	repos := newSegmentTestRepos(t)
+	ctx := t.Context()
+	now := time.Now()
+	for _, m := range []*model.Media{
+		{Base: model.Base{ID: "cold"}, Path: "/cold", TMDbID: 1},
+		{Base: model.Base{ID: "hot"}, Path: "/hot", TMDbID: 2},
+	} {
+		if err := repos.DB.Create(m).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := repos.DB.Create(&model.PlaybackHistory{
+		Base: model.Base{ID: "ph1"}, UserID: "u", MediaID: "hot",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	got, err := repos.MediaSegment.ListPrewarmCandidates(
+		ctx, "theintrodb", now.Add(-time.Hour), now.Add(-time.Hour), 10,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) < 2 {
+		t.Fatalf("candidates = %#v, want both", got)
+	}
+	if got[0].ID != "hot" {
+		t.Fatalf("first = %s, want hot (recently played)", got[0].ID)
+	}
+}

@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -83,4 +84,46 @@ func (r *MediaSegmentRepository) UpsertFetch(ctx context.Context, row *model.Med
 		}),
 	}
 	return r.db.WithContext(ctx).Clauses(onConflict).Create(row).Error
+}
+
+// ListPrewarmCandidates returns media that should be refreshed from source:
+// no ledger, expired miss (fetched_at < missBefore), or expired hit (fetched_at < hitBefore).
+// Recently played items come first so hot titles recover coverage sooner.
+func (r *MediaSegmentRepository) ListPrewarmCandidates(
+	ctx context.Context,
+	source string,
+	missBefore, hitBefore time.Time,
+	limit int,
+) ([]model.Media, error) {
+	if r == nil || limit <= 0 {
+		return nil, nil
+	}
+	rows := make([]model.Media, 0, limit)
+	// 可查询：有 TMDb，且是剧集（有季集）或电影（无季集）。
+	err := r.db.WithContext(ctx).Raw(`
+SELECT m.*
+FROM media m
+LEFT JOIN media_segment_fetches f
+  ON f.media_id = m.id AND f.source = ? AND f.deleted_at IS NULL
+LEFT JOIN (
+  SELECT media_id, MAX(updated_at) AS last_played
+  FROM playback_histories
+  WHERE deleted_at IS NULL
+  GROUP BY media_id
+) ph ON ph.media_id = m.id
+WHERE m.deleted_at IS NULL
+  AND m.tm_db_id > 0
+  AND (
+    (m.season_num > 0 AND m.episode_num > 0)
+    OR (COALESCE(m.season_num, 0) = 0 AND COALESCE(m.episode_num, 0) = 0)
+  )
+  AND (
+    f.id IS NULL
+    OR (f.found = 0 AND f.fetched_at < ?)
+    OR (f.found = 1 AND f.fetched_at < ?)
+  )
+ORDER BY ph.last_played DESC
+LIMIT ?
+`, source, missBefore, hitBefore, limit).Scan(&rows).Error
+	return rows, err
 }

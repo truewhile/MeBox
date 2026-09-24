@@ -385,6 +385,123 @@ func TestListForPlaybackRespectsCallerDeadline(t *testing.T) {
 	}
 }
 
+func TestPreferSegmentsBySourcePrefersManualThenIntroDBThenPropagated(t *testing.T) {
+	rows := []model.MediaSegment{
+		{Kind: model.SegmentKindIntro, StartMs: 1, EndMs: 2, Source: SegmentSourcePropagated},
+		{Kind: model.SegmentKindIntro, StartMs: 10, EndMs: 20, Source: IntroDBSource},
+		{Kind: model.SegmentKindIntro, StartMs: 100, EndMs: 200, Source: SegmentSourceManual},
+		{Kind: model.SegmentKindCredits, StartMs: 1000, EndMs: 0, Source: SegmentSourcePropagated},
+		{Kind: model.SegmentKindCredits, StartMs: 2000, EndMs: 0, Source: IntroDBSource},
+	}
+	got := preferSegmentsBySource(rows)
+	if len(got) != 2 {
+		t.Fatalf("got %#v, want manual intro + introdb credits", got)
+	}
+	if got[0].Source != SegmentSourceManual || got[0].StartMs != 100 {
+		t.Fatalf("intro = %#v, want manual", got[0])
+	}
+	if got[1].Source != IntroDBSource || got[1].StartMs != 2000 {
+		t.Fatalf("credits = %#v, want theintrodb", got[1])
+	}
+}
+
+func TestListForPlaybackPropagatesIntroToSeasonSiblings(t *testing.T) {
+	svc, repos, _ := newSegmentServiceFixture(t, writeJSONBody(introDBTVPayload))
+	svc.SetPrewarmGap(0)
+	ctx := t.Context()
+	episodes := []*model.Media{
+		{Base: model.Base{ID: "ep-1"}, LibraryID: "lib-anime", Title: "便·当",
+			Path: "/anime/S01E01.mkv", SeasonNum: 1, EpisodeNum: 1, TMDbID: 61970},
+		{Base: model.Base{ID: "ep-2"}, LibraryID: "lib-anime", Title: "便·当",
+			Path: "/anime/S01E02.mkv", SeasonNum: 1, EpisodeNum: 2, TMDbID: 61970},
+	}
+	for _, ep := range episodes {
+		if err := repos.DB.Create(ep).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rows, err := svc.ListForPlayback(ctx, episodes[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("ep1 rows = %#v, want intro+credits from provider", rows)
+	}
+
+	sib, err := repos.MediaSegment.ListByMediaSource(ctx, "ep-2", SegmentSourcePropagated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sib) != 1 || sib[0].Kind != model.SegmentKindIntro {
+		t.Fatalf("sibling propagated = %#v, want intro only", sib)
+	}
+	if sib[0].StartMs != 228_664 || sib[0].EndMs != 246_143 {
+		t.Fatalf("propagated window = %#v", sib[0])
+	}
+
+	// 兄弟集播放时应直接看到传播来的 intro（即使自己还没打过 IntroDB）。
+	if err := repos.MediaSegment.UpsertFetch(ctx, &model.MediaSegmentFetch{
+		MediaID: "ep-2", Source: IntroDBSource, FetchedAt: time.Now(), Found: false,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	merged, err := svc.ListForPlayback(ctx, episodes[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(merged) != 1 || merged[0].Kind != model.SegmentKindIntro || merged[0].Source != SegmentSourcePropagated {
+		t.Fatalf("ep2 playback = %#v, want propagated intro", merged)
+	}
+}
+
+func TestPrewarmFetchesStaleMissesPreferringRecentPlays(t *testing.T) {
+	svc, repos, calls := newSegmentServiceFixture(t, writeJSONBody(introDBMoviePayload))
+	svc.SetPrewarmGap(0)
+	ctx := t.Context()
+
+	old := &model.Media{Base: model.Base{ID: "mv-old"}, Path: "/a.mkv", TMDbID: 111}
+	hot := &model.Media{Base: model.Base{ID: "mv-hot"}, Path: "/b.mkv", TMDbID: 27205}
+	for _, m := range []*model.Media{old, hot} {
+		if err := repos.DB.Create(m).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 两条都是过期 miss，热播的应优先被预热。
+	stale := time.Now().Add(-segmentMissingTTL - time.Hour)
+	for _, id := range []string{"mv-old", "mv-hot"} {
+		if err := repos.MediaSegment.UpsertFetch(ctx, &model.MediaSegmentFetch{
+			MediaID: id, Source: IntroDBSource, FetchedAt: stale, Found: false,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := repos.DB.Create(&model.PlaybackHistory{
+		Base: model.Base{ID: "h-1"}, UserID: "u1", MediaID: "mv-hot",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := svc.Prewarm(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("attempted = %d, want 1", n)
+	}
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Fatalf("provider calls = %d, want 1", got)
+	}
+	ledger, err := repos.MediaSegment.GetFetch(ctx, "mv-hot", IntroDBSource)
+	if err != nil || ledger == nil || !ledger.Found {
+		t.Fatalf("hot ledger = %#v err=%v, want found", ledger, err)
+	}
+	oldLedger, err := repos.MediaSegment.GetFetch(ctx, "mv-old", IntroDBSource)
+	if err != nil || oldLedger == nil || oldLedger.Found {
+		t.Fatalf("old ledger should remain a miss, got %#v err=%v", oldLedger, err)
+	}
+}
+
 func TestLedgerFreshUsesLongerTTLWhenDataWasFound(t *testing.T) {
 	now := time.Now()
 	found := &model.MediaSegmentFetch{FetchedAt: now.Add(-segmentMissingTTL), Found: true}
@@ -399,3 +516,4 @@ func TestLedgerFreshUsesLongerTTLWhenDataWasFound(t *testing.T) {
 		t.Fatal("a missing ledger must not be considered fresh")
 	}
 }
+

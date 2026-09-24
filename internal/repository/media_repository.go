@@ -232,6 +232,31 @@ func (r *MediaRepository) ExistsSiblingWithTMDbID(ctx context.Context, m *model.
 	return count > 0
 }
 
+// ListSeasonSiblings returns other episodes in the same season as m.
+// Prefers series_id; falls back to shared library+title+tm_db_id (anime scrape path).
+func (r *MediaRepository) ListSeasonSiblings(ctx context.Context, m *model.Media) ([]model.Media, error) {
+	if r == nil || m == nil || m.SeasonNum <= 0 || m.ID == "" {
+		return nil, nil
+	}
+	query := r.db.WithContext(ctx).Model(&model.Media{}).
+		Where("season_num = ? AND id <> ?", m.SeasonNum, m.ID)
+	if seriesID := strings.TrimSpace(m.SeriesID); seriesID != "" {
+		query = query.Where("series_id = ?", seriesID)
+	} else {
+		libraryID := strings.TrimSpace(m.LibraryID)
+		title := strings.TrimSpace(m.Title)
+		if libraryID == "" || title == "" || m.TMDbID <= 0 {
+			return nil, nil
+		}
+		query = query.Where("library_id = ? AND title = ? AND tm_db_id = ?", libraryID, title, m.TMDbID)
+	}
+	var rows []model.Media
+	if err := query.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
 // ListByLibrary returns paginated media items for a library.
 func (r *MediaRepository) ListByLibrary(ctx context.Context, libraryID string, offset, limit int) ([]model.Media, int64, error) {
 	return r.ListByLibraryFiltered(ctx, libraryID, offset, limit, MediaQueryFilter{IncludeNSFW: true})

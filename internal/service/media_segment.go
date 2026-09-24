@@ -18,9 +18,21 @@ import (
 // 片段数据的缓存时长。命中过说明社区库里已有记录、数据很少变动，可以放很久；
 // 未命中说明这部片还没人贡献，隔一段时间再试一次即可——负缓存是必须的，否则
 // 每次播放一部没有片段数据的影片都会打一次外网。
+//
+// 未命中 TTL 刻意短于命中：社区库在持续补充，尤其是热门剧，24h 重试一次比
+// 锁死 7 天更能跟上贡献节奏；预热任务也会优先扫最近播放过的 miss。
 const (
 	segmentFoundTTL   = 30 * 24 * time.Hour
-	segmentMissingTTL = 7 * 24 * time.Hour
+	segmentMissingTTL = 24 * time.Hour
+
+	// SegmentSourceManual / Propagated 与 IntroDBSource 并列，播放时按优先级合并。
+	SegmentSourceManual     = "manual"
+	SegmentSourcePropagated = "propagated"
+
+	// segmentPrewarmDefaultLimit 是一次预热任务最多处理的媒体数，避免单次跑太久。
+	segmentPrewarmDefaultLimit = 200
+	// segmentPrewarmInterval 是预热请求之间的间隔，压低对 TheIntroDB 的 429。
+	segmentPrewarmInterval = time.Second
 )
 
 // SegmentView 是播放器消费的最小片段结构，避免把库内字段（source 等）暴露给前端。
@@ -44,14 +56,29 @@ type MediaSegmentService struct {
 	log     *zap.Logger
 	repo    *repository.Container
 	introdb *IntroDBService
-	// probe 负责从文件内嵌章节里提取片头/片尾（异步、落库）。未注入时只用
-	// TheIntroDB。
+	// probe 负责异步补齐媒体信息（主要是 STRM 时长）。未注入时只用 TheIntroDB。
 	probe *MediaProbeService
+	// prewarmGap 是预热两次 IntroDB 请求之间的间隔；测试可设为 0。
+	prewarmGap time.Duration
+	now        func() time.Time
 }
 
 // NewMediaSegmentService is the constructor.
 func NewMediaSegmentService(log *zap.Logger, repo *repository.Container) *MediaSegmentService {
-	return &MediaSegmentService{log: log, repo: repo}
+	return &MediaSegmentService{
+		log:        log,
+		repo:       repo,
+		prewarmGap: segmentPrewarmInterval,
+		now:        time.Now,
+	}
+}
+
+// SetPrewarmGap overrides the delay between prewarm fetches (tests use 0).
+func (s *MediaSegmentService) SetPrewarmGap(gap time.Duration) *MediaSegmentService {
+	if s != nil {
+		s.prewarmGap = gap
+	}
+	return s
 }
 
 // SetIntroDB wires the provider. Without it the service only reads cached rows.
@@ -62,8 +89,8 @@ func (s *MediaSegmentService) SetIntroDB(p *IntroDBService) *MediaSegmentService
 	return s
 }
 
-// SetProbe wires the in-file chapter extractor. Without it the ffprobe source
-// simply yields nothing and auto falls back to TheIntroDB.
+// SetProbe wires the async media probe (duration backfill for STRM). Without it
+// open-ended credits still work once duration is known from elsewhere.
 func (s *MediaSegmentService) SetProbe(p *MediaProbeService) *MediaSegmentService {
 	if s != nil {
 		s.probe = p
@@ -121,28 +148,73 @@ func mediaProbeSettled(row *model.MediaProbe) bool {
 }
 
 // introDBSegments 读社区库的片段，缓存过期时按调用方的预算抓一次并落库。
+// 返回值是按来源优先级合并后的结果（manual > theintrodb > propagated）。
 func (s *MediaSegmentService) introDBSegments(ctx context.Context, m *model.Media) ([]model.MediaSegment, error) {
-	cached, err := s.repo.MediaSegment.ListByMediaSource(ctx, m.ID, IntroDBSource)
-	if err != nil {
-		return nil, err
-	}
 	ledger, err := s.repo.MediaSegment.GetFetch(ctx, m.ID, IntroDBSource)
 	if err != nil {
+		// 调用方预算耗尽时仍读本地缓存，绝不能让播放接口报错。
+		if ctx.Err() != nil {
+			return s.mergeForPlayback(context.WithoutCancel(ctx), m.ID)
+		}
 		return nil, err
 	}
-	if ledger != nil && ledgerFresh(ledger) {
-		return cached, nil
+	if ledger == nil || !ledgerFresh(ledger) {
+		if _, _, err := s.refresh(ctx, m); err != nil {
+			// 社区库不可达或返回异常：沿用已有缓存，不影响播放；也不写负缓存。
+			logIntroDBFailure(s.log, 0, err)
+		}
 	}
-	refreshed, attempted, err := s.refresh(ctx, m)
+	// 合并读库只碰本地，脱离调用方 deadline，避免外网抓取耗尽预算后读缓存也失败。
+	return s.mergeForPlayback(context.WithoutCancel(ctx), m.ID)
+}
+
+// mergeForPlayback 合并同一媒体上多来源片段。同 kind 只保留优先级最高的来源。
+func (s *MediaSegmentService) mergeForPlayback(ctx context.Context, mediaID string) ([]model.MediaSegment, error) {
+	rows, err := s.repo.MediaSegment.ListByMedia(ctx, mediaID)
 	if err != nil {
-		// 社区库不可达或返回异常：沿用已有缓存，不影响播放。
-		logIntroDBFailure(s.log, 0, err)
-		return cached, nil
+		return nil, err
 	}
-	if !attempted {
-		return cached, nil
+	return preferSegmentsBySource(rows), nil
+}
+
+// segmentSourcePriority 数值越大越优先。未知来源视为最低，避免挡住已知源。
+func segmentSourcePriority(source string) int {
+	switch source {
+	case SegmentSourceManual:
+		return 3
+	case IntroDBSource:
+		return 2
+	case SegmentSourcePropagated:
+		return 1
+	default:
+		return 0
 	}
-	return refreshed, nil
+}
+
+// preferSegmentsBySource 按 kind 选取最高优先级来源的全部区间。
+func preferSegmentsBySource(rows []model.MediaSegment) []model.MediaSegment {
+	bestPri := make(map[string]int, 4)
+	byKind := make(map[string][]model.MediaSegment, 4)
+	for _, row := range rows {
+		pri := segmentSourcePriority(row.Source)
+		cur, seen := bestPri[row.Kind]
+		if !seen || pri > cur {
+			bestPri[row.Kind] = pri
+			byKind[row.Kind] = []model.MediaSegment{row}
+			continue
+		}
+		if pri == cur {
+			byKind[row.Kind] = append(byKind[row.Kind], row)
+		}
+	}
+	out := make([]model.MediaSegment, 0, len(rows))
+	for _, kind := range []string{
+		model.SegmentKindIntro, model.SegmentKindRecap,
+		model.SegmentKindCredits, model.SegmentKindPreview,
+	} {
+		out = append(out, byKind[kind]...)
+	}
+	return out
 }
 
 func (s *MediaSegmentService) debug(message, mediaID string, err error) {
@@ -210,7 +282,109 @@ func (s *MediaSegmentService) refresh(ctx context.Context, m *model.Media) ([]mo
 	}); err != nil {
 		return nil, true, err
 	}
+	s.propagateIntroToSeason(fetchCtx, m, rows)
 	return rows, true, nil
+}
+
+// propagateIntroToSeason 把本集 IntroDB 命中的 intro 复制到同季还没有
+// theintrodb intro 的兄弟集。片尾/预告不传播：各集时长与片尾位置经常不同。
+func (s *MediaSegmentService) propagateIntroToSeason(ctx context.Context, m *model.Media, rows []model.MediaSegment) {
+	if s == nil || s.repo == nil || m == nil || m.SeasonNum <= 0 {
+		return
+	}
+	intros := introSpansFrom(rows)
+	if len(intros) == 0 {
+		return
+	}
+	siblings, err := s.repo.Media.ListSeasonSiblings(ctx, m)
+	if err != nil {
+		s.debug("list season siblings failed", m.ID, err)
+		return
+	}
+	for i := range siblings {
+		sib := &siblings[i]
+		existing, err := s.repo.MediaSegment.ListByMediaSource(ctx, sib.ID, IntroDBSource)
+		if err != nil {
+			s.debug("list sibling introdb segments failed", sib.ID, err)
+			continue
+		}
+		if hasSegmentKind(existing, model.SegmentKindIntro) {
+			continue
+		}
+		copied := make([]model.MediaSegment, 0, len(intros))
+		for _, intro := range intros {
+			copied = append(copied, model.MediaSegment{
+				MediaID:  sib.ID,
+				SeriesID: sib.SeriesID,
+				Kind:     model.SegmentKindIntro,
+				StartMs:  intro.StartMs,
+				EndMs:    intro.EndMs,
+				Source:   SegmentSourcePropagated,
+			})
+		}
+		if err := s.repo.MediaSegment.ReplaceForMedia(ctx, sib.ID, SegmentSourcePropagated, copied); err != nil {
+			s.debug("propagate intro failed", sib.ID, err)
+		}
+	}
+}
+
+func introSpansFrom(rows []model.MediaSegment) []model.MediaSegment {
+	out := make([]model.MediaSegment, 0, 1)
+	for _, row := range rows {
+		if row.Kind == model.SegmentKindIntro {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+func hasSegmentKind(rows []model.MediaSegment, kind string) bool {
+	for _, row := range rows {
+		if row.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// Prewarm 批量向 TheIntroDB 补齐过期/缺失账本的可查询媒体。返回实际发起过查询的数量。
+func (s *MediaSegmentService) Prewarm(ctx context.Context, limit int) (int, error) {
+	if s == nil || s.repo == nil || s.introdb == nil {
+		return 0, nil
+	}
+	if limit <= 0 {
+		limit = segmentPrewarmDefaultLimit
+	}
+	now := time.Now()
+	if s.now != nil {
+		now = s.now()
+	}
+	candidates, err := s.repo.MediaSegment.ListPrewarmCandidates(
+		ctx, IntroDBSource, now.Add(-segmentMissingTTL), now.Add(-segmentFoundTTL), limit,
+	)
+	if err != nil {
+		return 0, err
+	}
+	attempted := 0
+	for i := range candidates {
+		if err := ctx.Err(); err != nil {
+			return attempted, err
+		}
+		m := &candidates[i]
+		_, did, err := s.refresh(ctx, m)
+		if err != nil {
+			logIntroDBFailure(s.log, m.TMDbID, err)
+		}
+		if did {
+			attempted++
+		}
+		if i+1 < len(candidates) && s.prewarmGap > 0 {
+			if !waitForIntroDBRetry(ctx, s.prewarmGap) {
+				return attempted, ctx.Err()
+			}
+		}
+	}
+	return attempted, nil
 }
 
 // queryIDs resolves the provider query key. Movies use their own TMDb id.

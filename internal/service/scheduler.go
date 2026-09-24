@@ -8,6 +8,7 @@
 //	organize_source   opt-in        — organize the configured staging folder.
 //	transcode_cleanup every 24 h   — purge HLS transcode artefacts
 //	                                  older than 24 h.
+//	segment_prewarm   every 6 h    — fill IntroDB skip segments for queryable media.
 //
 // Each job runs at most once at a time (an in-flight run blocks the
 // next tick). All work happens on a long-lived background context so
@@ -41,6 +42,8 @@ type SchedulerService struct {
 	now              func() time.Time
 
 	imagesPolicyProvider func() ImageCachePolicy
+
+	segments *MediaSegmentService
 
 	mu     sync.Mutex
 	stopCh chan struct{}
@@ -145,6 +148,14 @@ func (s *SchedulerService) Start(ctx context.Context) {
 			run:      s.jobCleanImageCache,
 		},
 	}
+	// 片头预热只在注入了 Segments 时注册，避免测试跑无转外网任务。
+	if s.segments != nil {
+		s.jobs = append(s.jobs, &scheduledJob{
+			name:     "segment_prewarm",
+			interval: segmentPrewarmJobInterval,
+			run:      s.jobSegmentPrewarm,
+		})
+	}
 	// 到期提醒只在配置了巡检器时注册，避免测试与未启用通知的部署跑空转任务。
 	if s.expiryWatcher != nil {
 		s.jobs = append(s.jobs, &scheduledJob{
@@ -155,8 +166,8 @@ func (s *SchedulerService) Start(ctx context.Context) {
 	}
 	for _, j := range s.jobs {
 		initialDelay := 15 * time.Second
-		if j.name == "library_scan" || j.name == "organize_source" {
-			// 重启后不立即整库重扫/整理下载目录：更新窗口恰是登录高峰，
+		if j.name == "library_scan" || j.name == "organize_source" || j.name == "segment_prewarm" {
+			// 重启后不立即整库重扫/整理/预热：更新窗口恰是登录高峰，
 			// 15 秒即全量 walk + ffprobe 曾把 CPU/磁盘打满导致无法登录。
 			// 首轮等满一个完整周期再跑，平时节奏不变。
 			initialDelay = j.interval
