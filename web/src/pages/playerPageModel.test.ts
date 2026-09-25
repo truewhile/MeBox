@@ -72,4 +72,28 @@ check(
   }) === 'fallback',
 )
 
+check(
+  'seek grace ignores decode miss without retrying',
+  classifyDirectPlayError({
+    errorCode: 4,
+    readyState: 0,
+    elementSrc: src,
+    expectedSrc: src,
+    alreadyRetried: false,
+    seekGraceActive: true,
+  }) === 'ignore',
+)
+
+check(
+  'seek grace never falls back to HLS',
+  classifyDirectPlayError({
+    errorCode: 4,
+    readyState: 0,
+    elementSrc: src,
+    expectedSrc: src,
+    alreadyRetried: true,
+    seekGraceActive: true,
+  }) === 'ignore',
+)
+
 console.log('playerPageModel.test.ts ok')

@@ -36,7 +36,7 @@ import {
   type SubtitleStylePreset,
 } from '../utils/subtitleDisplay'
 import { pickPlayerMode, needsTranscodeForBrowser, isDirectStreamMedia, isStrmMedia, type PlayerMode } from './playerPageModel'
-import { classifyDirectPlayError } from './directPlayError'
+import { classifyDirectPlayError, DIRECT_SEEK_GRACE_MS } from './directPlayError'
 import { apiErrorMessage } from './StrmManagePage'
 import { PlayerTopBar } from './PlayerTopBar'
 import { PlayerVideoStage } from './PlayerVideoStage'
@@ -106,6 +106,10 @@ export function PlayerPage() {
   const progressSessionRef = useRef<PlaybackProgressSession | null>(null)
   const directRetryRef = useRef(false)
   const retryingDirectRef = useRef(false)
+  // 程序化续播 seek 后的宽限截止时间；期内直连误报不升到 HLS。
+  const directSeekGraceUntilRef = useRef(0)
+  // 切集时清掉旧 ?mode= 的同一轮渲染里，先挡住 modeParam effect 把 hls 写回来。
+  const ignoreModeParamRef = useRef(false)
   const fallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const [media, setMedia] = useState<Media | null>(null)
@@ -485,6 +489,15 @@ export function PlayerPage() {
     setDanmakuSearching(true)
     directRetryRef.current = false
     retryingDirectRef.current = false
+    directSeekGraceUntilRef.current = 0
+    // 新片子清掉上一部失败回退留下的 ?mode=hls，避免「一直 HLS」。
+    ignoreModeParamRef.current = true
+    setMode('direct')
+    const nextParams = new URLSearchParams(window.location.search)
+    if (nextParams.has('mode')) {
+      nextParams.delete('mode')
+      setParams(nextParams, { replace: true })
+    }
     if (fallbackTimerRef.current) {
       clearTimeout(fallbackTimerRef.current)
       fallbackTimerRef.current = null
@@ -495,7 +508,7 @@ export function PlayerPage() {
         fallbackTimerRef.current = null
       }
     }
-  }, [id])
+  }, [id, setParams])
 
   // 依赖收敛为 mode 参数的字符串值：避免 params 对象引用每次变化都重复拉取元数据
   const modeParam = params.get('mode') as PlayerMode | null
@@ -526,12 +539,18 @@ export function PlayerPage() {
       .then((m) => {
         if (cancelled) return
         setMedia(m)
-        const isDirect = isDirectStreamMedia(m)
-        const auto = pickPlayerMode(m)
-        // 直连解码模式以及远程 Emby 挂载忽略 ?mode=hls。STRM 默认直连，但允许手动/失败后切 HLS。
-        setMode(directOnly || isDirect ? 'direct' : (modeParam ?? auto))
         setPlayerError('')
         setLoadError('')
+        const isDirect = isDirectStreamMedia(m)
+        const auto = pickPlayerMode(m)
+        // 直连解码 / 远程 Emby：强制直连。
+        // 不把 modeParam 放进依赖：失败回退写 ?mode=hls 时不应重拉 metadata，
+        // 也不要用滞后的 get 回调把 hls 盖回 direct。
+        if (directOnly || isDirect) {
+          setMode('direct')
+          return
+        }
+        setMode((prev) => (prev === 'hls' ? prev : auto))
       })
       .catch((err: unknown) => {
         if (cancelled) return
@@ -541,7 +560,21 @@ export function PlayerPage() {
     return () => {
       cancelled = true
     }
-  }, [id, modeParam, directOnly])
+  }, [id, directOnly])
+
+  // 仅在用户手动切换 / 回退写入 URL 后，把 ?mode= 同步回 state（切集时 id effect 已清掉旧 mode）。
+  useEffect(() => {
+    if (ignoreModeParamRef.current) {
+      ignoreModeParamRef.current = false
+      return
+    }
+    if (directOnly) {
+      setMode('direct')
+      return
+    }
+    if (modeParam !== 'direct' && modeParam !== 'hls') return
+    setMode(modeParam)
+  }, [modeParam, directOnly, id])
 
   // VR 全景素材识别：只在用户没手动改过开关时自动进入 VR 模式。
   // 识别完全基于文件名/路径关键词与画幅比例，误判时点一下 VR 按钮即可退出。
@@ -1083,32 +1116,72 @@ export function PlayerPage() {
     }
     const video = ref.current
     if (!video) return
+
+    let cancelled = false
+    let seekStarted = false
     let onSeeked: (() => void) | undefined
-    const applyResume = () => {
-      if (resumePosition > 0 && Math.abs(video.currentTime - resumePosition) > 2) {
-        onSeeked = () => {
-          setInitialSeekDone(true)
-          const m = Math.floor(resumePosition / 60)
-          const s = Math.floor(resumePosition % 60)
-          const timeStr = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
-          toast.success(`已恢复上次播放进度至 ${timeStr}`, { duration: 2500 })
-        }
-        video.addEventListener('seeked', onSeeked, { once: true })
-        video.currentTime = resumePosition
+    let onPlaying: (() => void) | undefined
+    let onCanPlay: (() => void) | undefined
+
+    const notifyResume = () => {
+      const m = Math.floor(resumePosition / 60)
+      const s = Math.floor(resumePosition % 60)
+      const timeStr = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
+      toast.success(`已恢复上次播放进度至 ${timeStr}`, { duration: 2500 })
+    }
+
+    const performResumeSeek = () => {
+      if (cancelled || seekStarted) return
+      if (Math.abs(video.currentTime - resumePosition) <= 2) {
+        seekStarted = true
+        setInitialSeekDone(true)
         return
       }
-      setInitialSeekDone(true)
+      seekStarted = true
+      // 115/STRM 302 直链上过早 seek 会让 Chromium 误报 error 并触发 HLS 回退。
+      directSeekGraceUntilRef.current = Date.now() + DIRECT_SEEK_GRACE_MS
+      directRetryRef.current = false
+      clearFallbackTimer()
+      onSeeked = () => {
+        setInitialSeekDone(true)
+        notifyResume()
+      }
+      video.addEventListener('seeked', onSeeked, { once: true })
+      try {
+        video.currentTime = resumePosition
+      } catch {
+        setInitialSeekDone(true)
+      }
     }
-    if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
-      applyResume()
+
+    // STRM/云盘：等真正起播后再续播跳转，避免 302 未完成就 seek。
+    // 本地文件仍可在 canplay 后立刻跳，体验更干净。
+    const deferForStrm = isStrmMedia(mediaRef.current)
+    if (deferForStrm) {
+      onPlaying = () => {
+        performResumeSeek()
+      }
+      if (!video.paused && video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+        performResumeSeek()
+      } else {
+        video.addEventListener('playing', onPlaying, { once: true })
+      }
+    } else if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+      performResumeSeek()
     } else {
-      video.addEventListener('canplay', applyResume, { once: true })
+      onCanPlay = () => {
+        performResumeSeek()
+      }
+      video.addEventListener('canplay', onCanPlay, { once: true })
     }
+
     return () => {
-      video.removeEventListener('canplay', applyResume)
+      cancelled = true
+      if (onPlaying) video.removeEventListener('playing', onPlaying)
+      if (onCanPlay) video.removeEventListener('canplay', onCanPlay)
       if (onSeeked) video.removeEventListener('seeked', onSeeked)
     }
-  }, [resumePosition, initialSeekDone, mode, hlsStartSec])
+  }, [resumePosition, initialSeekDone, mode, hlsStartSec, clearFallbackTimer])
 
   // 使用 ref 实时同步进度计算所需的状态，避免每次 hlsStartSec 改变都触发 cleanup 并误上报旧进度
   const hlsStartSecRef = useRef(hlsStartSec)
@@ -1762,6 +1835,7 @@ export function PlayerPage() {
       elementSrc: video?.src ?? '',
       expectedSrc,
       alreadyRetried: directRetryRef.current,
+      seekGraceActive: Date.now() < directSeekGraceUntilRef.current,
     })
     if (action === 'ignore') return
 
@@ -1779,6 +1853,8 @@ export function PlayerPage() {
 
     const fallbackDirectPlay = () => {
       if (modeRef.current !== 'direct') return
+      // 宽限期内又触发的迟到 fallback 定时器：直接丢掉。
+      if (Date.now() < directSeekGraceUntilRef.current) return
       const current = ref.current
       if (current && current.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) return
       if (isRemoteEmbyID(mediaRef.current?.id) || isDirectStreamMedia(mediaRef.current)) {
@@ -1813,7 +1889,9 @@ export function PlayerPage() {
     }
 
     clearFallbackTimer()
-    fallbackTimerRef.current = setTimeout(fallbackDirectPlay, 1500)
+    // STRM/115 直链冷启动比本地文件慢，给足缓冲时间再判定失败。
+    const fallbackDelayMs = isStrmMedia(mediaRef.current) ? 4000 : 1500
+    fallbackTimerRef.current = setTimeout(fallbackDirectPlay, fallbackDelayMs)
   }, [
     clearFallbackTimer,
     directOnly,
