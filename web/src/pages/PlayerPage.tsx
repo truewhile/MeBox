@@ -37,6 +37,7 @@ import {
 } from '../utils/subtitleDisplay'
 import { pickPlayerMode, needsTranscodeForBrowser, isDirectStreamMedia, isStrmMedia, type PlayerMode } from './playerPageModel'
 import { classifyDirectPlayError, DIRECT_SEEK_GRACE_MS } from './directPlayError'
+import { canSeekDirectNow, DIRECT_SEEK_WAIT_MS } from './directPlaySeek'
 import { apiErrorMessage } from './StrmManagePage'
 import { PlayerTopBar } from './PlayerTopBar'
 import { PlayerVideoStage } from './PlayerVideoStage'
@@ -108,6 +109,9 @@ export function PlayerPage() {
   const retryingDirectRef = useRef(false)
   // 程序化续播 seek 后的宽限截止时间；期内直连误报不升到 HLS。
   const directSeekGraceUntilRef = useRef(0)
+  // STRM 直连跳转目标；seekable 未覆盖时会等到可跳再写 currentTime。
+  const pendingDirectSeekRef = useRef<number | null>(null)
+  const directSeekWaitCleanupRef = useRef<(() => void) | null>(null)
   // 切集时清掉旧 ?mode= 的同一轮渲染里，先挡住 modeParam effect 把 hls 写回来。
   const ignoreModeParamRef = useRef(false)
   const fallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -490,6 +494,9 @@ export function PlayerPage() {
     directRetryRef.current = false
     retryingDirectRef.current = false
     directSeekGraceUntilRef.current = 0
+    pendingDirectSeekRef.current = null
+    directSeekWaitCleanupRef.current?.()
+    directSeekWaitCleanupRef.current = null
     // 新片子清掉上一部失败回退留下的 ?mode=hls，避免「一直 HLS」。
     ignoreModeParamRef.current = true
     setMode('direct')
@@ -529,6 +536,143 @@ export function PlayerPage() {
       fallbackTimerRef.current = null
     }
   }, [])
+
+  const clearDirectSeekWait = useCallback(() => {
+    directSeekWaitCleanupRef.current?.()
+    directSeekWaitCleanupRef.current = null
+  }, [])
+
+  /**
+   * STRM/115 直连跳转：等 seekable 覆盖目标再写 currentTime，避免被钳回 0；
+   * 同时打开误报宽限期，防止 seek 触发 video.load() 从头播。
+   */
+  const seekStrmDirectTo = useCallback(
+    (absoluteSec: number, options?: { onSettled?: () => void }) => {
+      const video = ref.current
+      if (!video) return false
+      const target = Math.max(0, absoluteSec)
+      pendingDirectSeekRef.current = target
+      directSeekGraceUntilRef.current = Date.now() + DIRECT_SEEK_GRACE_MS
+      directRetryRef.current = false
+      clearFallbackTimer()
+      clearDirectSeekWait()
+
+      let pollTimer: ReturnType<typeof setInterval> | null = null
+      let finishTimer: ReturnType<typeof setTimeout> | null = null
+      let forced = false
+      let forceAttempts = 0
+      let applied = false
+      let toastShown = false
+      const startedAt = Date.now()
+
+      const cleanup = () => {
+        video.removeEventListener('progress', tick)
+        video.removeEventListener('durationchange', tick)
+        video.removeEventListener('loadedmetadata', tick)
+        video.removeEventListener('seeked', onSeeked)
+        if (pollTimer) {
+          clearInterval(pollTimer)
+          pollTimer = null
+        }
+        if (finishTimer) {
+          clearTimeout(finishTimer)
+          finishTimer = null
+        }
+        if (directSeekWaitCleanupRef.current === cleanup) {
+          directSeekWaitCleanupRef.current = null
+        }
+      }
+
+      const settleIfMatched = () => {
+        const el = ref.current
+        if (!el || pendingDirectSeekRef.current === null) return false
+        const want = pendingDirectSeekRef.current
+        if (Math.abs(el.currentTime - want) <= 2.5) {
+          pendingDirectSeekRef.current = null
+          cleanup()
+          options?.onSettled?.()
+          return true
+        }
+        return false
+      }
+
+      const writeCurrentTime = (want: number) => {
+        const el = ref.current
+        if (!el) return false
+        selfSkipSeekRef.current = true
+        try {
+          el.currentTime = want
+        } catch {
+          return false
+        }
+        applied = true
+        directSeekGraceUntilRef.current = Date.now() + DIRECT_SEEK_GRACE_MS
+        return true
+      }
+
+      const onSeeked = () => {
+        if (settleIfMatched()) return
+        const el = ref.current
+        if (!el || pendingDirectSeekRef.current === null) return
+        const want = pendingDirectSeekRef.current
+        if (el.currentTime < 1.5 && want > 3) {
+          // 被钳回 0：允许在 seekable 就绪后再写一次。
+          applied = false
+          forced = false
+          directSeekGraceUntilRef.current = Date.now() + DIRECT_SEEK_GRACE_MS
+          if (canSeekDirectNow(el.seekable, want)) {
+            writeCurrentTime(want)
+          }
+        }
+      }
+
+      const tick = () => {
+        const el = ref.current
+        if (!el || pendingDirectSeekRef.current === null) {
+          cleanup()
+          return
+        }
+        const want = pendingDirectSeekRef.current
+        if (!applied && canSeekDirectNow(el.seekable, want)) {
+          writeCurrentTime(want)
+          return
+        }
+        if (!toastShown && Date.now() - startedAt > 600) {
+          toastShown = true
+          toast('正在定位播放位置…', { duration: 2200 })
+        }
+        if (!applied && !forced && Date.now() - startedAt >= DIRECT_SEEK_WAIT_MS) {
+          if (forceAttempts >= 2) {
+            pendingDirectSeekRef.current = null
+            cleanup()
+            return
+          }
+          forced = true
+          forceAttempts += 1
+          writeCurrentTime(want)
+          finishTimer = setTimeout(() => {
+            if (!settleIfMatched() && forceAttempts >= 2) {
+              pendingDirectSeekRef.current = null
+              cleanup()
+            } else if (pendingDirectSeekRef.current !== null) {
+              forced = false
+              applied = false
+            }
+          }, 2500)
+        }
+      }
+
+      video.addEventListener('progress', tick)
+      video.addEventListener('durationchange', tick)
+      video.addEventListener('loadedmetadata', tick)
+      video.addEventListener('seeked', onSeeked)
+      pollTimer = setInterval(tick, 350)
+      directSeekWaitCleanupRef.current = cleanup
+      tick()
+      return true
+    },
+    [clearDirectSeekWait, clearFallbackTimer],
+  )
 
   // Load metadata and pick a default mode.
   useEffect(() => {
@@ -1119,7 +1263,6 @@ export function PlayerPage() {
 
     let cancelled = false
     let seekStarted = false
-    let onSeeked: (() => void) | undefined
     let onPlaying: (() => void) | undefined
     let onCanPlay: (() => void) | undefined
 
@@ -1138,11 +1281,25 @@ export function PlayerPage() {
         return
       }
       seekStarted = true
-      // 115/STRM 302 直链上过早 seek 会让 Chromium 误报 error 并触发 HLS 回退。
+      if (isStrmMedia(mediaRef.current)) {
+        seekStrmDirectTo(resumePosition, {
+          onSettled: () => {
+            if (!cancelled) {
+              setInitialSeekDone(true)
+              notifyResume()
+            }
+          },
+        })
+        // 即使定位较慢，也不要卡住「未完成续播」状态太久。
+        window.setTimeout(() => {
+          if (!cancelled) setInitialSeekDone(true)
+        }, DIRECT_SEEK_WAIT_MS + 3000)
+        return
+      }
       directSeekGraceUntilRef.current = Date.now() + DIRECT_SEEK_GRACE_MS
       directRetryRef.current = false
       clearFallbackTimer()
-      onSeeked = () => {
+      const onSeeked = () => {
         setInitialSeekDone(true)
         notifyResume()
       }
@@ -1155,7 +1312,6 @@ export function PlayerPage() {
     }
 
     // STRM/云盘：等真正起播后再续播跳转，避免 302 未完成就 seek。
-    // 本地文件仍可在 canplay 后立刻跳，体验更干净。
     const deferForStrm = isStrmMedia(mediaRef.current)
     if (deferForStrm) {
       onPlaying = () => {
@@ -1179,9 +1335,8 @@ export function PlayerPage() {
       cancelled = true
       if (onPlaying) video.removeEventListener('playing', onPlaying)
       if (onCanPlay) video.removeEventListener('canplay', onCanPlay)
-      if (onSeeked) video.removeEventListener('seeked', onSeeked)
     }
-  }, [resumePosition, initialSeekDone, mode, hlsStartSec, clearFallbackTimer])
+  }, [resumePosition, initialSeekDone, mode, hlsStartSec, clearFallbackTimer, seekStrmDirectTo])
 
   // 使用 ref 实时同步进度计算所需的状态，避免每次 hlsStartSec 改变都触发 cleanup 并误上报旧进度
   const hlsStartSecRef = useRef(hlsStartSec)
@@ -1661,10 +1816,27 @@ export function PlayerPage() {
         video.currentTime = Math.max(0, target - hlsStartSec)
         return
       }
+      if (isStrmMedia(mediaRef.current)) {
+        seekStrmDirectTo(target)
+        return
+      }
       selfSkipSeekRef.current = true
       video.currentTime = target
     },
-    [handleSeekAbsolute, hlsSource, hlsStartSec, mode],
+    [handleSeekAbsolute, hlsSource, hlsStartSec, mode, seekStrmDirectTo],
+  )
+
+  const handlePlayerSeekAbsolute = useCallback(
+    (absoluteSec: number) => {
+      if (mode === 'hls' && hlsSource === 'local') {
+        return handleSeekAbsolute(absoluteSec)
+      }
+      if (mode === 'direct' && isStrmMedia(mediaRef.current)) {
+        return seekStrmDirectTo(absoluteSec)
+      }
+      return false
+    },
+    [handleSeekAbsolute, hlsSource, mode, seekStrmDirectTo],
   )
 
   const showSkipNotice = useCallback(
@@ -1843,8 +2015,17 @@ export function PlayerPage() {
       directRetryRef.current = true
       retryingDirectRef.current = true
       try {
-        video.load()
-        void video.play().catch(() => undefined)
+        // STRM/115 直连：load() 会清空进度从头播。软恢复即可。
+        if (isStrmMedia(mediaRef.current) || pendingDirectSeekRef.current !== null) {
+          const pending = pendingDirectSeekRef.current
+          void video.play().catch(() => undefined)
+          if (pending !== null && pending > 1) {
+            seekStrmDirectTo(pending)
+          }
+        } else {
+          video.load()
+          void video.play().catch(() => undefined)
+        }
       } finally {
         retryingDirectRef.current = false
       }
@@ -1899,6 +2080,7 @@ export function PlayerPage() {
     mediaId,
     mode,
     playbackInfo,
+    seekStrmDirectTo,
     selectedQuality,
     setPlaybackMode,
     startCloudTranscode,
@@ -1981,7 +2163,11 @@ export function PlayerPage() {
         onTogglePlaylist={isMobileTheater ? openPlaylistEntry : togglePlaylistOpen}
         knownDuration={media?.duration_sec || 0}
         streamOffset={mode === 'hls' && hlsSource === 'local' ? hlsStartSec : 0}
-        onSeekAbsolute={mode === 'hls' && hlsSource === 'local' ? handleSeekAbsolute : undefined}
+        onSeekAbsolute={
+          (mode === 'hls' && hlsSource === 'local') || (mode === 'direct' && isStrmMedia(media))
+            ? handlePlayerSeekAbsolute
+            : undefined
+        }
         qualities={qualityOptions}
         qualityLabel={qualityLabel}
         selectedQuality={selectedQuality}
