@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import type Hls from 'hls.js'
 import toast from 'react-hot-toast'
 
@@ -59,6 +59,10 @@ import {
 //   ?mode=hls       force HLS even when direct play would work
 //   ?mode=direct    force direct play (default for browser-friendly codecs)
 //
+// ?mode= 只在进入某个媒体时读取一次（媒体详情页的「HLS 兼容转码播放」入口依赖它）；
+// 播放模式不再写回 URL——写 URL 会让 search 变化触发依赖 setSearchParams 的 effect
+// 重跑，把刚切好的 HLS 打回直连（表现为「切了 HLS 还是直连播放」）。
+//
 // We pick a sensible default based on the source codec: H.264 + AAC in
 // MP4 / WebM containers play directly; everything else (HEVC, MKV, AV1,
 // AC3 audio, …) gets routed through ffmpeg → HLS. STRM / 云盘直链默认直连，
@@ -97,7 +101,6 @@ function newPlaybackProgressSession(mediaId: string): PlaybackProgressSession {
 
 export function PlayerPage() {
   const { id = '' } = useParams()
-  const [params, setParams] = useSearchParams()
   const navigate = useNavigate()
   const location = useLocation()
 
@@ -112,8 +115,12 @@ export function PlayerPage() {
   // STRM 直连跳转目标；seekable 未覆盖时会等到可跳再写 currentTime。
   const pendingDirectSeekRef = useRef<number | null>(null)
   const directSeekWaitCleanupRef = useRef<(() => void) | null>(null)
-  // 切集时清掉旧 ?mode= 的同一轮渲染里，先挡住 modeParam effect 把 hls 写回来。
-  const ignoreModeParamRef = useRef(false)
+  // 每个媒体加载时只读一次 URL 上的 ?mode=（媒体详情页「HLS 兼容转码播放」入口依赖它）。
+  // 播放模式本身不再写回 URL：写 URL 会让 search 变化触发依赖 setSearchParams 的 effect
+  // 重跑，把刚切好的 HLS 打回直连（表现为「切了 HLS 还是直连播放」）。
+  const requestedModeRef = useRef<PlayerMode | null>(null)
+  // URL 明确要求 HLS 时用它把「选线路」推迟到播放能力返回之后（云 HLS 优先，其次本地）。
+  const initialHlsRequestRef = useRef(false)
   const fallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const [media, setMedia] = useState<Media | null>(null)
@@ -497,14 +504,12 @@ export function PlayerPage() {
     pendingDirectSeekRef.current = null
     directSeekWaitCleanupRef.current?.()
     directSeekWaitCleanupRef.current = null
-    // 新片子清掉上一部失败回退留下的 ?mode=hls，避免「一直 HLS」。
-    ignoreModeParamRef.current = true
+    // 换片子时重新读一次 URL 上的强制模式；没有就按片源自动判定。
+    const urlMode = new URLSearchParams(window.location.search).get('mode')
+    requestedModeRef.current = urlMode === 'hls' || urlMode === 'direct' ? urlMode : null
+    // URL 明确要求 HLS 时，等播放能力拿到后还要选一次线路（云 HLS 优先）。
+    initialHlsRequestRef.current = urlMode === 'hls'
     setMode('direct')
-    const nextParams = new URLSearchParams(window.location.search)
-    if (nextParams.has('mode')) {
-      nextParams.delete('mode')
-      setParams(nextParams, { replace: true })
-    }
     if (fallbackTimerRef.current) {
       clearTimeout(fallbackTimerRef.current)
       fallbackTimerRef.current = null
@@ -515,20 +520,13 @@ export function PlayerPage() {
         fallbackTimerRef.current = null
       }
     }
-  }, [id, setParams])
+  }, [id])
 
-  // 依赖收敛为 mode 参数的字符串值：避免 params 对象引用每次变化都重复拉取元数据
-  const modeParam = params.get('mode') as PlayerMode | null
-
-  const setPlaybackMode = useCallback(
-    (next: PlayerMode) => {
-      setMode(next)
-      const nextParams = new URLSearchParams(window.location.search)
-      nextParams.set('mode', next)
-      setParams(nextParams, { replace: true })
-    },
-    [setParams],
-  )
+  const setPlaybackMode = useCallback((next: PlayerMode) => {
+    // 一旦显式决定过播放方式，URL 上的 ?mode= 就不再是权威（避免它把状态打回去）。
+    requestedModeRef.current = null
+    setMode(next)
+  }, [])
 
   const clearFallbackTimer = useCallback(() => {
     if (fallbackTimerRef.current) {
@@ -545,23 +543,33 @@ export function PlayerPage() {
   /**
    * STRM/115 直连跳转：等 seekable 覆盖目标再写 currentTime，避免被钳回 0；
    * 同时打开误报宽限期，防止 seek 触发 video.load() 从头播。
+   *
+   * 超过 timeoutMs 仍未落点就直接放弃并回调 onStalled，绝不把播放器挂在
+   * 「正在定位」状态里（之前的表现就是「跳转等半天没反应」）。
    */
   const seekStrmDirectTo = useCallback(
-    (absoluteSec: number, options?: { onSettled?: () => void }) => {
+    (
+      absoluteSec: number,
+      options?: {
+        onSettled?: () => void
+        onStalled?: (target: number) => void
+        timeoutMs?: number
+      },
+    ) => {
       const video = ref.current
       if (!video) return false
       const target = Math.max(0, absoluteSec)
+      const timeoutMs = options?.timeoutMs ?? DIRECT_SEEK_WAIT_MS
+      const wasPlaying = !video.paused
       pendingDirectSeekRef.current = target
       directSeekGraceUntilRef.current = Date.now() + DIRECT_SEEK_GRACE_MS
       directRetryRef.current = false
       clearFallbackTimer()
       clearDirectSeekWait()
 
-      let pollTimer: ReturnType<typeof setInterval> | null = null
-      let finishTimer: ReturnType<typeof setTimeout> | null = null
-      let forced = false
-      let forceAttempts = 0
+      let intervalId: ReturnType<typeof setInterval> | null = null
       let applied = false
+      let attempts = 0
       let toastShown = false
       const startedAt = Date.now()
 
@@ -570,27 +578,32 @@ export function PlayerPage() {
         video.removeEventListener('durationchange', tick)
         video.removeEventListener('loadedmetadata', tick)
         video.removeEventListener('seeked', onSeeked)
-        if (pollTimer) {
-          clearInterval(pollTimer)
-          pollTimer = null
-        }
-        if (finishTimer) {
-          clearTimeout(finishTimer)
-          finishTimer = null
+        if (intervalId) {
+          clearInterval(intervalId)
+          intervalId = null
         }
         if (directSeekWaitCleanupRef.current === cleanup) {
           directSeekWaitCleanupRef.current = null
         }
       }
 
+      const finish = (ok: boolean) => {
+        cleanup()
+        pendingDirectSeekRef.current = null
+        if (!ok) {
+          options?.onStalled?.(target)
+          return
+        }
+        // 定位完成后继续播：用户拖动时视频通常还在播，别让它停在暂停态。
+        if (wasPlaying) void video.play().catch(() => undefined)
+        options?.onSettled?.()
+      }
+
       const settleIfMatched = () => {
         const el = ref.current
         if (!el || pendingDirectSeekRef.current === null) return false
-        const want = pendingDirectSeekRef.current
-        if (Math.abs(el.currentTime - want) <= 2.5) {
-          pendingDirectSeekRef.current = null
-          cleanup()
-          options?.onSettled?.()
+        if (Math.abs(el.currentTime - target) <= 2.5) {
+          finish(true)
           return true
         }
         return false
@@ -606,6 +619,8 @@ export function PlayerPage() {
           return false
         }
         applied = true
+        attempts += 1
+        // 续期宽限：Range 拉取关键帧期间仍可能误报 error。
         directSeekGraceUntilRef.current = Date.now() + DIRECT_SEEK_GRACE_MS
         return true
       }
@@ -614,15 +629,10 @@ export function PlayerPage() {
         if (settleIfMatched()) return
         const el = ref.current
         if (!el || pendingDirectSeekRef.current === null) return
-        const want = pendingDirectSeekRef.current
-        if (el.currentTime < 1.5 && want > 3) {
-          // 被钳回 0：允许在 seekable 就绪后再写一次。
+        // 被钳回开头：允许 seekable 就绪后再写一次。
+        if (el.currentTime < 1.5 && target > 3) {
           applied = false
-          forced = false
           directSeekGraceUntilRef.current = Date.now() + DIRECT_SEEK_GRACE_MS
-          if (canSeekDirectNow(el.seekable, want)) {
-            writeCurrentTime(want)
-          }
         }
       }
 
@@ -632,33 +642,26 @@ export function PlayerPage() {
           cleanup()
           return
         }
-        const want = pendingDirectSeekRef.current
-        if (!applied && canSeekDirectNow(el.seekable, want)) {
-          writeCurrentTime(want)
+        if (settleIfMatched()) return
+        const elapsed = Date.now() - startedAt
+        if (elapsed >= timeoutMs + 2500) {
+          // 给过一次强制写入的机会仍然没落点：交给 HLS，别继续等。
+          finish(false)
           return
         }
-        if (!toastShown && Date.now() - startedAt > 600) {
+        const canSeek = canSeekDirectNow(el.seekable, target)
+        const overCap = elapsed >= timeoutMs
+        if (!applied && (canSeek || overCap)) {
+          writeCurrentTime(target)
+          return
+        }
+        if (applied && attempts < 3 && canSeek && el.currentTime < 1.5 && target > 3) {
+          writeCurrentTime(target)
+          return
+        }
+        if (!toastShown && elapsed > 700 && !applied) {
           toastShown = true
           toast('正在定位播放位置…', { duration: 2200 })
-        }
-        if (!applied && !forced && Date.now() - startedAt >= DIRECT_SEEK_WAIT_MS) {
-          if (forceAttempts >= 2) {
-            pendingDirectSeekRef.current = null
-            cleanup()
-            return
-          }
-          forced = true
-          forceAttempts += 1
-          writeCurrentTime(want)
-          finishTimer = setTimeout(() => {
-            if (!settleIfMatched() && forceAttempts >= 2) {
-              pendingDirectSeekRef.current = null
-              cleanup()
-            } else if (pendingDirectSeekRef.current !== null) {
-              forced = false
-              applied = false
-            }
-          }, 2500)
         }
       }
 
@@ -666,12 +669,49 @@ export function PlayerPage() {
       video.addEventListener('durationchange', tick)
       video.addEventListener('loadedmetadata', tick)
       video.addEventListener('seeked', onSeeked)
-      pollTimer = setInterval(tick, 350)
+      intervalId = setInterval(tick, 250)
       directSeekWaitCleanupRef.current = cleanup
       tick()
       return true
     },
     [clearDirectSeekWait, clearFallbackTimer],
+  )
+
+  /**
+   * 直连定位确实做不到时（例如 115 直链上 Chrome 无法跳到目标关键帧），
+   * 用 HLS 接管并跳到同一个位置，而不是把用户晾在原地。
+   */
+  const handleDirectSeekStalled = useCallback(
+    (target: number) => {
+      const cloudQuality =
+        findPlaybackQualityById(playbackInfo, selectedQuality) ??
+        findPlaybackQualityById(playbackInfo, playbackInfo?.default_quality ?? '')
+      if (cloudQuality?.source === 'cloud' && cloudQuality.available) {
+        setSelectedQuality(cloudQuality.id)
+        setHlsSource('cloud')
+        setCloudWaiting(false)
+        setCloudWaitMessage('')
+        pendingSeekRef.current = target > 2 ? target : null
+        setPlaybackMode('hls')
+        toast('直连定位失败，已切到 115 云 HLS 跳转')
+        return
+      }
+      const localQuality =
+        findPlaybackQualityById(playbackInfo, selectedQuality) ??
+        findPlaybackQualityById(playbackInfo, defaultLocalQualityId(playbackInfo))
+      if (localQuality?.available) {
+        setSelectedQuality(localQuality.id)
+        setHlsSource('local')
+        setCloudWaiting(false)
+        setCloudWaitMessage('')
+        setHlsStartSec(target)
+        setPlaybackMode('hls')
+        toast('直连定位失败，已切到本地 HLS 跳转')
+        return
+      }
+      toast.error('直连定位失败，且当前没有可用的 HLS 转码档位')
+    },
+    [playbackInfo, selectedQuality, setPlaybackMode],
   )
 
   // Load metadata and pick a default mode.
@@ -688,10 +728,15 @@ export function PlayerPage() {
         const isDirect = isDirectStreamMedia(m)
         const auto = pickPlayerMode(m)
         // 直连解码 / 远程 Emby：强制直连。
-        // 不把 modeParam 放进依赖：失败回退写 ?mode=hls 时不应重拉 metadata，
-        // 也不要用滞后的 get 回调把 hls 盖回 direct。
         if (directOnly || isDirect) {
           setMode('direct')
+          return
+        }
+        // URL 上带 ?mode= 时以它为准（详情页「HLS 兼容转码播放」入口）；
+        // 否则按片源自动判定，但不要用滞后的 get 回调把用户手动切的 HLS 盖回直连。
+        const requested = requestedModeRef.current
+        if (requested) {
+          setMode(requested)
           return
         }
         setMode((prev) => (prev === 'hls' ? prev : auto))
@@ -705,20 +750,6 @@ export function PlayerPage() {
       cancelled = true
     }
   }, [id, directOnly])
-
-  // 仅在用户手动切换 / 回退写入 URL 后，把 ?mode= 同步回 state（切集时 id effect 已清掉旧 mode）。
-  useEffect(() => {
-    if (ignoreModeParamRef.current) {
-      ignoreModeParamRef.current = false
-      return
-    }
-    if (directOnly) {
-      setMode('direct')
-      return
-    }
-    if (modeParam !== 'direct' && modeParam !== 'hls') return
-    setMode(modeParam)
-  }, [modeParam, directOnly, id])
 
   // VR 全景素材识别：只在用户没手动改过开关时自动进入 VR 模式。
   // 识别完全基于文件名/路径关键词与画幅比例，误判时点一下 VR 按钮即可退出。
@@ -948,24 +979,29 @@ export function PlayerPage() {
   // 切到 HLS 播放（优先 115 云端，其次本地转码）。toggleMode 与「VR 需要同源帧」
   // 的自愈逻辑共用，避免两处各写一遍云端/本地选择。
   const enterHlsPlayback = useCallback(
-    (startSec: number) => {
-      setHlsStartSec(startSec)
+    (startSec: number, infoOverride?: PlaybackInfo | null) => {
+      const position = Math.max(0, startSec)
+      // 允许传入刚拿到的能力信息：从 URL 强制 HLS 时不想等到 state 更新后才选线路。
+      const info = infoOverride ?? playbackInfo
+      setHlsStartSec(position)
       const preferred =
-        playbackInfo?.provider === 'cloud115'
-          ? findPlaybackQualityById(playbackInfo, selectedQuality) ??
-            findPlaybackQualityById(playbackInfo, playbackInfo.default_quality)
+        info?.provider === 'cloud115'
+          ? findPlaybackQualityById(info, selectedQuality) ??
+            findPlaybackQualityById(info, info.default_quality)
           : undefined
       if (preferred?.source === 'cloud') {
         setHlsSource('cloud')
         if (preferred.available) {
           setCloudWaiting(false)
+          // 云 HLS 是整段时间轴：切过去后按当前位置跳一下，别让用户从头看。
+          pendingSeekRef.current = position > 2 ? position : null
         } else {
           setCloudWaiting(true)
           setCloudWaitMessage(preferred.note || `正在等待 115 转码 ${preferred.label}…`)
           void startCloudTranscode(Number(preferred.id) || 4)
         }
       } else {
-        switchToLocalHLS(startSec)
+        switchToLocalHLS(position)
       }
       setPlaybackMode('hls')
     },
@@ -1016,6 +1052,15 @@ export function PlayerPage() {
       }
     }
   }, [cloudWaiting, cloudWaitStartedAt, mediaId, selectedQuality, setPlaybackMode, switchToLocalHLS])
+
+  // 从 URL 强制 HLS（媒体详情页「HLS 兼容转码播放」）时，等播放能力返回后再选线路：
+  // 115 有可用的云转码档位就走云 HLS，否则退回本地转码。只做一次。
+  useEffect(() => {
+    if (!playbackInfo || !initialHlsRequestRef.current) return
+    if (directOnly || !mediaId) return
+    initialHlsRequestRef.current = false
+    enterHlsPlayback(0, playbackInfo)
+  }, [directOnly, enterHlsPlayback, mediaId, playbackInfo])
 
   // 直连播放只发现外挂字幕；只有 HLS 模式需要探测可烧录的内嵌字幕。
   useEffect(() => {
@@ -1283,17 +1328,26 @@ export function PlayerPage() {
       seekStarted = true
       if (isStrmMedia(mediaRef.current)) {
         seekStrmDirectTo(resumePosition, {
+          timeoutMs: 6000,
           onSettled: () => {
             if (!cancelled) {
               setInitialSeekDone(true)
               notifyResume()
             }
           },
+          onStalled: () => {
+            // 定位不成就从头播，别把用户挂在「正在定位」上。
+            if (cancelled) return
+            setInitialSeekDone(true)
+            try {
+              video.currentTime = 0
+            } catch {
+              // ignore
+            }
+            void video.play().catch(() => undefined)
+            toast('续播定位超时，已从头播放', { duration: 2600 })
+          },
         })
-        // 即使定位较慢，也不要卡住「未完成续播」状态太久。
-        window.setTimeout(() => {
-          if (!cancelled) setInitialSeekDone(true)
-        }, DIRECT_SEEK_WAIT_MS + 3000)
         return
       }
       directSeekGraceUntilRef.current = Date.now() + DIRECT_SEEK_GRACE_MS
@@ -1662,7 +1716,8 @@ export function PlayerPage() {
   const selectedQualityLabel = findPlaybackQualityById(playbackInfo, selectedQuality)?.label || ''
   const qualityLabel =
     mode === 'direct' ? originalQualityLabel : selectedQualityLabel || '清晰度'
-  // 播放方式只描述状态，切换入口在控制栏的「设置」面板里（见 onTogglePlaybackMode）。
+  // 播放方式标签：直接说清「这条片子现在是怎么在播」，避免用户猜线路
+  //（115 直链 / 115 云 HLS / 本地转码 / 客户端解码）。
   const playbackModeLabel = isDirectStream
     ? isRemoteEmbyID(media?.id)
       ? 'Emby 直连播放'
@@ -1670,8 +1725,12 @@ export function PlayerPage() {
     : directOnly
       ? '客户端直连解码'
       : mode === 'hls'
-        ? 'HLS 转码'
-        : '直接播放'
+        ? hlsSource === 'cloud'
+          ? '115 云 HLS 转码'
+          : '本地 HLS 转码'
+        : playbackInfo?.provider === 'cloud115'
+          ? '直连播放 · 115 直链'
+          : '直接播放'
   const canTogglePlaybackMode = !isDirectStream && !directOnly
 
   // 顶栏标题下的次要信息：集数进度与版本数量，让用户一眼知道「在看什么、在哪」。
@@ -1724,7 +1783,8 @@ export function PlayerPage() {
     }
     const next = mode === 'hls' ? 'direct' : 'hls'
     if (next === 'hls') {
-      enterHlsPlayback(0)
+      // 带着当前位置切过去：云 HLS 跳一下、本地 HLS 从该点重开转码，都不从头播。
+      enterHlsPlayback(ref.current?.currentTime || 0)
     } else {
       setCloudWaiting(false)
     }
@@ -1817,13 +1877,13 @@ export function PlayerPage() {
         return
       }
       if (isStrmMedia(mediaRef.current)) {
-        seekStrmDirectTo(target)
+        seekStrmDirectTo(target, { onStalled: handleDirectSeekStalled })
         return
       }
       selfSkipSeekRef.current = true
       video.currentTime = target
     },
-    [handleSeekAbsolute, hlsSource, hlsStartSec, mode, seekStrmDirectTo],
+    [handleDirectSeekStalled, handleSeekAbsolute, hlsSource, hlsStartSec, mode, seekStrmDirectTo],
   )
 
   const handlePlayerSeekAbsolute = useCallback(
@@ -1832,11 +1892,14 @@ export function PlayerPage() {
         return handleSeekAbsolute(absoluteSec)
       }
       if (mode === 'direct' && isStrmMedia(mediaRef.current)) {
-        return seekStrmDirectTo(absoluteSec)
+        return seekStrmDirectTo(absoluteSec, {
+          timeoutMs: 4500,
+          onStalled: handleDirectSeekStalled,
+        })
       }
       return false
     },
-    [handleSeekAbsolute, hlsSource, mode, seekStrmDirectTo],
+    [handleDirectSeekStalled, handleSeekAbsolute, hlsSource, mode, seekStrmDirectTo],
   )
 
   const showSkipNotice = useCallback(
@@ -2115,6 +2178,7 @@ export function PlayerPage() {
         directOnly={directOnly}
         isDirectStream={isDirectStream}
         directStreamLabel={isRemoteEmbyID(media?.id) ? 'Emby 直连播放' : undefined}
+        modeLabel={playbackModeLabel}
         mode={mode}
         onBack={goBack}
       />

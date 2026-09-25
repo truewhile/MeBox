@@ -18,6 +18,8 @@ type PlayerTopBarProps = {
   directOnly: boolean
   isDirectStream?: boolean
   directStreamLabel?: string
+  /** 已算好的播放方式文字（如「直连播放 · 115 直链」「115 云 HLS 转码」）；传入时优先展示。 */
+  modeLabel?: string
   mode: PlayerMode
   onBack: () => void
 }
@@ -28,10 +30,11 @@ export function PlayerTopBar({
   directOnly,
   isDirectStream,
   directStreamLabel,
+  modeLabel,
   mode,
   onBack,
 }: PlayerTopBarProps) {
-  const status = isDirectStream
+  const derived = isDirectStream
     ? {
         icon: <Sparkles size={12} />,
         label: directStreamLabel || '直连播放',
@@ -56,6 +59,7 @@ export function PlayerTopBar({
             label: '直接播放',
             title: '当前直接播放原始文件，可在控制栏「设置」里切到 HLS 转码',
           }
+  const status = modeLabel ? { ...derived, label: modeLabel } : derived
 
   return (
     <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-start justify-between gap-3 bg-gradient-to-b from-black/60 via-black/20 to-transparent px-2.5 pb-10 pt-2.5 sm:px-3.5 sm:pt-3.5">
