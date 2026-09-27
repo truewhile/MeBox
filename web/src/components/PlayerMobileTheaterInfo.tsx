@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { ChevronDown, Layers, ListVideo } from 'lucide-react'
 
 import type { Media } from '../types'
+import { formatEpisodeLabel, formatEpisodeNumber } from '../utils/episodeNumber'
 import { mediaVersionLabel, mediaVersionMatches } from '../utils/mediaVersion'
 
 // PlayerMobileTheaterInfo — 竖屏剧场模式下视频下方的可滚动内容区。
@@ -38,15 +39,17 @@ type PlayerMobileTheaterInfoProps = {
 }
 
 function episodeShortLabel(ep: Media): string {
-  if (ep.episode_num > 0) return `${ep.episode_num}`
+  const number = formatEpisodeNumber(ep)
+  if (number) return number
   const title = ep.episode_title?.trim() || ep.title?.trim() || ''
   return title ? title.slice(0, 4) : '·'
 }
 
 function episodeFullLabel(ep: Media): string {
-  if (ep.episode_num > 0) {
+  const label = formatEpisodeLabel(ep)
+  if (label) {
     const title = ep.episode_title?.trim()
-    return title && title !== ep.title?.trim() ? `第 ${ep.episode_num} 集 · ${title}` : `第 ${ep.episode_num} 集`
+    return title && title !== ep.title?.trim() ? `${label} · ${title}` : label
   }
   return ep.episode_title?.trim() || ep.title?.trim() || '未命名'
 }

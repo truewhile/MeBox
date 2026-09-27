@@ -55,7 +55,7 @@ func (e *EmbyService) findSeriesGroup(ctx context.Context, id, userID string) (e
 		// 有 series_id 时分组 key 就是 series_id 本身（UUID，不带虚拟前缀）。
 		q = q.Where("series_id IS NULL OR series_id = ''")
 	}
-	if err := q.Order("media.season_num asc, media.episode_num asc, media.created_at asc").Limit(embySeriesGroupingLimit).Find(&rows).Error; err != nil {
+	if err := q.Order("media.season_num asc, media.episode_num asc, media.episode_fraction asc, media.created_at asc").Limit(embySeriesGroupingLimit).Find(&rows).Error; err != nil {
 		return embySeriesGroup{}, false, err
 	}
 	for _, group := range e.seriesGroupsFromMedia(ctx, rows) {
@@ -68,20 +68,20 @@ func (e *EmbyService) findSeriesGroup(ctx context.Context, id, userID string) (e
 		if series, err := e.repo.Series.FindByID(ctx, id); err != nil {
 			return embySeriesGroup{}, false, err
 		} else if series != nil {
-				return embySeriesGroup{
-					ID:                 series.ID,
-					LibraryID:          series.LibraryID,
-					Name:               series.Title,
-					PosterURL:          series.PosterURL,
-					BackdropURL:        series.BackdropURL,
-					Overview:           series.Overview,
-					Rating:             series.Rating,
-					Year:               series.Year,
-					TMDbID:             series.TMDbID,
-					BangumiID:          series.BangumiID,
-					CreatedAt:          series.CreatedAt,
-					DateLastMediaAdded: series.CreatedAt,
-				}, true, nil
+			return embySeriesGroup{
+				ID:                 series.ID,
+				LibraryID:          series.LibraryID,
+				Name:               series.Title,
+				PosterURL:          series.PosterURL,
+				BackdropURL:        series.BackdropURL,
+				Overview:           series.Overview,
+				Rating:             series.Rating,
+				Year:               series.Year,
+				TMDbID:             series.TMDbID,
+				BangumiID:          series.BangumiID,
+				CreatedAt:          series.CreatedAt,
+				DateLastMediaAdded: series.CreatedAt,
+			}, true, nil
 		}
 	}
 	return embySeriesGroup{}, false, nil
@@ -108,7 +108,7 @@ func (e *EmbyService) findSeasonGroup(ctx context.Context, id, userID string) (e
 		Where("(series_id IS NULL OR series_id = '') AND (season_num > 0 OR episode_num > 0)")
 	q = e.applyUserMediaVisibility(ctx, q, userID)
 	if err := q.
-		Order("media.season_num asc, media.episode_num asc, media.created_at asc").
+		Order("media.season_num asc, media.episode_num asc, media.episode_fraction asc, media.created_at asc").
 		Limit(embySeriesGroupingLimit).
 		Find(&rows).Error; err != nil {
 		return embySeasonGroup{}, false, err
@@ -167,7 +167,7 @@ func (e *EmbyService) seasonGroupForSeries(ctx context.Context, id, seriesID, us
 		Where("series_id = ? AND (season_num > 0 OR episode_num > 0)", seriesID)
 	rq = e.applyUserMediaVisibility(ctx, rq, userID)
 	if err := rq.
-		Order("media.season_num asc, media.episode_num asc, media.created_at asc").
+		Order("media.season_num asc, media.episode_num asc, media.episode_fraction asc, media.created_at asc").
 		Limit(embySeriesGroupingLimit).
 		Find(&rows).Error; err != nil {
 		return embySeasonGroup{}, false, err
@@ -194,26 +194,26 @@ func (e *EmbyService) seriesGroupsFromMedia(ctx context.Context, rows []model.Me
 		seriesID := e.seriesIDForMedia(ctx, &row)
 		group, ok := byID[seriesID]
 		if !ok {
-				group = &embySeriesGroup{
-					ID:                 seriesID,
-					LibraryID:          row.LibraryID,
-					Name:               e.seriesNameForMedia(ctx, &row),
-					Year:               row.Year,
-					ReleaseDate:        row.ReleaseDate,
-					TMDbID:             row.TMDbID,
-					BangumiID:          row.BangumiID,
-					CreatedAt:          row.CreatedAt,
-					DateLastMediaAdded: row.CreatedAt,
-				}
-				byID[seriesID] = group
-				order = append(order, seriesID)
+			group = &embySeriesGroup{
+				ID:                 seriesID,
+				LibraryID:          row.LibraryID,
+				Name:               e.seriesNameForMedia(ctx, &row),
+				Year:               row.Year,
+				ReleaseDate:        row.ReleaseDate,
+				TMDbID:             row.TMDbID,
+				BangumiID:          row.BangumiID,
+				CreatedAt:          row.CreatedAt,
+				DateLastMediaAdded: row.CreatedAt,
 			}
-			if row.CreatedAt.Before(group.CreatedAt) || group.CreatedAt.IsZero() {
-				group.CreatedAt = row.CreatedAt
-			}
-			if row.CreatedAt.After(group.DateLastMediaAdded) {
-				group.DateLastMediaAdded = row.CreatedAt
-			}
+			byID[seriesID] = group
+			order = append(order, seriesID)
+		}
+		if row.CreatedAt.Before(group.CreatedAt) || group.CreatedAt.IsZero() {
+			group.CreatedAt = row.CreatedAt
+		}
+		if row.CreatedAt.After(group.DateLastMediaAdded) {
+			group.DateLastMediaAdded = row.CreatedAt
+		}
 		if strings.TrimSpace(row.ReleaseDate) != "" && mediaReleaseSortTime(row).After(embySeriesReleaseSortTime(*group)) {
 			group.ReleaseDate = row.ReleaseDate
 			if row.Year > 0 {
@@ -248,6 +248,9 @@ func (e *EmbyService) seriesGroupsFromMedia(ctx context.Context, rows []model.Me
 			}
 			if group.Episodes[i].EpisodeNum != group.Episodes[j].EpisodeNum {
 				return group.Episodes[i].EpisodeNum < group.Episodes[j].EpisodeNum
+			}
+			if group.Episodes[i].EpisodeFraction != group.Episodes[j].EpisodeFraction {
+				return group.Episodes[i].EpisodeFraction < group.Episodes[j].EpisodeFraction
 			}
 			return group.Episodes[i].CreatedAt.Before(group.Episodes[j].CreatedAt)
 		})

@@ -287,7 +287,7 @@ func (s *MediaService) ListLibrarySeriesEpisodes(ctx context.Context, libraryID,
 	return out, nil
 }
 
-// sortEpisodesForDisplay 与历史行为一致：季/集号升序，再按入库时间兜底。
+// sortEpisodesForDisplay 与历史行为一致：季/集号升序（含半集的小数部分），再按入库时间兜底。
 func sortEpisodesForDisplay(out []model.Media) {
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].SeasonNum != out[j].SeasonNum {
@@ -295,6 +295,9 @@ func sortEpisodesForDisplay(out []model.Media) {
 		}
 		if out[i].EpisodeNum != out[j].EpisodeNum {
 			return out[i].EpisodeNum < out[j].EpisodeNum
+		}
+		if out[i].EpisodeFraction != out[j].EpisodeFraction {
+			return out[i].EpisodeFraction < out[j].EpisodeFraction
 		}
 		return out[i].CreatedAt.Before(out[j].CreatedAt)
 	})
@@ -402,6 +405,9 @@ func (s *MediaService) ListMediaEpisodes(ctx context.Context, mediaID string, vi
 		}
 		if out[i].EpisodeNum != out[j].EpisodeNum {
 			return out[i].EpisodeNum < out[j].EpisodeNum
+		}
+		if out[i].EpisodeFraction != out[j].EpisodeFraction {
+			return out[i].EpisodeFraction < out[j].EpisodeFraction
 		}
 		if out[i].Path != out[j].Path {
 			return out[i].Path < out[j].Path

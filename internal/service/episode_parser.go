@@ -28,9 +28,13 @@ import (
 )
 
 var (
-	patSEnE       = regexp.MustCompile(`(?i)s(\d{1,2})e(\d{1,3})`)
-	patSEnERange  = regexp.MustCompile(`(?i)s(\d{1,2})e(\d{1,3})\s*[-~–—]\s*(?:s(\d{1,2}))?e?(\d{1,3})(?:[^0-9]|$)`)
-	patDanglingSE = regexp.MustCompile(`(?i)(?:^|[\s._-])s\d{1,2}e(?:[\s._-]|$)`)
+	patSEnE = regexp.MustCompile(`(?i)s(\d{1,2})e(\d{1,3})`)
+	// patSEnEFraction 捕获 S01E11.5 这类「半集」写法的小数位：只在 SxxEyy 后
+	// 紧跟一个点加一位数字时成立；解析时还要确认该数字后面不是另一个数字，
+	// 否则 S01E11.1080p 的分辨率会被误读成小数集号。
+	patSEnEFraction = regexp.MustCompile(`(?i)s(\d{1,2})e(\d{1,3})\.(\d)`)
+	patSEnERange    = regexp.MustCompile(`(?i)s(\d{1,2})e(\d{1,3})\s*[-~–—]\s*(?:s(\d{1,2}))?e?(\d{1,3})(?:[^0-9]|$)`)
+	patDanglingSE   = regexp.MustCompile(`(?i)(?:^|[\s._-])s\d{1,2}e(?:[\s._-]|$)`)
 	// patNxE 匹配 1x02 这类季集写法的捕获组，同时用于从标题里剔除季集残留
 	// （ReplaceAllString），因此本身不带边界守卫。解析时改用 patNxEGuarded，
 	// 避免 "1920x1080" 被从中间匹配出 "20x108" 而误判成 S20E108。
@@ -123,6 +127,62 @@ func ParseEpisode(path string) (season, episode int) {
 	return 0, 0
 }
 
+// ParseEpisodeParts 在 ParseEpisode 的基础上返回集号的小数部分：
+// S01E11.5 → (1, 11, 0.5)。小数部分用来把「半集」和同季的整集区分开
+// （折叠/身份键、排序、网页端显示集号都带上它），解析不出来时为 0。
+func ParseEpisodeParts(path string) (season, episode int, fraction float64) {
+	name := mediaSidecarBase(path)
+	if name == "" {
+		name = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	}
+	if m := patSEnE.FindStringSubmatch(name); len(m) == 3 {
+		return mustAtoi(m[1]), mustAtoi(m[2]), episodeFractionFromName(name)
+	}
+	season, episode = ParseEpisode(path)
+	return season, episode, 0
+}
+
+// episodeFractionFromName 从 "S01E11.5" 这类名字里取出小数部分（0.5）。
+// 只在 SxxEyy 后紧跟「点 + 一位数字」、且该数字之后不是数字时才成立，
+// 否则 S01E11.1080p / S01E05.10bit 会被读成小数集号。
+func episodeFractionFromName(name string) float64 {
+	lower := strings.ToLower(name)
+	m := patSEnEFraction.FindStringSubmatchIndex(lower)
+	if len(m) != 8 {
+		return 0
+	}
+	digitsStart, digitsEnd := m[6], m[7]
+	if digitsStart < 0 || digitsEnd <= digitsStart {
+		return 0
+	}
+	if digitsEnd < len(lower) && lower[digitsEnd] >= '0' && lower[digitsEnd] <= '9' {
+		return 0
+	}
+	value, err := strconv.ParseFloat("0."+lower[digitsStart:digitsEnd], 64)
+	if err != nil || value <= 0 || value >= 1 {
+		return 0
+	}
+	return value
+}
+
+// episodeFractionSuffix 把小数部分渲染成身份/显示后缀：0.5 → ".5"，无小数 → ""。
+// 折叠键用它拼接，所以没有小数的集（绝大多数）产生的键与历史完全一致。
+func episodeFractionSuffix(fraction float64) string {
+	if fraction <= 0 || fraction >= 1 {
+		return ""
+	}
+	formatted := strconv.FormatFloat(fraction, 'f', -1, 64)
+	if !strings.HasPrefix(formatted, "0.") {
+		return ""
+	}
+	return formatted[1:]
+}
+
+// FormatEpisodeNumber 把整数集号与小数部分拼成显示集号：11 → "11"，11.5 → "11.5"。
+func FormatEpisodeNumber(episode int, fraction float64) string {
+	return strconv.Itoa(episode) + episodeFractionSuffix(fraction)
+}
+
 // resolutionEpisodeArtifact returns the bogus (season, episode) pair the legacy
 // `(\d{1,2})x(\d{1,3})` pattern would extract from a WxH pixel-dimension token
 // in path — e.g. 1920x1080 -> (20, 108), 3840x2160 -> (40, 216). Reports ok=false
@@ -213,6 +273,21 @@ func onlineEpisodeIdentityFromPath(path string) (season, episode int) {
 		}
 	}
 	return season, episode
+}
+
+// onlineEpisodeFractionFromPath 返回按在线身份规则得到的集号小数部分：
+// S01E11.5 → 0.5。只有在线身份未被重映射（SxxE00 特别篇那种改写）时才给出，
+// 避免把重映射后的特别篇又带上原季的小数。
+func onlineEpisodeFractionFromPath(path string) float64 {
+	season, episode, fraction := ParseEpisodeParts(path)
+	if fraction <= 0 || episode <= 0 {
+		return 0
+	}
+	onlineSeason, onlineEpisode := onlineEpisodeIdentityFromPath(path)
+	if onlineSeason != season || onlineEpisode != episode {
+		return 0
+	}
+	return fraction
 }
 
 type episodeRef struct {

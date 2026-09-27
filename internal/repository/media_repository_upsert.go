@@ -332,6 +332,11 @@ func addMediaPlacementUpdates(updates map[string]any, existing, incoming model.M
 	if episodeChanged {
 		updates["episode_num"] = incoming.EpisodeNum
 	}
+	// 半集的小数部分独立于整数集号比较：S01E11.5 重命名/新增/删除时都要落库，
+	// 否则「11」与「11.5」会被当成同一集折叠。
+	if existing.EpisodeFraction != incoming.EpisodeFraction {
+		updates["episode_fraction"] = incoming.EpisodeFraction
+	}
 	if strings.TrimSpace(existing.ScrapeStatus) == "no_match" && incoming.ScrapeStatus != "matched" && (seasonChanged || episodeChanged) {
 		updates["scrape_status"] = "pending"
 	}

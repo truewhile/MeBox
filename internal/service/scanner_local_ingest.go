@@ -23,18 +23,19 @@ func (s *ScannerService) ingestFile(ctx context.Context, lib *model.Library, roo
 		return
 	}
 
-	parsedSeason, parsedEpisode := ParseEpisode(path)
+	parsedSeason, parsedEpisode, parsedFraction := ParseEpisodeParts(path)
 	localMeta := s.readLocalScanMetadata(lib, root, path, parsedSeason, parsedEpisode)
 	media := s.buildLocalScanMedia(localScanMediaInput{
-		lib:           lib,
-		root:          root,
-		path:          path,
-		ext:           ext,
-		fileID:        fileID,
-		size:          size,
-		parsedSeason:  parsedSeason,
-		parsedEpisode: parsedEpisode,
-		localMeta:     localMeta,
+		lib:            lib,
+		root:           root,
+		path:           path,
+		ext:            ext,
+		fileID:         fileID,
+		size:           size,
+		parsedSeason:   parsedSeason,
+		parsedEpisode:  parsedEpisode,
+		parsedFraction: parsedFraction,
+		localMeta:      localMeta,
 	})
 	isNewMedia, skipUnchanged := s.localMediaScanState(localMediaScanStateInput{
 		ctx:           ctx,
@@ -169,15 +170,16 @@ func localMediaProbeDataMissing(existing existingLocalMedia) bool {
 }
 
 type localScanMediaInput struct {
-	lib           *model.Library
-	root          *model.LibraryRoot
-	path          string
-	ext           string
-	fileID        string
-	size          int64
-	parsedSeason  int
-	parsedEpisode int
-	localMeta     *LocalMetadata
+	lib            *model.Library
+	root           *model.LibraryRoot
+	path           string
+	ext            string
+	fileID         string
+	size           int64
+	parsedSeason   int
+	parsedEpisode  int
+	parsedFraction float64
+	localMeta      *LocalMetadata
 }
 
 func (s *ScannerService) buildLocalScanMedia(in localScanMediaInput) *model.Media {
@@ -191,17 +193,18 @@ func (s *ScannerService) buildLocalScanMedia(in localScanMediaInput) *model.Medi
 	title, year = preferISOParentScrapeIdentity(in.path, in.lib.Path, title, year)
 
 	media := &model.Media{
-		LibraryID:     in.lib.ID,
-		LibraryRootID: libraryRootID(in.root),
-		RelativePath:  localRelativePath(in.path, in.root),
-		Title:         title,
-		Year:          year,
-		Path:          in.path,
-		SizeBytes:     in.size,
-		Container:     strings.TrimPrefix(in.ext, "."),
-		FileID:        in.fileID,
-		SeasonNum:     in.parsedSeason,
-		EpisodeNum:    in.parsedEpisode,
+		LibraryID:       in.lib.ID,
+		LibraryRootID:   libraryRootID(in.root),
+		RelativePath:    localRelativePath(in.path, in.root),
+		Title:           title,
+		Year:            year,
+		Path:            in.path,
+		SizeBytes:       in.size,
+		Container:       strings.TrimPrefix(in.ext, "."),
+		FileID:          in.fileID,
+		SeasonNum:       in.parsedSeason,
+		EpisodeNum:      in.parsedEpisode,
+		EpisodeFraction: in.parsedFraction,
 	}
 	if in.ext == ".strm" {
 		media.Container = "strm"

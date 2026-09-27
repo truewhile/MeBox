@@ -142,7 +142,9 @@ func WriteMediaNFO(m *model.Media) (string, error) {
 	if m.SeasonNum > 0 || m.EpisodeNum > 0 {
 		title := strings.TrimSpace(m.EpisodeTitle)
 		if title == "" && m.EpisodeNum > 0 {
-			title = fmt.Sprintf("第 %d 集", m.EpisodeNum)
+			// 兜底标题也要带上小数：S01E11.5 导出成「第 11.5 集」，
+			// 否则回写 NFO 后重新入库会把半集写成普通的第 11 集。
+			title = fmt.Sprintf("第 %s 集", FormatEpisodeNumber(m.EpisodeNum, m.EpisodeFraction))
 		}
 		if title == "" {
 			title = strings.TrimSpace(m.Title)

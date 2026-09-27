@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, Cloud, Film, Layers, Play, Search, X } from 'lucide-react'
 
 import type { Media } from '../types'
+import { formatEpisodeLabel, formatEpisodeNumber, episodeNumberValue } from '../utils/episodeNumber'
 import { seasonLabel, seasonSortOrder, seriesTitleFromPath } from '../utils/groupSeries'
 import {
   isStrmMedia,
@@ -72,7 +73,7 @@ export function PlayerPlaylistPanel({
       seasonsMap.get(s)!.push(ep)
     }
     for (const [, list] of seasonsMap) {
-      list.sort((a, b) => (a.episode_num || 0) - (b.episode_num || 0))
+      list.sort((a, b) => episodeNumberValue(a) - episodeNumberValue(b))
     }
     return Array.from(seasonsMap.entries())
       .sort(([a], [b]) => seasonSortOrder(a) - seasonSortOrder(b))
@@ -118,7 +119,7 @@ export function PlayerPlaylistPanel({
     ? listToDisplay.filter((ep) => {
         const query = filterText.trim().toLowerCase()
         const title = (ep.episode_title || ep.title || '').toLowerCase()
-        const epNum = String(ep.episode_num)
+        const epNum = formatEpisodeNumber(ep)
         return title.includes(query) || epNum === query || `e${epNum}`.includes(query) || `第${epNum}集`.includes(query)
       })
     : listToDisplay
@@ -293,7 +294,7 @@ export function PlayerPlaylistPanel({
                 const durationText =
                   ep.duration_sec > 0 ? `${Math.round(ep.duration_sec / 60)} 分钟` : ''
                 const cellTitle = [
-                  ep.episode_num > 0 ? `第 ${ep.episode_num} 集` : '',
+                  formatEpisodeLabel(ep),
                   displayTitle,
                   durationText,
                   versions.length > 0 ? `${versions.length} 个版本` : '',
@@ -316,7 +317,7 @@ export function PlayerPlaylistPanel({
                       {isPlaying ? (
                         <Play size={12} className="fill-current" />
                       ) : ep.episode_num > 0 ? (
-                        ep.episode_num
+                        formatEpisodeNumber(ep)
                       ) : (
                         <Film size={13} className="text-white/45" />
                       )}
@@ -429,7 +430,8 @@ function getEpisodeTitle(ep: Media, siblings: Media[]): string {
     return mediaTitle
   }
 
-  return ep.episode_num > 0 ? `第 ${ep.episode_num} 集` : mediaTitle || title || '未命名'
+  const episodeLabel = formatEpisodeLabel(ep)
+  return episodeLabel || mediaTitle || title || '未命名'
 }
 
 function looksLikeSeriesTitle(ep: Media, title: string, siblings: Media[]): boolean {

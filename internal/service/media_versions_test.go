@@ -737,3 +737,53 @@ func TestMediaAdultGroupCodeRequiresNSFW(t *testing.T) {
 		})
 	}
 }
+
+// S01E11 与 S01E11.5 必须折叠成两条不同记录（既不合并，也不丢集），
+// 且 11.5 排在 11 之后、12 之前。这是「第一季分集加载不出来」那次的根因：
+// 两条同季同集的记录被折成一条，计数与返回条目对不上。
+func TestGroupEpisodeVersionsForDisplayKeepsHalfEpisodeSeparate(t *testing.T) {
+	rows := []model.Media{
+		{Base: model.Base{ID: "ep12"}, LibraryID: "anime", Title: "三月的狮子", SeasonNum: 1, EpisodeNum: 12, TMDbID: 65336, Path: "/anime/三月的狮子/3月的狮子 S01E12.mkv"},
+		{Base: model.Base{ID: "ep11"}, LibraryID: "anime", Title: "三月的狮子", SeasonNum: 1, EpisodeNum: 11, TMDbID: 65336, Path: "/anime/三月的狮子/3月的狮子 S01E11.mkv"},
+		{Base: model.Base{ID: "ep11half"}, LibraryID: "anime", Title: "三月的狮子", SeasonNum: 1, EpisodeNum: 11, EpisodeFraction: 0.5, TMDbID: 65336, Path: "/anime/三月的狮子/3月的狮子 S01E11.5.mkv"},
+	}
+
+	grouped := GroupEpisodeVersionsForDisplay(rows)
+	if len(grouped) != 3 {
+		t.Fatalf("grouped len = %d, want 3 (11 / 11.5 / 12): %#v", len(grouped), grouped)
+	}
+	wantOrder := []string{"ep11", "ep11half", "ep12"}
+	for i, want := range wantOrder {
+		if grouped[i].ID != want {
+			t.Fatalf("grouped[%d] = %q, want %q (order %#v)", i, grouped[i].ID, want, grouped)
+		}
+	}
+	for _, item := range grouped {
+		if len(item.Versions) != 0 {
+			t.Fatalf("half episode must not fold with the integral one: %#v", grouped)
+		}
+	}
+}
+
+// 版本身份键必须区分 11 与 11.5，同时保持没有小数时的历史键不变。
+func TestMediaVersionGroupKeyDistinguishesHalfEpisode(t *testing.T) {
+	base := model.Media{LibraryID: "anime", Title: "三月的狮子", SeasonNum: 1, EpisodeNum: 11}
+	plain := base
+	half := base
+	half.EpisodeFraction = 0.5
+
+	plainKey := mediaVersionGroupKey(plain)
+	halfKey := mediaVersionGroupKey(half)
+	if plainKey == "" || halfKey == "" {
+		t.Fatalf("version keys must not be empty: %q %q", plainKey, halfKey)
+	}
+	if plainKey == halfKey {
+		t.Fatalf("11 and 11.5 must have different version keys, both = %q", plainKey)
+	}
+	if !strings.HasSuffix(halfKey, "1:11.5") {
+		t.Fatalf("half episode key = %q, want suffix 1:11.5", halfKey)
+	}
+	if !strings.HasSuffix(plainKey, "1:11") {
+		t.Fatalf("plain episode key = %q, want suffix 1:11", plainKey)
+	}
+}

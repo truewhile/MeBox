@@ -134,6 +134,9 @@ func GroupEpisodeVersionsForDisplay(items []model.Media) []MediaItem {
 		if grouped[i].EpisodeNum != grouped[j].EpisodeNum {
 			return grouped[i].EpisodeNum < grouped[j].EpisodeNum
 		}
+		if grouped[i].EpisodeFraction != grouped[j].EpisodeFraction {
+			return grouped[i].EpisodeFraction < grouped[j].EpisodeFraction
+		}
 		return grouped[i].CreatedAt.Before(grouped[j].CreatedAt)
 	})
 	return grouped
@@ -192,7 +195,7 @@ func adultVouchedGroupKey(m model.Media, vouched map[string]bool) string {
 	return fmt.Sprintf("adult:%s:%s", libKey, code)
 }
 
-func mediaVersionGroupKey(m model.Media) string {	// 远程 Emby 挂载条目保持独立，不与其它远程条目或本地条目折叠合并。
+func mediaVersionGroupKey(m model.Media) string { // 远程 Emby 挂载条目保持独立，不与其它远程条目或本地条目折叠合并。
 	if IsEmbyRemoteID(m.ID) {
 		return fmt.Sprintf("embyremote:%s", m.ID)
 	}
@@ -200,11 +203,15 @@ func mediaVersionGroupKey(m model.Media) string {	// 远程 Emby 挂载条目保
 	libKey := mediaVersionLibraryKey(m)
 	specialKind := mediaSpecialKind(m.Path)
 	season, episode := m.SeasonNum, m.EpisodeNum
+	fraction := m.EpisodeFraction
 	if specialKind != "" && specialKind != mediaSpecialTheatrical && episode <= 0 {
-		if parsedSeason, parsedEpisode := ParseEpisode(m.Path); parsedEpisode > 0 {
-			season, episode = parsedSeason, parsedEpisode
+		if parsedSeason, parsedEpisode, parsedFraction := ParseEpisodeParts(m.Path); parsedEpisode > 0 {
+			season, episode, fraction = parsedSeason, parsedEpisode, parsedFraction
 		}
 	}
+	// 集号后缀：S01E11.5 记成 "11.5"，没有小数的集后缀为空，
+	// 因此绝大多数条目的版本身份键与历史完全一致。
+	episodeTag := fmt.Sprintf("%d:%d%s", season, episode, episodeFractionSuffix(fraction))
 
 	if season > 0 || episode > 0 {
 		kind := specialKind
@@ -213,13 +220,13 @@ func mediaVersionGroupKey(m model.Media) string {	// 远程 Emby 挂载条目保
 		}
 		switch {
 		case m.TMDbID > 0:
-			return fmt.Sprintf("episode:%s:tmdb:%d:%d:%d", kind, m.TMDbID, season, episode)
+			return fmt.Sprintf("episode:%s:tmdb:%d:%s", kind, m.TMDbID, episodeTag)
 		case m.BangumiID > 0:
-			return fmt.Sprintf("episode:%s:bangumi:%d:%d:%d", kind, m.BangumiID, season, episode)
+			return fmt.Sprintf("episode:%s:bangumi:%d:%s", kind, m.BangumiID, episodeTag)
 		case strings.TrimSpace(m.DoubanID) != "":
-			return fmt.Sprintf("episode:%s:douban:%s:%d:%d", kind, strings.ToLower(strings.TrimSpace(m.DoubanID)), season, episode)
+			return fmt.Sprintf("episode:%s:douban:%s:%s", kind, strings.ToLower(strings.TrimSpace(m.DoubanID)), episodeTag)
 		case strings.TrimSpace(m.TheTVDBID) != "":
-			return fmt.Sprintf("episode:%s:thetvdb:%s:%d:%d", kind, strings.ToLower(strings.TrimSpace(m.TheTVDBID)), season, episode)
+			return fmt.Sprintf("episode:%s:thetvdb:%s:%s", kind, strings.ToLower(strings.TrimSpace(m.TheTVDBID)), episodeTag)
 		}
 		title := firstNonEmpty(m.OriginalName, m.Title)
 		if title == "" {
@@ -234,7 +241,7 @@ func mediaVersionGroupKey(m model.Media) string {	// 远程 Emby 挂载条目保
 			kind,
 			libKey,
 			title,
-			fmt.Sprintf("%d:%d", season, episode),
+			episodeTag,
 		}, "|")
 	}
 

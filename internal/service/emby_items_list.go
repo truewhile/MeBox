@@ -153,6 +153,9 @@ func (e *EmbyService) episodeItems(ctx context.Context, rows []model.Media, p It
 		if rows[i].EpisodeNum != rows[j].EpisodeNum {
 			return rows[i].EpisodeNum < rows[j].EpisodeNum
 		}
+		if rows[i].EpisodeFraction != rows[j].EpisodeFraction {
+			return rows[i].EpisodeFraction < rows[j].EpisodeFraction
+		}
 		return rows[i].CreatedAt.Before(rows[j].CreatedAt)
 	})
 	// 先折叠同集的多个版本再统计总数与分页，与 payloadsForMedia 内部保持同一步骤。

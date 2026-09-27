@@ -11,6 +11,7 @@ import {
   THEATRICAL_SEASON,
 } from '../utils/groupSeries'
 import { formatSize } from './libraryPageModel'
+import { formatEpisodeLabel, formatEpisodeNumber } from '../utils/episodeNumber'
 
 type SeasonGroup = {
   season: number
@@ -95,14 +96,14 @@ export function LibrarySeriesEpisodes({
                         referrerPolicy="no-referrer"
                       />
                     ) : (
-                      <span className="text-brand-600 font-bold text-sm">{ep.episode_num || '—'}</span>
+                      <span className="text-brand-600 font-bold text-sm">{formatEpisodeNumber(ep) || '—'}</span>
                     )}
                     <div className="absolute inset-0 flex items-center justify-center bg-black/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
                       <Play size={15} className="fill-white text-white drop-shadow-sm" />
                     </div>
                     {ep.episode_num > 0 && (
                       <span className="absolute bottom-0 right-0 rounded-tl bg-black/75 px-1 py-0.5 text-[9px] font-bold leading-none text-white backdrop-blur-[2px]">
-                        {ep.episode_num}
+                        {formatEpisodeNumber(ep)}
                       </span>
                     )}
                   </div>
@@ -153,15 +154,18 @@ function episodeDisplayTitle(ep: Media, siblings: Media[]): string {
     }
   }
 
-  if (ep.episode_num > 0) {
+  const episodeLabel = formatEpisodeLabel(ep)
+  if (episodeLabel) {
     if (!mainTitle) {
-      return `第 ${ep.episode_num} 集`
+      return episodeLabel
     }
-    const prefixRegex = new RegExp(`^(第\\s*0*${ep.episode_num}\\s*集|ep?\\.?\\s*0*${ep.episode_num}\\b)`, 'i')
+    // 标题里已经以「第 11 集 / 第 11.5 集 / ep 11」开头时直接用它，避免重复前缀。
+    const episodeNumber = formatEpisodeNumber(ep).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const prefixRegex = new RegExp(`^(第\\s*0*${episodeNumber}\\s*集|ep?\\.?\\s*0*${episodeNumber}\\b)`, 'i')
     if (prefixRegex.test(mainTitle)) {
       return mainTitle
     }
-    return `第 ${ep.episode_num} 集 · ${mainTitle}`
+    return `${episodeLabel} · ${mainTitle}`
   }
 
   return mainTitle || '未命名'

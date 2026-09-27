@@ -33,7 +33,7 @@ func (e *EmbyService) mediaVersionSiblings(ctx context.Context, m *model.Media) 
 	}
 	q := e.repo.DB.WithContext(ctx).Model(&model.Media{}).
 		Where("library_id IN ?", libraryIDs).
-		Where("season_num = ? AND episode_num = ?", m.SeasonNum, m.EpisodeNum)
+		Where("season_num = ? AND episode_num = ? AND episode_fraction = ?", m.SeasonNum, m.EpisodeNum, m.EpisodeFraction)
 	if m.TMDbID > 0 {
 		q = q.Where("tm_db_id = ?", m.TMDbID)
 	} else if m.BangumiID > 0 {
@@ -110,11 +110,15 @@ func (e *EmbyService) mediaVersionKey(ctx context.Context, m *model.Media) strin
 	}
 	kind := mediaSpecialKind(m.Path)
 	season, episode := m.SeasonNum, m.EpisodeNum
+	fraction := m.EpisodeFraction
 	if kind != "" && kind != mediaSpecialTheatrical && episode <= 0 {
-		if parsedSeason, parsedEpisode := ParseEpisode(m.Path); parsedEpisode > 0 {
-			season, episode = parsedSeason, parsedEpisode
+		if parsedSeason, parsedEpisode, parsedFraction := ParseEpisodeParts(m.Path); parsedEpisode > 0 {
+			season, episode, fraction = parsedSeason, parsedEpisode, parsedFraction
 		}
 	}
+	// 集号后缀让 S01E11.5 与 S01E11 属于不同版本组；没有小数时后缀为空，
+	// 键与历史完全一致。
+	fractionSuffix := episodeFractionSuffix(fraction)
 	kindKey := ""
 	if kind != "" {
 		kindKey = "|kind:" + kind
@@ -126,10 +130,10 @@ func (e *EmbyService) mediaVersionKey(ctx context.Context, m *model.Media) strin
 		return libraryGroup + "|special-item:" + kind + "|id:" + m.ID
 	}
 	if m.TMDbID > 0 {
-		return fmt.Sprintf("%s|tmdb:%d|s:%d|e:%d%s", libraryGroup, m.TMDbID, season, episode, kindKey)
+		return fmt.Sprintf("%s|tmdb:%d|s:%d|e:%d%s%s", libraryGroup, m.TMDbID, season, episode, fractionSuffix, kindKey)
 	}
 	if m.BangumiID > 0 {
-		return fmt.Sprintf("%s|bangumi:%d|s:%d|e:%d%s", libraryGroup, m.BangumiID, season, episode, kindKey)
+		return fmt.Sprintf("%s|bangumi:%d|s:%d|e:%d%s%s", libraryGroup, m.BangumiID, season, episode, fractionSuffix, kindKey)
 	}
 	title := strings.ToLower(strings.TrimSpace(m.Title))
 	if title == "" {
@@ -138,7 +142,7 @@ func (e *EmbyService) mediaVersionKey(ctx context.Context, m *model.Media) strin
 	if title == "" {
 		return ""
 	}
-	return fmt.Sprintf("%s|title:%s|y:%d|s:%d|e:%d%s", libraryGroup, title, m.Year, season, episode, kindKey)
+	return fmt.Sprintf("%s|title:%s|y:%d|s:%d|e:%d%s%s", libraryGroup, title, m.Year, season, episode, fractionSuffix, kindKey)
 }
 
 func preferMediaVersion(candidate, current model.Media) bool {

@@ -10,6 +10,7 @@ import {
   type SeriesCard,
 } from '../utils/groupSeries'
 import { resolveSeriesCardByKey } from '../utils/seriesCardResolve'
+import { episodeNumberValue } from '../utils/episodeNumber'
 
 type SeasonEpisodes = {
   season: number
@@ -72,7 +73,7 @@ export function useLibrarySeriesSelection({
       seasons.get(s)!.push(ep)
     }
     for (const [, list] of seasons) {
-      list.sort((a, b) => (a.episode_num || 0) - (b.episode_num || 0))
+      list.sort((a, b) => episodeNumberValue(a) - episodeNumberValue(b))
     }
     return Array.from(seasons.entries())
       .sort(([a], [b]) => seasonSortOrder(a) - seasonSortOrder(b))

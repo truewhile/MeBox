@@ -83,6 +83,8 @@ export interface MediaMetadataUpdate {
   rating?: number
   season_num?: number
   episode_num?: number
+  /** 集号的小数部分（11.5 的 0.5）；与 episode_num 一起构成显示集号。 */
+  episode_fraction?: number
   tmdb_id?: number
   bangumi_id?: number
   douban_id?: string

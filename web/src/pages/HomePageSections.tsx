@@ -28,6 +28,7 @@ import type { SeriesCard } from '../utils/groupSeries'
 import { seriesCardLink } from '../utils/groupSeries'
 import { isRemoteEmbyID } from '../utils/remoteEmby'
 import { getLibraryArtworks } from './librariesPageModel'
+import { formatEpisodeNumber } from '../utils/episodeNumber'
 
 const TYPE_ICONS: Record<string, ReactNode> = {
   movie: <Film size={18} />,
@@ -773,7 +774,7 @@ function ContinueCard({ media, progress }: { media: Media; progress: number }) {
           {media.year > 0 && <span>{media.year}</span>}
           {media.season_num !== undefined && media.episode_num !== undefined && (
             <span>
-              S{media.season_num}E{media.episode_num}
+              S{media.season_num}E{formatEpisodeNumber(media)}
             </span>
           )}
         </div>

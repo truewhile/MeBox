@@ -19,6 +19,7 @@ import { profileAPI } from '../api/profile'
 import { useAuthStore } from '../stores/auth'
 import type { Media, PlaybackInfo, PlaybackQuality, PlaybackSegment, PlaybackSegmentKind } from '../types'
 import { getSeriesKey, seriesTitleFromPath } from '../utils/groupSeries'
+import { formatEpisodeLabel } from '../utils/episodeNumber'
 import { mediaVersionMatches, mediaVersionsOf } from '../utils/mediaVersion'
 import { DEFAULT_PLAYBACK_RATE, normalizePlaybackRate } from '../utils/playbackRate'
 import { resolveActiveSkip, skippedNoticeText, toSkipSegments, type SkipPrompt } from '../utils/skipSegments'
@@ -2347,7 +2348,8 @@ function formatEpisodeDisplay(ep: Media, siblings: Media[]): string {
     return mediaTitle
   }
 
-  return ep.episode_num > 0 ? `第 ${ep.episode_num} 集` : mediaTitle || title || '未命名'
+  const episodeLabel = formatEpisodeLabel(ep)
+  return episodeLabel || mediaTitle || title || '未命名'
 }
 
 function findPlaybackQualityById(info: PlaybackInfo | null, id: string): PlaybackQuality | undefined {

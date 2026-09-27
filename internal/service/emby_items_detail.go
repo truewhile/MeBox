@@ -682,9 +682,21 @@ func (e *EmbyService) itemPayload(ctx context.Context, m *model.Media, fav bool,
 		seasonID = e.seasonIDForMedia(ctx, m)
 		parentID = seasonID
 		episodeTitle := strings.TrimSpace(m.EpisodeTitle)
-		if episodeTitle != "" {
+		// 半集（S01E11.5）在 Emby 协议里只能占用整数 IndexNumber 11，标题里
+		// 不再带上小数就会和真正的第 11 集完全分不清，所以显式补上集号。
+		halfLabel := ""
+		if m.EpisodeFraction > 0 && m.EpisodeNum > 0 {
+			halfLabel = fmt.Sprintf("第 %s 集", FormatEpisodeNumber(m.EpisodeNum, m.EpisodeFraction))
+		}
+		switch {
+		case episodeTitle != "":
 			name = episodeTitle
-		} else if m.EpisodeNum > 0 {
+			if halfLabel != "" && !strings.HasPrefix(episodeTitle, halfLabel) {
+				name = halfLabel + " · " + episodeTitle
+			}
+		case halfLabel != "":
+			name = halfLabel
+		case m.EpisodeNum > 0:
 			name = fmt.Sprintf("第 %d 集", m.EpisodeNum)
 		}
 	}

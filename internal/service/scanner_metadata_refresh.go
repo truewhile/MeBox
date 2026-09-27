@@ -17,6 +17,9 @@ type scanDerivedMetadata struct {
 	TheTVDBID    string
 	SeasonNum    int
 	EpisodeNum   int
+	// EpisodeFraction 是集号的小数部分（S01E11.5 → 0.5）：它变化时同样要刷新，
+	// 否则已有行上的半集标记永远写不进去。
+	EpisodeFraction float64
 }
 
 func localMetadataNeedsRefresh(existing existingLocalMedia, local *LocalMetadata) bool {
@@ -97,16 +100,17 @@ func localDerivedMetadataNeedsRefresh(existing existingLocalMedia, incoming *mod
 		return true
 	}
 	return scanDerivedMetadataNeedsRefresh(scanDerivedMetadata{
-		Title:        existing.Title,
-		ScrapeStatus: existing.ScrapeStatus,
-		Year:         existing.Year,
-		ReleaseDate:  existing.ReleaseDate,
-		TMDbID:       existing.TMDbID,
-		BangumiID:    existing.BangumiID,
-		DoubanID:     existing.DoubanID,
-		TheTVDBID:    existing.TheTVDBID,
-		SeasonNum:    existing.SeasonNum,
-		EpisodeNum:   existing.EpisodeNum,
+		Title:           existing.Title,
+		ScrapeStatus:    existing.ScrapeStatus,
+		Year:            existing.Year,
+		ReleaseDate:     existing.ReleaseDate,
+		TMDbID:          existing.TMDbID,
+		BangumiID:       existing.BangumiID,
+		DoubanID:        existing.DoubanID,
+		TheTVDBID:       existing.TheTVDBID,
+		SeasonNum:       existing.SeasonNum,
+		EpisodeNum:      existing.EpisodeNum,
+		EpisodeFraction: existing.EpisodeFraction,
 	}, incoming)
 }
 
@@ -126,6 +130,9 @@ func scanDerivedMetadataNeedsRefresh(existing scanDerivedMetadata, incoming *mod
 		return true
 	}
 	if incoming.EpisodeNum > 0 && existing.EpisodeNum != incoming.EpisodeNum {
+		return true
+	}
+	if (incoming.SeasonNum > 0 || incoming.EpisodeNum > 0) && existing.EpisodeFraction != incoming.EpisodeFraction {
 		return true
 	}
 	if incoming.TMDbID > 0 && existing.TMDbID != incoming.TMDbID {

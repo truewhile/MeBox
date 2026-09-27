@@ -7,6 +7,7 @@ import { ExternalPlayerButton } from '../components/ExternalPlayerButton'
 import { MediaFavouriteButton } from '../components/MediaFavouriteButton'
 import type { Media } from '../types'
 import { isTheatricalFeature, seriesTitle, type SeriesCard } from '../utils/groupSeries'
+import { episodeNumberValue } from '../utils/episodeNumber'
 
 type LibrarySeriesDetailHeaderProps = {
   series: SeriesCard
@@ -152,7 +153,7 @@ function firstPlayableEpisode(episodes: Media[]): Media | null {
   const sorted = [...episodes]
   sorted.sort((a, b) =>
     (a.season_num || 0) - (b.season_num || 0)
-    || (a.episode_num || 0) - (b.episode_num || 0),
+    || episodeNumberValue(a) - episodeNumberValue(b),
   )
   return sorted[0] ?? null
 }

@@ -152,3 +152,60 @@ func TestDropResolutionArtifactEpisodeIdentity(t *testing.T) {
 		t.Fatalf("legitimate S20E108 identity was cleared: %+v", legit)
 	}
 }
+
+// S01E11.5 这类「半集」要保留小数部分，才能和真正的第 11 集区分开；
+// 同时不能把 S01E11.1080p / S01E05.10bit 这类分辨率、位深读成小数集号。
+func TestParseEpisodePartsReadsHalfEpisodes(t *testing.T) {
+	cases := []struct {
+		name         string
+		path         string
+		wantSeason   int
+		wantEpisode  int
+		wantFraction float64
+	}{
+		{"half episode in anime folder", `动漫/三月的狮子/3月的狮子 S01E11.5.mkv.strm`, 1, 11, 0.5},
+		{"half episode bare", `三月的狮子 S01E07.5.mkv`, 1, 7, 0.5},
+		{"plain episode has no fraction", `三月的狮子 S01E11.mkv`, 1, 11, 0},
+		{"resolution is not a fraction", `Show S01E11.1080p.WEB-DL.mkv`, 1, 11, 0},
+		{"bit depth is not a fraction", `Show S01E05.10bit.mkv`, 1, 5, 0},
+		{"special naming keeps integral episode", `三月的狮子 S00E11.mkv`, 0, 11, 0},
+		{"no episode marker", `movie.mkv`, 0, 0, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			season, episode, fraction := ParseEpisodeParts(tc.path)
+			if season != tc.wantSeason || episode != tc.wantEpisode || fraction != tc.wantFraction {
+				t.Fatalf("ParseEpisodeParts(%q) = (%d, %d, %v), want (%d, %d, %v)",
+					tc.path, season, episode, fraction, tc.wantSeason, tc.wantEpisode, tc.wantFraction)
+			}
+			// ParseEpisode 必须保持原行为（只返回整数季集号）。
+			plainSeason, plainEpisode := ParseEpisode(tc.path)
+			if plainSeason != tc.wantSeason || plainEpisode != tc.wantEpisode {
+				t.Fatalf("ParseEpisode(%q) = (%d, %d), want (%d, %d)",
+					tc.path, plainSeason, plainEpisode, tc.wantSeason, tc.wantEpisode)
+			}
+		})
+	}
+}
+
+func TestOnlineEpisodeFractionFromPath(t *testing.T) {
+	if got := onlineEpisodeFractionFromPath(`动漫/三月的狮子/3月的狮子 S01E11.5.mkv.strm`); got != 0.5 {
+		t.Fatalf("half episode fraction = %v, want 0.5", got)
+	}
+	if got := onlineEpisodeFractionFromPath(`三月的狮子 S01E11.mkv`); got != 0 {
+		t.Fatalf("plain episode fraction = %v, want 0", got)
+	}
+	// S01E00 会被重映射成特别篇 S00E01，此时不能再带上原季的小数规则。
+	if got := onlineEpisodeFractionFromPath(`三月的狮子 S01E00.mkv`); got != 0 {
+		t.Fatalf("remapped special fraction = %v, want 0", got)
+	}
+}
+
+func TestFormatEpisodeNumber(t *testing.T) {
+	if got := FormatEpisodeNumber(11, 0.5); got != "11.5" {
+		t.Fatalf("FormatEpisodeNumber(11, 0.5) = %q, want 11.5", got)
+	}
+	if got := FormatEpisodeNumber(11, 0); got != "11" {
+		t.Fatalf("FormatEpisodeNumber(11, 0) = %q, want 11", got)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -307,5 +308,65 @@ func TestEmbyShowEpisodesPagingAdvances(t *testing.T) {
 	third, _ := fetchEpisodeIDs(t, router, secret, base+"&StartIndex=2&Limit=1")
 	if len(third) != 0 {
 		t.Fatalf("page 3 = %#v, want an empty page so clients stop paging", third)
+	}
+}
+
+// 半集（S01E11.5）在 Emby 侧必须和第 11 集并列返回：一旦被折成一个条目，
+// TotalRecordCount 就会比 Items 多一条，按总数翻页的客户端会一直重发同一页
+// （这就是「第一季分集加载不出来」的根因）。Emby 的 IndexNumber 只能是整数，
+// 所以集号仍占 11，小数通过条目名体现。
+func TestEmbyShowEpisodesKeepsHalfEpisodeVisible(t *testing.T) {
+	router, secret, seriesID := embySeriesRouter(t, []model.Media{
+		{
+			Base:       model.Base{ID: "e11"},
+			Title:      "三月的狮子",
+			Path:       "D:\\media\\tv\\三月的狮子\\三月的狮子 - S01E11.mkv",
+			SeasonNum:  1,
+			EpisodeNum: 11,
+			Container:  "mkv",
+		},
+		{
+			Base:            model.Base{ID: "e11half"},
+			Title:           "三月的狮子",
+			Path:            "D:\\media\\tv\\三月的狮子\\三月的狮子 - S01E11.5.mkv",
+			SeasonNum:       1,
+			EpisodeNum:      11,
+			EpisodeFraction: 0.5,
+			Container:       "mkv",
+		},
+		{
+			Base:       model.Base{ID: "e12"},
+			Title:      "三月的狮子",
+			Path:       "D:\\media\\tv\\三月的狮子\\三月的狮子 - S01E12.mkv",
+			SeasonNum:  1,
+			EpisodeNum: 12,
+			Container:  "mkv",
+		},
+	})
+
+	items, total := fetchEpisodeItems(t, router, secret, "/Shows/"+seriesID+"/Episodes?Season=1")
+	if total != 3 || len(items) != 3 {
+		t.Fatalf("TotalRecordCount = %d, items = %d, want 3/3", total, len(items))
+	}
+	wantOrder := []string{"e11", "e11half", "e12"}
+	for i, want := range wantOrder {
+		id, _ := items[i]["Id"].(string)
+		if id != want {
+			t.Fatalf("items[%d] = %q, want %q (order %#v)", i, id, want, items)
+		}
+	}
+	for _, item := range items {
+		sources, _ := item["MediaSources"].([]any)
+		if len(sources) != 1 {
+			t.Fatalf("item %v folded %d sources, want 1", item["Id"], len(sources))
+		}
+	}
+
+	halfName, _ := items[1]["Name"].(string)
+	if !strings.HasPrefix(halfName, "第 11.5 集") {
+		t.Fatalf("half episode name = %q, want prefix 第 11.5 集", halfName)
+	}
+	if idx, _ := items[1]["IndexNumber"].(float64); int(idx) != 11 {
+		t.Fatalf("half episode IndexNumber = %v, want 11 (Emby only supports integers)", items[1]["IndexNumber"])
 	}
 }

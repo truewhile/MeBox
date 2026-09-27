@@ -4,6 +4,7 @@ import toast from 'react-hot-toast'
 
 import { mediaAPI, type MediaMetadataUpdate } from '../api/library'
 import type { Media } from '../types'
+import { formatEpisodeNumber } from '../utils/episodeNumber'
 
 interface MetadataEditDialogProps {
   open: boolean
@@ -58,7 +59,7 @@ export function MetadataEditDialog({
       release_date: media.release_date || '',
       rating: media.rating > 0 ? String(media.rating) : '',
       season_num: media.season_num > 0 || media.episode_num > 0 ? String(media.season_num || 0) : '',
-      episode_num: media.episode_num > 0 ? String(media.episode_num) : '',
+      episode_num: media.episode_num > 0 ? formatEpisodeNumber(media) : '',
       tmdb_id: media.tmdb_id > 0 ? String(media.tmdb_id) : '',
       bangumi_id: media.bangumi_id > 0 ? String(media.bangumi_id) : '',
       douban_id: media.douban_id || '',
@@ -105,7 +106,11 @@ export function MetadataEditDialog({
     if (!isSeries) {
       payload.original_name = form.original_name
       payload.season_num = Math.trunc(toNumber(form.season_num))
-      payload.episode_num = Math.trunc(toNumber(form.episode_num))
+      // 「集」输入框接受 11.5 这种半集写法：整数部分进 episode_num，
+      // 小数部分单独进 episode_fraction，避免保存后变成整集或残留小数。
+      const episodeValue = toNumber(form.episode_num)
+      payload.episode_num = Math.trunc(episodeValue)
+      payload.episode_fraction = Number((episodeValue - Math.trunc(episodeValue)).toFixed(3))
     }
     return payload
   }
