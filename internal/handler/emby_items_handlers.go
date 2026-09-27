@@ -231,12 +231,24 @@ func embyShowEpisodesHandler(svc *service.Container) gin.HandlerFunc {
 			// 不一致时把结果过滤成空集。
 			seasonIndex = nil
 		}
+		// Emby 客户端按 StartIndex/Limit 分页拉取分集，并在已收条目数小于
+		// TotalRecordCount 时继续请求下一页。忽略这两个参数会让客户端永远
+		// 停在第一页、反复重发同一请求（现象是分集列表一直加载不出来）。
+		limit, _ := strconv.Atoi(embyFirstNonEmptyString(firstQueryValue(c, "Limit", "limit"), "500"))
+		if limit <= 0 {
+			limit = 500
+		}
+		startIndex, _ := strconv.Atoi(embyFirstNonEmptyString(firstQueryValue(c, "StartIndex", "startIndex", "startindex"), "0"))
+		if startIndex < 0 {
+			startIndex = 0
+		}
 		params := service.ItemsParams{
 			UserID:           embyEffectiveUserID(c),
 			ParentID:         parentID,
 			IncludeItemTypes: []string{"Episode"},
 			Recursive:        true,
-			Limit:            500,
+			Limit:            limit,
+			StartIndex:       startIndex,
 			SeasonIndex:      seasonIndex,
 		}
 		out, err := svc.Emby.Items(c.Request.Context(), params)

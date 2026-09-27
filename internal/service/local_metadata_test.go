@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/truewhile/MeBox/internal/model"
 )
 
 func TestReadLocalMetadataDropsResolutionArtifactEpisode(t *testing.T) {
@@ -434,5 +436,50 @@ func TestReadLocalMetadataFindsLegacyImgPoster(t *testing.T) {
 	}
 	if got == nil || got.PosterURL != poster {
 		t.Fatalf("PosterURL = %q, want legacy .img poster %q", got.PosterURL, poster)
+	}
+}
+
+// tvshow.nfo 里 scraper 写的 <season>-1</season>（整剧级"不适用"哨兵）不能覆盖
+// 文件名解析出的季号：一旦覆盖，该集会被写成 -1，网页端按 seasonLabel(-1) 显示成
+// 「剧场版」，Emby 端也只能落进特别篇。S00Exx 这类特别篇命名应保留第 0 季。
+func TestApplyLocalEpisodeMetadataIgnoresNegativeSeasonSentinel(t *testing.T) {
+	cases := []struct {
+		name        string
+		parsed      model.Media
+		local       LocalMetadata
+		wantSeason  int
+		wantEpisode int
+	}{
+		{
+			name:        "show level sentinel keeps parsed season",
+			parsed:      model.Media{SeasonNum: 2, EpisodeNum: 5},
+			local:       LocalMetadata{SeasonNum: -1, EpisodeNum: 5, HasNFO: true},
+			wantSeason:  2,
+			wantEpisode: 5,
+		},
+		{
+			name:        "special naming keeps season zero",
+			parsed:      model.Media{SeasonNum: 0, EpisodeNum: 11},
+			local:       LocalMetadata{SeasonNum: -1, EpisodeNum: 11, HasNFO: true},
+			wantSeason:  0,
+			wantEpisode: 11,
+		},
+		{
+			name:        "positive episode season still applies",
+			parsed:      model.Media{SeasonNum: 0, EpisodeNum: 11},
+			local:       LocalMetadata{SeasonNum: 1, EpisodeNum: 11, HasNFO: true},
+			wantSeason:  1,
+			wantEpisode: 11,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			media := tc.parsed
+			local := tc.local
+			applyLocalMetadata(&media, &local)
+			if media.SeasonNum != tc.wantSeason || media.EpisodeNum != tc.wantEpisode {
+				t.Fatalf("season/episode = %d/%d, want %d/%d", media.SeasonNum, media.EpisodeNum, tc.wantSeason, tc.wantEpisode)
+			}
+		})
 	}
 }

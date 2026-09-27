@@ -155,6 +155,10 @@ func (e *EmbyService) episodeItems(ctx context.Context, rows []model.Media, p It
 		}
 		return rows[i].CreatedAt.Before(rows[j].CreatedAt)
 	})
+	// 先折叠同集的多个版本再统计总数与分页，与 payloadsForMedia 内部保持同一步骤。
+	// 若按未折叠的行数报 TotalRecordCount（例如 S01E11 与 S01E11.5 两行折叠成一条），
+	// 客户端会认为还有一条没取到，反复请求下一页 —— 分集列表就会一直加载不出来。
+	rows = e.collapseMediaVersionRows(ctx, rows)
 	total := len(rows)
 	items, err := e.payloadsForMedia(ctx, pageSlice(rows, p.StartIndex, p.Limit), p.UserID)
 	if err != nil {

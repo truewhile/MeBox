@@ -68,7 +68,11 @@ func applyLocalEpisodeMetadata(m *model.Media, local *LocalMetadata) {
 	if local.EpisodeTitle != "" {
 		m.EpisodeTitle = local.EpisodeTitle
 	}
-	if local.SeasonNum > 0 || local.EpisodeNum > 0 {
+	// tvshow.nfo 里常带 scraper 写的 <season>-1</season> / <episode>-1</episode>
+	// 哨兵（表示「整剧级、不适用」）。负季号不是有效季号：一旦让它覆盖，该集会被
+	// 写成 -1，网页端按 seasonLabel(-1) 显示成「剧场版」。因此负值一律忽略，
+	// 保留文件名解析出来的季号（S00Exx 会被解析成第 0 季 = 特别篇）。
+	if local.SeasonNum >= 0 && (local.SeasonNum > 0 || local.EpisodeNum > 0) {
 		m.SeasonNum = local.SeasonNum
 	}
 	if local.EpisodeNum > 0 {

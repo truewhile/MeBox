@@ -22,6 +22,31 @@ import (
 // real clients send.
 func embySeasonEpisodesRouter(t *testing.T) (*gin.Engine, string, string) {
 	t.Helper()
+	return embySeriesRouter(t, []model.Media{
+		{
+			Base:       model.Base{ID: "s1e1"},
+			Title:      "Test Show",
+			Path:       "D:\\media\\tv\\Test Show\\Season 01\\Test Show - S01E01.mkv",
+			SeasonNum:  1,
+			EpisodeNum: 1,
+			Container:  "mkv",
+		},
+		{
+			Base:       model.Base{ID: "s2e1"},
+			Title:      "Test Show",
+			Path:       "D:\\media\\tv\\Test Show\\Season 02\\Test Show - S02E01.mkv",
+			SeasonNum:  2,
+			EpisodeNum: 1,
+			Container:  "mkv",
+		},
+	})
+}
+
+// embySeriesRouter builds an Emby-compatible router with a single tv library and
+// one series made of the given episode rows. Callers omit LibraryID: it is filled
+// in here once the library exists.
+func embySeriesRouter(t *testing.T, rows []model.Media) (*gin.Engine, string, string) {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
@@ -48,27 +73,9 @@ func embySeasonEpisodesRouter(t *testing.T) (*gin.Engine, string, string) {
 	if err := repos.Library.Create(t.Context(), &lib); err != nil {
 		t.Fatalf("create library: %v", err)
 	}
-	for _, m := range []model.Media{
-		{
-			Base:       model.Base{ID: "s1e1"},
-			LibraryID:  lib.ID,
-			Title:      "Test Show",
-			Path:       "D:\\media\\tv\\Test Show\\Season 01\\Test Show - S01E01.mkv",
-			SeasonNum:  1,
-			EpisodeNum: 1,
-			Container:  "mkv",
-		},
-		{
-			Base:       model.Base{ID: "s2e1"},
-			LibraryID:  lib.ID,
-			Title:      "Test Show",
-			Path:       "D:\\media\\tv\\Test Show\\Season 02\\Test Show - S02E01.mkv",
-			SeasonNum:  2,
-			EpisodeNum: 1,
-			Container:  "mkv",
-		},
-	} {
-		if err := db.Create(&m).Error; err != nil {
+	for i := range rows {
+		rows[i].LibraryID = lib.ID
+		if err := db.Create(&rows[i]).Error; err != nil {
 			t.Fatalf("create media: %v", err)
 		}
 	}
@@ -104,7 +111,34 @@ func embySeasonEpisodesRouter(t *testing.T) (*gin.Engine, string, string) {
 	return router, secret, seriesID
 }
 
-func fetchEpisodeIDs(t *testing.T, router *gin.Engine, secret, path string) ([]string, int) {
+func fetchSeasonID(t *testing.T, router *gin.Engine, secret, seriesID string, index int) string {
+	t.Helper()
+	path := "/Shows/" + seriesID + "/Seasons"
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("X-Emby-Token", signedTestToken(t, secret))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("seasons status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var seasons struct {
+		Items []map[string]any `json:"Items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &seasons); err != nil {
+		t.Fatalf("decode seasons: %v", err)
+	}
+	for _, s := range seasons.Items {
+		if got, ok := s["IndexNumber"].(float64); ok && int(got) == index {
+			if id, _ := s["Id"].(string); id != "" {
+				return id
+			}
+		}
+	}
+	t.Fatalf("season %d not found in %#v", index, seasons.Items)
+	return ""
+}
+
+func fetchEpisodeItems(t *testing.T, router *gin.Engine, secret, path string) ([]map[string]any, int) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
 	req.Header.Set("X-Emby-Token", signedTestToken(t, secret))
@@ -120,12 +154,18 @@ func fetchEpisodeIDs(t *testing.T, router *gin.Engine, secret, path string) ([]s
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode %s: %v", path, err)
 	}
-	ids := make([]string, 0, len(payload.Items))
-	for _, item := range payload.Items {
+	return payload.Items, int(payload.TotalRecordCount)
+}
+
+func fetchEpisodeIDs(t *testing.T, router *gin.Engine, secret, path string) ([]string, int) {
+	t.Helper()
+	items, total := fetchEpisodeItems(t, router, secret, path)
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
 		id, _ := item["Id"].(string)
 		ids = append(ids, id)
 	}
-	return ids, int(payload.TotalRecordCount)
+	return ids, total
 }
 
 // TestEmbyShowEpisodesHonoursSeasonQueryParam is the client-facing regression
@@ -174,29 +214,7 @@ func TestEmbyShowEpisodesHonoursSeasonQueryParam(t *testing.T) {
 func TestEmbyShowEpisodesSeasonIdStillWins(t *testing.T) {
 	router, secret, seriesID := embySeasonEpisodesRouter(t)
 
-	seasonsPath := "/Shows/" + seriesID + "/Seasons"
-	req := httptest.NewRequest(http.MethodGet, seasonsPath, nil)
-	req.Header.Set("X-Emby-Token", signedTestToken(t, secret))
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("seasons status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	var seasons struct {
-		Items []map[string]any `json:"Items"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &seasons); err != nil {
-		t.Fatalf("decode seasons: %v", err)
-	}
-	var season1ID string
-	for _, s := range seasons.Items {
-		if index, ok := s["IndexNumber"].(float64); ok && int(index) == 1 {
-			season1ID, _ = s["Id"].(string)
-		}
-	}
-	if season1ID == "" {
-		t.Fatalf("season 1 not found in %#v", seasons.Items)
-	}
+	season1ID := fetchSeasonID(t, router, secret, seriesID, 1)
 
 	ids, _ := fetchEpisodeIDs(t, router, secret, "/Shows/"+seriesID+"/Episodes?SeasonId="+season1ID)
 	if len(ids) != 1 || ids[0] != "s1e1" {
@@ -207,5 +225,87 @@ func TestEmbyShowEpisodesSeasonIdStillWins(t *testing.T) {
 	ids, _ = fetchEpisodeIDs(t, router, secret, "/Shows/"+seriesID+"/Episodes?SeasonId="+season1ID+"&Season=2")
 	if len(ids) != 1 || ids[0] != "s1e1" {
 		t.Fatalf("SeasonId+Season episodes = %#v, want [s1e1]", ids)
+	}
+}
+
+// foldedDuplicateSeriesRows models a season where two files resolve to the same
+// episode number — 3月的狮子 S01E11 together with S01E11.5, which the episode
+// parser reads as S01E11 and stores as a second row for season 1 episode 2 here.
+func foldedDuplicateSeriesRows() []model.Media {
+	return []model.Media{
+		{
+			Base:       model.Base{ID: "e1"},
+			Title:      "三月的狮子",
+			Path:       "D:\\media\\tv\\三月的狮子\\三月的狮子 - S01E01.mkv",
+			SeasonNum:  1,
+			EpisodeNum: 1,
+			Container:  "mkv",
+		},
+		{
+			Base:       model.Base{ID: "e2"},
+			Title:      "三月的狮子",
+			Path:       "D:\\media\\tv\\三月的狮子\\三月的狮子 - S01E02.mkv",
+			SeasonNum:  1,
+			EpisodeNum: 2,
+			Container:  "mkv",
+		},
+		{
+			Base:       model.Base{ID: "e2half"},
+			Title:      "三月的狮子",
+			Path:       "D:\\media\\tv\\三月的狮子\\三月的狮子 - S01E02.5.mkv",
+			SeasonNum:  1,
+			EpisodeNum: 2,
+			Container:  "mkv",
+		},
+	}
+}
+
+// TestEmbyShowEpisodesFoldedDuplicateKeepsTotalsConsistent is the regression test
+// for the "第一季分集加载不出来" lock-up: two rows sharing one season/episode are
+// folded into a single Emby item with two MediaSources. TotalRecordCount used to
+// be computed before that fold, so clients that page until they have
+// TotalRecordCount items kept re-requesting the same page and never rendered the
+// season.
+func TestEmbyShowEpisodesFoldedDuplicateKeepsTotalsConsistent(t *testing.T) {
+	router, secret, seriesID := embySeriesRouter(t, foldedDuplicateSeriesRows())
+	seasonID := fetchSeasonID(t, router, secret, seriesID, 1)
+
+	items, total := fetchEpisodeItems(t, router, secret, "/Shows/"+seriesID+"/Episodes?SeasonId="+seasonID)
+	if total != len(items) {
+		t.Fatalf("TotalRecordCount = %d but %d items returned, want them equal", total, len(items))
+	}
+	if total != 2 {
+		t.Fatalf("TotalRecordCount = %d, want 2 distinct episodes", total)
+	}
+	// The folded episode must still carry both files so clients can switch version.
+	versioned := 0
+	for _, item := range items {
+		if sources, ok := item["MediaSources"].([]any); ok && len(sources) > 1 {
+			versioned++
+		}
+	}
+	if versioned != 1 {
+		t.Fatalf("items with multiple MediaSources = %d, want 1 (%#v)", versioned, items)
+	}
+}
+
+// TestEmbyShowEpisodesPagingAdvances pins that the client's StartIndex/Limit reach
+// the episode list. Ignoring them made every page identical, so a client paging
+// until it has TotalRecordCount items could never finish loading the season.
+func TestEmbyShowEpisodesPagingAdvances(t *testing.T) {
+	router, secret, seriesID := embySeriesRouter(t, foldedDuplicateSeriesRows())
+	base := "/Shows/" + seriesID + "/Episodes?Season=1"
+
+	first, total := fetchEpisodeIDs(t, router, secret, base+"&StartIndex=0&Limit=1")
+	if total != 2 || len(first) != 1 {
+		t.Fatalf("page 1 = %#v (total=%d), want one item of two", first, total)
+	}
+	second, _ := fetchEpisodeIDs(t, router, secret, base+"&StartIndex=1&Limit=1")
+	if len(second) != 1 || second[0] == first[0] {
+		t.Fatalf("page 2 = %#v, want the remaining episode (page 1 = %#v)", second, first)
+	}
+	third, _ := fetchEpisodeIDs(t, router, secret, base+"&StartIndex=2&Limit=1")
+	if len(third) != 0 {
+		t.Fatalf("page 3 = %#v, want an empty page so clients stop paging", third)
 	}
 }
