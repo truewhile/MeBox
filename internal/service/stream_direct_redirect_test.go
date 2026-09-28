@@ -145,43 +145,6 @@ func TestServeFileFallsBackWhenDirectResolveUnavailable(t *testing.T) {
 	}
 }
 
-// 客户端 API 层与播放器层 UA 不一致时（原生播放器普遍如此）不能由服务端换链后
-// 直接 302 到 CDN：115 直链绑定换取时的 UA，换错就是 403。此时必须回退到同源的
-// strm 端点跳转，让播放器用自己的 UA 换链。
-func TestServeFileWithClientSideResolveKeepsSTRMEndpoint(t *testing.T) {
-	repos := directRedirectTestRepo(t)
-	seedCloudSTRMMedia(t, repos, "cloud-client-side", "/api/strm/play/cloud115/video.mkv?acct=a1&pickcode=pc1")
-	direct := "https://cdnfhnfile.115cdn.net/637b/Movie.mkv?t=1&k=sig"
-	resolveCalls := 0
-	svc := NewStreamService(&config.Config{}, zap.NewNop(), repos, nil).
-		SetStrmPlayTargetResolver(func(_ context.Context, raw, userAgent string) (*StrmPlayResult, error) {
-			resolveCalls++
-			return &StrmPlayResult{
-				RedirectURL: direct,
-				Link:        &cloud.DirectLink{URL: direct, Headers: map[string]string{"User-Agent": userAgent}},
-			}, nil
-		})
-
-	req := httptest.NewRequest(http.MethodGet, "http://nas.local:18080/emby/Videos/cloud-client-side/stream?api_key=jwt123", nil)
-	req.Header.Set("User-Agent", "RodelPlayer/2.2610.2.0 (Windows NT 10.0.26200; x64)")
-	req = req.WithContext(WithClientSideSTRMResolve(req.Context()))
-	w := httptest.NewRecorder()
-
-	if err := svc.ServeFileWithCloudMode(w, req, "cloud-client-side", CloudPlaybackModeRedirectProxy); err != nil {
-		t.Fatalf("ServeFileWithCloudMode: %v", err)
-	}
-	if resolveCalls != 0 {
-		t.Fatalf("resolver called %d times, want 0", resolveCalls)
-	}
-	loc := w.Header().Get("Location")
-	if !strings.Contains(loc, "/api/strm/play/cloud115/video.mkv") {
-		t.Fatalf("Location = %q, want the same-origin strm endpoint", loc)
-	}
-	if strings.Contains(loc, "cdnfhnfile") {
-		t.Fatalf("Location = %q, must not point straight at the CDN", loc)
-	}
-}
-
 // 没有注入解析器（测试/精简部署）时保持原有跳转，不受本次优化影响。
 func TestServeFileKeepsSTRMEndpointWithoutResolver(t *testing.T) {
 	repos := directRedirectTestRepo(t)

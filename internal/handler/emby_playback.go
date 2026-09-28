@@ -348,12 +348,6 @@ func embyVideoStreamHandler(svc *service.Container, cloudMode string) gin.Handle
 		// 此前这里把所有错误一律吞成 404：云盘 Cookie 过期、直链解析失败、
 		// STRM 播放被关闭……在第三方播放器上全部表现为「404 不存在」，
 		// 无法排查。现在区分：行不存在→404；云盘播放不可用/上游故障→502+原因。
-		//
-		// 网盘直链与换取时的 UA 严格绑定，而 Emby 客户端的 API 层与播放器层 UA
-		// 不保证相同（浏览器一定相同），所以只有浏览器客户端允许服务端短路换链。
-		if !isBrowserLikeUserAgent(c.GetHeader("User-Agent")) {
-			c.Request = c.Request.WithContext(service.WithClientSideSTRMResolve(c.Request.Context()))
-		}
 		err = svc.Stream.ServeFileWithCloudMode(c.Writer, c.Request, c.Param("id"), cloudMode)
 		switch {
 		case err == nil:
@@ -391,25 +385,6 @@ func embyPlaybackRedirectToken(c *gin.Context, svc *service.Container) string {
 		return ""
 	}
 	return token
-}
-
-// isBrowserLikeUserAgent 判断请求是否来自浏览器（含 WebView / Electron 客户端）。
-//
-// 只有浏览器能保证「API 请求」与「<video> 拉流」用同一个 User-Agent，因此也只有
-// 浏览器客户端可以安全地接受服务端换链后的 CDN 直链（见
-// service.WithClientSideSTRMResolve 说明）。原生播放器的播放器层与 API 层 UA
-// 不保证一致，必须让客户端自己去同源 strm 端点换链。
-func isBrowserLikeUserAgent(ua string) bool {
-	ua = strings.ToLower(strings.TrimSpace(ua))
-	if ua == "" {
-		return false
-	}
-	for _, marker := range []string{"mozilla/", "applewebkit/", "gecko/"} {
-		if strings.Contains(ua, marker) {
-			return true
-		}
-	}
-	return false
 }
 
 func embyShouldRedirectVideoStreamToSTRM(c *gin.Context, svc *service.Container, mediaID, cloudMode string) bool {

@@ -86,36 +86,6 @@ func setCloudRedirectNoStore(w http.ResponseWriter) {
 // 由 /api/strm/play 再去换链，最坏情况只是回到改动前的行为。
 const directPlayResolveTimeout = 10 * time.Second
 
-// clientSideSTRMResolveKey 标记「本次播放由客户端自己换取 strm 直链」。
-type clientSideSTRMResolveKey struct{}
-
-// WithClientSideSTRMResolve 让本次播放跳过「服务端换链后直接 302 到 CDN」的短路，
-// 改为 302 到同源的 strm 播放端点，由客户端自己的请求去换取直链。
-//
-// 为什么需要它：115 等网盘的直链与「换取直链时提交的 User-Agent」逐个字符严格
-// 绑定，换错一个字符 CDN 一律 403。服务端短路换链用的是当前请求的 UA，而真正
-// 拉流的是客户端的播放器组件；当客户端的 API 层与播放器层 UA 不一致时
-// （例如小幻影视 / RodelPlayer：API 请求带 "(Windows NT 10.0.26200; x64)" 后缀、
-// 播放器拉流仍是裸 UA），客户端会拿到与自身 UA 不匹配的直链，CDN 返回 403，
-// 表现为「播放失败」。交给客户端自己请求同源端点换链，换链用的就是播放器真实 UA。
-//
-// 浏览器（含 WebView / Electron）的 XHR 与 <video> 拉流必然是同一个 UA，
-// 不需要走这条路径。
-func WithClientSideSTRMResolve(ctx context.Context) context.Context {
-	if ctx == nil {
-		return nil
-	}
-	return context.WithValue(ctx, clientSideSTRMResolveKey{}, true)
-}
-
-func clientSideSTRMResolve(ctx context.Context) bool {
-	if ctx == nil {
-		return false
-	}
-	enabled, _ := ctx.Value(clientSideSTRMResolveKey{}).(bool)
-	return enabled
-}
-
 // resolveDirectPlayTargetURL 尝试在服务端把 strm 目标解析成客户端可直接拉取的
 // 最终直链，供调用方直接 302。
 //
@@ -124,11 +94,6 @@ func clientSideSTRMResolve(ctx context.Context) bool {
 // strm 端点跳转，行为不会变差。
 func (s *StreamService) resolveDirectPlayTargetURL(r *http.Request, raw string) (string, bool) {
 	if s == nil || s.strmResolve == nil || r == nil {
-		return "", false
-	}
-	// 调用方声明该客户端的拉流 UA 与本次请求 UA 不保证一致（见
-	// WithClientSideSTRMResolve）：服务端换出来的直链会绑定错误的 UA，必须放弃短路。
-	if clientSideSTRMResolve(r.Context()) {
 		return "", false
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), directPlayResolveTimeout)

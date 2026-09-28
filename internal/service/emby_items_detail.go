@@ -787,7 +787,32 @@ func (e *EmbyService) itemPayload(ctx context.Context, m *model.Media, fav bool,
 	if includePeople {
 		item["People"] = e.resolveMediaPeople(ctx, m)
 	}
+	// Emby/Jellyfin 对「不适用」的字段是直接不下发（JSON 里没有该键），而不是下发
+	// 空串或占位值。电影等非剧集条目没有季/剧归属，小幻影视（RodelPlayer）2.2610
+	// 会把 "SeasonId": "" 原样传进播放准备逻辑并抛 ArgumentException
+	// （Parameter 'seasonId'），起播直接失败；"SeasonName": "特别篇" 也会让客户端
+	// 把电影当成特别篇展示。剧集则保留真实的季/剧信息，只清掉空值。
+	seasonKeys := []string{"SeasonId", "SeriesId", "SeasonName", "SeriesName"}
+	if itemType == "Episode" {
+		dropEmptyStringFields(item, seasonKeys...)
+	} else {
+		for _, key := range seasonKeys {
+			delete(item, key)
+		}
+	}
 	return item
+}
+
+// dropEmptyStringFields 删除值为空串（或全空白）的字符串字段。
+//
+// 用于对齐 Emby/Jellyfin 的序列化行为：这些字段在没有值时是「不存在」，
+// 而不是空串。客户端普遍把空串当合法值使用，收到空串会当成非法参数。
+func dropEmptyStringFields(item map[string]any, keys ...string) {
+	for _, key := range keys {
+		if value, ok := item[key].(string); ok && strings.TrimSpace(value) == "" {
+			delete(item, key)
+		}
+	}
 }
 
 func (e *EmbyService) resolveMediaPeople(ctx context.Context, m *model.Media) []map[string]any {
