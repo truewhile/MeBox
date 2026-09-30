@@ -1,12 +1,16 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
-import { ArrowLeft, Bug, Download, Loader2, Play, Trash2 } from 'lucide-react'
+import { ArrowLeft, Bug, Download, FileUp, KeyRound, Loader2, Play, Trash2, X } from 'lucide-react'
 
 import { readerAPI, type ReaderSource } from '../../api/reader'
 import { READER_SOURCE_TYPES } from './sourceTypes'
+import SourceLoginDialog from './SourceLoginDialog'
 
 // 书源管理页（仿 legado 书源列表：启停开关、快速调试、导入）。
+
+// 导入书源文件大小上限（legado 全量导出通常 < 10MB）
+const MAX_IMPORT_FILE_BYTES = 32 << 20
 
 function hostOf(url: string): string {
   try {
@@ -16,16 +20,28 @@ function hostOf(url: string): string {
   }
 }
 
+function fmtSize(bytes: number): string {
+  if (bytes >= 1 << 20) return `${(bytes / (1 << 20)).toFixed(1)}MB`
+  if (bytes >= 1 << 10) return `${(bytes / (1 << 10)).toFixed(0)}KB`
+  return `${bytes}B`
+}
+
 export default function ReaderSourcesPage() {
   const navigate = useNavigate()
   const [sources, setSources] = useState<ReaderSource[] | null>(null)
   const [importText, setImportText] = useState('')
+  const [importFile, setImportFile] = useState<{ name: string; text: string; size: number } | null>(null)
+  const [dragOver, setDragOver] = useState(false)
   const [importing, setImporting] = useState(false)
   const [showImport, setShowImport] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [debugId, setDebugId] = useState('')
   const [debugKey, setDebugKey] = useState('')
   const [debugLogs, setDebugLogs] = useState<string[] | null>(null)
   const [debugging, setDebugging] = useState(false)
+  // 登录面板：记录正在登录的书源
+  const [loginSource, setLoginSource] = useState<ReaderSource | null>(null)
+  const [loggedInIds, setLoggedInIds] = useState<Record<string, boolean>>({})
 
   const load = () => {
     readerAPI
@@ -36,13 +52,29 @@ export default function ReaderSourcesPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(load, [])
 
+  // 读取书源文件（选择或拖入），走与粘贴相同的导入链路
+  const readFile = async (file: File) => {
+    if (file.size > MAX_IMPORT_FILE_BYTES) {
+      toast.error('文件过大（超过 32MB）')
+      return
+    }
+    try {
+      const text = (await file.text()).replace(/^\uFEFF/, '')
+      setImportFile({ name: file.name, text, size: file.size })
+    } catch {
+      toast.error('读取文件失败')
+    }
+  }
+
   const doImport = async () => {
-    if (!importText.trim() || importing) return
+    const payload = importFile?.text ?? importText
+    if (!payload.trim() || importing) return
     setImporting(true)
     try {
-      const imported = await readerAPI.importSources(importText)
+      const imported = await readerAPI.importSources(payload)
       toast.success(`成功导入 ${imported} 个书源`)
       setImportText('')
+      setImportFile(null)
       setShowImport(false)
       load()
     } catch (e) {
@@ -111,16 +143,63 @@ export default function ReaderSourcesPage() {
       </div>
 
       {showImport && (
-        <div className="mt-4 rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel)] p-4">
+        <div
+          onDragOver={(e) => {
+            e.preventDefault()
+            setDragOver(true)
+          }}
+          onDragLeave={(e) => {
+            if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false)
+          }}
+          onDrop={(e) => {
+            e.preventDefault()
+            setDragOver(false)
+            const file = e.dataTransfer.files?.[0]
+            if (file) readFile(file)
+          }}
+          className={`mt-4 rounded-2xl border bg-[var(--app-panel)] p-4 transition ${
+            dragOver ? 'border-brand-500 bg-brand-500/5' : 'border-[var(--app-border)]'
+          }`}
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json,.txt,application/json,text/plain"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0]
+              if (file) readFile(file)
+              e.target.value = ''
+            }}
+          />
           <textarea
             value={importText}
             onChange={(e) => setImportText(e.target.value)}
             rows={6}
-            placeholder={'粘贴书源 JSON / Base64，或填一个书源链接（https://...）\n支持数组批量导入'}
+            placeholder={'粘贴书源 JSON / Base64，或填一个书源链接（https://...）\n也可选择 / 拖入书源文件（.json / .txt），支持数组批量导入'}
             className="w-full rounded-xl border border-[var(--app-border)] bg-[var(--app-panel-soft)] p-3 text-xs text-[var(--app-text)] outline-none placeholder:text-[var(--app-muted)]"
           />
-          <div className="mt-2 flex justify-end">
-            <button type="button" onClick={doImport} disabled={importing || !importText.trim()} className="btn-primary text-xs disabled:opacity-50">
+          {importFile && (
+            <div className="mt-2 flex items-center gap-2 rounded-xl border border-brand-500/30 bg-brand-500/10 px-3 py-1.5 text-xs font-bold text-brand-600">
+              <FileUp size={13} className="shrink-0" />
+              <span className="min-w-0 flex-1 truncate">
+                {importFile.name}（{fmtSize(importFile.size)}）
+              </span>
+              <button type="button" title="移除文件" onClick={() => setImportFile(null)} className="shrink-0 hover:text-red-500">
+                <X size={13} />
+              </button>
+            </div>
+          )}
+          <div className="mt-2 flex items-center justify-between">
+            <button type="button" onClick={() => fileInputRef.current?.click()} className="btn-outline text-xs">
+              <FileUp size={13} className="mr-1 inline" /> 选择文件
+            </button>
+            <button
+              type="button"
+              onClick={doImport}
+              disabled={importing || !(importFile || importText.trim())}
+              className="btn-primary text-xs disabled:opacity-50"
+            >
               {importing ? <Loader2 size={13} className="inline animate-spin" /> : '开始导入'}
             </button>
           </div>
@@ -151,6 +230,19 @@ export default function ReaderSourcesPage() {
                 </p>
                 <p className="mt-0.5 truncate text-xs text-[var(--app-muted)]">{hostOf(src.source_url)}</p>
               </div>
+              {/* 登录入口：仅对声明了 loginUrl/loginUi 的书源显示 */}
+              {src.has_login && (
+                <button
+                  type="button"
+                  title={loggedInIds[src.id] ? '已登录，点击管理' : '登录'}
+                  onClick={() => setLoginSource(src)}
+                  className={`rounded-xl p-2 hover:bg-[var(--app-hover)] ${
+                    loggedInIds[src.id] ? 'text-emerald-500' : 'text-[var(--app-muted)] hover:text-brand-600'
+                  }`}
+                >
+                  <KeyRound size={16} />
+                </button>
+              )}
               <button
                 type="button"
                 title="快速调试"
@@ -213,6 +305,24 @@ export default function ReaderSourcesPage() {
           </div>
         ))}
       </div>
+
+      {loginSource && (
+        <SourceLoginDialog
+          sourceId={loginSource.id}
+          sourceName={loginSource.name}
+          onClose={() => {
+            setLoginSource(null)
+            // 关闭时回读登录态，更新列表上的登录标记
+            readerAPI
+              .sourceLogin(loginSource.id)
+              .then((info) => setLoggedInIds((prev) => ({ ...prev, [loginSource.id]: info.logged_in })))
+              .catch(() => undefined)
+          }}
+          onLoggedInChange={(loggedIn) =>
+            setLoggedInIds((prev) => ({ ...prev, [loginSource.id]: loggedIn }))
+          }
+        />
+      )}
     </div>
   )
 }

@@ -3,6 +3,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 
 	"gorm.io/gorm"
 
@@ -50,9 +51,45 @@ func (r *ReaderRepository) UpdateSource(ctx context.Context, src *model.ReaderBo
 	return r.db.WithContext(ctx).Save(src).Error
 }
 
-// DeleteSource 删除书源。
+// DeleteSource 删除书源（连带清理其会话状态）。
 func (r *ReaderRepository) DeleteSource(ctx context.Context, id string) error {
-	return r.db.WithContext(ctx).Delete(&model.ReaderBookSource{}, "id = ?", id).Error
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		src := &model.ReaderBookSource{}
+		if err := tx.First(src, "id = ?", id).Error; err == nil && src.SourceURL != "" {
+			if err := tx.Delete(&model.ReaderSourceState{}, "source_url = ?", src.SourceURL).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Delete(&model.ReaderBookSource{}, "id = ?", id).Error
+	})
+}
+
+// GetSourceState 取书源会话状态；不存在返回 (nil, nil)。
+func (r *ReaderRepository) GetSourceState(ctx context.Context, sourceURL string) (*model.ReaderSourceState, error) {
+	var out model.ReaderSourceState
+	err := r.db.WithContext(ctx).First(&out, "source_url = ?", sourceURL).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SaveSourceState 覆盖保存书源会话状态（不存在则新建）。
+func (r *ReaderRepository) SaveSourceState(ctx context.Context, st *model.ReaderSourceState) error {
+	var existing model.ReaderSourceState
+	err := r.db.WithContext(ctx).First(&existing, "source_url = ?", st.SourceURL).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return r.db.WithContext(ctx).Create(st).Error
+	}
+	if err != nil {
+		return err
+	}
+	st.ID = existing.ID
+	st.CreatedAt = existing.CreatedAt
+	return r.db.WithContext(ctx).Save(st).Error
 }
 
 // ListBooks 用户书架（按 order 排序）。

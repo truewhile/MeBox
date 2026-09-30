@@ -24,6 +24,13 @@ func registerReaderRoutes(authed *gin.RouterGroup, svc *service.Container) {
 	g.DELETE("/sources/:id", readerDeleteSourceHandler(svc))
 	g.POST("/sources/:id/debug", readerDebugSourceHandler(svc))
 
+	// 书源登录与源变量（登录类书源必需）
+	g.GET("/sources/:id/login", readerSourceLoginInfoHandler(svc))
+	g.POST("/sources/:id/login", readerSourceLoginActionHandler(svc))
+	g.DELETE("/sources/:id/login", readerSourceLogoutHandler(svc))
+	g.PUT("/sources/:id/variable", readerSetSourceVariableHandler(svc))
+	g.PUT("/sources/:id/login-info", readerSetSourceLoginInfoHandler(svc))
+
 	// 搜索（多源聚合）
 	g.POST("/search", readerSearchHandler(svc))
 
@@ -119,6 +126,81 @@ func readerDebugSourceHandler(svc *service.Container) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"logs": logs})
+	}
+}
+
+func readerSourceLoginInfoHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		info, err := svc.Reader.GetSourceLogin(c.Request.Context(), c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, info)
+	}
+}
+
+func readerSourceLoginActionHandler(svc *service.Container) gin.HandlerFunc {
+	var body struct {
+		// Action 为 loginUi 里按钮的 action；留空表示执行 login()（确认登录）。
+		Action string            `json:"action"`
+		Fields map[string]string `json:"fields"`
+	}
+	return func(c *gin.Context) {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		res, err := svc.Reader.RunLoginAction(c.Request.Context(), c.Param("id"), body.Action, body.Fields)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, res)
+	}
+}
+
+func readerSourceLogoutHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if err := svc.Reader.ClearSourceLogin(c.Request.Context(), c.Param("id")); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+func readerSetSourceVariableHandler(svc *service.Container) gin.HandlerFunc {
+	var body struct {
+		Variable string `json:"variable"`
+	}
+	return func(c *gin.Context) {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := svc.Reader.SetSourceVariable(c.Request.Context(), c.Param("id"), body.Variable); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+func readerSetSourceLoginInfoHandler(svc *service.Container) gin.HandlerFunc {
+	var body struct {
+		Fields map[string]string `json:"fields"`
+	}
+	return func(c *gin.Context) {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := svc.Reader.SetSourceLoginInfo(c.Request.Context(), c.Param("id"), body.Fields); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
 	}
 }
 

@@ -404,6 +404,48 @@ func newJavaObject(vm *goja.Runtime, r *JSRunner, a *AnalyzeRule) *goja.Object {
 	set("t2s", func(call goja.FunctionCall) goja.Value { return vm.ToValue(stringArg(call, 0)) })
 	set("s2t", func(call goja.FunctionCall) goja.Value { return vm.ToValue(stringArg(call, 0)) })
 	set("htmlFormat", func(call goja.FunctionCall) goja.Value { return vm.ToValue(stringArg(call, 0)) })
+
+	// ── 书源会话状态（legado 中 `java` 与 `source` 是同一对象） ──
+	if r.state != nil {
+		bindSourceState(vm, set, r.state, r.cfg.SourceProps)
+	}
+
+	// ── 宿主交互：服务端无 UI，转为可回传前端的提示 / 待打开链接 ──
+	if r.state != nil {
+		toast := func(call goja.FunctionCall) goja.Value {
+			if len(call.Arguments) > 0 {
+				r.state.Toast(call.Arguments[0].String())
+			}
+			return goja.Null()
+		}
+		set("toast", toast)
+		set("longToast", toast)
+		// startBrowser(url, title)：记录待打开地址，前端可代开新标签。
+		set("startBrowser", func(call goja.FunctionCall) goja.Value {
+			r.state.OpenBrowser(stringArg(call, 0), stringArgOr(call, 1, ""))
+			return goja.Null()
+		})
+		// startBrowserAwait：服务端无 WebView，无法等待人工校验。
+		// 记录地址后抛出明确错误，避免书源逻辑误把空 body 当成功。
+		set("startBrowserAwait", func(call goja.FunctionCall) goja.Value {
+			url := stringArg(call, 0)
+			r.state.OpenBrowser(url, stringArgOr(call, 1, ""))
+			panic(vm.ToValue("java.startBrowserAwait: 服务端无浏览器，需要人工操作的页面请手动打开：" + url))
+		})
+	}
+	// 设备标识：部分源用 deviceID/androidId 做"是否支持该环境"探测，
+	// 成功返回会让源走安卓分支，这里统一以异常告知不支持并回退到通用分支。
+	for _, name := range []string{"deviceID", "androidId"} {
+		set(name, func(call goja.FunctionCall) goja.Value {
+			panic(vm.ToValue("java." + name + ": 服务端无设备标识"))
+		})
+	}
+	// 刷新发现页 / 打开界面：纯 UI 动作，服务端空实现。
+	for _, name := range []string{"refreshExplore", "open", "showBrowser", "reLoginView", "qread"} {
+		set(name, func(call goja.FunctionCall) goja.Value { return goja.Null() })
+	}
+
+	// 需要真正无头浏览器/本地文件系统的能力：明确抛出不支持
 	unsupported := func(name string) func(goja.FunctionCall) goja.Value {
 		return func(call goja.FunctionCall) goja.Value {
 			panic(vm.ToValue("java." + name + " 需要浏览器或本地文件能力，服务端不支持"))
@@ -411,7 +453,7 @@ func newJavaObject(vm *goja.Runtime, r *JSRunner, a *AnalyzeRule) *goja.Object {
 	}
 	for _, name := range []string{
 		"webView", "webViewGetSource", "webViewGetOverrideUrl",
-		"startBrowser", "startBrowserAwait", "openVideoPlayer", "getVerificationCode",
+		"openVideoPlayer", "getVerificationCode",
 		"importScript", "cacheFile", "downloadFile", "readFile", "readTxtFile", "deleteFile",
 		"unzipFile", "un7zFile", "unrarFile", "unArchiveFile", "getTxtInFolder",
 		"getZipStringContent", "getZipByteArrayContent",

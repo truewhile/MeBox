@@ -231,6 +231,10 @@ func TestParseSourcePayload(t *testing.T) {
 	if got := ParseSourcePayload(b64); len(got) != 1 {
 		t.Fatalf("base64 payload = %d", len(got))
 	}
+	// UTF-8 BOM（Windows 导出文件常见）
+	if got := ParseSourcePayload("\uFEFF" + arr); len(got) != 2 {
+		t.Fatalf("bom array payload = %d", len(got))
+	}
 }
 
 func TestMergeSearchResults(t *testing.T) {

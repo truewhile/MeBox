@@ -22,6 +22,9 @@ type BookSource struct {
 	ConcurrentRate    *string        `json:"concurrentRate"`
 	Header            *string        `json:"header"`
 	LoginURL          *string        `json:"loginUrl"`
+	LoginUI           *string        `json:"loginUi"`
+	LoginCheckJS      *string        `json:"loginCheckJs"`
+	JSLib             *string        `json:"jsLib"`
 	BookSourceComment *string        `json:"bookSourceComment"`
 	LastUpdateTime    *int64         `json:"lastUpdateTime"`
 	RespondTime       *int64         `json:"respondTime"`
@@ -36,6 +39,38 @@ type BookSource struct {
 	VariableComment   *string        `json:"variableComment"`
 	Variables         map[string]any `json:"-"`
 	RawVariables      *string        `json:"variables"`
+}
+
+// EnabledCookieJarOrDefault 是否启用 Cookie 自动携带（legado 默认 true）。
+func (b *BookSource) EnabledCookieJarOrDefault() bool {
+	return b.EnabledCookieJar == nil || *b.EnabledCookieJar
+}
+
+// HasLogin 是否声明了登录能力（登录需要 loginUrl 的 JS 或 loginUi 表单）。
+func (b *BookSource) HasLogin() bool {
+	return strings.TrimSpace(SPtr(b.LoginURL)) != "" || strings.TrimSpace(SPtr(b.LoginUI)) != ""
+}
+
+// LoginJS 返回 loginUrl 的纯 JS 体（剥掉 @js: / <js>…< 包裹）。
+// 对应 legado BaseSource.getLoginJs()：loginUi 的按钮 action 会拼在其后执行，
+// 因此 loginUrl 同时充当登录交互的函数库。
+func (b *BookSource) LoginJS() string {
+	return stripJSWrapper(SPtr(b.LoginURL))
+}
+
+// stripJSWrapper 去掉 JS 规则的 @js: / <js>…</js> 包裹。
+func stripJSWrapper(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "@js:") {
+		return s[len("@js:"):]
+	}
+	if strings.HasPrefix(s, "<js>") {
+		s = s[len("<js>"):]
+		s = strings.TrimSuffix(strings.TrimSpace(s), "</js>")
+		s = strings.TrimSuffix(strings.TrimSpace(s), "<")
+		return s
+	}
+	return s
 }
 
 // SearchRule 搜索规则。

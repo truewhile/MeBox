@@ -62,6 +62,7 @@ func AllModels() []interface{} {
 		&ScrapeTask{},
 		&EmbyMount{},
 		&ReaderBookSource{},
+		&ReaderSourceState{},
 		&ReaderBook{},
 		&ReaderChapter{},
 		&ReaderReplaceRule{},

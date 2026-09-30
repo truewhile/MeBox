@@ -26,6 +26,20 @@ type ReaderBookSource struct {
 	LastUpdateTime int64  `json:"last_update_time"`
 	LastCheckAt    *time.Time `json:"last_check_at"`
 	RespondTime    int64      `json:"respond_time"` // 最近一次调试响应耗时（ms）
+	// HasLogin 是否声明了登录能力（loginUrl/loginUi），列表接口按需计算，不落库。
+	HasLogin bool `gorm:"-" json:"has_login"`
+}
+
+// ReaderSourceState 书源会话状态：对应 legado 中按书源 key 存储的
+// sourceVariable / userInfo（登录信息）/ loginHeader 与 CookieStore。
+// 与书源分表存放，避免每次导入更新书源时把用户登录态覆盖掉。
+type ReaderSourceState struct {
+	Base
+	SourceURL   string `gorm:"type:varchar(512);uniqueIndex" json:"source_url"`
+	Variable    string `gorm:"type:text" json:"variable"`     // source.getVariable/setVariable
+	LoginInfo   string `gorm:"type:text" json:"login_info"`   // source.getLoginInfo/putLoginInfo（登录表单 JSON）
+	LoginHeader string `gorm:"type:text" json:"login_header"` // source 登录请求头 JSON
+	Cookies     string `gorm:"type:text" json:"cookies"`      // JSON: domain → "k=v; k=v"
 }
 
 // ReaderBook 书架条目（含阅读进度，对应 legado Book）。

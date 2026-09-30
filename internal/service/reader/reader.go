@@ -37,19 +37,21 @@ const (
 
 // ReaderService 阅读服务。
 type ReaderService struct {
-	cfg  *config.Config
-	log  *zap.Logger
-	repo *repository.ReaderRepository
-	http *http.Client
+	cfg    *config.Config
+	log    *zap.Logger
+	repo   *repository.ReaderRepository
+	http   *http.Client
+	crypto *helper.SecretCipher
 }
 
 // NewReaderService 创建服务。
 func NewReaderService(cfg *config.Config, log *zap.Logger, repos *repository.Container) *ReaderService {
 	return &ReaderService{
-		cfg:  cfg,
-		log:  log,
-		repo: repos.Reader,
-		http: helper.NewSiteHTTPClient(30, true),
+		cfg:    cfg,
+		log:    log,
+		repo:   repos.Reader,
+		http:   helper.NewSiteHTTPClient(30, true),
+		crypto: helper.NewSecretCipher(firstNonEmpty(cfg.Secrets.EncryptionKey, cfg.Secrets.JWTSecret)),
 	}
 }
 
@@ -59,6 +61,8 @@ func NewReaderService(cfg *config.Config, log *zap.Logger, repos *repository.Con
 // 返回导入数量。
 func (s *ReaderService) ImportSources(ctx context.Context, text string) (int, error) {
 	text = strings.TrimSpace(text)
+	// 去 UTF-8 BOM（Windows 记事本导出的书源文件常见），否则 URL 检测和 JSON 解析都会失败
+	text = strings.TrimPrefix(text, "\uFEFF")
 	if text == "" {
 		return 0, fmt.Errorf("导入内容为空")
 	}
@@ -136,7 +140,7 @@ func int64Now(p *int64) int64 {
 // ParseSourcePayload 识别 JSON 数组 / 单对象 / Base64 / 每行一个对象，
 // 返回书源 JSON 字符串列表（冒烟 CLI 复用）。
 func ParseSourcePayload(text string) []string {
-	text = strings.TrimSpace(text)
+	text = strings.TrimPrefix(strings.TrimSpace(text), "\uFEFF")
 	tryDecode := func(s string) []string {
 		var arr []json.RawMessage
 		if err := json.Unmarshal([]byte(s), &arr); err == nil {
@@ -190,9 +194,29 @@ func ParseSourcePayload(text string) []string {
 	return out
 }
 
-// ListSources 书源列表。
+// ListSources 书源列表（标注是否支持登录，供前端决定是否显示登录入口）。
 func (s *ReaderService) ListSources(ctx context.Context) ([]model.ReaderBookSource, error) {
-	return s.repo.ListSources(ctx)
+	sources, err := s.repo.ListSources(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range sources {
+		sources[i].HasLogin = rawSourceHasLogin(sources[i].RawJSON)
+	}
+	return sources, nil
+}
+
+// rawSourceHasLogin 只解出 loginUrl/loginUi 两个字段判断登录能力。
+// 列表接口按需计算，避免为了一个布尔值把每个书源的完整 JSON 都反序列化。
+func rawSourceHasLogin(rawJSON string) bool {
+	var probe struct {
+		LoginURL *string `json:"loginUrl"`
+		LoginUI  *string `json:"loginUi"`
+	}
+	if json.Unmarshal([]byte(rawJSON), &probe) != nil {
+		return false
+	}
+	return strings.TrimSpace(SPtr(probe.LoginURL)) != "" || strings.TrimSpace(SPtr(probe.LoginUI)) != ""
 }
 
 // UpdateSourceEnabled 启停书源。
@@ -214,6 +238,12 @@ func (s *ReaderService) DeleteSource(ctx context.Context, id string) error {
 
 // execute 执行 rule.Request，返回（解码后 body, 最终 URL, HTTP 状态码）。
 func (s *ReaderService) execute(ctx context.Context, req *rule.Request) (string, string, int, error) {
+	return s.executeWithState(ctx, req, nil, false)
+}
+
+// executeWithState 在 execute 基础上叠加会话：附加 Cookie / loginHeader，
+// 并在 captureCookies 为真时把响应 Set-Cookie 回写到会话。
+func (s *ReaderService) executeWithState(ctx context.Context, req *rule.Request, state *sourceState, captureCookies bool) (string, string, int, error) {
 	var bodyReader io.Reader
 	if req.Body != "" {
 		bodyReader = strings.NewReader(req.Body)
@@ -221,6 +251,23 @@ func (s *ReaderService) execute(ctx context.Context, req *rule.Request) (string,
 	target := req.URLNoQuery
 	if target == "" {
 		target = req.URL
+	}
+	if state != nil {
+		// 登录请求头（除 Cookie 外）优先级低于书源显式配置，高于预设。
+		for k, v := range state.LoginHeaderMap() {
+			if strings.EqualFold(k, "cookie") {
+				continue
+			}
+			if _, ok := req.Headers[k]; !ok {
+				req.Headers[k] = v
+			}
+		}
+		// Cookie 仅在调用方未显式指定时附加，避免覆盖书源自带的鉴权 Cookie。
+		if hasHeaderFold(req.Headers, "cookie") == "" {
+			if ck := state.CookieForRequest(target); ck != "" {
+				req.Headers["Cookie"] = ck
+			}
+		}
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, req.Method, target, bodyReader)
 	if err != nil {
@@ -263,8 +310,10 @@ func (s *ReaderService) execute(ctx context.Context, req *rule.Request) (string,
 	for _, ck := range resp.Cookies() {
 		cookieStrs = append(cookieStrs, ck.Name+"="+ck.Value)
 	}
-	if len(cookieStrs) > 0 {
-		rule.CookieJarRecord(finalURL, cookieStrs)
+	if len(cookieStrs) > 0 && state != nil && captureCookies {
+		for _, ck := range cookieStrs {
+			state.SetCookie(finalURL, ck)
+		}
 	}
 	// bodyJs 二次处理
 	if req.BodyJsFn != nil {
@@ -275,6 +324,16 @@ func (s *ReaderService) execute(ctx context.Context, req *rule.Request) (string,
 		body = "<?xml version=\"1.0\"?>" + body
 	}
 	return body, finalURL, resp.StatusCode, nil
+}
+
+// hasHeaderFold 大小写不敏感地取请求头值。
+func hasHeaderFold(headers map[string]string, name string) string {
+	for k, v := range headers {
+		if strings.EqualFold(k, name) {
+			return v
+		}
+	}
+	return ""
 }
 
 func charsetFromContentType(ct string) string {
@@ -294,32 +353,158 @@ func charsetFromContentType(ct string) string {
 
 // ─── 规则执行辅助 ───────────────────────────────────────────────────────────
 
-// newRuleAnalyzer 为指定书源构建规则解析器（注入书源变量与 JS 运行时）。
-func (s *ReaderService) newRuleAnalyzer(ctx context.Context, src *model.ReaderBookSource, bs *BookSource, key string, page int, body, finalURL string) *rule.AnalyzeRule {
+// sourceSession 是一次书源操作的执行上下文：把书源记录、解析结构与
+// 会话状态（Cookie/变量/登录信息）绑在一起，供各阶段复用并在结束时落库。
+type sourceSession struct {
+	svc   *ReaderService
+	ctx   context.Context
+	src   *model.ReaderBookSource
+	bs    *BookSource
+	state *sourceState
+}
+
+// newSession 为指定书源建立执行上下文。
+func (s *ReaderService) newSession(ctx context.Context, src *model.ReaderBookSource, bs *BookSource) *sourceSession {
+	url := ""
+	if src != nil {
+		url = src.SourceURL
+	} else if bs != nil {
+		url = bs.BookSourceURL
+	}
+	sess := &sourceSession{svc: s, ctx: ctx, src: src, bs: bs, state: s.newSourceState(ctx, url)}
+	sess.seedVariable()
+	return sess
+}
+
+// seedVariable 用书源 JSON 的 variables 字段初始化源变量（仅当尚未保存过）。
+// 对应「导入书源后源变量为作者设定的默认值」的行为。
+func (sess *sourceSession) seedVariable() {
+	if sess.bs == nil || sess.state == nil {
+		return
+	}
+	if strings.TrimSpace(sess.state.GetVariable()) != "" {
+		return
+	}
+	if raw := strings.TrimSpace(SPtr(sess.bs.RawVariables)); raw != "" && json.Valid([]byte(raw)) {
+		sess.state.SetVariable(raw)
+	}
+}
+
+// close 落库会话状态（Cookie/变量可能在执行中被书源 JS 改写）。
+func (sess *sourceSession) close() {
+	if sess != nil && sess.state != nil {
+		sess.state.flush()
+	}
+}
+
+// fetch 执行请求，并按书源配置决定是否自动保存响应里的 Cookie。
+func (sess *sourceSession) fetch(req *rule.Request) (string, string, int, error) {
+	body, finalURL, code, err := sess.svc.executeWithState(sess.ctx, req, sess.state, sess.captureCookies())
+	if err != nil {
+		return body, finalURL, code, err
+	}
+	// loginCheckJs：书源借此检测会话失效并自行重登/重取（对应 legado WebBook.checkJs）。
+	// 返回新 body 时替换原响应，使上层规则直接拿到修复后的内容。
+	if check := SPtr(sess.bs.LoginCheckJS); strings.TrimSpace(check) != "" {
+		body = sess.applyLoginCheck(check, body, code, finalURL)
+	}
+	return body, finalURL, code, nil
+}
+
+// captureCookies 是否自动保存响应里的 Set-Cookie。
+// 对应 legado 的 enabledCookieJar（默认 true）：关掉后不再自动累积 Cookie，
+// 但书源 JS 主动 cookie.setCookie 写入的仍会保存（那是明确意图）。
+func (sess *sourceSession) captureCookies() bool {
+	return sess.bs == nil || sess.bs.EnabledCookieJarOrDefault()
+}
+
+// applyLoginCheck 执行 loginCheckJs；失败时保留原 body，避免因检查脚本本身出错而中断阅读。
+func (sess *sourceSession) applyLoginCheck(check, body string, code int, finalURL string) string {
+	runner := sess.runner("", 0)
+	newBody, changed, err := runner.EvalLoginCheck(stripJSWrapper(check), body, code, finalURL)
+	if err != nil {
+		if sess.svc.log != nil {
+			sess.svc.log.Warn("reader:loginCheckJs 执行失败",
+				zap.String("source", sess.srcName()), zap.Error(err))
+		}
+		return body
+	}
+	if changed && newBody != "" {
+		return newBody
+	}
+	return body
+}
+
+// newAnalyzer 构建规则解析器（注入书源变量与 JS 运行时）。
+func (sess *sourceSession) newAnalyzer(key string, page int, body, finalURL string) *rule.AnalyzeRule {
 	ar := rule.NewAnalyzeRule()
 	ar.SetContent(body, finalURL)
-	applySourceVariables(ar, bs)
-	ar.SetJSRunner(s.jsRunnerFor(ctx, src, bs, key, page).ForAnalyzer(ar))
+	applySourceVariables(ar, sess.bs)
+	// 内嵌 JS 里的 java.put/java.get 读写书源级变量（对应 source.variableMap）
+	ar.SetSourceVariables(sess.state.GetVariableKey, sess.state.SetVariableKey)
+	ar.SetJSRunner(sess.runner(key, page).ForAnalyzer(ar))
 	return ar
 }
 
-// jsRunnerFor 为本次请求构建 JS 运行时（网络桥回 execute，携带书源上下文）。
-func (s *ReaderService) jsRunnerFor(ctx context.Context, src *model.ReaderBookSource, bs *BookSource, key string, page int) *rule.JSRunner {
+// runner 构建本次请求的 JS 运行时（网络桥回 execute，携带书源上下文与会话状态）。
+func (sess *sourceSession) runner(key string, page int) *rule.JSRunner {
 	return rule.NewJSRunner(rule.JSConfig{
 		Fetch: func(req *rule.Request) (string, string, int, error) {
-			return s.execute(ctx, req)
+			return sess.fetch(req)
 		},
-		SourceProps: bs.SourceProps(),
+		SourceProps: sess.bs.SourceProps(),
 		Log: func(msg string) {
-			if s.log != nil {
-				s.log.Info("reader:source-js",
-					zap.String("source", srcNameOf(src, bs)), zap.String("log", msg))
+			if sess.svc.log != nil {
+				sess.svc.log.Info("reader:source-js",
+					zap.String("source", srcNameOf(sess.src, sess.bs)), zap.String("log", msg))
 			}
 		},
-		BaseURL: src.SourceURL,
+		BaseURL: sess.srcURL(),
 		Key:     key,
 		Page:    page,
+		State:   sess.state,
+		JSLib:   SPtr(sess.bs.JSLib),
 	})
+}
+
+// srcURL 书源标识 URL（会话状态与 baseUrl 的键）。
+func (sess *sourceSession) srcURL() string {
+	if sess.src != nil && sess.src.SourceURL != "" {
+		return sess.src.SourceURL
+	}
+	if sess.bs != nil {
+		return sess.bs.BookSourceURL
+	}
+	return ""
+}
+
+// srcName 书源显示名。
+func (sess *sourceSession) srcName() string {
+	return srcNameOf(sess.src, sess.bs)
+}
+
+// headerJSON 书源级请求头 JSON。
+func (sess *sourceSession) headerJSON() string {
+	if sess.src != nil && sess.src.Header != "" {
+		return sess.src.Header
+	}
+	return SPtr(sess.bs.Header)
+}
+
+// applyHeaders 把书源级请求头合并进请求（不覆盖已显式设置的值）。
+func (sess *sourceSession) applyHeaders(req *rule.Request) {
+	raw := sess.headerJSON()
+	if raw == "" {
+		return
+	}
+	var headers map[string]any
+	if json.Unmarshal([]byte(raw), &headers) == nil {
+		for k, v := range headers {
+			if _, ok := req.Headers[k]; !ok {
+				req.Headers[k] = fmt.Sprintf("%v", v)
+			}
+		}
+	}
 }
 
 func srcNameOf(src *model.ReaderBookSource, bs *BookSource) string {
@@ -480,30 +665,22 @@ func (s *ReaderService) searchInSource(ctx context.Context, src *model.ReaderBoo
 	if sr == nil || SPtr(sr.BookList) == "" {
 		return nil, fmt.Errorf("书源未配置搜索列表规则")
 	}
-	runner := s.jsRunnerFor(ctx, src, bs, key, page)
-	req, err := rule.ParseAnalyzeUrlWithJS(searchURL, key, page, src.SourceURL, runner)
+	sess := s.newSession(ctx, src, bs)
+	defer sess.close()
+	runner := sess.runner(key, page)
+	req, err := rule.ParseAnalyzeUrlWithJS(searchURL, key, page, sess.srcURL(), runner)
 	if err != nil {
 		return nil, err
 	}
 	if req.Unsupported != nil {
 		return nil, req.Unsupported
 	}
-	// 书源级请求头
-	if src.Header != "" {
-		var headers map[string]any
-		if json.Unmarshal([]byte(src.Header), &headers) == nil {
-			for k, v := range headers {
-				if _, ok := req.Headers[k]; !ok {
-					req.Headers[k] = fmt.Sprintf("%v", v)
-				}
-			}
-		}
-	}
-	body, finalURL, _, err := s.execute(ctx, req)
+	sess.applyHeaders(req)
+	body, finalURL, _, err := sess.fetch(req)
 	if err != nil {
 		return nil, err
 	}
-	ar := s.newRuleAnalyzer(ctx, src, bs, key, page, body, finalURL)
+	ar := sess.newAnalyzer(key, page, body, finalURL)
 
 	elements, err := ar.GetElements(SPtr(sr.BookList))
 	if err != nil {
@@ -596,20 +773,22 @@ func (s *ReaderService) getBookInfoFrom(ctx context.Context, src *model.ReaderBo
 	if bir == nil {
 		return nil, fmt.Errorf("书源未配置详情规则")
 	}
-	runner := s.jsRunnerFor(ctx, src, bs, "", 0)
-	req, err := rule.ParseAnalyzeUrlWithJS(bookURL, "", 0, src.SourceURL, runner)
+	sess := s.newSession(ctx, src, bs)
+	defer sess.close()
+	runner := sess.runner("", 0)
+	req, err := rule.ParseAnalyzeUrlWithJS(bookURL, "", 0, sess.srcURL(), runner)
 	if err != nil {
 		return nil, err
 	}
 	if req.Unsupported != nil {
 		return nil, req.Unsupported
 	}
-	applySourceHeaders(req, src)
-	body, finalURL, _, err := s.execute(ctx, req)
+	sess.applyHeaders(req)
+	body, finalURL, _, err := sess.fetch(req)
 	if err != nil {
 		return nil, err
 	}
-	ar := s.newRuleAnalyzer(ctx, src, bs, "", 0, body, finalURL)
+	ar := sess.newAnalyzer("", 0, body, finalURL)
 
 	info := &BookInfo{BookURL: bookURL, TocURL: bookURL}
 	if initRule := SPtr(bir.Init); initRule != "" {
@@ -687,20 +866,22 @@ func (s *ReaderService) getTocFrom(ctx context.Context, src *model.ReaderBookSou
 	if tocURL == "" {
 		tocURL = bookURL
 	}
-	runner := s.jsRunnerFor(ctx, src, bs, "", 0)
-	req, err := rule.ParseAnalyzeUrlWithJS(tocURL, "", 0, src.SourceURL, runner)
+	sess := s.newSession(ctx, src, bs)
+	defer sess.close()
+	runner := sess.runner("", 0)
+	req, err := rule.ParseAnalyzeUrlWithJS(tocURL, "", 0, sess.srcURL(), runner)
 	if err != nil {
 		return nil, err
 	}
 	if req.Unsupported != nil {
 		return nil, req.Unsupported
 	}
-	applySourceHeaders(req, src)
-	body, finalURL, _, err := s.execute(ctx, req)
+	sess.applyHeaders(req)
+	body, finalURL, _, err := sess.fetch(req)
 	if err != nil {
 		return nil, err
 	}
-	ar := s.newRuleAnalyzer(ctx, src, bs, "", 0, body, finalURL)
+	ar := sess.newAnalyzer("", 0, body, finalURL)
 
 	elements, err := ar.GetElements(SPtr(tr.ChapterList))
 	if err != nil {
@@ -790,6 +971,20 @@ func (s *ReaderService) FetchMedia(ctx context.Context, book *model.ReaderBook, 
 			}
 		}
 	}
+	// 登录态：登录类书源的漫画/音频资源同样需要 Cookie 与 loginHeader 才能取到。
+	if s.repo != nil {
+		state := s.newSourceState(ctx, book.Origin)
+		for k, v := range state.LoginHeaderMap() {
+			if !strings.EqualFold(k, "cookie") && httpReq.Header.Get(k) == "" {
+				httpReq.Header.Set(k, v)
+			}
+		}
+		if httpReq.Header.Get("Cookie") == "" {
+			if ck := state.CookieForRequest(rawURL); ck != "" {
+				httpReq.Header.Set("Cookie", ck)
+			}
+		}
+	}
 	if httpReq.Header.Get("Referer") == "" && book.Origin != "" {
 		httpReq.Header.Set("Referer", strings.TrimSuffix(book.Origin, "/")+"/")
 	}
@@ -854,22 +1049,25 @@ func (s *ReaderService) getContentFrom(ctx context.Context, src *model.ReaderBoo
 	var parts []string
 	url := chapterURL
 	lastFinalURL := ""
+	// 整章（含翻页）共用一个会话，翻页期间 Cookie/变量变更保持一致。
+	sess := s.newSession(ctx, src, bs)
+	defer sess.close()
 	for i := 0; i < maxContentNextPage; i++ {
-		runner := s.jsRunnerFor(ctx, src, bs, "", 0)
-		req, err := rule.ParseAnalyzeUrlWithJS(url, "", 0, src.SourceURL, runner)
+		runner := sess.runner("", 0)
+		req, err := rule.ParseAnalyzeUrlWithJS(url, "", 0, sess.srcURL(), runner)
 		if err != nil {
 			return nil, err
 		}
 		if req.Unsupported != nil {
 			return nil, req.Unsupported
 		}
-		applySourceHeaders(req, src)
-		body, finalURL, _, err := s.execute(ctx, req)
+		sess.applyHeaders(req)
+		body, finalURL, _, err := sess.fetch(req)
 		if err != nil {
 			return nil, err
 		}
 		lastFinalURL = finalURL
-		ar := s.newRuleAnalyzer(ctx, src, bs, "", 0, body, finalURL)
+		ar := sess.newAnalyzer("", 0, body, finalURL)
 
 		list, err := ar.GetStringList(SPtr(cr.Content), nil, false)
 		if err != nil {

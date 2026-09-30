@@ -42,6 +42,8 @@ export interface ReaderSource {
   comment: string
   last_update_time: number
   respond_time: number
+  // 书源声明了登录能力（loginUrl / loginUi）
+  has_login: boolean
 }
 
 export interface ReaderBook {
@@ -115,6 +117,47 @@ export interface ReaderReplaceRule {
   order: number
 }
 
+// ── 书源登录 ──
+
+export interface ReaderLoginField {
+  name: string
+  type: 'text' | 'password' | 'button' | 'toggle' | 'select'
+  action?: string
+  chars?: string[]
+  default?: string
+  viewName?: string
+  style?: Record<string, unknown>
+}
+
+export interface ReaderSourceLogin {
+  source_id: string
+  source_name: string
+  has_login_js: boolean
+  login_js?: string
+  fields: ReaderLoginField[]
+  values: Record<string, string>
+  cookies: Record<string, string>
+  variable: string
+  variable_comment?: string
+  logged_in: boolean
+  error?: string
+}
+
+export interface ReaderBrowserRequest {
+  url: string
+  title: string
+}
+
+export interface ReaderLoginResult {
+  ok: boolean
+  error?: string
+  toasts?: string[]
+  browsers?: ReaderBrowserRequest[]
+  values: Record<string, string>
+  cookies: Record<string, string>
+  logged_in: boolean
+}
+
 const longOpts = { timeout: LONG_REQUEST_TIMEOUT } as const
 
 export const readerAPI = {
@@ -126,6 +169,18 @@ export const readerAPI = {
   deleteSource: (id: string) => api.delete(`/reader/sources/${id}`),
   debugSource: (id: string, key: string) =>
     api.post<{ logs: string[] }>(`/reader/sources/${id}/debug`, { key }, longOpts).then((r) => r.data.logs),
+
+  // ── 书源登录与源变量 ──
+  // 取登录界面描述（loginUi 控件 + 已保存值 + 当前 Cookie 状态）
+  sourceLogin: (id: string) => api.get<ReaderSourceLogin>(`/reader/sources/${id}/login`).then((r) => r.data),
+  // 执行登录动作：action 为空表示执行 loginUrl 的 login()（确认登录）
+  runSourceLogin: (id: string, body: { action?: string; fields?: Record<string, string> }) =>
+    api.post<ReaderLoginResult>(`/reader/sources/${id}/login`, body, longOpts).then((r) => r.data),
+  // 仅保存表单值，不触发登录
+  saveSourceLoginInfo: (id: string, fields: Record<string, string>) =>
+    api.put(`/reader/sources/${id}/login-info`, { fields }),
+  logoutSource: (id: string) => api.delete(`/reader/sources/${id}/login`),
+  setSourceVariable: (id: string, variable: string) => api.put(`/reader/sources/${id}/variable`, { variable }),
 
   // ── 搜索 / 详情 / 目录 / 正文 ──
   search: (key: string) =>
