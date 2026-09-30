@@ -220,6 +220,11 @@ func (s *Cloud115PlaybackService) ResolveCloud115URL(ctx context.Context, mediaI
 	return strings.TrimSpace(item.URL), data, nil
 }
 
+// cloud115PushStateRetention pushState 条目保留上限。成功条目 3 小时内用于
+// 去重；超过一倍余量即为死数据，触发转码请求时顺带清理，防止 map 随观看过的
+// 条目数无限增长。
+const cloud115PushStateRetention = 6 * time.Hour
+
 func (s *Cloud115PlaybackService) ensureCloudTranscode(
 	ctx context.Context,
 	accountID, pickCode string,
@@ -230,6 +235,13 @@ func (s *Cloud115PlaybackService) ensureCloudTranscode(
 	now := time.Now()
 
 	s.mu.Lock()
+	if len(s.pushState) > 0 {
+		for k, v := range s.pushState {
+			if now.Sub(v.at) > cloud115PushStateRetention {
+				delete(s.pushState, k)
+			}
+		}
+	}
 	if last, ok := s.pushState[key]; ok {
 		ttl := 2 * time.Minute
 		if last.success {

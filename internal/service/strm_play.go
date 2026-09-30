@@ -286,7 +286,7 @@ func (s *StrmService) ProxyDirect(ctx context.Context, w http.ResponseWriter, r 
 			req.Header.Set("User-Agent", ua)
 		}
 	}
-	resp, err := s.http.Do(req)
+	resp, err := s.streamHTTP.Do(req)
 	if err != nil {
 		return err
 	}

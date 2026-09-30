@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -53,6 +54,67 @@ https://cpats01.115.com/seg.ts?x=1
 	}
 	if len(session.entries) != 2 {
 		t.Fatalf("session entries = %d, want 2", len(session.entries))
+	}
+}
+
+// 长视频 VOD 播放期间只有分片请求经过 lookup，会话必须随活动滑动续期，
+// 否则固定 30 分钟 TTL 一到就会在中途 404 断流。
+func TestCloud115HLSProxyLookupRenewsSession(t *testing.T) {
+	proxy := &Cloud115HLSProxy{sessions: map[string]*cloud115HLSSession{}}
+	session := &cloud115HLSSession{
+		ID:      "sess",
+		MediaID: "media-1",
+		entries: map[string]string{"e1": "https://cpats01.115.com/v.m3u8"},
+	}
+	proxy.storeSession(session)
+	// 模拟播放进行到第 29 分钟：距过期只剩 1 分钟。
+	session.ExpiresAt = time.Now().Add(time.Minute)
+
+	if _, _, ok := proxy.lookup(session.ID, "e1"); !ok {
+		t.Fatal("active session should still resolve before expiry")
+	}
+	if remaining := time.Until(session.ExpiresAt); remaining < cloud115HLSSessionTTL-10*time.Second {
+		t.Fatalf("session not renewed on activity, remaining = %v", remaining)
+	}
+
+	// 真正过期（期间无任何活动）的会话仍要被清理。
+	session.ExpiresAt = time.Now().Add(-time.Minute)
+	if _, _, ok := proxy.lookup(session.ID, "e1"); ok {
+		t.Fatal("expired session should not resolve")
+	}
+	proxy.mu.Lock()
+	_, exists := proxy.sessions[session.ID]
+	proxy.mu.Unlock()
+	if exists {
+		t.Fatal("expired session should be evicted from the map")
+	}
+}
+
+// 满员驱逐必须淘汰最久未活跃的会话（ExpiresAt = 最近活跃 + TTL，最小者即
+// 最久未活跃），而不是随机挑一个——随机驱逐可能正好杀掉正在播放的会话。
+func TestCloud115HLSProxyEvictsLeastRecentlyActiveSession(t *testing.T) {
+	proxy := &Cloud115HLSProxy{sessions: map[string]*cloud115HLSSession{}}
+	first := &cloud115HLSSession{ID: "active", MediaID: "media-1", entries: map[string]string{}}
+	proxy.storeSession(first)
+	for i := 0; i < cloud115HLSMaxSessions-1; i++ {
+		proxy.storeSession(&cloud115HLSSession{ID: fmt.Sprintf("s-%03d", i), MediaID: "media-1", entries: map[string]string{}})
+	}
+	// 人为拉开活跃时间差，避免依赖时钟精度：active 最近活跃，s-000 最久未活跃。
+	base := time.Now()
+	first.ExpiresAt = base.Add(cloud115HLSSessionTTL)
+	proxy.sessions["s-000"].ExpiresAt = base.Add(cloud115HLSSessionTTL - time.Hour)
+
+	proxy.storeSession(&cloud115HLSSession{ID: "newcomer", MediaID: "media-1", entries: map[string]string{}})
+
+	proxy.mu.Lock()
+	_, activeExists := proxy.sessions["active"]
+	_, staleExists := proxy.sessions["s-000"]
+	proxy.mu.Unlock()
+	if !activeExists {
+		t.Fatal("recently active session must survive eviction")
+	}
+	if staleExists {
+		t.Fatal("least recently active session should have been evicted")
 	}
 }
 

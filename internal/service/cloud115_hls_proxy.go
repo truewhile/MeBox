@@ -128,16 +128,16 @@ func (p *Cloud115HLSProxy) ServeChild(ctx context.Context, w http.ResponseWriter
 		strings.Contains(contentType, "application/vnd.apple.mpegurl")
 
 	if !isPlaylist {
+		// Content-Type 缺失时用前 4KB 内容嗅探是否为播放列表；无论结果如何
+		// 都要把已读前缀接回 body，避免分片/播放列表丢开头字节。
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		if readErr != nil {
 			return readErr
 		}
 		if strings.HasPrefix(strings.TrimSpace(string(body)), "#EXTM3U") {
 			isPlaylist = true
-			resp.Body = io.NopCloser(io.MultiReader(strings.NewReader(string(body)), resp.Body))
-		} else {
-			resp.Body = io.NopCloser(io.MultiReader(strings.NewReader(string(body)), resp.Body))
 		}
+		resp.Body = io.NopCloser(io.MultiReader(strings.NewReader(string(body)), resp.Body))
 	}
 
 	copyUpstreamHeaders(w, resp, isPlaylist)
@@ -195,9 +195,17 @@ func (p *Cloud115HLSProxy) storeSession(session *cloud115HLSSession) {
 		}
 	}
 	if len(p.sessions) >= cloud115HLSMaxSessions {
-		for id := range p.sessions {
-			delete(p.sessions, id)
-			break
+		// ExpiresAt 恒为「最近一次活跃时间 + TTL」（lookup 会滑动续期），
+		// 因此最小者即最久未活跃的会话，淘汰它对正在播放的影响最小。
+		evictID := ""
+		var evictAt time.Time
+		for id, existing := range p.sessions {
+			if evictID == "" || existing.ExpiresAt.Before(evictAt) {
+				evictID, evictAt = id, existing.ExpiresAt
+			}
+		}
+		if evictID != "" {
+			delete(p.sessions, evictID)
 		}
 	}
 	session.ExpiresAt = now.Add(cloud115HLSSessionTTL)
@@ -210,9 +218,15 @@ func (p *Cloud115HLSProxy) lookup(sessionID, key string) (*cloud115HLSSession, s
 	}
 	p.mu.Lock()
 	session := p.sessions[sessionID]
-	if session != nil && time.Now().After(session.ExpiresAt) {
-		delete(p.sessions, sessionID)
-		session = nil
+	if session != nil {
+		if time.Now().After(session.ExpiresAt) {
+			delete(p.sessions, sessionID)
+			session = nil
+		} else {
+			// 滑动续期：VOD 点播整个播放期间只有分片请求，master 只在起播时取
+			// 一次，不续期的话会话会在 TTL 后被删，长视频播放到一半必然断流。
+			session.ExpiresAt = time.Now().Add(cloud115HLSSessionTTL)
+		}
 	}
 	p.mu.Unlock()
 	if session == nil {

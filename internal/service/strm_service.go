@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -81,14 +82,15 @@ var StrmAccountSecretKeys = []string{"cookie", "password", "token", "access_toke
 
 // StrmService 提供 STRM 管理的能力。
 type StrmService struct {
-	log      *zap.Logger
-	repo     *repository.Container
-	cfg      *config.Config
-	crypto   *CryptoService
-	http     *http.Client
-	stopOnce sync.Once
-	stopCh   chan struct{}
-	baseCtx  context.Context // 服务级长期上下文（同步/队列不随 HTTP 请求取消）
+	log        *zap.Logger
+	repo       *repository.Container
+	cfg        *config.Config
+	crypto     *CryptoService
+	http       *http.Client
+	streamHTTP *http.Client // 视频流转发专用：无总超时（见 ProxyDirect）
+	stopOnce   sync.Once
+	stopCh     chan struct{}
+	baseCtx    context.Context // 服务级长期上下文（同步/队列不随 HTTP 请求取消）
 
 	mu            sync.Mutex
 	running       map[string]context.CancelFunc // sync path id -> cancel
@@ -161,11 +163,24 @@ func (s *StrmService) releaseDownloadSlot(provider string) {
 // NewStrmService constructs the STRM service.
 func NewStrmService(cfg *config.Config, log *zap.Logger, repos *repository.Container, crypto *CryptoService) *StrmService {
 	return &StrmService{
-		log:              log,
-		repo:             repos,
-		cfg:              cfg,
-		crypto:           crypto,
-		http:             &http.Client{Timeout: 90 * time.Second},
+		log:    log,
+		repo:   repos,
+		cfg:    cfg,
+		crypto: crypto,
+		http:   &http.Client{Timeout: 90 * time.Second},
+		// 视频流转发不能用带总超时的 client：http.Client.Timeout 覆盖整个
+		// 响应体读取，长视频必然超过 90s 被硬切。传输生命周期由请求 ctx
+		// （客户端断开即取消）控制，这里只保留建连/响应头阶段的兜底超时。
+		streamHTTP: &http.Client{
+			Transport: &http.Transport{
+				Proxy:                 http.ProxyFromEnvironment,
+				DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+				ForceAttemptHTTP2:     true,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: 30 * time.Second,
+				IdleConnTimeout:       90 * time.Second,
+			},
+		},
 		stopCh:           make(chan struct{}),
 		baseCtx:          context.Background(),
 		running:          map[string]context.CancelFunc{},

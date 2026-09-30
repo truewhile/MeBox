@@ -22,6 +22,25 @@ func (s *StreamService) ServeFile(w http.ResponseWriter, r *http.Request, mediaI
 	return s.ServeFileWithCloudMode(w, r, mediaID, "")
 }
 
+// MediaSTRMTarget 返回媒体行固化的 STRM 播放目标。STRMURL 为空时回读本地
+// .strm 文件内容兜底（扫描时内容解析失败的行只剩 Container=strm + Path），
+// 仍拿不到返回空串。
+func MediaSTRMTarget(m *model.Media) string {
+	if m == nil {
+		return ""
+	}
+	if raw := strings.TrimSpace(m.STRMURL); raw != "" {
+		return raw
+	}
+	path := strings.TrimSpace(m.Path)
+	if strings.HasSuffix(strings.ToLower(path), ".strm") {
+		if target, err := readLocalSTRMTarget(path); err == nil {
+			return strings.TrimSpace(target)
+		}
+	}
+	return ""
+}
+
 func (s *StreamService) ServeFileWithCloudMode(w http.ResponseWriter, r *http.Request, mediaID, cloudMode string) error {
 	m, err := s.repo.Media.FindByID(r.Context(), mediaID)
 	if err != nil {
@@ -30,7 +49,8 @@ func (s *StreamService) ServeFileWithCloudMode(w http.ResponseWriter, r *http.Re
 	if m == nil {
 		return ErrMediaNotFound
 	}
-	if strmURL := strings.TrimSpace(m.STRMURL); strmURL != "" && playableSTRMTarget(r.Context(), s.repo, strmURL, m) {
+	strmURL := MediaSTRMTarget(m)
+	if strmURL != "" && playableSTRMTarget(r.Context(), s.repo, strmURL, m) {
 		if !cloudPlaybackModeEnabled(r.Context(), s.repo, cloudMode) {
 			return ErrCloudPlaybackDisabled
 		}
@@ -50,10 +70,14 @@ func (s *StreamService) ServeFileWithCloudMode(w http.ResponseWriter, r *http.Re
 		http.Redirect(w, r, absoluteInternalRedirect(target, r), http.StatusFound)
 		return nil
 	}
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(m.Path)), "cloud://") {
-		// 云盘媒体没有本地文件可回退；走到这里说明 STRM 播放被关闭或
-		// STRMURL 缺失。返回明确错误而不是笼统的「文件不存在」，
-		// 处理器据此回 502 + 原因，方便用户在播放器/日志里定位。
+	pathLower := strings.ToLower(strings.TrimSpace(m.Path))
+	if strings.HasPrefix(pathLower, "cloud://") ||
+		strings.HasSuffix(pathLower, ".strm") ||
+		strings.EqualFold(strings.TrimSpace(m.Container), "strm") {
+		// 云盘/STRM 媒体没有本地视频文件可回退；走到这里说明 STRM 播放被关闭
+		// 或播放目标缺失（.strm 内容解析失败）。绝不能把 .strm 文本文件当视频
+		// 流出去，返回明确错误而不是笼统的「文件不存在」，处理器据此回
+		// 502 + 原因，方便用户在播放器/日志里定位。
 		return ErrCloudPlaybackUnavailable
 	}
 	f, err := os.Open(m.Path)

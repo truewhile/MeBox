@@ -86,7 +86,9 @@ func embyPrewarmPlaybackTargets(svc *service.Container, c *gin.Context, out map[
 			if err != nil || m == nil {
 				return
 			}
-			raw := strings.TrimSpace(m.STRMURL)
+			// 与播放路径（StreamService.ServeFileWithCloudMode）同一套目标解析：
+			// STRMURL 为空时回读 .strm 文件内容，预热才能覆盖同一批条目。
+			raw := service.MediaSTRMTarget(m)
 			if raw == "" || !service.IsStrmMediaRow(m) {
 				return
 			}
@@ -409,9 +411,10 @@ func embyVideoHLSPlaylistHandler(svc *service.Container) gin.HandlerFunc {
 			c.Status(http.StatusNotFound)
 			return
 		}
-		uid := embyUserID(c)
-		item, err := svc.Emby.Item(c.Request.Context(), c.Param("id"), uid)
-		if err != nil || item == nil || svc.Stream == nil {
+		// 只需确认媒体行存在且对当前用户可见；Emby.Item 会构建完整条目载荷，
+		// 转码播放下每个分片请求都跑一遍太浪费。
+		m, err := svc.Repo.Media.FindByID(c.Request.Context(), c.Param("id"))
+		if err != nil || m == nil || !mediaVisibleForRequest(c, svc, m) || svc.Stream == nil {
 			c.Status(http.StatusNotFound)
 			return
 		}
@@ -436,9 +439,8 @@ func embyVideoHLSSegmentHandler(svc *service.Container) gin.HandlerFunc {
 			c.Status(http.StatusNotFound)
 			return
 		}
-		uid := embyUserID(c)
-		item, err := svc.Emby.Item(c.Request.Context(), c.Param("id"), uid)
-		if err != nil || item == nil || svc.Stream == nil {
+		m, err := svc.Repo.Media.FindByID(c.Request.Context(), c.Param("id"))
+		if err != nil || m == nil || !mediaVisibleForRequest(c, svc, m) || svc.Stream == nil {
 			c.Status(http.StatusNotFound)
 			return
 		}
