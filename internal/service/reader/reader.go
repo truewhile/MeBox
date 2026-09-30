@@ -552,8 +552,8 @@ type BookInfo struct {
 }
 
 // GetBookInfo 抓取书籍详情。
-func (s *ReaderService) GetBookInfo(ctx context.Context, sourceID, bookURL string) (*BookInfo, error) {
-	src, bs, err := s.loadSource(ctx, sourceID)
+func (s *ReaderService) GetBookInfo(ctx context.Context, sourceID, sourceURL, bookURL string) (*BookInfo, error) {
+	src, bs, err := s.loadSourceFlexible(ctx, sourceID, sourceURL)
 	if err != nil {
 		return nil, err
 	}
@@ -637,8 +637,8 @@ type TocChapter struct {
 }
 
 // GetToc 抓取目录。
-func (s *ReaderService) GetToc(ctx context.Context, sourceID, bookURL, tocURL string) ([]TocChapter, error) {
-	src, bs, err := s.loadSource(ctx, sourceID)
+func (s *ReaderService) GetToc(ctx context.Context, sourceID, sourceURL, bookURL, tocURL string) ([]TocChapter, error) {
+	src, bs, err := s.loadSourceFlexible(ctx, sourceID, sourceURL)
 	if err != nil {
 		return nil, err
 	}
@@ -702,8 +702,8 @@ type ChapterContent struct {
 }
 
 // GetContent 抓取正文（含 nextContentUrl 翻页合并与净化替换）。
-func (s *ReaderService) GetContent(ctx context.Context, sourceID, bookURL, chapterURL string) (*ChapterContent, error) {
-	src, bs, err := s.loadSource(ctx, sourceID)
+func (s *ReaderService) GetContent(ctx context.Context, sourceID, sourceURL, bookURL, chapterURL string) (*ChapterContent, error) {
+	src, bs, err := s.loadSourceFlexible(ctx, sourceID, sourceURL)
 	if err != nil {
 		return nil, err
 	}
@@ -886,14 +886,14 @@ func (s *ReaderService) Debug(ctx context.Context, sourceID, key string) ([]stri
 	}
 	first := books[0]
 	logf("访问详情页: %s", first.BookURL)
-	info, err := s.GetBookInfo(ctx, sourceID, first.BookURL)
+	info, err := s.GetBookInfo(ctx, sourceID, "", first.BookURL)
 	if err != nil {
 		logf("详情失败: %v", err)
 		return logs, nil
 	}
 	logf("书名: %s 作者: %s 最新章节: %s", info.Name, info.Author, info.LatestChapter)
 	logf("访问目录页: %s", info.TocURL)
-	chapters, err := s.GetToc(ctx, sourceID, first.BookURL, info.TocURL)
+	chapters, err := s.GetToc(ctx, sourceID, "", first.BookURL, info.TocURL)
 	if err != nil {
 		logf("目录失败: %v", err)
 		return logs, nil
@@ -911,7 +911,7 @@ func (s *ReaderService) Debug(ctx context.Context, sourceID, key string) ([]stri
 			continue
 		}
 		logf("访问正文: %s", c.URL)
-		content, err := s.GetContent(ctx, sourceID, first.BookURL, c.URL)
+		content, err := s.GetContent(ctx, sourceID, "", first.BookURL, c.URL)
 		if err != nil {
 			logf("正文失败: %v", err)
 			return logs, nil
@@ -932,6 +932,26 @@ func (s *ReaderService) loadSource(ctx context.Context, sourceID string) (*model
 	src, err := s.repo.GetSource(ctx, sourceID)
 	if err != nil {
 		return nil, nil, err
+	}
+	bs, err := ParseBookSource(src.RawJSON)
+	if err != nil {
+		return nil, nil, fmt.Errorf("书源 JSON 解析失败: %w", err)
+	}
+	return src, bs, nil
+}
+
+// loadSourceFlexible 按 ID 或 URL 加载书源（书架上只存 origin URL，
+// 前端阅读链路用 source_url 定位书源）。
+func (s *ReaderService) loadSourceFlexible(ctx context.Context, sourceID, sourceURL string) (*model.ReaderBookSource, *BookSource, error) {
+	if sourceID != "" {
+		return s.loadSource(ctx, sourceID)
+	}
+	if sourceURL == "" {
+		return nil, nil, fmt.Errorf("缺少书源标识（source_id 或 source_url）")
+	}
+	src, err := s.repo.GetSourceByURL(ctx, sourceURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("书源不存在或已被删除")
 	}
 	bs, err := ParseBookSource(src.RawJSON)
 	if err != nil {

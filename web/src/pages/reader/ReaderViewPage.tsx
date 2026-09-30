@@ -1,0 +1,606 @@
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useParams } from 'react-router-dom'
+import toast from 'react-hot-toast'
+import {
+  ArrowLeft,
+  BookOpen,
+  ChevronLeft,
+  LayoutList,
+  ListEnd,
+  Loader2,
+  Minus,
+  Moon,
+  Plus,
+  ScrollText,
+  Sun,
+} from 'lucide-react'
+import { Virtuoso } from 'react-virtuoso'
+
+import { readerAPI, type ReaderBook, type ReaderChapter, type ReaderChapterContent } from '../../api/reader'
+import { READER_THEMES, getReaderTheme, useReaderSettingsStore } from '../../stores/readerSettings'
+
+// 文本阅读器（仿 legado ReadBookActivity：主题配色、点击区域、上下章、
+// 进度记忆、翻页/滚动双模式；桌面端限宽居中，支持键盘翻页）。
+
+const COLUMN_GAP = 48
+
+function firstReadableIndex(chapters: ReaderChapter[]): number {
+  const i = chapters.findIndex((c) => !c.is_volume && c.url)
+  return i === -1 ? 0 : i
+}
+
+export default function ReaderViewPage() {
+  const { bookId = '' } = useParams()
+  const settings = useReaderSettingsStore()
+  const theme = getReaderTheme(settings.themeId, settings.night)
+
+  const [book, setBook] = useState<ReaderBook | null>(null)
+  const [chapters, setChapters] = useState<ReaderChapter[]>([])
+  const [chapterIndex, setChapterIndex] = useState<number | null>(null)
+  const [content, setContent] = useState<string | null>(null)
+  const [contentType, setContentType] = useState<'text' | 'audio' | 'image'>('text')
+  const [loadingStage, setLoadingStage] = useState<'book' | 'content' | null>('book')
+  const [error, setError] = useState('')
+
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [panel, setPanel] = useState<'none' | 'toc' | 'style'>('none')
+
+  // 分页状态
+  const viewportRef = useRef<HTMLDivElement>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
+  const [page, setPage] = useState(0)
+  const [pageCount, setPageCount] = useState(1)
+  const [vw, setVw] = useState(0)
+  const contentCache = useRef(new Map<string, ReaderChapterContent>())
+  const pendingPosRef = useRef(0)
+  const pendingEndRef = useRef(false)
+
+  // ── 加载书籍与章节 ──
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        setLoadingStage('book')
+        setError('')
+        const books = await readerAPI.listBooks()
+        const b = books.find((x) => x.id === bookId)
+        if (!b) throw new Error('书籍不存在或已移出书架')
+        if (cancelled) return
+        setBook(b)
+        let chs = await readerAPI.listChapters(b.id)
+        if (chs.length === 0) {
+          const toc = await readerAPI.toc({
+            source_url: b.origin,
+            book_url: b.book_url,
+            toc_url: b.toc_url || b.book_url,
+          })
+          if (toc.length === 0) throw new Error('目录为空，尝试到详情页刷新目录')
+          const toSave = toc.map((c) => ({ index: c.index, title: c.title, url: c.url, is_volume: c.is_volume }))
+          await readerAPI.saveChapters(b.id, toSave).catch(() => undefined)
+          chs = toSave
+        }
+        if (cancelled) return
+        setChapters(chs)
+        const qChapter = Number(new URLSearchParams(window.location.search).get('chapter') ?? '')
+        let idx = firstReadableIndex(chs)
+        if (Number.isInteger(qChapter) && chs[qChapter] && !chs[qChapter].is_volume) idx = qChapter
+        else if (b.dur_chapter_index > 0 && chs[b.dur_chapter_index] && !chs[b.dur_chapter_index].is_volume) {
+          idx = b.dur_chapter_index
+        }
+        pendingPosRef.current = b.dur_chapter_pos ?? 0
+        setChapterIndex(idx)
+      } catch (e) {
+        if (!cancelled) setError((e as Error).message || '加载失败')
+      } finally {
+        if (!cancelled) setLoadingStage(null)
+      }
+    })()
+    return () => {
+      cancelled = true
+      contentCache.current.clear()
+    }
+  }, [bookId])
+
+  // ── 加载章节正文（带缓存与下一章预取） ──
+  useEffect(() => {
+    if (chapterIndex === null || !book || chapters.length === 0) return
+    const ch = chapters[chapterIndex]
+    if (!ch) return
+    let cancelled = false
+    ;(async () => {
+      setContent(null)
+      setLoadingStage('content')
+      try {
+        let ct = contentCache.current.get(ch.url)
+        if (!ct) {
+          ct = await readerAPI.content({
+            source_url: book.origin,
+            book_url: book.book_url,
+            chapter_url: ch.url,
+          })
+          contentCache.current.set(ch.url, ct)
+        }
+        if (cancelled) return
+        setContentType(ct.type)
+        setContent(ct.content ?? '')
+        setPage(0)
+        // pendingPosRef 保留：排版完成后由 relayout / 滚动恢复效果消费
+        // 进度上报（pos 保留原值，排版完成后才被消费清零）
+        readerAPI
+          .saveProgress(book.id, { chapter_index: chapterIndex, pos: pendingPosRef.current, chapter_title: ch.title })
+          .catch(() => undefined)
+        // 预取下一章
+        const next = chapters[chapterIndex + 1]
+        if (next && !contentCache.current.has(next.url)) {
+          readerAPI
+            .content({ source_url: book.origin, book_url: book.book_url, chapter_url: next.url })
+            .then((c) => contentCache.current.set(next.url, c))
+            .catch(() => undefined)
+        }
+      } catch (e) {
+        if (!cancelled) {
+          const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? (e as Error).message
+          setError(msg || '正文加载失败')
+        }
+      } finally {
+        if (!cancelled) setLoadingStage(null)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [chapterIndex, book, chapters])
+
+  // ── 分页排版（CSS 多栏 + 平移） ──
+  const relayout = useCallback(() => {
+    const vp = viewportRef.current
+    if (!vp) return
+    const width = vp.clientWidth
+    setVw(width)
+    const total = vp.scrollWidth
+    const count = Math.max(1, Math.ceil((total + COLUMN_GAP) / (width + COLUMN_GAP)))
+    setPageCount(count)
+    setPage((p) => {
+      if (pendingEndRef.current && count > 0) {
+        pendingEndRef.current = false
+        return count - 1
+      }
+      if (pendingPosRef.current > 0) {
+        const pos = Math.min(pendingPosRef.current, count - 1)
+        pendingPosRef.current = 0
+        return pos
+      }
+      return Math.min(p, count - 1)
+    })
+  }, [])
+
+  useLayoutEffect(() => {
+    relayout()
+  }, [relayout, content, settings.fontSize, settings.lineHeight, settings.paragraphSpacing, settings.pageMode, vw])
+
+  useEffect(() => {
+    const vp = viewportRef.current
+    if (!vp) return
+    const ro = new ResizeObserver(() => relayout())
+    ro.observe(vp)
+    return () => ro.disconnect()
+  }, [relayout, content, settings.pageMode])
+
+  // 滚动模式恢复进度
+  useEffect(() => {
+    if (settings.pageMode !== 'scroll' || content === null) return
+    const el = scrollRef.current
+    if (el && pendingPosRef.current > 0) {
+      el.scrollTop = pendingPosRef.current
+      pendingPosRef.current = 0
+    }
+  }, [content, settings.pageMode])
+
+  // ── 进度保存（翻页 / 滚动） ──
+  const savePos = useCallback(
+    (pos: number) => {
+      if (!book || chapterIndex === null) return
+      const ch = chapters[chapterIndex]
+      readerAPI
+        .saveProgress(book.id, { chapter_index: chapterIndex, pos, chapter_title: ch?.title ?? '' })
+        .catch(() => undefined)
+    },
+    [book, chapterIndex, chapters],
+  )
+
+  useEffect(() => {
+    if (settings.pageMode !== 'page' || content === null || chapterIndex === null) return
+    const t = setTimeout(() => savePos(page), 1500)
+    return () => clearTimeout(t)
+  }, [page, content, chapterIndex, settings.pageMode, savePos])
+
+  // ── 章节导航 ──
+  const goChapter = useCallback(
+    (delta: number, atEnd = false) => {
+      if (chapterIndex === null) return
+      let i = chapterIndex + delta
+      while (i >= 0 && i < chapters.length && chapters[i].is_volume) i += delta
+      if (i < 0 || i >= chapters.length) {
+        toast(delta < 0 ? '已经是第一章' : '已经是最后一章')
+        return
+      }
+      pendingEndRef.current = atEnd
+      setError('')
+      setChapterIndex(i)
+    },
+    [chapterIndex, chapters],
+  )
+
+  const goPrev = useCallback(() => {
+    if (settings.pageMode === 'scroll') {
+      scrollRef.current?.scrollBy({ top: -window.innerHeight * 0.9, behavior: 'auto' })
+      return
+    }
+    if (page > 0) setPage((p) => p - 1)
+    else goChapter(-1, true)
+  }, [settings.pageMode, page, goChapter])
+
+  const goNext = useCallback(() => {
+    if (settings.pageMode === 'scroll') {
+      const el = scrollRef.current
+      if (el && el.scrollTop + el.clientHeight >= el.scrollHeight - 2) goChapter(1)
+      else el?.scrollBy({ top: window.innerHeight * 0.9, behavior: 'auto' })
+      return
+    }
+    if (page < pageCount - 1) setPage((p) => p + 1)
+    else goChapter(1)
+  }, [settings.pageMode, page, pageCount, goChapter])
+
+  // ── 键盘（桌面端） ──
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (panel !== 'none') setPanel('none')
+        else if (menuOpen) setMenuOpen(false)
+        else setMenuOpen(true)
+        return
+      }
+      if (e.key === 'ArrowLeft' || e.key === 'PageUp') goPrev()
+      else if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') {
+        e.preventDefault()
+        goNext()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [goPrev, goNext, menuOpen, panel])
+
+  const currentChapter = chapterIndex !== null ? chapters[chapterIndex] : null
+  const paragraphs = (content ?? '').split('\n').map((p) => p.trim()).filter(Boolean)
+
+  // ── 渲染 ──
+  if (error && !book) {
+    return (
+      <div className="flex min-h-[100dvh] flex-col items-center justify-center gap-4 bg-[var(--app-bg)] text-[var(--app-text)]">
+        <p className="text-sm text-[var(--app-muted)]">{error}</p>
+        <button type="button" onClick={() => window.history.back()} className="btn-outline text-xs">
+          返回
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="fixed inset-0 z-40 flex flex-col" style={{ backgroundColor: theme.bg, color: theme.text }}>
+      {/* 正文视口 */}
+      <div className="relative flex-1 overflow-hidden">
+        <div className="mx-auto h-full w-full max-w-[900px]">
+          {settings.pageMode === 'page' ? (
+            <div ref={viewportRef} className="relative h-full overflow-hidden">
+              <div
+                ref={contentRef}
+                className="h-full"
+                style={{
+                  columnWidth: `${Math.max(vw, 1)}px`,
+                  columnGap: `${COLUMN_GAP}px`,
+                  columnFill: 'auto',
+                  transform: `translateX(-${page * (vw + COLUMN_GAP)}px)`,
+                  transition: 'transform 220ms ease',
+                  fontSize: settings.fontSize,
+                  lineHeight: settings.lineHeight,
+                }}
+              >
+                {paragraphs.map((p, i) => (
+                  <p key={i} style={{ textIndent: '2em', marginBottom: settings.paragraphSpacing }}>
+                    {p}
+                  </p>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div
+              ref={scrollRef}
+              onScroll={(e) => {
+                const el = e.currentTarget
+                if (chapterIndex === null) return
+                const max = el.scrollHeight - el.clientHeight
+                if (max > 0) {
+                  const pct = el.scrollTop / max
+                  if (Math.abs(pct * 1000 - (Number(el.dataset.last) ?? -1) * 1000) > 20) {
+                    el.dataset.last = String(pct)
+                    savePos(Math.round(el.scrollTop))
+                  }
+                }
+              }}
+              className="h-full overflow-y-auto px-1"
+              style={{ fontSize: settings.fontSize, lineHeight: settings.lineHeight }}
+            >
+              <div className="py-4">
+                {paragraphs.map((p, i) => (
+                  <p key={i} style={{ textIndent: '2em', marginBottom: settings.paragraphSpacing }}>
+                    {p}
+                  </p>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* 加载 / 错误 / 空内容态 */}
+          {(loadingStage !== null || (content !== null && paragraphs.length === 0)) && contentType === 'text' && (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center" style={{ color: theme.text }}>
+              {loadingStage !== null ? (
+                <Loader2 className="animate-spin opacity-60" size={24} />
+              ) : (
+                <p className="text-sm opacity-60">本章内容为空</p>
+              )}
+            </div>
+          )}
+          {error && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3" style={{ color: theme.text }}>
+              <p className="text-sm opacity-80">{error}</p>
+              <button
+                type="button"
+                onClick={() => {
+                  setError('')
+                  if (chapterIndex !== null) {
+                    const ch = chapters[chapterIndex]
+                    if (ch) contentCache.current.delete(ch.url)
+                    setChapterIndex(chapterIndex)
+                  }
+                }}
+                className="rounded-xl border px-4 py-1.5 text-xs font-bold"
+                style={{ borderColor: theme.text }}
+              >
+                重试
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* 点击区域（9 宫格简化为三列，语义同 legado 默认配置：左右翻页、中间呼出菜单） */}
+        <div className="absolute inset-0 grid grid-cols-[30%_40%_30%]">
+          <button type="button" aria-label="上一页" onClick={goPrev} className="cursor-w-resize" />
+          <button
+            type="button"
+            aria-label="菜单"
+            onClick={() => setMenuOpen((v) => !v)}
+            className="cursor-default"
+          />
+          <button type="button" aria-label="下一页" onClick={goNext} className="cursor-e-resize" />
+        </div>
+      </div>
+
+      {/* 页脚页码（翻页模式） */}
+      {settings.pageMode === 'page' && contentType === 'text' && content !== null && (
+        <div className="pointer-events-none pb-2 text-center text-2xs opacity-50" style={{ color: theme.text }}>
+          {page + 1} / {pageCount} · {currentChapter?.title ?? ''}
+        </div>
+      )}
+
+      {/* 主菜单（仿 legado ReadMenu） */}
+      {menuOpen && (
+        <>
+          <button
+            type="button"
+            aria-label="关闭菜单"
+            className="fixed inset-0 z-40 cursor-default bg-black/30"
+            onClick={() => setMenuOpen(false)}
+          />
+          {/* 顶栏 */}
+          <div
+            className="fixed inset-x-0 top-0 z-50 flex items-center gap-3 border-b px-4 py-3 backdrop-blur"
+            style={{ backgroundColor: theme.bg, borderColor: theme.text + '22' }}
+          >
+            <button
+              type="button"
+              onClick={() => window.history.back()}
+              className="rounded-xl p-1.5 opacity-70 hover:opacity-100"
+              style={{ color: theme.text }}
+            >
+              <ArrowLeft size={18} />
+            </button>
+            <div className="min-w-0 flex-1 text-center">
+              <p className="truncate text-sm font-bold">{book?.name ?? '阅读'}</p>
+              <p className="truncate text-2xs opacity-60">{currentChapter?.title ?? ''}</p>
+            </div>
+            <div className="w-9" />
+          </div>
+
+          {/* 底部菜单 */}
+          <div
+            className="fixed inset-x-0 bottom-0 z-50 space-y-3 rounded-t-2xl border-t px-4 pb-6 pt-4 backdrop-blur"
+            style={{ backgroundColor: theme.bg, borderColor: theme.text + '22' }}
+          >
+            {/* 章节行 */}
+            <div className="flex items-center gap-3" style={{ color: theme.text }}>
+              <button
+                type="button"
+                onClick={() => goChapter(-1)}
+                className="rounded-xl px-2 py-1 text-xs font-bold opacity-80 hover:opacity-100"
+              >
+                上一章
+              </button>
+              <input
+                type="range"
+                min={1}
+                max={Math.max(1, settings.pageMode === 'page' ? pageCount : 1000)}
+                value={settings.pageMode === 'page' ? page + 1 : Math.round(
+                  ((scrollRef.current?.scrollTop ?? 0) /
+                    Math.max(1, (scrollRef.current?.scrollHeight ?? 1) - (scrollRef.current?.clientHeight ?? 1))) *
+                    1000,
+                )}
+                onChange={(e) => {
+                  if (settings.pageMode === 'page') setPage(Number(e.target.value) - 1)
+                  else {
+                    const el = scrollRef.current
+                    if (el) el.scrollTop = (Number(e.target.value) / 1000) * (el.scrollHeight - el.clientHeight)
+                  }
+                }}
+                className="flex-1 accent-current"
+                style={{ accentColor: theme.accent }}
+              />
+              <button
+                type="button"
+                onClick={() => goChapter(1)}
+                className="rounded-xl px-2 py-1 text-xs font-bold opacity-80 hover:opacity-100"
+              >
+                下一章
+              </button>
+            </div>
+
+            {/* 动作行（目录 / 界面 / 夜间 / 模式） */}
+            <div className="grid grid-cols-4 pt-1" style={{ color: theme.text }}>
+              {([
+                { icon: <LayoutList size={18} />, label: '目录', action: () => setPanel(panel === 'toc' ? 'none' : 'toc') },
+                { icon: <BookOpen size={18} />, label: '界面', action: () => setPanel(panel === 'style' ? 'none' : 'style') },
+                {
+                  icon: settings.night ? <Sun size={18} /> : <Moon size={18} />,
+                  label: settings.night ? '日间' : '夜间',
+                  action: () => settings.toggleNight(),
+                },
+                {
+                  icon: settings.pageMode === 'page' ? <ScrollText size={18} /> : <ListEnd size={18} />,
+                  label: settings.pageMode === 'page' ? '滚动' : '翻页',
+                  action: () => settings.setPageMode(settings.pageMode === 'page' ? 'scroll' : 'page'),
+                },
+              ]).map((item) => (
+                <button
+                  key={item.label}
+                  type="button"
+                  onClick={item.action}
+                  className="flex flex-col items-center gap-1 py-1 opacity-80 hover:opacity-100"
+                >
+                  {item.icon}
+                  <span className="text-2xs">{item.label}</span>
+                </button>
+              ))}
+            </div>
+
+            {/* 目录抽屉 */}
+            {panel === 'toc' && (
+              <div
+                className="absolute bottom-full right-0 top-0 w-72 overflow-hidden border-l sm:w-80"
+                style={{ backgroundColor: theme.bg, borderColor: theme.text + '22' }}
+              >
+                <div className="flex h-full flex-col" style={{ color: theme.text }}>
+                  <p className="border-b px-4 py-3 text-xs font-bold" style={{ borderColor: theme.text + '22' }}>
+                    目录（{chapters.length} 章）
+                  </p>
+                  <div className="min-h-0 flex-1">
+                    <Virtuoso
+                      data={chapters}
+                      initialTopMostItemIndex={Math.max(0, chapterIndex ?? 0)}
+                      itemContent={(_, ch) => {
+                        const idx = chapters.indexOf(ch)
+                        const isCurrent = idx === chapterIndex
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setChapterIndex(idx)
+                              setPanel('none')
+                              setMenuOpen(false)
+                            }}
+                            className={`block w-full truncate px-4 py-2.5 text-left text-xs ${
+                              ch.is_volume ? 'font-bold opacity-70' : ''
+                            }`}
+                            style={isCurrent ? { color: theme.accent, fontWeight: 700 } : undefined}
+                          >
+                            {ch.title}
+                          </button>
+                        )
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 界面设置面板（主题 / 字号 / 行距 / 段距） */}
+            {panel === 'style' && (
+              <div
+                className="absolute bottom-full inset-x-0 border-t px-4 py-4"
+                style={{ backgroundColor: theme.bg, borderColor: theme.text + '22', color: theme.text }}
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  {READER_THEMES.map((t) => {
+                    const bg = settings.night ? t.nightBg : t.bg
+                    const active = settings.themeId === t.id
+                    return (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => settings.setThemeId(t.id)}
+                        className={`h-8 w-8 rounded-full border-2 ${active ? 'scale-110' : ''}`}
+                        style={{ backgroundColor: bg, borderColor: active ? theme.accent : theme.text + '44' }}
+                        title={t.name}
+                      />
+                    )
+                  })}
+                </div>
+                <div className="mt-4 flex items-center gap-6 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="opacity-70">字号</span>
+                    <button type="button" onClick={() => settings.setFontSize(settings.fontSize - 1)} className="rounded-lg border px-2 py-0.5" style={{ borderColor: theme.text + '44' }}>
+                      <Minus size={12} />
+                    </button>
+                    <span className="w-6 text-center font-bold">{settings.fontSize}</span>
+                    <button type="button" onClick={() => settings.setFontSize(settings.fontSize + 1)} className="rounded-lg border px-2 py-0.5" style={{ borderColor: theme.text + '44' }}>
+                      <Plus size={12} />
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="opacity-70">行距</span>
+                    <button type="button" onClick={() => settings.setLineHeight(settings.lineHeight - 0.1)} className="rounded-lg border px-2 py-0.5" style={{ borderColor: theme.text + '44' }}>
+                      <Minus size={12} />
+                    </button>
+                    <span className="w-8 text-center font-bold">{settings.lineHeight.toFixed(1)}</span>
+                    <button type="button" onClick={() => settings.setLineHeight(settings.lineHeight + 0.1)} className="rounded-lg border px-2 py-0.5" style={{ borderColor: theme.text + '44' }}>
+                      <Plus size={12} />
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="opacity-70">段距</span>
+                    <button type="button" onClick={() => settings.setParagraphSpacing(settings.paragraphSpacing - 2)} className="rounded-lg border px-2 py-0.5" style={{ borderColor: theme.text + '44' }}>
+                      <Minus size={12} />
+                    </button>
+                    <span className="w-6 text-center font-bold">{settings.paragraphSpacing}</span>
+                    <button type="button" onClick={() => settings.setParagraphSpacing(settings.paragraphSpacing + 2)} className="rounded-lg border px-2 py-0.5" style={{ borderColor: theme.text + '44' }}>
+                      <Plus size={12} />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* 音频/漫画提示（P3/P4 开放） */}
+      {contentType !== 'text' && content !== null && (
+        <div className="absolute inset-0 flex items-center justify-center" style={{ color: theme.text }}>
+          <div className="text-center">
+            <ChevronLeft className="mx-auto opacity-30" size={28} />
+            <p className="mt-2 text-sm opacity-70">{contentType === 'audio' ? '音频播放将在后续版本开放' : '漫画阅读将在后续版本开放'}</p>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

@@ -137,7 +137,7 @@ func readerBookInfoHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		info, err := svc.Reader.GetBookInfo(
 			c.Request.Context(),
-			c.Query("source_id"), c.Query("book_url"),
+			c.Query("source_id"), c.Query("source_url"), c.Query("book_url"),
 		)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -151,7 +151,7 @@ func readerTocHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		chapters, err := svc.Reader.GetToc(
 			c.Request.Context(),
-			c.Query("source_id"), c.Query("book_url"), c.Query("toc_url"),
+			c.Query("source_id"), c.Query("source_url"), c.Query("book_url"), c.Query("toc_url"),
 		)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -165,7 +165,7 @@ func readerContentHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		content, err := svc.Reader.GetContent(
 			c.Request.Context(),
-			c.Query("source_id"), c.Query("book_url"), c.Query("chapter_url"),
+			c.Query("source_id"), c.Query("source_url"), c.Query("book_url"), c.Query("chapter_url"),
 		)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
