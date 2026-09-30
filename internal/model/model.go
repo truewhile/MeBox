@@ -61,5 +61,9 @@ func AllModels() []interface{} {
 		&StrmDirCache{},
 		&ScrapeTask{},
 		&EmbyMount{},
+		&ReaderBookSource{},
+		&ReaderBook{},
+		&ReaderChapter{},
+		&ReaderReplaceRule{},
 	}
 }

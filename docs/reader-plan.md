@@ -2,6 +2,9 @@
 
 > 分支：`feature/reading`
 > 目标：在首页增加「影视 / 阅读」模式切换，阅读模式完整兼容阅读 3.0（legado）书源体系，覆盖 **文本（bookSourceType=0）、音频（=1）、漫画/图片（=2）** 三类源。
+> 实现方式（用户明确要求）：**样式与逻辑全部仿造 refgd/legado 本体**，不参考其他重实现项目；相当于用 Go + React 18 + TypeScript 5 重写该项目。
+> 界面与交互的唯一规格：`docs/reader-ui-spec.md`（从 legado 源码逐屏调研产出）。
+> 规则引擎的唯一语义基准：legado `app/src/main/java/io/legado/app/model/analyzeRule/` 源码，Go 侧逐方法移植对拍（源码克隆在 `C:\MyProject\_ref\legado`，仅作对照，不进入构建）。
 
 ## 1. 范围
 
@@ -114,12 +117,12 @@ web/src/
 
 | 阶段 | 内容 | 交付物 |
 |---|---|---|
-| P0 引擎地基 | 规则引擎核心（四分析器 + 规则拆分/组合/变量）+ AnalyzeUrl v1（GET/POST/charset/headers/变量）+ 表结构 + 书源导入/管理 API | 冒烟工具可跑，非 JS 规则单测通过 |
-| P1 文本源全链路 + 首页切换 | 搜索聚合（WS 进度）/详情/目录/正文（nextContentUrl 合并、缓存）+ 书架/进度 API；前端首页切换、书架、搜索、详情、文本阅读器 v1 | 用纯规则型文本源完成「搜书→加入→阅读」全流程 |
-| P2 JS 与兼容率爬坡 | goja 接入 + `java.*` 桥分批实现 + 加解密族 + URL 完整选项 + replaceRegex + 替换规则管理 + 书源调试页 + 冒烟指标报告 | 主流公开文本源通过率显著提升，形成回归基线 |
-| P3 音频源 | 播放列表解析、音频代理（带 UA/Referer）、音频播放器页、进度记忆 | 音频源可听 |
-| P4 漫画/图片源 | 图片列表解析（含翻页）、图片代理接入磁盘缓存、漫画阅读器双模式、预加载 | 漫画源可看 |
-| P5 体验完善 | 换源、追更（定时刷新目录 + 缓存清理）、发现页、阅读器高级设置、书源备份导出；可选：本地 TXT/EPUB | 完整体验 |
+| P0 引擎地基 ✅ | 规则引擎核心（四分析器 + 规则拆分/组合/变量）+ AnalyzeUrl v1（GET/POST/charset/headers/变量/页码模式）+ 表结构 + 书源导入/管理 API + 搜索/详情/目录/正文/书架/进度/调试 API | 已完成：`internal/service/reader/rule/`（规则引擎，~2800 行，对齐 AnalyzeRule/AnalyzeByJSoup/AnalyzeByJSonPath/AnalyzeByXPath/AnalyzeByRegex/AnalyzeUrl/RuleAnalyzer）+ 服务层 + `/api/reader/*` 路由 + 单测/端到端测试全绿 |
+| P1 文本源全链路 + 首页切换 | 搜索聚合（WS 进度）/详情/目录/正文（nextContentUrl 合并、缓存）+ 前端首页切换、书架、搜索、详情、文本阅读器 v1（阅读器样式仿 legado：9 宫格点击、主题、翻页动画） | 用纯规则型文本源完成「搜书→加入→阅读」全流程 |
+| P2 JS 与兼容率爬坡 | goja 接入 + `java.*` 桥分批实现 + 加解密族 + URL 完整选项 + replaceRegex + 替换规则管理 + 书源调试页（仿 legado 逐条日志流式输出）+ 冒烟指标报告 | 主流公开文本源通过率显著提升，形成回归基线 |
+| P3 音频源 | 播放列表解析、音频代理（带 UA/Referer）、音频播放器页（仿 ReadAloudDialog 布局：上一章/播放/下一章/定时/倍速）、进度记忆 | 音频源可听 |
+| P4 漫画/图片源 | 图片列表解析（含翻页）、图片代理接入磁盘缓存、漫画阅读器双模式（MangaMenu：顶栏+底部胶囊）、预加载 | 漫画源可看 |
+| P5 体验完善 | 换源（ChangeBookSourceDialog 四档排序）、追更（定时刷新目录 + 缓存清理）、发现页（exploreUrl 标签条）、阅读器高级设置（页眉页脚提示、点击区域自定义）、书源编辑器六 Tab、备份导出；可选：本地 TXT/EPUB | 完整体验 |
 
 P0–P2 是主体（约全部工作量 60–70%），P3/P4 相对独立可并行。
 
@@ -133,7 +136,5 @@ P0–P2 是主体（约全部工作量 60–70%），P3/P4 相对独立可并行
 
 ## 9. 参考
 
-- 规则语义基准：https://github.com/gedoor/legado （analyzeRule 源码）
-- Java 侧完整 Web 实现先例（语义参考与对拍对象）：https://github.com/hectorqin/reader
+- **唯一语义与样式基准**：https://github.com/refgd/legado （规则引擎 analyzeRule 源码 + UI 布局/交互，见 docs/reader-ui-spec.md）
 - 书源规则教程：https://mgz0227.github.io/The-tutorial-of-Legado/
-- 需求来源 fork：https://github.com/refgd/legado

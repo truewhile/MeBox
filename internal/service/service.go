@@ -12,6 +12,7 @@ import (
 	"github.com/truewhile/MeBox/internal/config"
 	"github.com/truewhile/MeBox/internal/helper"
 	"github.com/truewhile/MeBox/internal/repository"
+	"github.com/truewhile/MeBox/internal/service/reader"
 )
 
 // Container 持有在启动时初始化的每个服务。Handler 接收指向它的指针并选择相关字段。
@@ -70,6 +71,7 @@ type Container struct {
 	Danmaku          *DanmakuService
 	Strm             *StrmService
 	Cloud115         *Cloud115PlaybackService
+	Reader           *reader.ReaderService
 	Database         *DatabaseAdminService
 	FFTools          *FFmpegToolsService
 

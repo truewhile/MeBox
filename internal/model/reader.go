@@ -1,0 +1,83 @@
+// Package model — 阅读（legado 书源兼容）子系统数据模型。
+// 字段语义对齐 legado 的 BookSource / Book / BookChapter / ReplaceRule 实体；
+// 阅读进度沿用 legado 的做法直接挂在书籍上（durChapter* 字段）。
+package model
+
+import (
+	"time"
+)
+
+// ReaderBookSource 书源：原始 JSON 全量存储 + 常用字段冗余列出便于筛选排序。
+type ReaderBookSource struct {
+	Base
+	Name           string `gorm:"type:varchar(255);index" json:"name"`
+	GroupName      string `gorm:"type:varchar(255);index" json:"group"`
+	Type           int    `gorm:"default:0" json:"type"` // 0文本 1音频 2图片 3文件 4视频
+	SourceURL      string `gorm:"type:varchar(512);index" json:"source_url"`
+	RawJSON        string `gorm:"type:text" json:"-"`
+	Enabled        bool   `gorm:"default:true" json:"enabled"`
+	EnabledExplore bool   `gorm:"default:true" json:"enabled_explore"`
+	CustomOrder    int    `json:"custom_order"`
+	Weight         int    `json:"weight"`
+	ConcurrentRate string `gorm:"type:varchar(64)" json:"concurrent_rate"`
+	Header         string `gorm:"type:text" json:"header"` // 书源级请求头 JSON
+	Comment        string `gorm:"type:text" json:"comment"`
+	Variables      string `gorm:"type:text" json:"variables"` // source 变量 JSON
+	LastUpdateTime int64  `json:"last_update_time"`
+	LastCheckAt    *time.Time `json:"last_check_at"`
+	RespondTime    int64      `json:"respond_time"` // 最近一次调试响应耗时（ms）
+}
+
+// ReaderBook 书架条目（含阅读进度，对应 legado Book）。
+type ReaderBook struct {
+	Base
+	UserID             string `gorm:"type:varchar(36);index" json:"user_id"`
+	Origin             string `gorm:"type:varchar(512)" json:"origin"` // 书源 URL
+	OriginName         string `gorm:"type:varchar(255)" json:"origin_name"`
+	BookURL            string `gorm:"type:varchar(512);index" json:"book_url"`
+	TocURL             string `gorm:"type:varchar(512)" json:"toc_url"`
+	Name               string `gorm:"type:varchar(255)" json:"name"`
+	Author             string `gorm:"type:varchar(255)" json:"author"`
+	Kind               string `gorm:"type:varchar(255)" json:"kind"`
+	CoverURL           string `gorm:"type:varchar(512)" json:"cover_url"`
+	Intro              string `gorm:"type:text" json:"intro"`
+	Charset            string `gorm:"type:varchar(32)" json:"charset"`
+	Type               int    `gorm:"default:0" json:"type"` // 0文本 1音频 2图片
+	LatestChapterTitle string `gorm:"type:varchar(512)" json:"latest_chapter_title"`
+	TotalChapterNum    int    `json:"total_chapter_num"`
+	DurChapterIndex    int    `json:"dur_chapter_index"`
+	DurChapterPos      int    `json:"dur_chapter_pos"`
+	DurChapterTitle    string `gorm:"type:varchar(512)" json:"dur_chapter_title"`
+	DurChapterTime     int64  `json:"dur_chapter_time"`
+	Order              int    `json:"order"`
+	Variable           string `gorm:"type:text" json:"variable"`
+}
+
+// ReaderChapter 章节缓存（对应 legado BookChapter）。
+type ReaderChapter struct {
+	Base
+	BookID   string `gorm:"type:varchar(36);uniqueIndex:idx_reader_book_chapter" json:"book_id"`
+	Index    int    `gorm:"uniqueIndex:idx_reader_book_chapter" json:"index"`
+	URL      string `gorm:"type:varchar(512)" json:"url"`
+	Title    string `gorm:"type:varchar(512)" json:"title"`
+	IsVolume bool   `json:"is_volume"`
+	Tag      string `gorm:"type:varchar(255)" json:"tag"`
+}
+
+// ReaderReplaceRule 替换净化规则（对应 legado ReplaceRule）。
+type ReaderReplaceRule struct {
+	Base
+	UserID             string `gorm:"type:varchar(36);index" json:"user_id"`
+	Name               string `gorm:"type:varchar(255)" json:"name"`
+	GroupName          string `gorm:"type:varchar(255);index" json:"group"`
+	Pattern            string `gorm:"type:text" json:"pattern"`
+	Replacement        string `gorm:"type:text" json:"replacement"`
+	Scope              string `gorm:"type:varchar(255)" json:"scope"`
+	ScopeTitle         bool   `json:"scope_title"`
+	ScopeContent       bool   `gorm:"default:true" json:"scope_content"`
+	ExcludeScope       string `gorm:"type:varchar(255)" json:"exclude_scope"`
+	IsEnabled          bool   `gorm:"default:true" json:"is_enabled"`
+	IsRegex            bool   `gorm:"default:true" json:"is_regex"`
+	TimeoutMillisecond int64  `gorm:"default:3000" json:"timeout_millisecond"`
+	Order              int    `json:"order"`
+}

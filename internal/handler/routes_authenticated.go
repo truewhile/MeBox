@@ -30,4 +30,5 @@ func registerAuthenticatedRoutes(api *gin.RouterGroup, cfg *config.Config, svc *
 	registerAuthedDLNAControlRoutes(authed, svc)
 	registerAuthedFavoriteAndMediaActionRoutes(authed, svc)
 	registerAuthedPlaybackExtraRoutes(authed, svc)
+	registerReaderRoutes(authed, svc)
 }

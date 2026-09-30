@@ -12,6 +12,7 @@ import (
 	"github.com/truewhile/MeBox/internal/helper"
 	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/repository"
+	"github.com/truewhile/MeBox/internal/service/reader"
 )
 
 type serviceContainerBuilder struct {
@@ -82,6 +83,7 @@ func (b *serviceContainerBuilder) initProviderServices() {
 	b.c.Fanart = NewFanartProvider(b.cfg, b.log)
 	b.c.RecognitionWords = NewRecognitionWordsService(b.log, b.repos)
 	b.c.Danmaku = NewDanmakuService(b.log, b.repos)
+	b.c.Reader = reader.NewReaderService(b.cfg, b.log, b.repos)
 
 	adult := NewAdultProvider(b.log, b.c.APIConfig, b.repos)
 	b.c.Scraper = NewScraperService(
