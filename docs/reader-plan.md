@@ -120,8 +120,8 @@ web/src/
 | P0 引擎地基 ✅ | 规则引擎核心（四分析器 + 规则拆分/组合/变量）+ AnalyzeUrl v1（GET/POST/charset/headers/变量/页码模式）+ 表结构 + 书源导入/管理 API + 搜索/详情/目录/正文/书架/进度/调试 API | 已完成：`internal/service/reader/rule/`（规则引擎，~2800 行，对齐 AnalyzeRule/AnalyzeByJSoup/AnalyzeByJSonPath/AnalyzeByXPath/AnalyzeByRegex/AnalyzeUrl/RuleAnalyzer）+ 服务层 + `/api/reader/*` 路由 + 单测/端到端测试全绿 |
 | P1 文本源全链路 + 首页切换 | 搜索聚合（WS 进度）/详情/目录/正文（nextContentUrl 合并、缓存）+ 前端首页切换、书架、搜索、详情、文本阅读器 v1（阅读器样式仿 legado：9 宫格点击、主题、翻页动画） | 用纯规则型文本源完成「搜书→加入→阅读」全流程 |
 | P2 JS 与兼容率爬坡 ✅ | goja 接入 + `java.*` 桥（网络/编解码/摘要/对称加密全家桶/规则回调，函数名对齐 JsExtensions）+ URL 规则 JS（analyzeJs/{{}}/js/bodyJs）+ cookie jar + 用户替换净化规则（含正则超时保护）+ 替换净化页 + 结构化冒烟链路（SmokeChain）+ `cmd/reader-smoke` 冒烟 CLI | JS 源可用；冒烟 CLI 跑公开书源集出各阶段通过率报告 |
-| P3 音频源 | 播放列表解析、音频代理（带 UA/Referer）、音频播放器页（仿 ReadAloudDialog 布局：上一章/播放/下一章/定时/倍速）、进度记忆 | 音频源可听 |
-| P4 漫画/图片源 | 图片列表解析（含翻页）、图片代理接入磁盘缓存、漫画阅读器双模式（MangaMenu：顶栏+底部胶囊）、预加载 | 漫画源可看 |
+| P3 音频源 ✅ | 正文按音频类型返回播放列表（绝对化）+ `/api/reader/media` 签名媒体代理（HMAC 防滥用、Range 透传支持拖动、m3u8 分片/密钥地址重写）+ 阅读器音频面板（hls.js 播 m3u8、直链 `<audio>`、上一章/播放暂停/下一章、倍速 0.75–2x、进度按秒记忆、播完自动下一章） | 音频源可听 |
+| P4 漫画/图片源 ✅ | 图片列表绝对化 + 经签名代理（带书源 Referer 防盗链头）+ 漫画阅读器（上下滚动/左右单页双模式、图片懒加载与加载失败占位、点击分区翻页/呼菜单、菜单进度条按图片序号、进度按图片序号记忆、下一章预取）+ imageStyle 透传 | 漫画源可看 |
 | P5 体验完善 | 换源（ChangeBookSourceDialog 四档排序）、追更（定时刷新目录 + 缓存清理）、发现页（exploreUrl 标签条）、阅读器高级设置（页眉页脚提示、点击区域自定义）、书源编辑器六 Tab、备份导出；可选：本地 TXT/EPUB | 完整体验 |
 
 P0–P2 是主体（约全部工作量 60–70%），P3/P4 相对独立可并行。

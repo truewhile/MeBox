@@ -97,6 +97,7 @@ export interface ReaderChapterContent {
   content?: string
   tracks?: string[]
   images?: string[]
+  image_style?: string
 }
 
 export interface ReaderReplaceRule {

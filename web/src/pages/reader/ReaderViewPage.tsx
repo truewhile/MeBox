@@ -4,7 +4,6 @@ import toast from 'react-hot-toast'
 import {
   ArrowLeft,
   BookOpen,
-  ChevronLeft,
   LayoutList,
   ListEnd,
   Loader2,
@@ -18,6 +17,8 @@ import { Virtuoso } from 'react-virtuoso'
 
 import { readerAPI, type ReaderBook, type ReaderChapter, type ReaderChapterContent } from '../../api/reader'
 import { READER_THEMES, getReaderTheme, useReaderSettingsStore } from '../../stores/readerSettings'
+import { ReaderAudioPanel } from './ReaderAudioPanel'
+import { ReaderComic } from './ReaderComic'
 
 // 文本阅读器（仿 legado ReadBookActivity：主题配色、点击区域、上下章、
 // 进度记忆、翻页/滚动双模式；桌面端限宽居中，支持键盘翻页）。
@@ -52,6 +53,13 @@ export default function ReaderViewPage() {
   const [page, setPage] = useState(0)
   const [pageCount, setPageCount] = useState(1)
   const [vw, setVw] = useState(0)
+  // 音频/漫画媒体状态
+  const [media, setMedia] = useState<ReaderChapterContent | null>(null)
+  const [restorePos, setRestorePos] = useState(0) // 音频秒数 / 漫画图片序号
+  const [comicPage, setComicPage] = useState(0)
+  const [currentImage, setCurrentImage] = useState(0)
+  const [scrollToImage, setScrollToImage] = useState<number | null>(null)
+  const lastMediaSaveRef = useRef(0)
   const contentCache = useRef(new Map<string, ReaderChapterContent>())
   const pendingPosRef = useRef(0)
   const pendingEndRef = useRef(false)
@@ -120,9 +128,16 @@ export default function ReaderViewPage() {
         }
         if (cancelled) return
         setContentType(ct.type)
+        setMedia(ct)
         setContent(ct.content ?? '')
         setPage(0)
-        // pendingPosRef 保留：排版完成后由 relayout / 滚动恢复效果消费
+        setComicPage(0)
+        setCurrentImage(0)
+        // 音频/漫画的进度恢复值在这里取走（文本由排版/滚动效果消费 pendingPosRef）
+        if (ct.type !== 'text') {
+          setRestorePos(pendingPosRef.current)
+          pendingPosRef.current = 0
+        }
         // 进度上报（pos 保留原值，排版完成后才被消费清零）
         readerAPI
           .saveProgress(book.id, { chapter_index: chapterIndex, pos: pendingPosRef.current, chapter_title: ch.title })
@@ -211,6 +226,39 @@ export default function ReaderViewPage() {
     return () => clearTimeout(t)
   }, [page, content, chapterIndex, settings.pageMode, savePos])
 
+  // 漫画单页进度保存
+  useEffect(() => {
+    if (contentType !== 'image' || settings.pageMode !== 'page' || !media || chapterIndex === null) return
+    const t = setTimeout(() => savePos(comicPage), 1200)
+    return () => clearTimeout(t)
+  }, [comicPage, contentType, settings.pageMode, media, chapterIndex, savePos])
+
+  // 音频/漫画滚动：节流进度保存
+  const throttledMediaSave = useCallback(
+    (pos: number) => {
+      if (!book || chapterIndex === null) return
+      const now = Date.now()
+      if (now - lastMediaSaveRef.current < (contentType === 'audio' ? 10_000 : 2_000)) return
+      lastMediaSaveRef.current = now
+      savePos(pos)
+    },
+    [book, chapterIndex, contentType, savePos],
+  )
+
+  // 漫画：翻到章尾/恢复进度定位
+  useEffect(() => {
+    if (!media || media.type !== 'image') return
+    const n = media.images?.length ?? 0
+    if (pendingEndRef.current && n > 0) {
+      setComicPage(n - 1)
+      pendingEndRef.current = false
+      return
+    }
+    if (restorePos > 0) {
+      setComicPage(Math.min(restorePos, Math.max(0, n - 1)))
+    }
+  }, [media, restorePos])
+
   // ── 章节导航 ──
   const goChapter = useCallback(
     (delta: number, atEnd = false) => {
@@ -229,15 +277,34 @@ export default function ReaderViewPage() {
   )
 
   const goPrev = useCallback(() => {
+    if (contentType === 'audio') {
+      goChapter(-1)
+      return
+    }
+    if (contentType === 'image' && settings.pageMode === 'page') {
+      if (comicPage > 0) setComicPage((p) => p - 1)
+      else goChapter(-1, true)
+      return
+    }
     if (settings.pageMode === 'scroll') {
       scrollRef.current?.scrollBy({ top: -window.innerHeight * 0.9, behavior: 'auto' })
       return
     }
     if (page > 0) setPage((p) => p - 1)
     else goChapter(-1, true)
-  }, [settings.pageMode, page, goChapter])
+  }, [contentType, settings.pageMode, comicPage, page, goChapter])
 
   const goNext = useCallback(() => {
+    if (contentType === 'audio') {
+      goChapter(1)
+      return
+    }
+    if (contentType === 'image' && settings.pageMode === 'page') {
+      const n = media?.images?.length ?? 0
+      if (comicPage < n - 1) setComicPage((p) => p + 1)
+      else goChapter(1)
+      return
+    }
     if (settings.pageMode === 'scroll') {
       const el = scrollRef.current
       if (el && el.scrollTop + el.clientHeight >= el.scrollHeight - 2) goChapter(1)
@@ -246,7 +313,7 @@ export default function ReaderViewPage() {
     }
     if (page < pageCount - 1) setPage((p) => p + 1)
     else goChapter(1)
-  }, [settings.pageMode, page, pageCount, goChapter])
+  }, [contentType, settings.pageMode, media, comicPage, page, pageCount, goChapter])
 
   // ── 键盘（桌面端） ──
   useEffect(() => {
@@ -268,6 +335,45 @@ export default function ReaderViewPage() {
   }, [goPrev, goNext, menuOpen, panel])
 
   const currentChapter = chapterIndex !== null ? chapters[chapterIndex] : null
+
+  // 菜单进度条按内容类型适配：文本=页/滚动位置，音频=章节，漫画=图片序号
+  const imageCount = media?.images?.length ?? 0
+  const sliderCfg = (() => {
+    if (contentType === 'audio') {
+      return {
+        min: 0,
+        max: Math.max(0, chapters.length - 1),
+        value: Math.max(0, chapterIndex ?? 0),
+        onChange: (v: number) => setChapterIndex(v),
+      }
+    }
+    if (contentType === 'image') {
+      const max = Math.max(0, imageCount - 1)
+      if (settings.pageMode === 'page') {
+        return { min: 0, max, value: Math.min(comicPage, max), onChange: (v: number) => setComicPage(v) }
+      }
+      return { min: 0, max, value: Math.min(currentImage, max), onChange: (v: number) => setScrollToImage(v) }
+    }
+    return {
+      min: 1,
+      max: Math.max(1, settings.pageMode === 'page' ? pageCount : 1000),
+      value:
+        settings.pageMode === 'page'
+          ? page + 1
+          : Math.round(
+              ((scrollRef.current?.scrollTop ?? 0) /
+                Math.max(1, (scrollRef.current?.scrollHeight ?? 1) - (scrollRef.current?.clientHeight ?? 1))) *
+                1000,
+            ),
+      onChange: (v: number) => {
+        if (settings.pageMode === 'page') setPage(v - 1)
+        else {
+          const el = scrollRef.current
+          if (el) el.scrollTop = (v / 1000) * (el.scrollHeight - el.clientHeight)
+        }
+      },
+    }
+  })()
   const paragraphs = (content ?? '').split('\n').map((p) => p.trim()).filter(Boolean)
 
   // ── 渲染 ──
@@ -287,7 +393,42 @@ export default function ReaderViewPage() {
       {/* 正文视口 */}
       <div className="relative flex-1 overflow-hidden">
         <div className="mx-auto h-full w-full max-w-[900px]">
-          {settings.pageMode === 'page' ? (
+          {contentType === 'audio' ? (
+            media && media.tracks && media.tracks.length > 0 ? (
+              <ReaderAudioPanel
+                src={media.tracks[0]}
+                title={currentChapter?.title ?? book?.name ?? '播放'}
+                theme={theme}
+                initialPos={restorePos}
+                onProgress={throttledMediaSave}
+                onPrevChapter={() => goChapter(-1)}
+                onNextChapter={() => goChapter(1)}
+                onEnded={() => goChapter(1)}
+                onToggleMenu={() => setMenuOpen((v) => !v)}
+              />
+            ) : (
+              <div className="flex h-full items-center justify-center text-sm opacity-60" style={{ color: theme.text }}>
+                {loadingStage !== null ? <Loader2 className="animate-spin opacity-60" size={24} /> : '本章没有可播放的音频'}
+              </div>
+            )
+          ) : contentType === 'image' ? (
+            <ReaderComic
+              images={media?.images ?? []}
+              theme={theme}
+              mode={settings.pageMode}
+              page={comicPage}
+              onZone={(zone) => {
+                if (zone === 'center') setMenuOpen((v) => !v)
+              }}
+              initialImage={restorePos}
+              onProgress={(idx) => {
+                setCurrentImage(idx)
+                throttledMediaSave(idx)
+              }}
+              scrollTo={scrollToImage}
+              onScrolled={() => setScrollToImage(null)}
+            />
+          ) : settings.pageMode === 'page' ? (
             <div ref={viewportRef} className="relative h-full overflow-hidden">
               <div
                 ref={contentRef}
@@ -368,17 +509,18 @@ export default function ReaderViewPage() {
           )}
         </div>
 
-        {/* 点击区域（9 宫格简化为三列，语义同 legado 默认配置：左右翻页、中间呼出菜单） */}
-        <div className="absolute inset-0 grid grid-cols-[30%_40%_30%]">
-          <button type="button" aria-label="上一页" onClick={goPrev} className="cursor-w-resize" />
-          <button
-            type="button"
-            aria-label="菜单"
-            onClick={() => setMenuOpen((v) => !v)}
-            className="cursor-default"
-          />
-          <button type="button" aria-label="下一页" onClick={goNext} className="cursor-e-resize" />
-        </div>
+        {(contentType === 'text' || (contentType === 'image' && settings.pageMode === 'page')) && (
+          <div className="absolute inset-0 grid grid-cols-[30%_40%_30%]">
+            <button type="button" aria-label="上一页" onClick={goPrev} className="cursor-w-resize" />
+            <button
+              type="button"
+              aria-label="菜单"
+              onClick={() => setMenuOpen((v) => !v)}
+              className="cursor-default"
+            />
+            <button type="button" aria-label="下一页" onClick={goNext} className="cursor-e-resize" />
+          </div>
+        )}
       </div>
 
       {/* 页脚页码（翻页模式） */}
@@ -433,20 +575,10 @@ export default function ReaderViewPage() {
               </button>
               <input
                 type="range"
-                min={1}
-                max={Math.max(1, settings.pageMode === 'page' ? pageCount : 1000)}
-                value={settings.pageMode === 'page' ? page + 1 : Math.round(
-                  ((scrollRef.current?.scrollTop ?? 0) /
-                    Math.max(1, (scrollRef.current?.scrollHeight ?? 1) - (scrollRef.current?.clientHeight ?? 1))) *
-                    1000,
-                )}
-                onChange={(e) => {
-                  if (settings.pageMode === 'page') setPage(Number(e.target.value) - 1)
-                  else {
-                    const el = scrollRef.current
-                    if (el) el.scrollTop = (Number(e.target.value) / 1000) * (el.scrollHeight - el.clientHeight)
-                  }
-                }}
+                min={sliderCfg.min}
+                max={sliderCfg.max}
+                value={sliderCfg.value}
+                onChange={(e) => sliderCfg.onChange(Number(e.target.value))}
                 className="flex-1 accent-current"
                 style={{ accentColor: theme.accent }}
               />
@@ -587,15 +719,6 @@ export default function ReaderViewPage() {
         </>
       )}
 
-      {/* 音频/漫画提示（P3/P4 开放） */}
-      {contentType !== 'text' && content !== null && (
-        <div className="absolute inset-0 flex items-center justify-center" style={{ color: theme.text }}>
-          <div className="text-center">
-            <ChevronLeft className="mx-auto opacity-30" size={28} />
-            <p className="mt-2 text-sm opacity-70">{contentType === 'audio' ? '音频播放将在后续版本开放' : '漫画阅读将在后续版本开放'}</p>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

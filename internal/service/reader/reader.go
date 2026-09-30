@@ -4,11 +4,15 @@ package reader
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -728,10 +732,109 @@ func (s *ReaderService) getTocFrom(ctx context.Context, src *model.ReaderBookSou
 
 // ChapterContent 章节内容（按类型返回文本/音频/图片）。
 type ChapterContent struct {
-	Type    string   `json:"type"` // text / audio / image
-	Content string   `json:"content,omitempty"`
-	Tracks  []string `json:"tracks,omitempty"` // 音频播放地址（m3u8/直链）
-	Images  []string `json:"images,omitempty"` // 漫画图片列表
+	Type       string   `json:"type"` // text / audio / image
+	Content    string   `json:"content,omitempty"`
+	Tracks     []string `json:"tracks,omitempty"`      // 音频播放地址（已改写为服务端签名代理）
+	Images     []string `json:"images,omitempty"`      // 漫画图片列表（已改写为服务端签名代理）
+	ImageStyle string   `json:"image_style,omitempty"` // 对应 legado ruleContent.imageStyle
+}
+
+// ─── 媒体代理（音频流 / 漫画图片，带防盗链头与 HMAC 签名） ──────────────────
+
+// ProxyURL 将书源返回的媒体地址改写为签名代理地址。
+// 签名 = HMAC-SHA256(jwtSecret, bookID|url)，防止代理被滥用为开放中转。
+func (s *ReaderService) ProxyURL(bookID, rawURL string) string {
+	if rawURL == "" || strings.HasPrefix(rawURL, "/api/") {
+		return rawURL
+	}
+	mac := hmac.New(sha256.New, []byte(s.cfg.Secrets.JWTSecret))
+	mac.Write([]byte(bookID + "|" + rawURL))
+	sig := hex.EncodeToString(mac.Sum(nil))[:32]
+	return "/api/reader/media?b=" + url.QueryEscape(bookID) +
+		"&u=" + base64.RawURLEncoding.EncodeToString([]byte(rawURL)) + "&s=" + sig
+}
+
+// VerifyProxyURL 校验签名并还原媒体地址。
+func (s *ReaderService) VerifyProxyURL(bookID, encoded, sig string) (string, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", fmt.Errorf("媒体地址解码失败")
+	}
+	mac := hmac.New(sha256.New, []byte(s.cfg.Secrets.JWTSecret))
+	mac.Write([]byte(bookID + "|" + string(raw)))
+	expect := hex.EncodeToString(mac.Sum(nil))[:32]
+	if !hmac.Equal([]byte(expect), []byte(sig)) {
+		return "", fmt.Errorf("媒体地址签名校验失败")
+	}
+	return string(raw), nil
+}
+
+// FetchMedia 服务端拉取媒体资源（携带书源级请求头与 Referer，支持 Range 透传）。
+// 调用方负责关闭 resp.Body。
+func (s *ReaderService) FetchMedia(ctx context.Context, book *model.ReaderBook, rawURL, rangeHeader string) (*http.Response, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range helper.HTTPHeaderPresets() {
+		httpReq.Header.Set(k, v)
+	}
+	// 书源级请求头
+	if s.repo != nil {
+		if found, findErr := s.repo.GetSourceByURL(ctx, book.Origin); findErr == nil && found != nil && found.Header != "" {
+			var headers map[string]any
+			if json.Unmarshal([]byte(found.Header), &headers) == nil {
+				for k, v := range headers {
+					httpReq.Header.Set(k, fmt.Sprintf("%v", v))
+				}
+			}
+		}
+	}
+	if httpReq.Header.Get("Referer") == "" && book.Origin != "" {
+		httpReq.Header.Set("Referer", strings.TrimSuffix(book.Origin, "/")+"/")
+	}
+	if rangeHeader != "" {
+		httpReq.Header.Set("Range", rangeHeader)
+	}
+	return s.http.Do(httpReq)
+}
+
+// RewritePlaylist 重写 m3u8 播放列表：分片与密钥地址改写为签名代理地址。
+func (s *ReaderService) RewritePlaylist(bookID, playlistURL, text string) string {
+	base, err := url.Parse(playlistURL)
+	if err != nil {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		t := strings.TrimSpace(line)
+		if t == "" {
+			continue
+		}
+		if strings.HasPrefix(t, "#") {
+			// EXT-X-KEY / EXT-X-MAP 的 URI="..." 属性
+			if idx := strings.Index(t, `URI="`); idx >= 0 {
+				rest := t[idx+len(`URI="`):]
+				if end := strings.Index(rest, `"`); end >= 0 {
+					inner := rest[:end]
+					abs := GetAbsoluteURLOf(base, inner)
+					lines[i] = t[:idx] + `URI="` + s.ProxyURL(bookID, abs) + `"` + rest[end+1:]
+				}
+			}
+			continue
+		}
+		lines[i] = s.ProxyURL(bookID, GetAbsoluteURLOf(base, t))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// GetAbsoluteURLOf 以解析后的 base URL 拼绝对地址（内部工具）。
+func GetAbsoluteURLOf(base *url.URL, ref string) string {
+	parsed, err := url.Parse(strings.TrimSpace(ref))
+	if err != nil {
+		return ref
+	}
+	return base.ResolveReference(parsed).String()
 }
 
 // GetContent 抓取正文（含 nextContentUrl 翻页合并与净化替换）。
@@ -750,6 +853,7 @@ func (s *ReaderService) getContentFrom(ctx context.Context, src *model.ReaderBoo
 	}
 	var parts []string
 	url := chapterURL
+	lastFinalURL := ""
 	for i := 0; i < maxContentNextPage; i++ {
 		runner := s.jsRunnerFor(ctx, src, bs, "", 0)
 		req, err := rule.ParseAnalyzeUrlWithJS(url, "", 0, src.SourceURL, runner)
@@ -764,6 +868,7 @@ func (s *ReaderService) getContentFrom(ctx context.Context, src *model.ReaderBoo
 		if err != nil {
 			return nil, err
 		}
+		lastFinalURL = finalURL
 		ar := s.newRuleAnalyzer(ctx, src, bs, "", 0, body, finalURL)
 
 		list, err := ar.GetStringList(SPtr(cr.Content), nil, false)
@@ -786,12 +891,21 @@ func (s *ReaderService) getContentFrom(ctx context.Context, src *model.ReaderBoo
 	}
 	out := &ChapterContent{Content: content}
 	switch src.Type {
-	case 1:
+	case 1: // 音频：逐行地址，按最终页面 URL 绝对化
 		out.Type = "audio"
-		out.Tracks = splitURLLines(content)
-	case 2:
+		for _, line := range splitURLLines(content) {
+			if abs := rule.GetAbsoluteURL(lastFinalURL, line); abs != "" {
+				out.Tracks = append(out.Tracks, abs)
+			}
+		}
+	case 2: // 漫画/图片
 		out.Type = "image"
-		out.Images = splitURLLines(content)
+		for _, line := range splitURLLines(content) {
+			if abs := rule.GetAbsoluteURL(lastFinalURL, line); abs != "" {
+				out.Images = append(out.Images, abs)
+			}
+		}
+		out.ImageStyle = SPtr(cr.ImageStyle)
 	default:
 		out.Type = "text"
 	}
@@ -830,6 +944,11 @@ func (s *ReaderService) AddBook(ctx context.Context, userID string, origin Searc
 		return nil, err
 	}
 	return book, nil
+}
+
+// GetBook 按 ID 取书（媒体代理等使用）。
+func (s *ReaderService) GetBook(ctx context.Context, id string) (*model.ReaderBook, error) {
+	return s.repo.GetBook(ctx, id)
 }
 
 // ListBooks 书架列表。
@@ -995,6 +1114,13 @@ func (s *ReaderService) GetContentForBook(ctx context.Context, userID, bookID st
 	}
 	if out.Type == "text" {
 		out.Content = s.applyUserReplaceRules(ctx, userID, book.Name, out.Content)
+	}
+	// 音频/图片地址改写为签名代理（浏览器播放/展示无法带防盗链头）
+	for i, t := range out.Tracks {
+		out.Tracks[i] = s.ProxyURL(book.ID, t)
+	}
+	for i, img := range out.Images {
+		out.Images[i] = s.ProxyURL(book.ID, img)
 	}
 	return out, nil
 }

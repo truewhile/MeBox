@@ -2,8 +2,10 @@
 package handler
 
 import (
+	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -326,6 +328,53 @@ func readerDeleteReplaceRuleHandler(svc *service.Container) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+// readerMediaProxyHandler 音频流/漫画图片签名代理：
+// 校验 HMAC 签名 → 携书源防盗链头拉取 → Range 透传（音频拖动）/ m3u8 重写。
+func readerMediaProxyHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		bookID := c.Query("b")
+		rawURL, err := svc.Reader.VerifyProxyURL(bookID, c.Query("u"), c.Query("s"))
+		if err != nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "仅支持 http(s) 媒体地址"})
+			return
+		}
+		book, err := svc.Reader.GetBook(c.Request.Context(), bookID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "书籍不存在"})
+			return
+		}
+		resp, err := svc.Reader.FetchMedia(c.Request.Context(), book, rawURL, c.GetHeader("Range"))
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "媒体拉取失败: " + err.Error()})
+			return
+		}
+		defer resp.Body.Close()
+
+		ct := resp.Header.Get("Content-Type")
+		isPlaylist := strings.Contains(ct, "mpegurl") || strings.Contains(ct, "m3u8") ||
+			strings.HasSuffix(strings.ToLower(rawURL), ".m3u8")
+		if isPlaylist {
+			// m3u8：改写分片/密钥地址为签名代理后返回，hls.js 无感续播
+			data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+			rewritten := svc.Reader.RewritePlaylist(bookID, rawURL, string(data))
+			c.Data(http.StatusOK, "application/vnd.apple.mpegurl", []byte(rewritten))
+			return
+		}
+		// 流式透传（含 206 Partial Content，支持音频拖动进度）
+		for _, h := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"} {
+			if v := resp.Header.Get(h); v != "" {
+				c.Header(h, v)
+			}
+		}
+		c.Status(resp.StatusCode)
+		_, _ = io.Copy(c.Writer, resp.Body)
 	}
 }
 
