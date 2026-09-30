@@ -152,8 +152,32 @@ export const readerAPI = {
   listChapters: (id: string) =>
     api.get<{ chapters: ReaderChapter[] }>(`/reader/books/${id}/chapters`).then((r) => r.data.chapters),
   saveChapters: (id: string, chapters: ReaderChapter[]) => api.post(`/reader/books/${id}/chapters`, { chapters }),
+  // 书架维度正文（服务端已应用书源 replaceRegex 与用户替换净化规则）
+  bookContent: (id: string, chapter: number) =>
+    api
+      .get<ReaderChapterContent>(`/reader/books/${id}/content`, { params: { chapter }, timeout: LONG_REQUEST_TIMEOUT })
+      .then((r) => r.data),
 
-  // ── 替换规则 ──
+  // ── 替换净化规则 ──
   listReplaceRules: () =>
     api.get<{ rules: ReaderReplaceRule[] }>('/reader/replace-rules').then((r) => r.data.rules),
+  createReplaceRule: (body: ReplaceRuleInput) =>
+    api.post<ReaderReplaceRule>('/reader/replace-rules', body).then((r) => r.data),
+  updateReplaceRule: (id: string, body: ReplaceRuleInput) => api.patch(`/reader/replace-rules/${id}`, body),
+  deleteReplaceRule: (id: string) => api.delete(`/reader/replace-rules/${id}`),
+}
+
+export interface ReplaceRuleInput {
+  name: string
+  group: string
+  pattern: string
+  replacement: string
+  scope: string
+  scope_title: boolean
+  scope_content: boolean
+  exclude_scope: string
+  is_enabled: boolean
+  is_regex: boolean
+  timeout_millisecond: number
+  order: number
 }

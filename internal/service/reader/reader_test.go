@@ -218,17 +218,17 @@ func TestEndToEndSourceChain(t *testing.T) {
 func TestParseSourcePayload(t *testing.T) {
 	// 数组
 	arr := `[{"bookSourceUrl":"http://a.com","bookSourceName":"A"},{"bookSourceUrl":"http://b.com","bookSourceName":"B"}]`
-	if got := parseSourcePayload(arr); len(got) != 2 {
+	if got := ParseSourcePayload(arr); len(got) != 2 {
 		t.Fatalf("array payload = %d", len(got))
 	}
 	// 单对象
 	single := `{"bookSourceUrl":"http://a.com","bookSourceName":"A"}`
-	if got := parseSourcePayload(single); len(got) != 1 {
+	if got := ParseSourcePayload(single); len(got) != 1 {
 		t.Fatalf("single payload = %d", len(got))
 	}
 	// Base64
 	b64 := base64StdEncode(single)
-	if got := parseSourcePayload(b64); len(got) != 1 {
+	if got := ParseSourcePayload(b64); len(got) != 1 {
 		t.Fatalf("base64 payload = %d", len(got))
 	}
 }

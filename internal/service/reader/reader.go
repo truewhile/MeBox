@@ -65,7 +65,7 @@ func (s *ReaderService) ImportSources(ctx context.Context, text string) (int, er
 		}
 		text = body
 	}
-	sources := parseSourcePayload(text)
+	sources := ParseSourcePayload(text)
 	if len(sources) == 0 {
 		return 0, fmt.Errorf("未识别到有效书源（支持 JSON 数组/对象或 Base64）")
 	}
@@ -129,8 +129,9 @@ func int64Now(p *int64) int64 {
 	return *p
 }
 
-// parseSourcePayload 识别 JSON 数组 / 单对象 / Base64 / 每行一个对象。
-func parseSourcePayload(text string) []string {
+// ParseSourcePayload 识别 JSON 数组 / 单对象 / Base64 / 每行一个对象，
+// 返回书源 JSON 字符串列表（冒烟 CLI 复用）。
+func ParseSourcePayload(text string) []string {
 	text = strings.TrimSpace(text)
 	tryDecode := func(s string) []string {
 		var arr []json.RawMessage
@@ -385,7 +386,7 @@ func (s *ReaderService) Search(ctx context.Context, key string) ([]SearchBook, [
 		g.Go(func() error {
 			gctxSrc, cancel := context.WithTimeout(gctx, perSourceTimeout)
 			defer cancel()
-			books, err := s.searchInSource(gctxSrc, &src, key, 1)
+			books, err := s.searchInSource(gctxSrc, &src, nil, key, 1)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -459,10 +460,13 @@ func mergeSearchResults(hits []searchHit, key string) []SearchBook {
 }
 
 // searchInSource 单源搜索（对应 WebBook.searchBook）。
-func (s *ReaderService) searchInSource(ctx context.Context, src *model.ReaderBookSource, key string, page int) ([]SearchBook, error) {
-	bs, err := ParseBookSource(src.RawJSON)
-	if err != nil {
-		return nil, fmt.Errorf("书源 JSON 解析失败")
+func (s *ReaderService) searchInSource(ctx context.Context, src *model.ReaderBookSource, bs *BookSource, key string, page int) ([]SearchBook, error) {
+	if bs == nil {
+		var err error
+		bs, err = ParseBookSource(src.RawJSON)
+		if err != nil {
+			return nil, fmt.Errorf("书源 JSON 解析失败")
+		}
 	}
 	searchURL := SPtr(bs.SearchURL)
 	if searchURL == "" {
@@ -580,6 +584,10 @@ func (s *ReaderService) GetBookInfo(ctx context.Context, sourceID, sourceURL, bo
 	if err != nil {
 		return nil, err
 	}
+	return s.getBookInfoFrom(ctx, src, bs, bookURL)
+}
+
+func (s *ReaderService) getBookInfoFrom(ctx context.Context, src *model.ReaderBookSource, bs *BookSource, bookURL string) (*BookInfo, error) {
 	bir := bs.RuleBookInfo
 	if bir == nil {
 		return nil, fmt.Errorf("书源未配置详情规则")
@@ -664,6 +672,10 @@ func (s *ReaderService) GetToc(ctx context.Context, sourceID, sourceURL, bookURL
 	if err != nil {
 		return nil, err
 	}
+	return s.getTocFrom(ctx, src, bs, bookURL, tocURL)
+}
+
+func (s *ReaderService) getTocFrom(ctx context.Context, src *model.ReaderBookSource, bs *BookSource, bookURL, tocURL string) ([]TocChapter, error) {
 	tr := bs.RuleToc
 	if tr == nil || SPtr(tr.ChapterList) == "" {
 		return nil, fmt.Errorf("书源未配置目录规则")
@@ -728,6 +740,10 @@ func (s *ReaderService) GetContent(ctx context.Context, sourceID, sourceURL, boo
 	if err != nil {
 		return nil, err
 	}
+	return s.getContentFrom(ctx, src, bs, bookURL, chapterURL)
+}
+
+func (s *ReaderService) getContentFrom(ctx context.Context, src *model.ReaderBookSource, bs *BookSource, bookURL, chapterURL string) (*ChapterContent, error) {
 	cr := bs.RuleContent
 	if cr == nil || SPtr(cr.Content) == "" {
 		return nil, fmt.Errorf("书源未配置正文规则")
@@ -875,76 +891,293 @@ func (s *ReaderService) ListReplaceRules(ctx context.Context, userID string) ([]
 	return s.repo.ListReplaceRules(ctx, userID)
 }
 
-// ─── 书源调试（对应 BookSourceDebugModel 全链路） ───────────────────────────
+// ReplaceRuleInput 替换规则输入。
+type ReplaceRuleInput struct {
+	Name               string `json:"name"`
+	GroupName          string `json:"group"`
+	Pattern            string `json:"pattern"`
+	Replacement        string `json:"replacement"`
+	Scope              string `json:"scope"`
+	ScopeTitle         bool   `json:"scope_title"`
+	ScopeContent       bool   `json:"scope_content"`
+	ExcludeScope       string `json:"exclude_scope"`
+	IsEnabled          bool   `json:"is_enabled"`
+	IsRegex            bool   `json:"is_regex"`
+	TimeoutMillisecond int64  `json:"timeout_millisecond"`
+	Order              int    `json:"order"`
+}
 
-// Debug 全链路调试：搜索 → 详情 → 目录 → 正文，返回逐条日志。
-func (s *ReaderService) Debug(ctx context.Context, sourceID, key string) ([]string, error) {
-	src, _, err := s.loadSource(ctx, sourceID)
+// CreateReplaceRule 新增替换规则。
+func (s *ReaderService) CreateReplaceRule(ctx context.Context, userID string, in ReplaceRuleInput) (*model.ReaderReplaceRule, error) {
+	if strings.TrimSpace(in.Pattern) == "" {
+		return nil, fmt.Errorf("替换规则不能为空")
+	}
+	rule := &model.ReaderReplaceRule{
+		UserID:             userID,
+		Name:               in.Name,
+		GroupName:          in.GroupName,
+		Pattern:            in.Pattern,
+		Replacement:        in.Replacement,
+		Scope:              in.Scope,
+		ScopeTitle:         in.ScopeTitle,
+		ScopeContent:       in.ScopeContent,
+		ExcludeScope:       in.ExcludeScope,
+		IsEnabled:          in.IsEnabled,
+		IsRegex:            in.IsRegex,
+		TimeoutMillisecond: in.TimeoutMillisecond,
+		Order:              in.Order,
+	}
+	if err := s.repo.CreateReplaceRule(ctx, rule); err != nil {
+		return nil, err
+	}
+	return rule, nil
+}
+
+// UpdateReplaceRule 更新替换规则。
+func (s *ReaderService) UpdateReplaceRule(ctx context.Context, userID, id string, in ReplaceRuleInput) error {
+	existing, err := s.repo.ListReplaceRules(ctx, userID)
+	if err != nil {
+		return err
+	}
+	var target *model.ReaderReplaceRule
+	for i := range existing {
+		if existing[i].ID == id {
+			target = &existing[i]
+			break
+		}
+	}
+	if target == nil {
+		return fmt.Errorf("规则不存在")
+	}
+	target.Name = in.Name
+	target.GroupName = in.GroupName
+	target.Pattern = in.Pattern
+	target.Replacement = in.Replacement
+	target.Scope = in.Scope
+	target.ScopeTitle = in.ScopeTitle
+	target.ScopeContent = in.ScopeContent
+	target.ExcludeScope = in.ExcludeScope
+	target.IsEnabled = in.IsEnabled
+	target.IsRegex = in.IsRegex
+	target.TimeoutMillisecond = in.TimeoutMillisecond
+	target.Order = in.Order
+	return s.repo.UpdateReplaceRule(ctx, target)
+}
+
+// DeleteReplaceRule 删除替换规则。
+func (s *ReaderService) DeleteReplaceRule(ctx context.Context, userID, id string) error {
+	return s.repo.DeleteReplaceRule(ctx, userID, id)
+}
+
+// ─── 书架维度正文（含用户替换净化） ─────────────────────────────────────────
+
+// GetContentForBook 按书架书籍 + 章节序号取正文：
+// 解析书源 → 章节缓存 → 抓正文 → 书源 replaceRegex → 用户替换净化规则。
+func (s *ReaderService) GetContentForBook(ctx context.Context, userID, bookID string, chapterIndex int) (*ChapterContent, error) {
+	book, err := s.repo.GetBook(ctx, bookID)
 	if err != nil {
 		return nil, err
 	}
-	var logs []string
-	logf := func(format string, args ...any) {
-		logs = append(logs, fmt.Sprintf(format, args...))
-	}
-	logf("搜索关键词: %s", key)
-	books, err := s.searchInSource(ctx, src, key, 1)
+	chapters, err := s.repo.ListChapters(ctx, bookID)
 	if err != nil {
-		logf("搜索失败: %v", err)
-		return logs, nil
+		return nil, err
 	}
+	if len(chapters) == 0 {
+		return nil, fmt.Errorf("章节缓存为空，请先在详情页刷新目录")
+	}
+	if chapterIndex < 0 || chapterIndex >= len(chapters) {
+		return nil, fmt.Errorf("章节序号越界（共 %d 章）", len(chapters))
+	}
+	ch := chapters[chapterIndex]
+	out, err := s.GetContent(ctx, "", book.Origin, book.BookURL, ch.URL)
+	if err != nil {
+		return nil, err
+	}
+	if out.Type == "text" {
+		out.Content = s.applyUserReplaceRules(ctx, userID, book.Name, out.Content)
+	}
+	return out, nil
+}
+
+// applyUserReplaceRules 应用启用的用户替换规则（对应 legado ReplaceRule 作用链）。
+func (s *ReaderService) applyUserReplaceRules(ctx context.Context, userID, bookName, content string) string {
+	if content == "" {
+		return content
+	}
+	rules, err := s.repo.ListReplaceRules(ctx, userID)
+	if err != nil {
+		return content
+	}
+	for _, r := range rules {
+		if !r.IsEnabled || r.Pattern == "" || !r.ScopeContent {
+			continue
+		}
+		// 作用范围 / 排除范围按书名匹配（对应 legado scope / excludeScope）
+		if r.Scope != "" && !strings.Contains(bookName, r.Scope) {
+			continue
+		}
+		if r.ExcludeScope != "" && strings.Contains(bookName, r.ExcludeScope) {
+			continue
+		}
+		content = rule.ApplyUserReplace(content, r.Pattern, r.Replacement, r.IsRegex, r.TimeoutMillisecond)
+	}
+	return content
+}
+
+// ─── 书源调试（对应 BookSourceDebugModel 全链路） ───────────────────────────
+
+// Debug 全链路调试：搜索 → 详情 → 目录 → 正文，返回逐条日志。
+// SmokeLog 冒烟/调试日志行。
+type SmokeLog struct {
+	Stage   string `json:"stage"`
+	Level   string `json:"level"` // info / error
+	Message string `json:"message"`
+}
+
+// SmokeChainResult 单书源全链路冒烟结果。
+type SmokeChainResult struct {
+	SourceID   string     `json:"source_id"`
+	SourceName string     `json:"source_name"`
+	SourceURL  string     `json:"source_url"`
+	Type       int        `json:"type"`
+	OK         bool       `json:"ok"`
+	FailedAt   string     `json:"failed_at,omitempty"` // search / info / toc / content
+	Error      string     `json:"error,omitempty"`
+	SearchHits int        `json:"search_hits"`
+	Chapters   int        `json:"chapters"`
+	ContentLen int        `json:"content_len"`
+	ElapsedMS  int64      `json:"elapsed_ms"`
+	Logs       []SmokeLog `json:"logs"`
+}
+
+// SmokeChain 对单个书源跑 搜索→详情→目录→正文 全链路，
+// 返回结构化结果（书源调试接口与冒烟 CLI 共用）。
+func (s *ReaderService) SmokeChain(ctx context.Context, sourceID string, src *model.ReaderBookSource, bs *BookSource, key string) *SmokeChainResult {
+	res := &SmokeChainResult{Logs: []SmokeLog{}}
+	if src != nil {
+		res.SourceID = src.ID
+		res.SourceName = src.Name
+		res.SourceURL = src.SourceURL
+		res.Type = src.Type
+	} else if bs != nil {
+		res.SourceName = bs.BookSourceName
+		res.SourceURL = bs.BookSourceURL
+		res.Type = bs.Type()
+	}
+	start := time.Now()
+	logf := func(stage, level, format string, args ...any) {
+		res.Logs = append(res.Logs, SmokeLog{Stage: stage, Level: level, Message: fmt.Sprintf(format, args...)})
+	}
+	fail := func(stage string, err error) *SmokeChainResult {
+		res.FailedAt = stage
+		res.Error = err.Error()
+		res.ElapsedMS = time.Since(start).Milliseconds()
+		logf(stage, "error", "%s 失败: %v", stage, err)
+		return res
+	}
+
+	logf("search", "info", "搜索关键词: %s", key)
+	books, err := s.searchInSource(ctx, src, bs, key, 1)
+	if err != nil {
+		return fail("search", err)
+	}
+	res.SearchHits = len(books)
 	if len(books) == 0 {
-		logf("搜索结果为空")
-		return logs, nil
+		return fail("search", fmt.Errorf("搜索结果为空"))
 	}
-	logf("搜索到 %d 条结果", len(books))
+	logf("search", "info", "搜索到 %d 条结果", len(books))
 	for i, b := range books {
 		if i >= 3 {
 			break
 		}
-		logf("结果[%d] %s / %s", i, b.Name, b.Author)
+		logf("search", "info", "结果[%d] %s / %s", i, b.Name, b.Author)
 	}
 	first := books[0]
-	logf("访问详情页: %s", first.BookURL)
-	info, err := s.GetBookInfo(ctx, sourceID, "", first.BookURL)
+
+	logf("info", "info", "访问详情页: %s", first.BookURL)
+	info, err := s.getBookInfoFrom(ctx, src, bs, first.BookURL)
 	if err != nil {
-		logf("详情失败: %v", err)
-		return logs, nil
+		return fail("info", err)
 	}
-	logf("书名: %s 作者: %s 最新章节: %s", info.Name, info.Author, info.LatestChapter)
-	logf("访问目录页: %s", info.TocURL)
-	chapters, err := s.GetToc(ctx, sourceID, "", first.BookURL, info.TocURL)
+	logf("info", "info", "书名: %s 作者: %s 最新章节: %s", info.Name, info.Author, info.LatestChapter)
+
+	logf("toc", "info", "访问目录页: %s", info.TocURL)
+	chapters, err := s.getTocFrom(ctx, src, bs, first.BookURL, info.TocURL)
 	if err != nil {
-		logf("目录失败: %v", err)
-		return logs, nil
+		return fail("toc", err)
 	}
-	logf("共 %d 章", len(chapters))
+	res.Chapters = len(chapters)
+	logf("toc", "info", "共 %d 章", len(chapters))
 	for i, c := range chapters {
 		if i >= 3 {
 			break
 		}
-		logf("章节[%d] %s", c.Index, c.Title)
+		logf("toc", "info", "章节[%d] %s", c.Index, c.Title)
 	}
-	// 找第一个非卷章节读正文
+
 	for _, c := range chapters {
-		if c.IsVolume {
+		if c.IsVolume || c.URL == "" {
 			continue
 		}
-		logf("访问正文: %s", c.URL)
-		content, err := s.GetContent(ctx, sourceID, "", first.BookURL, c.URL)
+		logf("content", "info", "访问正文: %s", c.URL)
+		content, err := s.getContentFrom(ctx, src, bs, first.BookURL, c.URL)
 		if err != nil {
-			logf("正文失败: %v", err)
-			return logs, nil
+			return fail("content", err)
 		}
+		res.ContentLen = len([]rune(content.Content))
 		text := content.Content
-		if len(text) > 200 {
-			text = text[:200] + "..."
+		if len([]rune(text)) > 200 {
+			text = string([]rune(text)[:200]) + "..."
 		}
-		logf("正文预览: %s", text)
+		logf("content", "info", "正文预览(%d字): %s", res.ContentLen, text)
 		break
 	}
-	logf("调试完成")
-	return logs, nil
+	if res.ContentLen == 0 {
+		return fail("content", fmt.Errorf("未取到正文（可能全是卷名）"))
+	}
+	res.OK = true
+	res.ElapsedMS = time.Since(start).Milliseconds()
+	logf("done", "info", "链路完成，耗时 %dms", res.ElapsedMS)
+	return res
+}
+
+// SmokeSource 直接对一段书源 JSON 跑全链路（冒烟 CLI 用，不落库）。
+func (s *ReaderService) SmokeSource(ctx context.Context, raw string, key string) *SmokeChainResult {
+	bs, err := ParseBookSource(raw)
+	var res *SmokeChainResult
+	if err != nil {
+		res = &SmokeChainResult{OK: false, FailedAt: "parse", Error: err.Error(), Logs: []SmokeLog{}}
+		return res
+	}
+	src := &model.ReaderBookSource{
+		Name:        bs.BookSourceName,
+		GroupName:   strings.TrimSpace(SPtr(bs.BookSourceGroup)),
+		Type:        bs.Type(),
+		SourceURL:   bs.BookSourceURL,
+		RawJSON:     raw,
+		Header:      SPtr(bs.Header),
+		Enabled:     true,
+		CustomOrder: IPtr(bs.CustomOrder),
+	}
+	return s.SmokeChain(ctx, "", src, bs, key)
+}
+
+// Debug 书源调试接口：返回逐条日志字符串（前端展示用）。
+func (s *ReaderService) Debug(ctx context.Context, sourceID, key string) ([]string, error) {
+	src, bs, err := s.loadSource(ctx, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	res := s.SmokeChain(ctx, src.ID, src, bs, key)
+	out := make([]string, 0, len(res.Logs))
+	for _, l := range res.Logs {
+		prefix := "[info]"
+		if l.Level == "error" {
+			prefix = "[错误]"
+		}
+		out = append(out, fmt.Sprintf("%s %s", prefix, l.Message))
+	}
+	return out, nil
 }
 
 // loadSource 加载书源记录与解析结构。

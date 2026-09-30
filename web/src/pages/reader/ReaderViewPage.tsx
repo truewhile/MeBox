@@ -112,14 +112,11 @@ export default function ReaderViewPage() {
       setContent(null)
       setLoadingStage('content')
       try {
-        let ct = contentCache.current.get(ch.url)
+        const cacheKey = String(chapterIndex)
+        let ct = contentCache.current.get(cacheKey)
         if (!ct) {
-          ct = await readerAPI.content({
-            source_url: book.origin,
-            book_url: book.book_url,
-            chapter_url: ch.url,
-          })
-          contentCache.current.set(ch.url, ct)
+          ct = await readerAPI.bookContent(book.id, chapterIndex)
+          contentCache.current.set(cacheKey, ct)
         }
         if (cancelled) return
         setContentType(ct.type)
@@ -131,11 +128,10 @@ export default function ReaderViewPage() {
           .saveProgress(book.id, { chapter_index: chapterIndex, pos: pendingPosRef.current, chapter_title: ch.title })
           .catch(() => undefined)
         // 预取下一章
-        const next = chapters[chapterIndex + 1]
-        if (next && !contentCache.current.has(next.url)) {
+        if (!contentCache.current.has(String(chapterIndex + 1))) {
           readerAPI
-            .content({ source_url: book.origin, book_url: book.book_url, chapter_url: next.url })
-            .then((c) => contentCache.current.set(next.url, c))
+            .bookContent(book.id, chapterIndex + 1)
+            .then((c) => contentCache.current.set(String(chapterIndex + 1), c))
             .catch(() => undefined)
         }
       } catch (e) {
@@ -359,8 +355,7 @@ export default function ReaderViewPage() {
                 onClick={() => {
                   setError('')
                   if (chapterIndex !== null) {
-                    const ch = chapters[chapterIndex]
-                    if (ch) contentCache.current.delete(ch.url)
+                    contentCache.current.delete(String(chapterIndex))
                     setChapterIndex(chapterIndex)
                   }
                 }}

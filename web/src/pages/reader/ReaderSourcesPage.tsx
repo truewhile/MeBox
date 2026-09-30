@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import { ArrowLeft, Bug, Download, Loader2, Play, Trash2 } from 'lucide-react'
 
@@ -102,6 +102,9 @@ export default function ReaderSourcesPage() {
           <ArrowLeft size={18} />
         </button>
         <h1 className="flex-1 font-display text-lg text-ink-600">书源管理</h1>
+        <Link to="/reader/replace" className="btn-outline mr-2 text-xs">
+          替换净化
+        </Link>
         <button type="button" onClick={() => setShowImport((v) => !v)} className="btn-primary text-xs">
           <Download size={13} className="mr-1 inline" /> 导入书源
         </button>

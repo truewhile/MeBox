@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 
 import ReaderBookPage from './ReaderBookPage'
 import ReaderHomePage from './ReaderHomePage'
+import ReaderReplacePage from './ReaderReplacePage'
 import ReaderSearchPage from './ReaderSearchPage'
 import ReaderSourcesPage from './ReaderSourcesPage'
 import ReaderViewPage from './ReaderViewPage'
@@ -13,6 +14,7 @@ export default function ReaderRoutes() {
       <Route index element={<ReaderHomePage />} />
       <Route path="search" element={<ReaderSearchPage />} />
       <Route path="sources" element={<ReaderSourcesPage />} />
+      <Route path="replace" element={<ReaderReplacePage />} />
       <Route path="book" element={<ReaderBookPage />} />
       <Route path="view/:bookId" element={<ReaderViewPage />} />
       <Route path="*" element={<Navigate to="/reader" replace />} />

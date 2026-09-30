@@ -2,6 +2,7 @@ package rule
 
 import (
 	"strings"
+	"time"
 
 	"github.com/dlclark/regexp2"
 )
@@ -101,6 +102,32 @@ func regexReplaceAll(pattern, result, replacement string) string {
 	out, err := re.Replace(result, replacement, 0, -1)
 	if err != nil {
 		return result
+	}
+	return out
+}
+
+// ApplyUserReplace 应用一条用户替换净化规则（对应 legado ReplaceRule）。
+// isRegex=false 按字面替换；isRegex=true 用 Java 正则语义并带匹配超时
+// （防灾难性回溯挂死服务），编译失败回退字面替换。
+func ApplyUserReplace(content, pattern, replacement string, isRegex bool, timeoutMS int64) string {
+	if pattern == "" {
+		return content
+	}
+	if !isRegex {
+		return strings.ReplaceAll(content, pattern, replacement)
+	}
+	re, err := regexp2.Compile(pattern, regexp2.None)
+	if err != nil {
+		return strings.ReplaceAll(content, pattern, replacement)
+	}
+	if timeoutMS > 0 {
+		re.MatchTimeout = time.Duration(timeoutMS) * time.Millisecond
+	} else {
+		re.MatchTimeout = 3 * time.Second
+	}
+	out, err := re.Replace(content, replacement, 0, -1)
+	if err != nil {
+		return content
 	}
 	return out
 }

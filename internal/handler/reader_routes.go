@@ -3,6 +3,7 @@ package handler
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -36,9 +37,13 @@ func registerReaderRoutes(authed *gin.RouterGroup, svc *service.Container) {
 	g.PUT("/books/:id/progress", readerSaveProgressHandler(svc))
 	g.GET("/books/:id/chapters", readerListChaptersHandler(svc))
 	g.POST("/books/:id/chapters", readerReplaceChaptersHandler(svc))
+	g.GET("/books/:id/content", readerBookContentHandler(svc))
 
 	// 替换净化规则
 	g.GET("/replace-rules", readerListReplaceRulesHandler(svc))
+	g.POST("/replace-rules", readerCreateReplaceRuleHandler(svc))
+	g.PATCH("/replace-rules/:id", readerUpdateReplaceRuleHandler(svc))
+	g.DELETE("/replace-rules/:id", readerDeleteReplaceRuleHandler(svc))
 }
 
 func readerListSourcesHandler(svc *service.Container) gin.HandlerFunc {
@@ -277,5 +282,67 @@ func readerListReplaceRulesHandler(svc *service.Container) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"rules": rules})
+	}
+}
+
+func readerCreateReplaceRuleHandler(svc *service.Container) gin.HandlerFunc {
+	var body reader.ReplaceRuleInput
+	return func(c *gin.Context) {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		userID := c.GetString(middleware.CtxUserID)
+		rule, err := svc.Reader.CreateReplaceRule(c.Request.Context(), userID, body)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, rule)
+	}
+}
+
+func readerUpdateReplaceRuleHandler(svc *service.Container) gin.HandlerFunc {
+	var body reader.ReplaceRuleInput
+	return func(c *gin.Context) {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		userID := c.GetString(middleware.CtxUserID)
+		if err := svc.Reader.UpdateReplaceRule(c.Request.Context(), userID, c.Param("id"), body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+func readerDeleteReplaceRuleHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID := c.GetString(middleware.CtxUserID)
+		if err := svc.Reader.DeleteReplaceRule(c.Request.Context(), userID, c.Param("id")); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+// readerBookContentHandler 书架维度正文（服务端应用替换净化规则）。
+func readerBookContentHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		chapter, err := strconv.Atoi(c.DefaultQuery("chapter", "0"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "chapter 参数需为整数"})
+			return
+		}
+		userID := c.GetString(middleware.CtxUserID)
+		content, err := svc.Reader.GetContentForBook(c.Request.Context(), userID, c.Param("id"), chapter)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, content)
 	}
 }
