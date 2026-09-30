@@ -59,7 +59,7 @@ func (s *ReaderService) ImportSources(ctx context.Context, text string) (int, er
 		return 0, fmt.Errorf("导入内容为空")
 	}
 	if strings.HasPrefix(text, "http://") || strings.HasPrefix(text, "https://") {
-		body, _, err := s.execute(ctx, &rule.Request{Method: "GET", URL: text, URLNoQuery: text, Headers: map[string]string{}})
+		body, _, _, err := s.execute(ctx, &rule.Request{Method: "GET", URL: text, URLNoQuery: text, Headers: map[string]string{}})
 		if err != nil {
 			return 0, fmt.Errorf("拉取书源失败: %w", err)
 		}
@@ -207,8 +207,8 @@ func (s *ReaderService) DeleteSource(ctx context.Context, id string) error {
 
 // ─── HTTP 执行 ──────────────────────────────────────────────────────────────
 
-// execute 执行 rule.Request，返回（解码后 body, 最终 URL）。
-func (s *ReaderService) execute(ctx context.Context, req *rule.Request) (string, string, error) {
+// execute 执行 rule.Request，返回（解码后 body, 最终 URL, HTTP 状态码）。
+func (s *ReaderService) execute(ctx context.Context, req *rule.Request) (string, string, int, error) {
 	var bodyReader io.Reader
 	if req.Body != "" {
 		bodyReader = strings.NewReader(req.Body)
@@ -219,7 +219,7 @@ func (s *ReaderService) execute(ctx context.Context, req *rule.Request) (string,
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, req.Method, target, bodyReader)
 	if err != nil {
-		return "", "", err
+		return "", "", 0, err
 	}
 	for k, v := range helper.HTTPHeaderPresets() {
 		httpReq.Header.Set(k, v)
@@ -237,12 +237,12 @@ func (s *ReaderService) execute(ctx context.Context, req *rule.Request) (string,
 	}
 	resp, err := s.http.Do(httpReq)
 	if err != nil {
-		return "", "", err
+		return "", "", 0, err
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
-		return "", "", err
+		return "", "", resp.StatusCode, err
 	}
 	charset := req.Charset
 	if charset == "" {
@@ -253,11 +253,23 @@ func (s *ReaderService) execute(ctx context.Context, req *rule.Request) (string,
 		body = string(data)
 	}
 	finalURL := resp.Request.URL.String()
+	// 记录 Set-Cookie（书源 JS 的 cookie.getCookie 可读取）
+	var cookieStrs []string
+	for _, ck := range resp.Cookies() {
+		cookieStrs = append(cookieStrs, ck.Name+"="+ck.Value)
+	}
+	if len(cookieStrs) > 0 {
+		rule.CookieJarRecord(finalURL, cookieStrs)
+	}
+	// bodyJs 二次处理
+	if req.BodyJsFn != nil {
+		body = req.BodyJsFn(body)
+	}
 	if strings.EqualFold(charsetFromContentType(resp.Header.Get("Content-Type")), "xml") &&
 		!strings.HasPrefix(strings.TrimSpace(body), "<?xml") {
 		body = "<?xml version=\"1.0\"?>" + body
 	}
-	return body, finalURL, nil
+	return body, finalURL, resp.StatusCode, nil
 }
 
 func charsetFromContentType(ct string) string {
@@ -277,30 +289,42 @@ func charsetFromContentType(ct string) string {
 
 // ─── 规则执行辅助 ───────────────────────────────────────────────────────────
 
-// newRuleAnalyzer 为指定书源构建规则解析器（注入书源变量）。
-func (s *ReaderService) newRuleAnalyzer(bs *BookSource, body, finalURL string) *rule.AnalyzeRule {
+// newRuleAnalyzer 为指定书源构建规则解析器（注入书源变量与 JS 运行时）。
+func (s *ReaderService) newRuleAnalyzer(ctx context.Context, src *model.ReaderBookSource, bs *BookSource, key string, page int, body, finalURL string) *rule.AnalyzeRule {
 	ar := rule.NewAnalyzeRule()
 	ar.SetContent(body, finalURL)
 	applySourceVariables(ar, bs)
+	ar.SetJSRunner(s.jsRunnerFor(ctx, src, bs, key, page).ForAnalyzer(ar))
 	return ar
 }
 
-// fetchViaRule 解析 URL 规则并抓取，返回 (body, 最终URL)。
-func (s *ReaderService) fetchViaRule(ctx context.Context, urlRule, key string, page int, baseUrl string) (*rule.AnalyzeRule, error) {
-	req, err := rule.ParseAnalyzeUrl(urlRule, key, page, baseUrl)
-	if err != nil {
-		return nil, err
+// jsRunnerFor 为本次请求构建 JS 运行时（网络桥回 execute，携带书源上下文）。
+func (s *ReaderService) jsRunnerFor(ctx context.Context, src *model.ReaderBookSource, bs *BookSource, key string, page int) *rule.JSRunner {
+	return rule.NewJSRunner(rule.JSConfig{
+		Fetch: func(req *rule.Request) (string, string, int, error) {
+			return s.execute(ctx, req)
+		},
+		SourceProps: bs.SourceProps(),
+		Log: func(msg string) {
+			if s.log != nil {
+				s.log.Info("reader:source-js",
+					zap.String("source", srcNameOf(src, bs)), zap.String("log", msg))
+			}
+		},
+		BaseURL: src.SourceURL,
+		Key:     key,
+		Page:    page,
+	})
+}
+
+func srcNameOf(src *model.ReaderBookSource, bs *BookSource) string {
+	if src != nil {
+		return src.Name
 	}
-	if req.Unsupported != nil {
-		return nil, req.Unsupported
+	if bs != nil {
+		return bs.BookSourceName
 	}
-	body, finalURL, err := s.execute(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	ar := rule.NewAnalyzeRule()
-	ar.SetContent(body, finalURL)
-	return ar, nil
+	return ""
 }
 
 // ─── 搜索 ──────────────────────────────────────────────────────────────────
@@ -448,7 +472,8 @@ func (s *ReaderService) searchInSource(ctx context.Context, src *model.ReaderBoo
 	if sr == nil || SPtr(sr.BookList) == "" {
 		return nil, fmt.Errorf("书源未配置搜索列表规则")
 	}
-	req, err := rule.ParseAnalyzeUrl(searchURL, key, page, src.SourceURL)
+	runner := s.jsRunnerFor(ctx, src, bs, key, page)
+	req, err := rule.ParseAnalyzeUrlWithJS(searchURL, key, page, src.SourceURL, runner)
 	if err != nil {
 		return nil, err
 	}
@@ -466,13 +491,11 @@ func (s *ReaderService) searchInSource(ctx context.Context, src *model.ReaderBoo
 			}
 		}
 	}
-	body, finalURL, err := s.execute(ctx, req)
+	body, finalURL, _, err := s.execute(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	ar := rule.NewAnalyzeRule()
-	ar.SetContent(body, finalURL)
-	applySourceVariables(ar, bs)
+	ar := s.newRuleAnalyzer(ctx, src, bs, key, page, body, finalURL)
 
 	elements, err := ar.GetElements(SPtr(sr.BookList))
 	if err != nil {
@@ -561,7 +584,8 @@ func (s *ReaderService) GetBookInfo(ctx context.Context, sourceID, sourceURL, bo
 	if bir == nil {
 		return nil, fmt.Errorf("书源未配置详情规则")
 	}
-	req, err := rule.ParseAnalyzeUrl(bookURL, "", 0, src.SourceURL)
+	runner := s.jsRunnerFor(ctx, src, bs, "", 0)
+	req, err := rule.ParseAnalyzeUrlWithJS(bookURL, "", 0, src.SourceURL, runner)
 	if err != nil {
 		return nil, err
 	}
@@ -569,13 +593,11 @@ func (s *ReaderService) GetBookInfo(ctx context.Context, sourceID, sourceURL, bo
 		return nil, req.Unsupported
 	}
 	applySourceHeaders(req, src)
-	body, finalURL, err := s.execute(ctx, req)
+	body, finalURL, _, err := s.execute(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	ar := rule.NewAnalyzeRule()
-	ar.SetContent(body, finalURL)
-	applySourceVariables(ar, bs)
+	ar := s.newRuleAnalyzer(ctx, src, bs, "", 0, body, finalURL)
 
 	info := &BookInfo{BookURL: bookURL, TocURL: bookURL}
 	if initRule := SPtr(bir.Init); initRule != "" {
@@ -649,7 +671,8 @@ func (s *ReaderService) GetToc(ctx context.Context, sourceID, sourceURL, bookURL
 	if tocURL == "" {
 		tocURL = bookURL
 	}
-	req, err := rule.ParseAnalyzeUrl(tocURL, "", 0, src.SourceURL)
+	runner := s.jsRunnerFor(ctx, src, bs, "", 0)
+	req, err := rule.ParseAnalyzeUrlWithJS(tocURL, "", 0, src.SourceURL, runner)
 	if err != nil {
 		return nil, err
 	}
@@ -657,13 +680,11 @@ func (s *ReaderService) GetToc(ctx context.Context, sourceID, sourceURL, bookURL
 		return nil, req.Unsupported
 	}
 	applySourceHeaders(req, src)
-	body, finalURL, err := s.execute(ctx, req)
+	body, finalURL, _, err := s.execute(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	ar := rule.NewAnalyzeRule()
-	ar.SetContent(body, finalURL)
-	applySourceVariables(ar, bs)
+	ar := s.newRuleAnalyzer(ctx, src, bs, "", 0, body, finalURL)
 
 	elements, err := ar.GetElements(SPtr(tr.ChapterList))
 	if err != nil {
@@ -714,7 +735,8 @@ func (s *ReaderService) GetContent(ctx context.Context, sourceID, sourceURL, boo
 	var parts []string
 	url := chapterURL
 	for i := 0; i < maxContentNextPage; i++ {
-		req, err := rule.ParseAnalyzeUrl(url, "", 0, src.SourceURL)
+		runner := s.jsRunnerFor(ctx, src, bs, "", 0)
+		req, err := rule.ParseAnalyzeUrlWithJS(url, "", 0, src.SourceURL, runner)
 		if err != nil {
 			return nil, err
 		}
@@ -722,13 +744,11 @@ func (s *ReaderService) GetContent(ctx context.Context, sourceID, sourceURL, boo
 			return nil, req.Unsupported
 		}
 		applySourceHeaders(req, src)
-		body, finalURL, err := s.execute(ctx, req)
+		body, finalURL, _, err := s.execute(ctx, req)
 		if err != nil {
 			return nil, err
 		}
-		ar := rule.NewAnalyzeRule()
-		ar.SetContent(body, finalURL)
-		applySourceVariables(ar, bs)
+		ar := s.newRuleAnalyzer(ctx, src, bs, "", 0, body, finalURL)
 
 		list, err := ar.GetStringList(SPtr(cr.Content), nil, false)
 		if err != nil {

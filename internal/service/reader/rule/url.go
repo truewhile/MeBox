@@ -39,14 +39,23 @@ type Request struct {
 	IsForm     bool // Body 为已编码的 form 数据
 	IsJSON     bool // 以 application/json 发送
 	Charset    string
+	// BodyJsFn 对应 UrlOption.bodyJs：响应体二次处理（JS 执行闭包）。
+	BodyJsFn func(body string) string
 	// Unsupported 非 nil 表示该请求依赖当前阶段不支持的能力，
-	// 值为对应错误（webView/js/type）。
+	// 值为对应错误（webView/type；JS 在接入 runner 后已支持）。
 	Unsupported error
 }
 
 // ParseAnalyzeUrl 对应 AnalyzeUrl.init：URL 规则 → 可执行请求。
 // key/page 对应搜索关键词与页码（{{key}}/{{page}}/<1,2,3>）。
 func ParseAnalyzeUrl(mUrl, key string, page int, baseUrl string) (*Request, error) {
+	return ParseAnalyzeUrlWithJS(mUrl, key, page, baseUrl, nil)
+}
+
+// ParseAnalyzeUrlWithJS 在 ParseAnalyzeUrl 基础上支持 JS：
+// URL 中的 <js>/@js: 块、{{js}} 内嵌、选项里的 js/bodyJs。
+// runner 为 nil 时遇到 JS 标记 Unsupported（P0 兼容路径）。
+func ParseAnalyzeUrlWithJS(mUrl, key string, page int, baseUrl string, runner *JSRunner) (*Request, error) {
 	req := &Request{Method: "GET", Headers: map[string]string{}}
 	// baseUrl 自身可能带 ",{...}" 选项段，先截断（对应 init 中的 paramPattern）
 	if st, _, ok := findParamSplit(baseUrl); ok {
@@ -54,37 +63,87 @@ func ParseAnalyzeUrl(mUrl, key string, page int, baseUrl string) (*Request, erro
 	}
 	ruleUrl := mUrl
 
-	// ── analyzeJs：URL 中的 <js>/@js:（P0 不支持） ──
+	// ── analyzeJs：URL 中的 <js>/@js:，@result 引用前序结果 ──
 	if jsPatternRe.MatchString(ruleUrl) {
-		req.Unsupported = ErrJsUnsupported
-		// 移除 JS 块继续解析，便于调试接口展示其余部分
-		ruleUrl = jsPatternRe.ReplaceAllString(ruleUrl, "")
+		if runner == nil {
+			req.Unsupported = ErrJsUnsupported
+			// 移除 JS 块继续解析，便于调试接口展示其余部分
+			ruleUrl = jsPatternRe.ReplaceAllString(ruleUrl, "")
+		} else {
+			// 对应 AnalyzeUrl.analyzeJs
+			start := 0
+			result := ruleUrl
+			for _, g := range jsPatternRe.FindAllStringSubmatchIndex(ruleUrl, -1) {
+				if g[0] > start {
+					if seg := strings.TrimSpace(ruleUrl[start:g[0]]); seg != "" {
+						result = strings.ReplaceAll(seg, "@result", anyToString(result))
+					}
+				}
+				jsBody := ""
+				if g[2] >= 0 {
+					jsBody = ruleUrl[g[2]:g[3]]
+				} else if g[4] >= 0 {
+					jsBody = ruleUrl[g[4]:g[5]]
+				}
+				v, err := runner.Run(nil, jsBody, result, baseUrl)
+				if err != nil {
+					return req, err
+				}
+				result = anyToString(v)
+				start = g[1]
+			}
+			if len(ruleUrl) > start {
+				if seg := strings.TrimSpace(ruleUrl[start:]); seg != "" {
+					result = strings.ReplaceAll(seg, "@result", result)
+				}
+			}
+			ruleUrl = result
+		}
 	}
 
 	// ── replaceKeyPageJs：{{...}} 与 <页码列表> ──
 	if strings.Contains(ruleUrl, "{{") && strings.Contains(ruleUrl, "}}") {
 		var subErr error
-		ra := NewRuleAnalyzer(ruleUrl, false)
-		out := ra.InnerRule2("{{", "}}", func(inner string) string {
-			trimmed := strings.TrimSpace(inner)
-			switch trimmed {
-			case "key":
-				return key
-			case "page":
-				p := page
-				if p < 1 {
-					p = 1
+		if runner == nil {
+			ra := NewRuleAnalyzer(ruleUrl, false)
+			out := ra.InnerRule2("{{", "}}", func(inner string) string {
+				trimmed := strings.TrimSpace(inner)
+				switch trimmed {
+				case "key":
+					return key
+				case "page":
+					p := page
+					if p < 1 {
+						p = 1
+					}
+					return anyToString(float64(p))
+				default:
+					subErr = ErrJsUnsupported
+					return ""
 				}
-				return anyToString(float64(p))
-			default:
-				subErr = ErrJsUnsupported
-				return ""
+			})
+			if subErr != nil {
+				req.Unsupported = subErr
+			} else if out != "" {
+				ruleUrl = out
 			}
-		})
-		if subErr != nil {
-			req.Unsupported = subErr
-		} else if out != "" {
-			ruleUrl = out
+		} else {
+			// 对应 legado：{{...}} 一律按 JS 执行（key/page 为绑定变量）
+			ra := NewRuleAnalyzer(ruleUrl, false)
+			out := ra.InnerRule2("{{", "}}", func(inner string) string {
+				v, err := runner.Run(nil, strings.TrimSpace(inner), nil, baseUrl)
+				if err != nil {
+					subErr = err
+					return ""
+				}
+				return anyToString(v)
+			})
+			if subErr != nil {
+				return req, subErr
+			}
+			if out != "" {
+				ruleUrl = out
+			}
 		}
 	}
 	if page >= 1 {
@@ -148,10 +207,26 @@ func ParseAnalyzeUrl(mUrl, key string, page int, baseUrl string) (*Request, erro
 		if useWebView(option.WebView) && req.Unsupported == nil {
 			req.Unsupported = ErrWebJSUnsupported
 		}
+		// 对应 AnalyzeUrl：option.js 在解析完成后执行，结果覆盖 url
 		if option.Js != "" && req.Unsupported == nil {
-			req.Unsupported = ErrJsUnsupported
+			if runner == nil {
+				req.Unsupported = ErrJsUnsupported
+			} else if v, err := runner.Run(nil, option.Js, req.URL, baseUrl); err != nil {
+				return req, err
+			} else if s := anyToString(v); s != "" {
+				req.URL = s
+			}
 		}
-		if option.BodyJs != "" && req.Unsupported == nil {
+		// 对应 AnalyzeUrl：bodyJs 在响应后执行，结果作为 body
+		if option.BodyJs != "" && req.Unsupported == nil && runner != nil {
+			req.BodyJsFn = func(body string) string {
+				v, err := runner.Run(nil, option.BodyJs, body, baseUrl)
+				if err != nil {
+					return body
+				}
+				return anyToString(v)
+			}
+		} else if option.BodyJs != "" && req.Unsupported == nil {
 			req.Unsupported = ErrJsUnsupported
 		}
 	}

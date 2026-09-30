@@ -9,6 +9,7 @@ import (
 
 // BookSource 书源 JSON 结构（字段与 legado 实体一致，未知字段忽略）。
 type BookSource struct {
+	RawJSON           string         `json:"-"`
 	BookSourceURL     string         `json:"bookSourceUrl"`
 	BookSourceName    string         `json:"bookSourceName"`
 	BookSourceGroup   *string        `json:"bookSourceGroup"`
@@ -109,10 +110,23 @@ func ParseBookSource(raw string) (*BookSource, error) {
 	if err := json.Unmarshal([]byte(raw), &bs); err != nil {
 		return nil, err
 	}
+	bs.RawJSON = raw
 	if bs.RawVariables != nil && strings.TrimSpace(*bs.RawVariables) != "" {
 		_ = json.Unmarshal([]byte(*bs.RawVariables), &bs.Variables)
 	}
 	return &bs, nil
+}
+
+// SourceProps 书源 JSON 原样转为 map（注入 JS 的 `source` 对象）。
+func (b *BookSource) SourceProps() map[string]any {
+	if b.RawJSON == "" {
+		return nil
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(b.RawJSON), &m) != nil {
+		return nil
+	}
+	return m
 }
 
 // Type 返回书源类型（默认文本）。
