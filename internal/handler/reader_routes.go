@@ -57,6 +57,8 @@ func registerReaderRoutes(authed *gin.RouterGroup, svc *service.Container) {
 	g.POST("/local/audiobooks", middleware.AdminRequired(), readerImportLocalAudioDirHandler(svc))
 	g.DELETE("/books/:id", readerRemoveBookHandler(svc))
 	g.PUT("/books/:id/progress", readerSaveProgressHandler(svc))
+	// 换源：把书架里的书切到另一个书源（保留阅读进度，目录缓存按新源重建）
+	g.POST("/books/:id/origin", readerSwitchOriginHandler(svc))
 	g.PUT("/books/:id/audio-config", readerSaveAudioConfigHandler(svc))
 	g.GET("/books/:id/chapters", readerListChaptersHandler(svc))
 	g.POST("/books/:id/chapters", readerReplaceChaptersHandler(svc))
@@ -409,6 +411,28 @@ func readerAddBookHandler(svc *service.Container) gin.HandlerFunc {
 			return
 		}
 		// 后台补目录缓存，让书架能显示未读章数；失败不影响加入书架本身。
+		svc.Reader.WarmUpBookChaptersAsync(c.Request.Context(), userID, book)
+		c.JSON(http.StatusOK, book)
+	}
+}
+
+// readerSwitchOriginHandler 换源：把书架里的书切到另一个书源。
+// 阅读进度保留；旧源目录缓存清空后按新源后台重新预热。
+func readerSwitchOriginHandler(svc *service.Container) gin.HandlerFunc {
+	var body struct {
+		Origin reader.SearchOrigin `json:"origin" binding:"required"`
+	}
+	return func(c *gin.Context) {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		userID := c.GetString(middleware.CtxUserID)
+		book, err := svc.Reader.SwitchOrigin(c.Request.Context(), userID, c.Param("id"), body.Origin)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		svc.Reader.WarmUpBookChaptersAsync(c.Request.Context(), userID, book)
 		c.JSON(http.StatusOK, book)
 	}

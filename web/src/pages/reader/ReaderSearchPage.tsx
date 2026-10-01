@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import toast from 'react-hot-toast'
-import { AlertTriangle, ArrowLeft, BookOpen, ChevronDown, ChevronRight, Loader2, Plus, Search } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, ChevronDown, ChevronRight, Loader2, Plus, Search } from 'lucide-react'
 
 import { readerAPI, type ReaderSearchBook, type ReaderSearchSkipped } from '../../api/reader'
+import ReaderBookCover from '../../components/ReaderBookCover'
+import { splitKindTags } from '../../utils/kindTags'
+import { SourcePickerDialog } from './SourcePickerDialog'
 
 // 多源聚合搜索页（仿 legado SearchActivity：结果流 + 失败书源列表）。
 
@@ -12,6 +15,8 @@ export default function ReaderSearchPage() {
   const [params] = useSearchParams()
   const [key, setKey] = useState(() => params.get('key') ?? '')
   const [searching, setSearching] = useState(false)
+  // 换源：点「N 源可换」后选择用哪个源打开这本书
+  const [picker, setPicker] = useState<ReaderSearchBook | null>(null)
   const [books, setBooks] = useState<ReaderSearchBook[] | null>(null)
   const [skipped, setSkipped] = useState<ReaderSearchSkipped[]>([])
   const [showSkipped, setShowSkipped] = useState(false)
@@ -61,8 +66,7 @@ export default function ReaderSearchPage() {
     }
   }
 
-  const openBook = async (book: ReaderSearchBook) => {
-    const origin = book.origins[0]
+  const openBook = (book: ReaderSearchBook, origin = book.origins[0]) => {
     if (!origin) return
     navigate(
       `/reader/book?${new URLSearchParams({
@@ -125,36 +129,37 @@ export default function ReaderSearchPage() {
             >
               <button type="button" onClick={() => openBook(book)} className="shrink-0">
                 <div className="h-24 w-16 overflow-hidden rounded-lg border border-[var(--app-border)] bg-[var(--app-panel-soft)]">
-                  {book.cover_url ? (
-                    <img
-                      src={book.cover_url}
-                      alt={book.name}
-                      loading="lazy"
-                      referrerPolicy="no-referrer"
-                      className="h-full w-full object-cover"
-                    />
-                  ) : (
-                    <div className="flex h-full w-full items-center justify-center">
-                      <BookOpen size={18} className="text-[var(--app-muted)]" />
-                    </div>
-                  )}
+                  <ReaderBookCover url={book.cover_url} alt={book.name} iconSize={18} />
                 </div>
               </button>
               <div className="min-w-0 flex-1">
-                <button type="button" onClick={() => openBook(book)} className="text-left">
-                  <p className="truncate text-sm font-bold text-[var(--app-text)] hover:text-brand-600">
-                    {book.name}
-                    {book.origins.length > 1 && (
-                      <span className="ml-2 rounded-md bg-brand-500/10 px-1.5 py-0.5 text-2xs font-bold text-brand-600">
-                        {book.origins.length} 源可换
-                      </span>
-                    )}
-                  </p>
-                </button>
-                <p className="mt-1 truncate text-xs text-[var(--app-muted)]">
-                  {book.author || '佚名'}
-                  {book.kind ? ` · ${book.kind}` : ''}
-                  {book.word_count ? ` · ${book.word_count}` : ''}
+                <div className="flex items-center gap-2">
+                  <button type="button" onClick={() => openBook(book)} className="min-w-0 text-left">
+                    <p className="truncate text-sm font-bold text-[var(--app-text)] hover:text-brand-600">{book.name}</p>
+                  </button>
+                  {book.origins.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => setPicker(book)}
+                      title="换源"
+                      className="shrink-0 rounded-md bg-brand-500/10 px-1.5 py-0.5 text-2xs font-bold text-brand-600 transition hover:bg-brand-500/20"
+                    >
+                      {book.origins.length} 源可换
+                    </button>
+                  )}
+                </div>
+                <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-[var(--app-muted)]">
+                  <span className="truncate">{book.author || '佚名'}</span>
+                  {splitKindTags(book.kind).map((k) => (
+                    <span key={k} className="shrink-0 rounded bg-brand-500/10 px-1 py-0.5 text-2xs font-bold text-brand-600">
+                      {k}
+                    </span>
+                  ))}
+                  {book.word_count && (
+                    <span className="shrink-0 rounded bg-[var(--app-hover)] px-1 py-0.5 text-2xs font-bold text-[var(--app-muted)]">
+                      {book.word_count}
+                    </span>
+                  )}
                 </p>
                 <p className="mt-1 truncate text-xs text-[var(--app-muted)]">最新：{book.latest_chapter || '未知'}</p>
                 {book.intro && <p className="mt-1 line-clamp-2 text-xs text-[var(--app-subtle)]">{book.intro}</p>}
@@ -206,6 +211,19 @@ export default function ReaderSearchPage() {
         <div className="py-24 text-center text-xs text-[var(--app-muted)]">
           输入关键词开始搜索 · 需要 <Link to="/reader/sources" className="text-brand-600 hover:underline">先导入书源</Link>
         </div>
+      )}
+
+      {picker && (
+        <SourcePickerDialog
+          title={picker.name}
+          origins={picker.origins}
+          onPick={(origin) => {
+            const book = picker
+            setPicker(null)
+            openBook(book, origin)
+          }}
+          onClose={() => setPicker(null)}
+        />
       )}
     </div>
   )

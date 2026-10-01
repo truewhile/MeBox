@@ -718,6 +718,9 @@ func mergeSearchResults(hits []searchHit, key string) []SearchBook {
 		k := b.Name + "|" + b.Author
 		if existing, ok := merged[k]; ok {
 			existing.Origins = append(existing.Origins, b.Origins...)
+			// 同书多源时补齐缺失字段：legado 是「一源一行」，各源自己显示拿到的
+			// 信息；MeBox 合并成一行，若不补齐，先到的空值会挡掉后面源的有效值。
+			fillMissingSearchBookFields(existing, &b)
 			continue
 		}
 		merged[k] = &b
@@ -737,6 +740,29 @@ func mergeSearchResults(hits []searchHit, key string) []SearchBook {
 		return len(out[i].Origins) > len(out[j].Origins)
 	})
 	return out
+}
+
+// fillMissingSearchBookFields 把同书多源结果里另一份的有效字段补进合并结果。
+//
+// 同一个聚合源的不同上游、或不同书源，对同一本书的覆盖能力不同：有的能给封面、
+// 简介、字数、最新章节，有的只给书名。合并成一行时必须补齐，否则先到的空值会把
+// 后面源的有效值挡掉——典型表现就是「这本书明明有源带封面，列表里却是空白」。
+func fillMissingSearchBookFields(dst, src *SearchBook) {
+	if dst.CoverURL == "" {
+		dst.CoverURL = src.CoverURL
+	}
+	if dst.Intro == "" {
+		dst.Intro = src.Intro
+	}
+	if dst.Kind == "" {
+		dst.Kind = src.Kind
+	}
+	if dst.WordCount == "" {
+		dst.WordCount = src.WordCount
+	}
+	if dst.LatestChapter == "" {
+		dst.LatestChapter = src.LatestChapter
+	}
 }
 
 // searchInSource 单源搜索（对应 WebBook.searchBook）。
@@ -800,7 +826,7 @@ func (s *ReaderService) searchInSource(ctx context.Context, src *model.ReaderBoo
 			WordCount:     wordCount,
 			LatestChapter: lastChapter,
 			Intro:         intro,
-			CoverURL:      cover,
+			CoverURL:      normalizeCoverURL(cover),
 			BookURL:       bookURL,
 			Origins: []SearchOrigin{{
 				SourceID:      src.ID,
@@ -833,6 +859,33 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// normalizeCoverURL 过滤书源规则给出的封面地址，只保留浏览器能真正渲染成图片的
+// 值，其余一律返回空串（前端据此显示占位图标，而不是破图）。
+//
+// 背景：书源在「这本书没有封面」时不一定返回空值。legado 语义下
+// getString(rule, isUrl=true) 取值为空会回退成 baseUrl，而聚合类书源
+// （如「光遇聚合」）的搜索请求地址本身就是 data:;base64,... 参数信封，
+// 于是封面上会落一串 data: 文本，<img> 按 text/plain 处理必然破图。
+// 允许的相对地址以 "/" 开头，用于应用自身生成的本地书封面
+// （/api/reader/local/asset?...）。
+func normalizeCoverURL(raw string) string {
+	u := strings.TrimSpace(raw)
+	if u == "" {
+		return ""
+	}
+	lower := strings.ToLower(u)
+	switch {
+	case strings.HasPrefix(lower, "http://"), strings.HasPrefix(lower, "https://"):
+		return u
+	case strings.HasPrefix(lower, "data:image/"):
+		return u
+	case strings.HasPrefix(u, "/"):
+		return u
+	default:
+		return ""
+	}
 }
 
 // ─── 详情 / 目录 / 正文 ─────────────────────────────────────────────────────
@@ -912,7 +965,7 @@ func (s *ReaderService) getBookInfoFrom(ctx context.Context, src *model.ReaderBo
 		info.Intro = v
 	}
 	if v, err := ar.GetString(SPtr(bir.CoverURL), nil, true); err == nil && v != "" {
-		info.CoverURL = v
+		info.CoverURL = normalizeCoverURL(v)
 	}
 	if v, err := ar.GetString(SPtr(bir.TocURL), nil, true); err == nil && v != "" {
 		info.TocURL = v
@@ -1300,10 +1353,71 @@ func (s *ReaderService) AddBook(ctx context.Context, userID string, origin Searc
 		BookURL:    origin.BookURL,
 		Name:       name,
 		Author:     author,
-		CoverURL:   coverURL,
+		CoverURL:   normalizeCoverURL(coverURL),
 		Type:       origin.OriginType,
 	}
 	if err := s.repo.CreateBook(ctx, book); err != nil {
+		return nil, err
+	}
+	return book, nil
+}
+
+// SwitchOrigin 换源：把书架里的书切到另一个书源（对应 legado 的「换源」）。
+//
+// 换源要同时处理三件事：
+//  1. 来源字段整体换成新源（origin / origin_name / book_url / toc_url）；
+//  2. 旧源缓存的目录必须清掉——章节地址只对旧源有效，留着会让阅读器读到错内容；
+//  3. 阅读进度保留（按章节序号定位，与 legado 的做法一致）。
+//
+// 新源详情是「尽力而为」：抓得到就用它的 tocUrl（以及当前封面为空时的封面），
+// 抓不到就把 tocUrl 留空让目录回落到书籍地址重新解析，不让一次网络抖动挡住换源。
+func (s *ReaderService) SwitchOrigin(ctx context.Context, userID, bookID string, origin SearchOrigin) (*model.ReaderBook, error) {
+	book, err := s.repo.GetBook(ctx, bookID)
+	if err != nil {
+		return nil, err
+	}
+	if book.UserID != userID {
+		return nil, fmt.Errorf("无权操作他人书架")
+	}
+	if book.LocalPath != "" {
+		return nil, fmt.Errorf("本地导入的书籍没有书源，无法换源")
+	}
+	target := strings.TrimSpace(origin.BookURL)
+	if target == "" {
+		return nil, fmt.Errorf("缺少目标书源的书本地址")
+	}
+	if _, _, err := s.loadSourceFlexible(ctx, origin.SourceID, origin.Origin); err != nil {
+		return nil, err
+	}
+	if book.BookURL == target && book.Origin == origin.Origin {
+		return book, nil // 已经是这个源，重复点击视为成功
+	}
+
+	info, infoErr := s.GetBookInfo(ctx, origin.SourceID, origin.Origin, target)
+	if infoErr != nil && s.log != nil {
+		s.log.Warn("reader: 换源时读取新源详情失败",
+			zap.String("book", book.ID), zap.String("origin", origin.Origin), zap.Error(infoErr))
+	}
+
+	book.Origin = origin.Origin
+	book.OriginName = firstNonEmpty(origin.OriginName, book.OriginName)
+	book.BookURL = target
+	book.TocURL = ""
+	if info != nil {
+		book.TocURL = strings.TrimSpace(info.TocURL)
+		if book.CoverURL == "" {
+			book.CoverURL = normalizeCoverURL(info.CoverURL)
+		}
+		if info.LatestChapter != "" {
+			book.LatestChapterTitle = info.LatestChapter
+		}
+	}
+	// 目录是旧源的缓存，必须清空；章节数一并归零，等新源目录重新预热后再算未读。
+	book.TotalChapterNum = 0
+	if err := s.repo.ReplaceChapters(ctx, book.ID, nil); err != nil {
+		return nil, err
+	}
+	if err := s.repo.UpdateBook(ctx, book); err != nil {
 		return nil, err
 	}
 	return book, nil

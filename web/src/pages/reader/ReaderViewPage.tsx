@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import {
   ArrowLeft,
+  ArrowLeftRight,
   BookOpen,
   LayoutList,
   ListEnd,
@@ -15,10 +16,11 @@ import {
 } from 'lucide-react'
 import { Virtuoso } from 'react-virtuoso'
 
-import { readerAPI, type ReaderBook, type ReaderChapter, type ReaderChapterContent } from '../../api/reader'
+import { readerAPI, type ReaderBook, type ReaderChapter, type ReaderChapterContent, type ReaderSearchOrigin } from '../../api/reader'
 import { READER_THEMES, getReaderTheme, useReaderSettingsStore } from '../../stores/readerSettings'
 import { ReaderAudioPanel } from './ReaderAudioPanel'
 import { ReaderComic } from './ReaderComic'
+import { SourcePickerDialog } from './SourcePickerDialog'
 
 // 文本阅读器（仿 legado ReadBookActivity：主题配色、点击区域、上下章、
 // 进度记忆、翻页/滚动双模式；桌面端限宽居中，支持键盘翻页）。
@@ -64,6 +66,11 @@ export default function ReaderViewPage() {
 
   const [menuOpen, setMenuOpen] = useState(false)
   const [panel, setPanel] = useState<'none' | 'toc' | 'style'>('none')
+  // 换源：候选源来自按书名重新搜索的结果；reloadKey 变化时整本书重新加载
+  const [switchOpen, setSwitchOpen] = useState(false)
+  const [switchLoading, setSwitchLoading] = useState(false)
+  const [switchCandidates, setSwitchCandidates] = useState<ReaderSearchOrigin[]>([])
+  const [reloadKey, setReloadKey] = useState(0)
   // 顶栏高度：菜单打开时正文整体下移这么多，顶栏就不会压住开头几行
   const topBarRef = useRef<HTMLDivElement>(null)
   const [menuInset, setMenuInset] = useState(0)
@@ -139,7 +146,7 @@ export default function ReaderViewPage() {
       cancelled = true
       contentCache.current.clear()
     }
-  }, [bookId])
+  }, [bookId, reloadKey])
 
   // ── 加载章节正文（带缓存与下一章预取） ──
   useEffect(() => {
@@ -323,6 +330,54 @@ export default function ReaderViewPage() {
     }
     return false
   }, [chapterIndex, chapters])
+
+  // ── 换源（对应 legado 阅读页的「换源」） ──
+  //
+  // 候选源来自按书名重新搜索；选中后调用换源接口，服务端保留阅读进度、清空旧源
+  // 目录缓存，这里只需要清掉正文缓存并让整本书重新加载。
+  const openSourcePicker = useCallback(async () => {
+    const key = (book?.name ?? '').trim()
+    if (!key) {
+      toast.error('缺少书名，无法换源')
+      return
+    }
+    setSwitchOpen(true)
+    setSwitchLoading(true)
+    setSwitchCandidates([])
+    try {
+      const res = await readerAPI.search(key)
+      const list = res.books ?? []
+      const wantAuthor = (book?.author ?? '').trim()
+      const hit =
+        list.find((b) => b.name === key && wantAuthor !== '' && b.author === wantAuthor) ??
+        list.find((b) => b.name === key) ??
+        null
+      setSwitchCandidates(hit?.origins ?? [])
+    } catch (e) {
+      toast.error((e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '搜索书源失败')
+    } finally {
+      setSwitchLoading(false)
+    }
+  }, [book])
+
+  const applyOrigin = useCallback(
+    async (origin: ReaderSearchOrigin) => {
+      setSwitchOpen(false)
+      if (!book) return
+      try {
+        await readerAPI.switchOrigin(book.id, origin)
+        toast.success(`已切换到「${origin.origin_name || origin.origin}」`)
+        contentCache.current.clear()
+        setReloadKey((v) => v + 1)
+      } catch (e) {
+        toast.error((e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '换源失败')
+      }
+    },
+    [book],
+  )
+
+  // 本地导入的书没有书源，不显示换源入口
+  const canSwitchSource = !!book && !book.is_local
 
   // 听书：片头/片尾跳过秒数按书写入（对应 legado Book.openCredits/closeCredits）
   const saveAudioCredits = useCallback(
@@ -739,8 +794,8 @@ export default function ReaderViewPage() {
               </button>
             </div>
 
-            {/* 动作行（目录 / 界面 / 夜间 / 模式） */}
-            <div className="grid grid-cols-4 pt-1" style={{ color: theme.text }}>
+            {/* 动作行（目录 / 界面 / 夜间 / 模式 / 换源） */}
+            <div className={`${canSwitchSource ? 'grid-cols-5' : 'grid-cols-4'} grid pt-1`} style={{ color: theme.text }}>
               {([
                 { icon: <LayoutList size={18} />, label: '目录', action: () => setPanel(panel === 'toc' ? 'none' : 'toc') },
                 { icon: <BookOpen size={18} />, label: '界面', action: () => setPanel(panel === 'style' ? 'none' : 'style') },
@@ -754,6 +809,17 @@ export default function ReaderViewPage() {
                   label: settings.pageMode === 'page' ? '滚动' : '翻页',
                   action: () => settings.setPageMode(settings.pageMode === 'page' ? 'scroll' : 'page'),
                 },
+                ...(canSwitchSource
+                  ? [
+                      {
+                        icon: <ArrowLeftRight size={18} />,
+                        label: '换源',
+                        action: () => {
+                          void openSourcePicker()
+                        },
+                      },
+                    ]
+                  : []),
               ]).map((item) => (
                 <button
                   key={item.label}
@@ -879,6 +945,19 @@ export default function ReaderViewPage() {
         </>
       )}
 
+      {switchOpen && (
+        <SourcePickerDialog
+          title={book?.name ?? '这本书'}
+          origins={switchCandidates}
+          current={{ originURL: book?.origin, bookURL: book?.book_url }}
+          loading={switchLoading}
+          emptyHint="按书名重搜后没有找到其它书源"
+          onPick={(origin) => {
+            void applyOrigin(origin)
+          }}
+          onClose={() => setSwitchOpen(false)}
+        />
+      )}
     </div>
   )
 }

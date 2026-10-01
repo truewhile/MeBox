@@ -248,10 +248,16 @@ func (a *AnalyzeRule) putRule(putMap map[string]string) error {
 	return nil
 }
 
-func (a *AnalyzeRule) makeDeps() *RuleDeps {
+// makeDeps 构造 MakeUpRule 展开内嵌 {{...}} 需要的执行环境。
+//
+// content 是当前正在解析的元素。legado 的内嵌规则（{{$.x}} / {{@x}}）在**当前元素**
+// 上求值：书源普遍用 `{{$.status}},{{$.score}}` 这种模板拼 kind、用
+// `{{$.source}} {{$.last_chapter_title}}` 拼最新章节。若拿整份响应去求值，
+// 这些模板会全部取空——表现为 kind=",,,"、"最新"为空（聚合源尤其明显）。
+func (a *AnalyzeRule) makeDeps(content any) *RuleDeps {
 	return &RuleDeps{
 		JS:   a.evalJS,
-		Rule: func(rule string) (string, error) { return a.GetString(rule, nil, false) },
+		Rule: func(rule string) (string, error) { return a.GetString(rule, content, false) },
 		Get:  a.Get,
 	}
 }
@@ -279,7 +285,7 @@ func (a *AnalyzeRule) getStringListRules(ruleList []*SourceRule, mContent any, i
 			if err := a.putRule(sourceRule.putMap); err != nil {
 				return nil, err
 			}
-			resolved, err := sourceRule.MakeUpRule(result, a.makeDeps())
+			resolved, err := sourceRule.MakeUpRule(result, a.makeDeps(result))
 			if err != nil {
 				return nil, err
 			}
@@ -378,7 +384,7 @@ func (a *AnalyzeRule) getStringRules(ruleList []*SourceRule, mContent any, isUrl
 			if err := a.putRule(sourceRule.putMap); err != nil {
 				return "", err
 			}
-			resolved, err := sourceRule.MakeUpRule(result, a.makeDeps())
+			resolved, err := sourceRule.MakeUpRule(result, a.makeDeps(result))
 			if err != nil {
 				return "", err
 			}
@@ -423,7 +429,14 @@ func (a *AnalyzeRule) getStringRules(ruleList []*SourceRule, mContent any, isUrl
 	}
 	if isUrl {
 		if strings.TrimSpace(str) == "" {
-			return a.baseUrl, nil
+			// 对应 legado：取值为空时回退 baseUrl，让相对地址还能解析。
+			// 但 baseUrl 未必是地址：聚合类书源（如「光遇聚合」）的搜索请求地址
+			// 本身就是 data:;base64,... 参数信封，直接回退会把信封当成封面/书址
+			// 返回，前端 <img> 只能显示破图。故仅在 baseUrl 是 http(s) 地址时回退。
+			if base := strings.TrimSpace(a.baseUrl); isAbsURL(base) {
+				return base, nil
+			}
+			return "", nil
 		}
 		return a.absolutize(str), nil
 	}
@@ -444,7 +457,7 @@ func (a *AnalyzeRule) GetElement(ruleStr string) (any, error) {
 			if err := a.putRule(sourceRule.putMap); err != nil {
 				return nil, err
 			}
-			resolved, err := sourceRule.MakeUpRule(result, a.makeDeps())
+			resolved, err := sourceRule.MakeUpRule(result, a.makeDeps(result))
 			if err != nil {
 				return nil, err
 			}

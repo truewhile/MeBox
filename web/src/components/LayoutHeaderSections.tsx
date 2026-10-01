@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { ArrowLeft, BookOpen, Film, LoaderCircle, Menu, Search, Star, X } from 'lucide-react'
+import { ArrowLeft, Film, LoaderCircle, Menu, Search, Star, X } from 'lucide-react'
 
 import { ARTWORK, imageURL } from '../api/client'
 import { mediaAPI } from '../api/library'
@@ -12,6 +12,7 @@ import { resolveHeaderBack } from './layoutNavigation'
 import { LayoutThemeToggle } from './LayoutThemeToggle'
 import { LayoutUserMenu } from './LayoutUserMenu'
 import { LayoutReaderModeToggle } from './LayoutReaderModeToggle'
+import ReaderBookCover from './ReaderBookCover'
 import type { useLayoutProfiles } from './useLayoutProfiles'
 import type { ThemeMode, useThemeMode } from './useThemeMode'
 
@@ -248,19 +249,7 @@ function LayoutHeaderBookSearch() {
                   className="flex w-full items-center gap-3 rounded-xl p-2 text-left transition-colors hover:bg-[var(--app-hover)] group"
                 >
                   <div className="relative h-12 w-9 shrink-0 overflow-hidden rounded-lg bg-[var(--app-panel-soft)]">
-                    {book.cover_url ? (
-                      <img
-                        src={book.cover_url}
-                        alt=""
-                        referrerPolicy="no-referrer"
-                        loading="lazy"
-                        className="h-full w-full object-cover"
-                      />
-                    ) : (
-                      <div className="flex h-full w-full items-center justify-center text-[var(--app-muted)]">
-                        <BookOpen size={14} />
-                      </div>
-                    )}
+                    <ReaderBookCover url={book.cover_url} iconSize={14} />
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1.5">
