@@ -4,10 +4,12 @@
 # 产出：
 #   1. 前端 + 后端编译验证（go vet / go test / go build）
 #   2. 多平台可执行二进制 artifact（linux/amd64、linux/arm64、windows/amd64）
-#   3. ghcr.io/{owner}/mebox:beta 多架构 Docker 镜像（linux/amd64 + linux/arm64）
+#   3. ghcr.io/{owner}/mebox 多架构 Docker 镜像（linux/amd64 + linux/arm64），
+#      标签：beta（滚动）+ {基版本}-beta.{短 SHA}（本次构建，只增不改）
 #
-# 与 main 分支的发布流（Auto-docker-publish.yml）隔离：beta 不做版本递增、
-# 不打 release tag，只构建带 -beta 标识的产物供测试。
+# 与 main 分支发布流（Auto-docker-publish.yml）的关系：镜像的构建方式、标签策略
+# 和基版本号来源（version 分支）与发布流保持一致，区别是 beta 不做版本递增、
+# 不打 release tag、不发布 GitHub Release、不部署服务器。
 
 name: Beta Build
 
@@ -22,9 +24,6 @@ permissions:
   contents: read
   packages: write
 
-env:
-  BETA_VERSION_PREFIX: beta
-
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   # 1) 编译验证 + 多平台二进制产物
@@ -32,17 +31,24 @@ jobs:
   test-and-build:
     name: Test & build artifacts
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      binary_version: ${{ steps.version.outputs.binary_version }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # 基版本号与发布流同源：读 version 分支上由 main 发布流水线维护的 VERSION。
+      # beta 只读不自增，避免与 main 的发布流程争抢版本号。
       - name: Resolve beta version
         id: version
         run: |
-          BASE_VERSION=$(cat VERSION 2>/dev/null || echo "0.0.0")
+          git fetch origin version || true
+          BASE_VERSION=$(git show FETCH_HEAD:VERSION 2>/dev/null || echo "0.0.0")
           SHA_SHORT=${GITHUB_SHA:0:7}
-          echo "full_version=${BASE_VERSION}-beta.${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "version=${BASE_VERSION}-beta.${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "binary_version=mebox-v${BASE_VERSION}-beta.${SHA_SHORT}" >> "$GITHUB_OUTPUT"
 
       # The binary embeds the SPA (web/dist) via go:embed, so dist must exist
       # before the Go toolchain touches the web package.
@@ -59,7 +65,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version: '1.26'
           cache: true
 
       - name: go vet
@@ -71,13 +77,13 @@ jobs:
       - name: go build (host)
         run: go build ./...
 
-      # 多平台可执行文件（嵌入刚构建的 web/dist）
+      # 多平台可执行文件（嵌入刚构建的 web/dist），版本号写入口径与发布流一致
       - name: Build linux/amd64
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=${{ steps.version.outputs.full_version }}" -o dist/mebox-beta-linux-amd64 ./cmd/server
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=${{ steps.version.outputs.binary_version }}" -o dist/mebox-beta-linux-amd64 ./cmd/server
       - name: Build linux/arm64
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -X main.version=${{ steps.version.outputs.full_version }}" -o dist/mebox-beta-linux-arm64 ./cmd/server
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -X main.version=${{ steps.version.outputs.binary_version }}" -o dist/mebox-beta-linux-arm64 ./cmd/server
       - name: Build windows/amd64
-        run: CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -H=windowsgui -X main.version=${{ steps.version.outputs.full_version }}" -o dist/mebox-beta-windows-amd64.exe ./cmd/server
+        run: CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -H=windowsgui -X main.version=${{ steps.version.outputs.binary_version }}" -o dist/mebox-beta-windows-amd64.exe ./cmd/server
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -87,7 +93,8 @@ jobs:
           if-no-files-found: error
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # 2) Beta Docker 镜像（ghcr.io/{owner}/mebox:beta）
+  # 2) Beta Docker 镜像（ghcr.io/{owner}/mebox:beta + :{基版本}-beta.{短 SHA}）
+  #    构建步骤与 Auto-docker-publish.yml 的 build-image 一致，只是不带 deploy。
   # ─────────────────────────────────────────────────────────────────────────────
   docker-beta:
     name: Build & push beta Docker image
@@ -97,13 +104,6 @@ jobs:
     if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v4
-
-      - name: Resolve beta version
-        id: version
-        run: |
-          BASE_VERSION=$(cat VERSION 2>/dev/null || echo "0.0.0")
-          SHA_SHORT=${GITHUB_SHA:0:7}
-          echo "full_version=${BASE_VERSION}-beta.${SHA_SHORT}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -115,6 +115,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/mebox
+          tags: |
+            type=raw,value=beta
+            type=raw,value=${{ needs.test-and-build.outputs.version }}
+
       - name: Build & push
         uses: docker/build-push-action@v6
         with:
@@ -123,11 +132,9 @@ jobs:
           push: true
           provenance: false
           sbom: false
-          tags: ghcr.io/${{ github.repository_owner }}/mebox:beta
-          labels: |
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=${{ github.repository }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ steps.version.outputs.full_version }}
+            VERSION=${{ needs.test-and-build.outputs.binary_version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
