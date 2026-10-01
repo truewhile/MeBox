@@ -283,6 +283,12 @@ export const readerAPI = {
       .post<ReaderBook>('/reader/local/audiobooks', { path }, { timeout: LONG_REQUEST_TIMEOUT })
       .then((r) => r.data),
   removeBook: (id: string) => api.delete(`/reader/books/${id}`),
+  /**
+   * 换源：把书架里的书切到另一个书源。
+   * 阅读进度保留，旧源目录缓存由服务端清空并按新源重新预热。
+   */
+  switchOrigin: (id: string, origin: ReaderSearchOrigin) =>
+    api.post<ReaderBook>(`/reader/books/${id}/origin`, { origin }, longOpts).then((r) => r.data),
   saveProgress: (id: string, body: { chapter_index: number; pos: number; chapter_title: string }) =>
     api.put(`/reader/books/${id}/progress`, body),
   // 听书跳过片头/片尾（秒，0 不跳过）

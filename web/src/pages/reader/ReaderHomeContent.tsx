@@ -5,6 +5,7 @@ import { BookOpen, ChevronDown, FileUp, FolderOpen, HardDrive, Headphones, Loade
 
 import { readerAPI, type ReaderBook } from '../../api/reader'
 import { confirmAction } from '../../components/confirmAction'
+import ReaderBookCover from '../../components/ReaderBookCover'
 import { useAuthStore } from '../../stores/auth'
 import { ReaderModeSwitch } from './ReaderModeSwitch'
 import { ServerFilePickerDialog } from './ServerFilePickerDialog'
@@ -272,19 +273,7 @@ export function ReaderHomeContent({ embedded = false }: { embedded?: boolean }) 
                   className="relative w-full cursor-pointer overflow-hidden rounded-xl border border-[var(--app-border)] bg-[var(--app-panel-soft)] shadow-sm transition group-hover:shadow-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500"
                 >
                   <div className="aspect-[3/4] w-full">
-                    {book.cover_url ? (
-                      <img
-                        src={book.cover_url}
-                        alt={book.name}
-                        loading="lazy"
-                        referrerPolicy="no-referrer"
-                        className="h-full w-full object-cover"
-                      />
-                    ) : (
-                      <div className="flex h-full w-full items-center justify-center">
-                        <BookOpen size={22} className="text-[var(--app-muted)]" />
-                      </div>
-                    )}
+                    <ReaderBookCover url={book.cover_url} alt={book.name} iconSize={22} />
                   </div>
                   {/* 左下角：本地来源标记（右上角留给未读徽标，右下角是移出按钮，避免窄卡片时重叠） */}
                   {book.is_local && (
