@@ -81,3 +81,4 @@ tools/
 verify-cache/
 verify-data/
 .zcode/
+.tmp-src

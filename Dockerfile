@@ -3,7 +3,7 @@
 # Multi-architecture build for MeBox.
 #
 # Stage 1 (frontend) :  Node 20.19+ -> static SPA bundle
-# Stage 2 (backend)  :  Go 1.25  -> single static binary (CGO_ENABLED=0)
+# Stage 2 (backend)  :  Go 1.26  -> single static binary (CGO_ENABLED=0)
 # Stage 3 (runtime)  :  Alpine 3.23 -> ffmpeg + tzdata + non-root user
 #
 # Build:
@@ -25,7 +25,7 @@ COPY web/ .
 RUN npm run build
 
 # ---- Stage 2: backend (cross-compiled to TARGETPLATFORM) -------------------
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS backend
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS backend
 ARG TARGETOS
 ARG TARGETARCH
 ARG GOPROXY=https://proxy.golang.org,direct

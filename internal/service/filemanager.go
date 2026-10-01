@@ -66,6 +66,14 @@ var ErrPathOutOfBounds = errors.New("path is outside the allowed roots")
 // ErrRootMutation protects configured roots such as /media and /downloads.
 var ErrRootMutation = errors.New("refusing to mutate an allowed root")
 
+// ResolvePath validates that path sits inside one of the allowed storage roots
+// and returns its absolute form. Callers use it to accept a server-side path
+// from the UI (file pickers) without re-implementing the boundary check.
+func (s *FileManagerService) ResolvePath(path string) (string, error) {
+	abs, _, err := s.requireAllowedPath(path, false)
+	return abs, err
+}
+
 // List enumerates a directory under one of the allowed roots, returning up to
 // maxEntries items sorted by (dir-first, path). Recursive listing is capped by
 // maxEntries to avoid accidentally walking huge NAS trees from the UI.

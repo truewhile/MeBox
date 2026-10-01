@@ -23,6 +23,8 @@ import {
   HomeLibraryRowSection,
   HomeLoadingState,
 } from './HomePageSections'
+import { ReaderHomeContent } from './reader/ReaderHomeContent'
+import { useReaderSettingsStore } from '../stores/readerSettings'
 
 const hasArtwork = (media?: Media | null) => !!(media?.poster_url || media?.backdrop_url)
 
@@ -37,6 +39,7 @@ export function HomePage() {
   const { pinnedIds } = usePinnedLibraries()
   const { field: sortField, order: sortOrder } = useLibraryListSort()
   const libraryTags = useLibraryTags()
+  const homeMode = useReaderSettingsStore((s) => s.homeMode)
 
   // 1. 媒体库元数据极速加载（不带 preview，毫秒级秒开首屏）。
   //    会话内已有缓存则先用缓存立即渲染，后台仍刷新一次兜底。
@@ -315,6 +318,14 @@ export function HomePage() {
 
   // 库列表还没回来先展示整页 loading；库为空时再等一下播放记录，
   // 以免在"空站点"和"有观看记录"两个终态之间闪空白。
+  // 阅读模式下跳过影视内容的加载门槛，直接渲染书架。
+  if (homeMode === 'reading') {
+    return (
+      <div className="space-y-6 pb-16">
+        <ReaderHomeContent embedded />
+      </div>
+    )
+  }
   if (librariesLoading || (libraries.length === 0 && historyLoading)) {
     return <HomeLoadingState />
   }

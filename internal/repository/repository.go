@@ -36,6 +36,7 @@ type Container struct {
 	StrmDirCache   *StrmDirCacheRepository
 	ScrapeTask     *ScrapeTaskRepository
 	EmbyMount      *EmbyMountRepository
+	Reader         *ReaderRepository
 }
 
 // New 将每个 repository 连接到单个 *gorm.DB。
@@ -68,5 +69,6 @@ func New(db *gorm.DB) *Container {
 		StrmDirCache:   &StrmDirCacheRepository{db: db},
 		ScrapeTask:     &ScrapeTaskRepository{db: db},
 		EmbyMount:      &EmbyMountRepository{db: db},
+		Reader:         &ReaderRepository{db: db},
 	}
 }
