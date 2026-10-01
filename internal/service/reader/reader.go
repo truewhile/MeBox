@@ -42,6 +42,11 @@ type ReaderService struct {
 	repo   *repository.ReaderRepository
 	http   *http.Client
 	crypto *helper.SecretCipher
+
+	// browserMu / browserPending 保护「待用户完成的页面」表
+	// （java.startBrowser / startBrowserAwait，见 browser_panel.go）。
+	browserMu      sync.Mutex
+	browserPending map[string]*pendingBrowser
 }
 
 // NewReaderService 创建服务。
@@ -248,9 +253,18 @@ func (s *ReaderService) executeWithState(ctx context.Context, req *rule.Request,
 	if req.Body != "" {
 		bodyReader = strings.NewReader(req.Body)
 	}
-	target := req.URLNoQuery
+	// 请求目标是含 query 的完整 URL：对应 legado 的 `get(urlNoQuery, encodedQuery)`
+	// （两端拼起来才是最终地址）。ParseAnalyzeUrl 已把重编码后的 query 放进
+	// req.URL。早期这里误用 URLNoQuery，导致所有「参数写在 query 里」的 GET
+	// 请求都丢掉了参数（搜索关键词、分页等），下游站点拿到空参数直接返回空结果。
+	target := req.URL
 	if target == "" {
-		target = req.URL
+		target = req.URLNoQuery
+	}
+	// data: 地址是书源自带的「参数信封」，内容在本地，不发网络请求。
+	// 对应 legado AnalyzeUrl.getByteArrayIfDataUri()。
+	if raw, ok := rule.DecodeDataURI(target); ok {
+		return rule.EncodeRuleBody(req, raw, req.Charset), target, http.StatusOK, nil
 	}
 	if state != nil {
 		// 登录请求头（除 Cookie 外）优先级低于书源显式配置，高于预设。
@@ -279,6 +293,10 @@ func (s *ReaderService) executeWithState(ctx context.Context, req *rule.Request,
 	for k, v := range req.Headers {
 		httpReq.Header.Set(k, v)
 	}
+	// Accept-Encoding 必须留给 net/http：只有调用方没设置时它才会自动解压，
+	// 否则压缩响应会以原始字节进入规则层（书源的 JSON.parse 会直接炸）。
+	// 书源 JSON 的 header 字段也可能塞了这个头，所以放在最后统一清掉。
+	helper.StripAcceptEncoding(httpReq.Header)
 	if req.Method == "POST" {
 		switch {
 		case req.IsForm:
@@ -295,6 +313,12 @@ func (s *ReaderService) executeWithState(ctx context.Context, req *rule.Request,
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
 		return "", "", resp.StatusCode, err
+	}
+	data = helper.DecompressBody(resp, data)
+	// 声明了 type 的请求按「原始字节的 hex」返回（对应 legado AnalyzeUrl.type），
+	// 不做 charset 解码——书源会自己 hexDecodeToString 取回内容。
+	if req.HexBody {
+		return hex.EncodeToString(data), resp.Request.URL.String(), resp.StatusCode, nil
 	}
 	charset := req.Charset
 	if charset == "" {
@@ -361,6 +385,12 @@ type sourceSession struct {
 	src   *model.ReaderBookSource
 	bs    *BookSource
 	state *sourceState
+	// userID 触发本次操作的用户（登录界面的浏览器待办按用户隔离）。
+	userID string
+	// browserEnabled 是否给本次执行注入宿主浏览器。
+	// 只在登录动作里开启：startBrowserAwait 会阻塞等待用户操作（可达十分钟），
+	// 若在搜索/正文等链路里被书源意外调用，会把普通请求长时间挂住。
+	browserEnabled bool
 }
 
 // newSession 为指定书源建立执行上下文。
@@ -405,7 +435,8 @@ func (sess *sourceSession) fetch(req *rule.Request) (string, string, int, error)
 	}
 	// loginCheckJs：书源借此检测会话失效并自行重登/重取（对应 legado WebBook.checkJs）。
 	// 返回新 body 时替换原响应，使上层规则直接拿到修复后的内容。
-	if check := SPtr(sess.bs.LoginCheckJS); strings.TrimSpace(check) != "" {
+	// 声明了 type 的响应是原始字节的 hex（参数信封），不是可校验的文本，跳过。
+	if check := SPtr(sess.bs.LoginCheckJS); strings.TrimSpace(check) != "" && !req.HexBody {
 		body = sess.applyLoginCheck(check, body, code, finalURL)
 	}
 	return body, finalURL, code, nil
@@ -446,8 +477,56 @@ func (sess *sourceSession) newAnalyzer(key string, page int, body, finalURL stri
 	return ar
 }
 
+// applyBookContext 把书籍/章节上下文注入解析器，供规则 JS 的 book / chapter 对象
+// 读取（对应 legado 里 AnalyzeRule 持有 Book / BookChapter 实体）。
+func (sess *sourceSession) applyBookContext(ar *rule.AnalyzeRule, bookURL string, book *model.ReaderBook, chapterTitle string, chapterIndex int) {
+	meta := map[string]any{"bookUrl": bookURL, "tocUrl": bookURL}
+	if book != nil {
+		meta["name"] = book.Name
+		meta["author"] = book.Author
+		meta["origin"] = book.Origin
+		meta["originName"] = book.OriginName
+		meta["kind"] = book.Kind
+		meta["coverUrl"] = book.CoverURL
+		meta["intro"] = book.Intro
+		meta["type"] = book.Type
+		meta["order"] = book.Order
+		meta["durChapterIndex"] = book.DurChapterIndex
+		meta["durChapterTitle"] = book.DurChapterTitle
+		meta["durChapterPos"] = book.DurChapterPos
+		ar.SetBookContext(book.Name, nil)
+		ar.SetBookCustomVars(parseBookVariableMap(book.Variable))
+	}
+	ar.SetBookMeta(meta)
+	ar.SetChapterContext(chapterTitle, nil)
+	ar.SetChapterIndex(chapterIndex)
+}
+
+// parseBookVariableMap 解析书架书籍的自定义变量 JSON（对应 legado Book.variableMap）。
+func parseBookVariableMap(raw string) map[string]string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return nil
+	}
+	return m
+}
+
 // runner 构建本次请求的 JS 运行时（网络桥回 execute，携带书源上下文与会话状态）。
 func (sess *sourceSession) runner(key string, page int) *rule.JSRunner {
+	// 宿主浏览器只在登录动作里注入（见 browserEnabled 的说明）；
+	// 其它链路保持「无浏览器」语义，java.startBrowser* 会如实报错。
+	var host rule.BrowserHost
+	if sess.browserEnabled {
+		host = &browserHost{
+			svc:       sess.svc,
+			sourceURL: sess.srcURL(),
+			sourceID:  sess.srcID(),
+			userID:    sess.userID,
+		}
+	}
 	return rule.NewJSRunner(rule.JSConfig{
 		Fetch: func(req *rule.Request) (string, string, int, error) {
 			return sess.fetch(req)
@@ -464,7 +543,17 @@ func (sess *sourceSession) runner(key string, page int) *rule.JSRunner {
 		Page:    page,
 		State:   sess.state,
 		JSLib:   SPtr(sess.bs.JSLib),
+		Ctx:     sess.ctx,
+		Browser: host,
 	})
+}
+
+// srcID 书源记录 ID（登录界面待办按书源隔离）。
+func (sess *sourceSession) srcID() string {
+	if sess.src != nil {
+		return sess.src.ID
+	}
+	return ""
 }
 
 // srcURL 书源标识 URL（会话状态与 baseUrl 的键）。
@@ -564,9 +653,11 @@ func (s *ReaderService) Search(ctx context.Context, key string) ([]SearchBook, [
 	}
 
 	var (
-		mu      sync.Mutex
-		hits    []searchHit
-		skipped []SearchSkipped
+		mu sync.Mutex
+		// 初始化为空切片而不是 nil：nil 切片会被编码成 JSON null，
+		// 前端一旦按数组用（skipped.length）就直接 TypeError 崩页面。
+		hits    = []searchHit{}
+		skipped = []SearchSkipped{}
 	)
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(searchConcurrency)
@@ -789,28 +880,17 @@ func (s *ReaderService) getBookInfoFrom(ctx context.Context, src *model.ReaderBo
 		return nil, err
 	}
 	ar := sess.newAnalyzer("", 0, body, finalURL)
+	sess.applyBookContext(ar, bookURL, nil, "", 0)
 
 	info := &BookInfo{BookURL: bookURL, TocURL: bookURL}
 	if initRule := SPtr(bir.Init); initRule != "" {
-		// init 规则返回 JSON 对象时合并字段（对应 legado ruleBookInfo.init）
-		if initVal, err := ar.GetString(initRule, nil, false); err == nil && initVal != "" {
-			if strings.HasPrefix(strings.TrimSpace(initVal), "{") {
-				var m map[string]string
-				if json.Unmarshal([]byte(initVal), &m) == nil {
-					if v, ok := m["name"]; ok {
-						info.Name = v
-					}
-					if v, ok := m["author"]; ok {
-						info.Author = v
-					}
-					if v, ok := m["intro"]; ok {
-						info.Intro = v
-					}
-					if v, ok := m["tocUrl"]; ok {
-						info.TocURL = v
-					}
-				}
-			}
+		// 对应 legado BookInfo.analyzeBookInfo：
+		//   analyzeRule.setContent(analyzeRule.getElement(infoRule.init))
+		// init 的结果整体成为后续字段的解析内容。这个源的 init 是
+		// `<js>…</js>$.data` 组合规则：先请求详情接口，再用 $.data 取出对象，
+		// 后面的 name / author / tocUrl 都在这个对象上求值。
+		if initVal, err := ar.GetElement(initRule); err == nil && initVal != nil {
+			ar.SetContent(initVal, finalURL)
 		}
 	}
 	if v, err := ar.GetString(SPtr(bir.Name), nil, false); err == nil && v != "" {
@@ -849,19 +929,63 @@ type TocChapter struct {
 	UpdateTime string `json:"update_time"`
 }
 
-// GetToc 抓取目录。
-func (s *ReaderService) GetToc(ctx context.Context, sourceID, sourceURL, bookURL, tocURL string) ([]TocChapter, error) {
+// normalizeBookType 把 legado BookType 的位掩码归一成 MeBox 内部使用的
+// 0 文本 / 1 音频 / 2 图片 / 3 视频。
+//
+// legado 的 BookType 是按位区分的常量（4=视频、8=文本、32=音频、64=图片），
+// 书源在目录规则里直接给 book.type 赋这些值（听书源写 32 表示音频），
+// 而 MeBox 的 ReaderBook.Type 沿用书源 bookSourceType 的 0/1/2/3 约定，
+// 两者必须转换，否则音频书会被当成文本来渲染。
+func normalizeBookType(t int) int {
+	switch {
+	case t&32 != 0:
+		return 1 // audio
+	case t&64 != 0:
+		return 2 // image
+	case t&4 != 0:
+		return 3 // video
+	case t&8 != 0, t == 0:
+		return 0 // text
+	}
+	return 0
+}
+
+// GetToc 抓取目录。返回值中的 declaredType 是书源在规则 JS 里声明的书籍类型
+// （-1 表示未声明），书源用它在目录阶段把听书/漫画/短剧源标成对应类型。
+func (s *ReaderService) GetToc(ctx context.Context, userID, sourceID, sourceURL, bookURL, tocURL string) ([]TocChapter, error) {
 	src, bs, err := s.loadSourceFlexible(ctx, sourceID, sourceURL)
 	if err != nil {
 		return nil, err
 	}
-	return s.getTocFrom(ctx, src, bs, bookURL, tocURL)
+	chapters, declared, err := s.getTocFrom(ctx, src, bs, bookURL, tocURL)
+	if err != nil {
+		return nil, err
+	}
+	// 对应 legado：书源给 book.type 赋值后 legado 会持久化到 Book.type。
+	// 书架的「开始阅读」与详情页都会在这里拉目录，此时书籍已在书架时即可写回。
+	s.applyDeclaredBookType(ctx, userID, src.SourceURL, bookURL, declared)
+	return chapters, nil
 }
 
-func (s *ReaderService) getTocFrom(ctx context.Context, src *model.ReaderBookSource, bs *BookSource, bookURL, tocURL string) ([]TocChapter, error) {
+// applyDeclaredBookType 把书源声明的书籍类型写回书架记录。
+func (s *ReaderService) applyDeclaredBookType(ctx context.Context, userID, origin, bookURL string, declared int) {
+	if declared < 0 || userID == "" || origin == "" || bookURL == "" {
+		return
+	}
+	book, err := s.repo.FindBookByURL(ctx, userID, origin, bookURL)
+	if err != nil || book == nil || book.Type == declared {
+		return
+	}
+	book.Type = declared
+	if err := s.repo.UpdateBook(ctx, book); err != nil && s.log != nil {
+		s.log.Warn("reader: 写回书籍类型失败", zap.String("book", book.ID), zap.Error(err))
+	}
+}
+
+func (s *ReaderService) getTocFrom(ctx context.Context, src *model.ReaderBookSource, bs *BookSource, bookURL, tocURL string) ([]TocChapter, int, error) {
 	tr := bs.RuleToc
 	if tr == nil || SPtr(tr.ChapterList) == "" {
-		return nil, fmt.Errorf("书源未配置目录规则")
+		return nil, -1, fmt.Errorf("书源未配置目录规则")
 	}
 	if tocURL == "" {
 		tocURL = bookURL
@@ -871,21 +995,26 @@ func (s *ReaderService) getTocFrom(ctx context.Context, src *model.ReaderBookSou
 	runner := sess.runner("", 0)
 	req, err := rule.ParseAnalyzeUrlWithJS(tocURL, "", 0, sess.srcURL(), runner)
 	if err != nil {
-		return nil, err
+		return nil, -1, err
 	}
 	if req.Unsupported != nil {
-		return nil, req.Unsupported
+		return nil, -1, req.Unsupported
 	}
 	sess.applyHeaders(req)
 	body, finalURL, _, err := sess.fetch(req)
 	if err != nil {
-		return nil, err
+		return nil, -1, err
 	}
 	ar := sess.newAnalyzer("", 0, body, finalURL)
+	sess.applyBookContext(ar, bookURL, nil, "", 0)
 
 	elements, err := ar.GetElements(SPtr(tr.ChapterList))
 	if err != nil {
-		return nil, err
+		return nil, -1, err
+	}
+	declaredType := -1
+	if t, ok := ar.BookTypeOverride(); ok {
+		declaredType = normalizeBookType(t)
 	}
 	var chapters []TocChapter
 	for i, el := range elements {
@@ -908,7 +1037,11 @@ func (s *ReaderService) getTocFrom(ctx context.Context, src *model.ReaderBookSou
 			Index: i, Title: title, URL: url, IsVolume: isVolume, UpdateTime: updateTime,
 		})
 	}
-	return chapters, nil
+	// 章节规则可能逐条执行，取最后一次声明（书源是在元素循环前设置的）。
+	if t, ok := ar.BookTypeOverride(); ok {
+		declaredType = normalizeBookType(t)
+	}
+	return chapters, declaredType, nil
 }
 
 // ChapterContent 章节内容（按类型返回文本/音频/图片）。
@@ -918,6 +1051,12 @@ type ChapterContent struct {
 	Tracks     []string `json:"tracks,omitempty"`      // 音频播放地址（已改写为服务端签名代理）
 	Images     []string `json:"images,omitempty"`      // 漫画图片列表（已改写为服务端签名代理）
 	ImageStyle string   `json:"image_style,omitempty"` // 对应 legado ruleContent.imageStyle
+	// Transcoding 为真表示该音轨走了服务端转码（源格式浏览器解不了），
+	// 首次播放需要等转码完成，之后命中缓存秒开。
+	Transcoding bool `json:"transcoding,omitempty"`
+	// declaredType 书源在规则 JS 里声明的书籍类型（-1 表示未声明），
+	// 由 GetContentForBook 写回书架记录（对应 legado Book.type）。
+	declaredType int
 }
 
 // ─── 媒体代理（音频流 / 漫画图片，带防盗链头与 HMAC 签名） ──────────────────
@@ -960,6 +1099,10 @@ func (s *ReaderService) FetchMedia(ctx context.Context, book *model.ReaderBook, 
 	for k, v := range helper.HTTPHeaderPresets() {
 		httpReq.Header.Set(k, v)
 	}
+	// 媒体流同样交给 net/http 管压缩：否则压缩过的资源会以原始字节透传给
+	// 播放器/图片标签，表现为「打不开」。Range 请求服务端通常不压缩，
+	// 解压后 resp 会去掉 Content-Length/Content-Encoding，透传逻辑不受影响。
+	helper.StripAcceptEncoding(httpReq.Header)
 	// 书源级请求头
 	if s.repo != nil {
 		if found, findErr := s.repo.GetSourceByURL(ctx, book.Origin); findErr == nil && found != nil && found.Header != "" {
@@ -1033,15 +1176,21 @@ func GetAbsoluteURLOf(base *url.URL, ref string) string {
 }
 
 // GetContent 抓取正文（含 nextContentUrl 翻页合并与净化替换）。
+// 未指定书籍类型时按书源声明的类型判断（详情页的临时阅读路径）。
 func (s *ReaderService) GetContent(ctx context.Context, sourceID, sourceURL, bookURL, chapterURL string) (*ChapterContent, error) {
 	src, bs, err := s.loadSourceFlexible(ctx, sourceID, sourceURL)
 	if err != nil {
 		return nil, err
 	}
-	return s.getContentFrom(ctx, src, bs, bookURL, chapterURL)
+	return s.getContentFrom(ctx, src, bs, bookURL, chapterURL, -1)
 }
 
-func (s *ReaderService) getContentFrom(ctx context.Context, src *model.ReaderBookSource, bs *BookSource, bookURL, chapterURL string) (*ChapterContent, error) {
+// getContentFrom 抓取正文。
+//
+// bookType 是书架记录里的书籍类型（0文本/1音频/2图片），-1 表示未知、
+// 退回用书源的 bookSourceType。注意不能直接用 bookSourceType：文本型聚合源
+// 也会提供听书/漫画内容，真正的类型由书源在目录规则里声明（见 normalizeBookType）。
+func (s *ReaderService) getContentFrom(ctx context.Context, src *model.ReaderBookSource, bs *BookSource, bookURL, chapterURL string, bookType int) (*ChapterContent, error) {
 	cr := bs.RuleContent
 	if cr == nil || SPtr(cr.Content) == "" {
 		return nil, fmt.Errorf("书源未配置正文规则")
@@ -1049,6 +1198,9 @@ func (s *ReaderService) getContentFrom(ctx context.Context, src *model.ReaderBoo
 	var parts []string
 	url := chapterURL
 	lastFinalURL := ""
+	// 书源可以在规则 JS 里声明书籍类型（听书源会把 type 改成音频），
+	// 用最后一次声明为准；未声明时沿用书架记录里的类型。
+	declaredType := -1
 	// 整章（含翻页）共用一个会话，翻页期间 Cookie/变量变更保持一致。
 	sess := s.newSession(ctx, src, bs)
 	defer sess.close()
@@ -1068,10 +1220,14 @@ func (s *ReaderService) getContentFrom(ctx context.Context, src *model.ReaderBoo
 		}
 		lastFinalURL = finalURL
 		ar := sess.newAnalyzer("", 0, body, finalURL)
+		sess.applyBookContext(ar, bookURL, nil, "", 0)
 
 		list, err := ar.GetStringList(SPtr(cr.Content), nil, false)
 		if err != nil {
 			return nil, err
+		}
+		if t, ok := ar.BookTypeOverride(); ok {
+			declaredType = normalizeBookType(t)
 		}
 		parts = append(parts, strings.Join(list, "\n"))
 		if SPtr(cr.NextContentURL) == "" {
@@ -1087,8 +1243,17 @@ func (s *ReaderService) getContentFrom(ctx context.Context, src *model.ReaderBoo
 	if rr := SPtr(cr.ReplaceRegex); rr != "" {
 		content = rule.ApplyReplaceRegexString(content, rr)
 	}
-	out := &ChapterContent{Content: content}
-	switch src.Type {
+	out := &ChapterContent{Content: content, declaredType: declaredType}
+	// 书源在规则 JS 里声明的类型优先（听书源会把书籍标成音频），
+	// 其次用书架记录里的类型，最后才退回书源的 bookSourceType。
+	effective := bookType
+	if declaredType >= 0 {
+		effective = declaredType
+	}
+	if effective < 0 {
+		effective = src.Type
+	}
+	switch effective {
 	case 1: // 音频：逐行地址，按最终页面 URL 绝对化
 		out.Type = "audio"
 		for _, line := range splitURLLines(content) {
@@ -1151,11 +1316,37 @@ func (s *ReaderService) GetBook(ctx context.Context, id string) (*model.ReaderBo
 
 // ListBooks 书架列表。
 func (s *ReaderService) ListBooks(ctx context.Context, userID string) ([]model.ReaderBook, error) {
-	return s.repo.ListBooks(ctx, userID)
+	books, err := s.repo.ListBooks(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	// 网络书籍的 total_chapter_num 不落库，用已缓存的目录条数补齐，供书架显示未读章数。
+	// 统计失败不影响书架列表本身。
+	ids := make([]string, 0, len(books))
+	for i := range books {
+		ids = append(ids, books[i].ID)
+	}
+	if counts, err := s.repo.CountChaptersByBook(ctx, ids); err == nil {
+		for i := range books {
+			if n := counts[books[i].ID]; n > books[i].TotalChapterNum {
+				books[i].TotalChapterNum = n
+			}
+		}
+	}
+	for i := range books {
+		books[i].IsLocal = books[i].LocalPath != ""
+		// 早期导入的本地 EPUB 没存封面，这里按需自愈一次
+		s.BackfillLocalCover(ctx, &books[i])
+	}
+	return books, nil
 }
 
-// RemoveBook 移出书架。
+// RemoveBook 移出书架（本地书籍顺带删掉落盘的正文文件）。
 func (s *ReaderService) RemoveBook(ctx context.Context, userID, id string) error {
+	book, err := s.repo.GetBook(ctx, id)
+	if err == nil && book.UserID == userID {
+		s.DeleteLocalBookFile(book)
+	}
 	return s.repo.DeleteBook(ctx, userID, id)
 }
 
@@ -1172,6 +1363,23 @@ func (s *ReaderService) SaveProgress(ctx context.Context, userID, bookID string,
 	book.DurChapterPos = pos
 	book.DurChapterTitle = chapterTitle
 	book.DurChapterTime = time.Now().UnixMilli()
+	return s.repo.UpdateBook(ctx, book)
+}
+
+// SaveAudioConfig 保存听书跳过片头/片尾设置（对应 legado Book.openCredits/closeCredits，单位秒）。
+func (s *ReaderService) SaveAudioConfig(ctx context.Context, userID, bookID string, openCredits, closeCredits int) error {
+	if openCredits < 0 || closeCredits < 0 {
+		return fmt.Errorf("片头/片尾秒数不能为负")
+	}
+	book, err := s.repo.GetBook(ctx, bookID)
+	if err != nil {
+		return err
+	}
+	if book.UserID != userID {
+		return fmt.Errorf("无权操作他人书架")
+	}
+	book.OpenCredits = openCredits
+	book.CloseCredits = closeCredits
 	return s.repo.UpdateBook(ctx, book)
 }
 
@@ -1201,6 +1409,49 @@ func (s *ReaderService) SaveChapters(ctx context.Context, bookID string, chapter
 		})
 	}
 	return s.repo.ReplaceChapters(ctx, bookID, models)
+}
+
+// WarmUpBookChaptersAsync 异步补一次目录缓存，不阻塞加入书架接口。
+// 加入书架时只写书籍记录、不抓目录，书架就没有总章数可算未读；这里后台抓一次目录落库。
+func (s *ReaderService) WarmUpBookChaptersAsync(ctx context.Context, userID string, book *model.ReaderBook) {
+	if book == nil {
+		return
+	}
+	// 请求结束后 gin 的 ctx 会被取消，先摘掉取消信号再开 goroutine。
+	bg := context.WithoutCancel(ctx)
+	go func() {
+		warmCtx, cancel := context.WithTimeout(bg, 60*time.Second)
+		defer cancel()
+		s.WarmUpBookChapters(warmCtx, userID, book)
+	}()
+}
+
+// WarmUpBookChapters 抓取目录并写入章节缓存，供书架显示未读章数。
+// 本地书籍、已有目录缓存、书源未配目录规则的情况都会直接跳过，失败只记日志。
+func (s *ReaderService) WarmUpBookChapters(ctx context.Context, userID string, book *model.ReaderBook) {
+	if book == nil || book.LocalPath != "" {
+		return
+	}
+	if existing, err := s.repo.ListChapters(ctx, book.ID); err == nil && len(existing) > 0 {
+		return
+	}
+	chapters, err := s.GetToc(ctx, userID, "", book.Origin, book.BookURL, book.TocURL)
+	if err != nil {
+		if s.log != nil {
+			s.log.Debug("reader: 预热目录失败", zap.String("book", book.ID), zap.Error(err))
+		}
+		return
+	}
+	if len(chapters) == 0 {
+		return
+	}
+	inputs := make([]ChapterInput, 0, len(chapters))
+	for _, ch := range chapters {
+		inputs = append(inputs, ChapterInput{Index: ch.Index, Title: ch.Title, URL: ch.URL, IsVolume: ch.IsVolume})
+	}
+	if err := s.SaveChapters(ctx, book.ID, inputs); err != nil && s.log != nil {
+		s.log.Warn("reader: 预热目录写入失败", zap.String("book", book.ID), zap.Error(err))
+	}
 }
 
 // ListReplaceRules 用户替换规则列表。
@@ -1295,6 +1546,10 @@ func (s *ReaderService) GetContentForBook(ctx context.Context, userID, bookID st
 	if err != nil {
 		return nil, err
 	}
+	// 本地导入书籍：正文直接从本地文件读，不走书源
+	if book.LocalPath != "" {
+		return s.LocalChapterContent(ctx, userID, bookID, chapterIndex)
+	}
 	chapters, err := s.repo.ListChapters(ctx, bookID)
 	if err != nil {
 		return nil, err
@@ -1306,9 +1561,21 @@ func (s *ReaderService) GetContentForBook(ctx context.Context, userID, bookID st
 		return nil, fmt.Errorf("章节序号越界（共 %d 章）", len(chapters))
 	}
 	ch := chapters[chapterIndex]
-	out, err := s.GetContent(ctx, "", book.Origin, book.BookURL, ch.URL)
+	src, bs, err := s.loadSourceFlexible(ctx, "", book.Origin)
 	if err != nil {
 		return nil, err
+	}
+	out, err := s.getContentFrom(ctx, src, bs, book.BookURL, ch.URL, book.Type)
+	if err != nil {
+		return nil, err
+	}
+	// 书源在规则 JS 里声明的书籍类型写回书架记录：听书/漫画/短剧源靠它
+	// 声明类型，否则下次阅读又会按导入时的默认类型（文本）渲染。
+	if out.declaredType >= 0 && out.declaredType != book.Type {
+		book.Type = out.declaredType
+		if err := s.repo.UpdateBook(ctx, book); err != nil && s.log != nil {
+			s.log.Warn("reader: 写回书籍类型失败", zap.String("book", book.ID), zap.Error(err))
+		}
 	}
 	if out.Type == "text" {
 		out.Content = s.applyUserReplaceRules(ctx, userID, book.Name, out.Content)
@@ -1426,7 +1693,7 @@ func (s *ReaderService) SmokeChain(ctx context.Context, sourceID string, src *mo
 	logf("info", "info", "书名: %s 作者: %s 最新章节: %s", info.Name, info.Author, info.LatestChapter)
 
 	logf("toc", "info", "访问目录页: %s", info.TocURL)
-	chapters, err := s.getTocFrom(ctx, src, bs, first.BookURL, info.TocURL)
+	chapters, _, err := s.getTocFrom(ctx, src, bs, first.BookURL, info.TocURL)
 	if err != nil {
 		return fail("toc", err)
 	}
@@ -1444,7 +1711,7 @@ func (s *ReaderService) SmokeChain(ctx context.Context, sourceID string, src *mo
 			continue
 		}
 		logf("content", "info", "访问正文: %s", c.URL)
-		content, err := s.getContentFrom(ctx, src, bs, first.BookURL, c.URL)
+		content, err := s.getContentFrom(ctx, src, bs, first.BookURL, c.URL, -1)
 		if err != nil {
 			return fail("content", err)
 		}

@@ -65,6 +65,19 @@ type ReaderBook struct {
 	DurChapterTime     int64  `json:"dur_chapter_time"`
 	Order              int    `json:"order"`
 	Variable           string `gorm:"type:text" json:"variable"`
+	// LocalPath 本地导入书籍的位置：默认是 data/reader/local 下的文件名
+	// （如 "<id>.txt"）；LocalExternal 为真时是服务器上的绝对路径。
+	// 为空表示来自网络书源。不对外暴露路径，前端用 is_local 判断。
+	LocalPath string `gorm:"type:varchar(255)" json:"-"`
+	// LocalExternal 为真表示原地引用服务器上已有的文件/目录（管理员在导入时选定），
+	// 移出书架只解除引用，不删除源文件；为假表示 data/reader/local 下的托管副本。
+	LocalExternal bool `json:"local_external"`
+	// IsLocal 是否本地导入书籍，列表接口按需计算，不落库。
+	IsLocal bool `gorm:"-" json:"is_local"`
+	// 听书（音频源）跳过片头/片尾秒数，对应 legado Book.getOpenCredits/getCloseCredits。
+	// 0 表示不跳过。仅对音频和视频源生效。
+	OpenCredits  int `gorm:"default:0" json:"open_credits"`
+	CloseCredits int `gorm:"default:0" json:"close_credits"`
 }
 
 // ReaderChapter 章节缓存（对应 legado BookChapter）。

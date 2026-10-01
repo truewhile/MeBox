@@ -26,9 +26,18 @@ type AnalyzeRule struct {
 	bookVars    map[string]string
 	vars        map[string]string
 	chapterTitle string
+	chapterIndex int
 	bookName     string
-	sourceGetter func(key string) string
-	sourcePutter func(key, value string)
+	// bookMeta 书籍元数据（对应 legado 规则 JS 里的 Book 实体字段）。
+	bookMeta map[string]any
+	// bookCustom 书籍自定义变量（对应 legado Book.variableMap），
+	// 由规则 JS 的 book.getVariable / book.putVariable 读写。
+	bookCustom map[string]string
+	// bookTypeOverride 书源在规则 JS 里给 book.type 赋的值
+	// （听书/漫画/短剧源靠它声明书籍类型），由服务层读回。
+	bookTypeOverride *int
+	sourceGetter     func(key string) string
+	sourcePutter     func(key, value string)
 
 	ruleCache map[string][]*SourceRule
 }
@@ -83,6 +92,57 @@ func (a *AnalyzeRule) SetChapterContext(title string, vars map[string]string) {
 	if vars != nil {
 		a.chapterVars = vars
 	}
+}
+
+// SetChapterIndex 设置当前章节下标（规则 JS 的 chapter.index）。
+func (a *AnalyzeRule) SetChapterIndex(i int) { a.chapterIndex = i }
+
+// SetBookMeta 注入书籍元数据（legado 的 Book 实体字段），
+// 供规则 JS 里的 `book` 对象读取（name/author/coverUrl/durChapterIndex…）。
+func (a *AnalyzeRule) SetBookMeta(meta map[string]any) {
+	if len(meta) == 0 {
+		return
+	}
+	if a.bookMeta == nil {
+		a.bookMeta = make(map[string]any, len(meta))
+	}
+	for k, v := range meta {
+		a.bookMeta[k] = v
+	}
+}
+
+// SetBookCustomVars 注入书籍自定义变量（对应 legado Book.variableMap），
+// 规则 JS 通过 book.getVariable / book.putVariable 读写。
+func (a *AnalyzeRule) SetBookCustomVars(vars map[string]string) {
+	if vars != nil {
+		a.bookCustom = vars
+	}
+}
+
+// SetBookType 记录书源声明的书籍类型（legado Book.type）。
+func (a *AnalyzeRule) SetBookType(t int) {
+	v := t
+	a.bookTypeOverride = &v
+}
+
+// BookTypeOverride 返回书源在规则 JS 里声明的书籍类型；
+// ok 为 false 表示书源没有声明（应沿用书架记录里的类型）。
+func (a *AnalyzeRule) BookTypeOverride() (int, bool) {
+	if a.bookTypeOverride == nil {
+		return 0, false
+	}
+	return *a.bookTypeOverride, true
+}
+
+// bookTypeValue 供 book.type 读取：优先书源本次声明的值，否则用元数据里的。
+func (a *AnalyzeRule) bookTypeValue() any {
+	if a.bookTypeOverride != nil {
+		return *a.bookTypeOverride
+	}
+	if v, ok := a.bookMeta["type"]; ok {
+		return v
+	}
+	return 0
 }
 
 // SetBookContext 设置书籍上下文（name 与书籍级变量存储）。

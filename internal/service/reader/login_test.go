@@ -21,6 +21,9 @@ import (
 // 本文件：登录类书源的服务层链路测试。
 // 覆盖「登录 → Cookie 落库 → 后续请求自动携带 Cookie → 登出清理」。
 
+// readerTestUserID 登录接口按用户隔离浏览器待办，测试里统一用一个固定用户。
+const readerTestUserID = "test-user"
+
 // loginTestServer 模拟一个需要登录的书源站点：
 //   - POST /login_api 校验账号密码并下发会话 Cookie
 //   - GET  /search     读取 Cookie，无 Cookie 返回 401（模拟登录后才能搜索）
@@ -155,7 +158,7 @@ func TestSourceLoginEndToEnd(t *testing.T) {
 	}
 
 	// ── 登录 ──
-	res, err := svc.RunLoginAction(ctx, sourceID, "", map[string]string{
+	res, err := svc.RunLoginAction(ctx, readerTestUserID, sourceID, "", map[string]string{
 		"邮箱": "user@example.com", "密码": "pw123456",
 	})
 	if err != nil {
@@ -173,7 +176,7 @@ func TestSourceLoginEndToEnd(t *testing.T) {
 
 	// ── 登录态应落库（换一个 service 实例仍可读到）──
 	svc2 := NewReaderService(svc.cfg, zap.NewNop(), repos)
-	info, err := svc2.GetSourceLogin(ctx, sourceID)
+	info, err := svc2.GetSourceLogin(ctx, readerTestUserID, sourceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +203,7 @@ func TestSourceLoginEndToEnd(t *testing.T) {
 	if err := svc.ClearSourceLogin(ctx, sourceID); err != nil {
 		t.Fatal(err)
 	}
-	info, err = svc.GetSourceLogin(ctx, sourceID)
+	info, err = svc.GetSourceLogin(ctx, readerTestUserID, sourceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +224,7 @@ func TestSourceLoginWrongPassword(t *testing.T) {
 	svc, _ := newLoginTestService(t)
 	sourceID := prepareLoginSource(t, svc, loginTestSourceJSON(t, srv.URL))
 
-	res, err := svc.RunLoginAction(t.Context(), sourceID, "", map[string]string{
+	res, err := svc.RunLoginAction(t.Context(), readerTestUserID, sourceID, "", map[string]string{
 		"邮箱": "user@example.com", "密码": "wrong",
 	})
 	if err != nil {
@@ -245,7 +248,7 @@ func TestSourceLoginInfo_ExposesUIFields(t *testing.T) {
 	svc, _ := newLoginTestService(t)
 	sourceID := prepareLoginSource(t, svc, loginTestSourceJSON(t, srv.URL))
 
-	info, err := svc.GetSourceLogin(t.Context(), sourceID)
+	info, err := svc.GetSourceLogin(t.Context(), readerTestUserID, sourceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +280,7 @@ func TestSourceStateEncryptedAtRest(t *testing.T) {
 	ctx := t.Context()
 	sourceID := prepareLoginSource(t, svc, loginTestSourceJSON(t, srv.URL))
 
-	if _, err := svc.RunLoginAction(ctx, sourceID, "", map[string]string{
+	if _, err := svc.RunLoginAction(ctx, readerTestUserID, sourceID, "", map[string]string{
 		"邮箱": "user@example.com", "密码": "pw123456",
 	}); err != nil {
 		t.Fatal(err)
@@ -313,7 +316,7 @@ func TestSourceVariableRoundTrip(t *testing.T) {
 	if err := svc.SetSourceVariable(ctx, sourceID, `{"线路":"https://v2.example.com"}`); err != nil {
 		t.Fatal(err)
 	}
-	info, err := svc.GetSourceLogin(ctx, sourceID)
+	info, err := svc.GetSourceLogin(ctx, readerTestUserID, sourceID)
 	if err != nil {
 		t.Fatal(err)
 	}

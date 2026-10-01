@@ -1,5 +1,5 @@
-import { useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import { AlertTriangle, ArrowLeft, BookOpen, ChevronDown, ChevronRight, Loader2, Plus, Search } from 'lucide-react'
 
@@ -9,7 +9,8 @@ import { readerAPI, type ReaderSearchBook, type ReaderSearchSkipped } from '../.
 
 export default function ReaderSearchPage() {
   const navigate = useNavigate()
-  const [key, setKey] = useState('')
+  const [params] = useSearchParams()
+  const [key, setKey] = useState(() => params.get('key') ?? '')
   const [searching, setSearching] = useState(false)
   const [books, setBooks] = useState<ReaderSearchBook[] | null>(null)
   const [skipped, setSkipped] = useState<ReaderSearchSkipped[]>([])
@@ -24,9 +25,11 @@ export default function ReaderSearchPage() {
     setShowSkipped(false)
     try {
       const res = await readerAPI.search(kw)
-      setBooks(res.books)
-      setSkipped(res.skipped)
-      if (res.books.length === 0) toast.error('所有书源都没有找到结果')
+      setBooks(res.books ?? [])
+      // 后端在「没有书源失败」时会把空列表编码成 null，这里兜底成数组，
+      // 否则下面 skipped.length 会直接抛 TypeError 把整页打崩。
+      setSkipped(res.skipped ?? [])
+      if ((res.books ?? []).length === 0) toast.error('所有书源都没有找到结果')
     } catch (e) {
       const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '搜索失败'
       toast.error(msg)
@@ -35,8 +38,16 @@ export default function ReaderSearchPage() {
     }
   }
 
-  const addToShelf = async (book: ReaderSearchBook) => {
-    const origin = book.origins[0]
+// 从首页顶部书搜索带 ?key= 进来时自动搜一次（只做一次，之后由用户手动搜）
+  const autoSearchedRef = useRef(false)
+  useEffect(() => {
+    if (autoSearchedRef.current) return
+    autoSearchedRef.current = true
+    if (key.trim()) void doSearch()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const addToShelf = async (book: ReaderSearchBook) => {    const origin = book.origins[0]
     if (!origin) return
     setAdding(book.book_url)
     try {

@@ -1,6 +1,7 @@
 package rule
 
 import (
+	"encoding/json"
 	"net"
 	"net/url"
 	"strings"
@@ -41,6 +42,20 @@ type SourceState interface {
 	// OpenBrowser 记录需要浏览器完成的地址（java.startBrowser）——
 	// 服务端无法弹窗，前端据此提供「在新标签打开」。
 	OpenBrowser(url, title string)
+}
+
+// UIState 是可选实现的登录界面信号接口。
+//
+// java.reLoginView / java.refreshExplore / java.upLoginData 在 legado 中直接
+// 操作登录对话框的控件。服务端不能碰 DOM，因此把意图显式交给宿主处理，
+// 而不是静默丢弃——静默丢弃会让书源以为表单已经按它的预期更新了。
+type UIState interface {
+	// RequestUIRefresh 请求宿主重新渲染登录表单
+	// （对应 legado SourceLoginJsExtensions.reLoginView / refreshExplore）。
+	RequestUIRefresh()
+	// ApplyLoginData 把书源给出的值合并进登录表单
+	// （对应 legado SourceLoginJsExtensions.upLoginData）。
+	ApplyLoginData(data map[string]string)
 }
 
 // CookieDomain 取 URL 的有效顶级域 +1（对应 legado NetworkUtils.getSubDomain）。
@@ -114,6 +129,7 @@ type MemoryState struct {
 	cookies     map[string]map[string]string // domain → name → value
 	toasts      []string
 	browsers    []BrowserRequest
+	uiRefresh   bool
 }
 
 // BrowserRequest 前端可代为打开的浏览器地址（java.startBrowser 收集）。
@@ -206,6 +222,42 @@ func (m *MemoryState) OpenBrowser(url, title string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.browsers = append(m.browsers, BrowserRequest{URL: url, Title: title})
+}
+
+// RequestUIRefresh 实现 UIState（进程内实现，供单测）。
+func (m *MemoryState) RequestUIRefresh() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.uiRefresh = true
+}
+
+// ApplyLoginData 实现 UIState：合并进 loginInfo。
+func (m *MemoryState) ApplyLoginData(data map[string]string) {
+	if len(data) == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur := map[string]string{}
+	if m.loginInfo != "" {
+		_ = json.Unmarshal([]byte(m.loginInfo), &cur)
+	}
+	for k, v := range data {
+		cur[k] = v
+	}
+	if b, err := json.Marshal(cur); err == nil {
+		m.loginInfo = string(b)
+	}
+	m.uiRefresh = true
+}
+
+// UIRefreshRequested 返回并清空「重画登录表单」标记。
+func (m *MemoryState) UIRefreshRequested() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := m.uiRefresh
+	m.uiRefresh = false
+	return out
 }
 
 // Toasts 返回并清空已收集的宿主提示。

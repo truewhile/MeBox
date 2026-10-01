@@ -50,6 +50,28 @@ function user() {
     java.startBrowserAwait(BaseUrl() + '/user', '用户后台');
 }
 
+// 切换线路：与真实聚合源同构——把一段内嵌 HTML 交给宿主浏览器，
+// 用户在页面里点选，宿主回传「操作后的页面源码」，书源再从 DOM 里
+// 解析出所选线路写进源变量。（光遇聚合的 getServerSettings 即此结构）
+function switchLine() {
+    let hostsbk = (getVariable('云端配置') || {})['hosts'] || hosts;
+    let html = '<!DOCTYPE html><html><body>'
+        + '<span id="serverValue">' + BaseUrl() + '</span>'
+        + '<span id="autoSwitchValue">true</span>'
+        + '</body></html>';
+    let body = java.startBrowserAwait(
+        'data:text/html;base64,' + java.base64Encode(html), '线路设置', false
+    ).body();
+    let match = body.match(/id="serverValue"\s*>\s*([^<]*?)\s*<\/span>/);
+    if (!match) {
+        java.longToast('解析线路失败');
+        return;
+    }
+    setVariable('线路', match[1], false);
+    java.longToast('已切换到 ' + match[1]);
+    return match[1];
+}
+
 // 查看信息
 function checkStatus() {
     if (String(getToken()).length < 10) {

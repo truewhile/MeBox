@@ -28,7 +28,10 @@ type sourceState struct {
 
 	toasts   []string
 	browsers []rule.BrowserRequest
-	dirty    bool
+	// uiRefresh 书源通过 java.reLoginView / refreshExplore / upLoginData
+	// 请求重新渲染登录表单（对应 legado 直接操作对话框控件）。
+	uiRefresh bool
+	dirty     bool
 }
 
 // newSourceState 载入指定书源的会话状态（含解密）。
@@ -156,6 +159,34 @@ func (st *sourceState) RemoveCookie(rawURL string) {
 }
 
 func (st *sourceState) Toast(msg string) { st.toasts = append(st.toasts, msg) }
+
+// RequestUIRefresh 实现 rule.UIState：书源要求重画登录表单。
+func (st *sourceState) RequestUIRefresh() { st.uiRefresh = true }
+
+// ApplyLoginData 实现 rule.UIState：把书源给出的值合并进已保存的登录信息。
+func (st *sourceState) ApplyLoginData(data map[string]string) {
+	if len(data) == 0 {
+		return
+	}
+	cur := map[string]string{}
+	if st.loginInfo != "" {
+		_ = json.Unmarshal([]byte(st.loginInfo), &cur)
+	}
+	for k, v := range data {
+		cur[k] = v
+	}
+	if b, err := json.Marshal(cur); err == nil {
+		st.SetLoginInfo(string(b))
+	}
+	st.uiRefresh = true
+}
+
+// UIRefreshRequested 返回并清空「重画登录表单」标记。
+func (st *sourceState) UIRefreshRequested() bool {
+	out := st.uiRefresh
+	st.uiRefresh = false
+	return out
+}
 
 func (st *sourceState) OpenBrowser(url, title string) {
 	st.browsers = append(st.browsers, rule.BrowserRequest{URL: url, Title: title})

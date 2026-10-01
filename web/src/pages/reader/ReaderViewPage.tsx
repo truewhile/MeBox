@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import {
@@ -25,9 +25,28 @@ import { ReaderComic } from './ReaderComic'
 
 const COLUMN_GAP = 48
 
+/** 正文里的图片占位行前缀（本地 EPUB 的图片，服务端已换成签名地址）。 */
+const IMG_MARK = '[img]'
+
+/** 菜单打开时正文下移过渡（与顶栏动画同节奏）。 */
+const MENU_SHIFT = 'transition-transform duration-200'
+
+// 滚轮翻页参数（deltaY 已按 deltaMode 归一化成像素）
+/** 单次 deltaY 达到这个量视为鼠标滚轮的一格（一格一页）。 */
+const WHEEL_NOTCH = 40
+/** 触控板小步长累计到这个量翻一页。 */
+const WHEEL_SWIPE_THRESHOLD = 60
+/** 两次翻页的最小间隔，与 220ms 翻页动画对齐。 */
+const WHEEL_TURN_COOLDOWN = 220
+/** 滚轮事件间隔超过这个毫秒数算新手势，重新累计（用于判断触控板一次滑动结束）。 */
+const WHEEL_GESTURE_GAP = 180
+
 function firstReadableIndex(chapters: ReaderChapter[]): number {
   const i = chapters.findIndex((c) => !c.is_volume && c.url)
-  return i === -1 ? 0 : i
+  if (i !== -1) return i
+  // 本地导入的章节没有 url，退回第一个非卷名章
+  const j = chapters.findIndex((c) => !c.is_volume)
+  return j === -1 ? 0 : j
 }
 
 export default function ReaderViewPage() {
@@ -45,6 +64,15 @@ export default function ReaderViewPage() {
 
   const [menuOpen, setMenuOpen] = useState(false)
   const [panel, setPanel] = useState<'none' | 'toc' | 'style'>('none')
+  // 顶栏高度：菜单打开时正文整体下移这么多，顶栏就不会压住开头几行
+  const topBarRef = useRef<HTMLDivElement>(null)
+  const [menuInset, setMenuInset] = useState(0)
+  // 滚轮翻页的累计量 / 冷却 / 一次手势只翻一页的锁
+  const readerRef = useRef<HTMLDivElement>(null)
+  const wheelAccumRef = useRef(0)
+  const wheelLastEventRef = useRef(0)
+  const wheelLastTurnRef = useRef(0)
+  const wheelSwipeLockedRef = useRef(false)
 
   // 分页状态
   const viewportRef = useRef<HTMLDivElement>(null)
@@ -78,6 +106,7 @@ export default function ReaderViewPage() {
         setBook(b)
         let chs = await readerAPI.listChapters(b.id)
         if (chs.length === 0) {
+          if (b.is_local) throw new Error('本地书籍目录为空，请重新导入该书')
           const toc = await readerAPI.toc({
             source_url: b.origin,
             book_url: b.book_url,
@@ -90,7 +119,9 @@ export default function ReaderViewPage() {
         }
         if (cancelled) return
         setChapters(chs)
-        const qChapter = Number(new URLSearchParams(window.location.search).get('chapter') ?? '')
+        // URL 上带 chapter 才用它；没有这个参数就不能当成 0，否则每次进来都回第一章
+        const qChapterRaw = new URLSearchParams(window.location.search).get('chapter')
+        const qChapter = qChapterRaw && qChapterRaw.trim() !== '' ? Number(qChapterRaw) : NaN
         let idx = firstReadableIndex(chs)
         if (Number.isInteger(qChapter) && chs[qChapter] && !chs[qChapter].is_volume) idx = qChapter
         else if (b.dur_chapter_index > 0 && chs[b.dur_chapter_index] && !chs[b.dur_chapter_index].is_volume) {
@@ -276,6 +307,33 @@ export default function ReaderViewPage() {
     [chapterIndex, chapters],
   )
 
+  // 听书：进度条/章节列表跳章（不沿用 goChapter 的越界提示，直接落位）
+  const jumpToChapter = useCallback((idx: number) => {
+    if (idx < 0 || idx >= chapters.length) return
+    pendingEndRef.current = false
+    setError('')
+    setChapterIndex(idx)
+  }, [chapters.length])
+
+  // 听书：是否还有下一章（片尾跳过/播完时决定续播还是停住）
+  const hasNextAudioChapter = useMemo(() => {
+    if (chapterIndex === null) return false
+    for (let i = chapterIndex + 1; i < chapters.length; i++) {
+      if (!chapters[i].is_volume) return true
+    }
+    return false
+  }, [chapterIndex, chapters])
+
+  // 听书：片头/片尾跳过秒数按书写入（对应 legado Book.openCredits/closeCredits）
+  const saveAudioCredits = useCallback(
+    (open: number, close: number) => {
+      if (!book) return
+      setBook((prev) => (prev ? { ...prev, open_credits: open, close_credits: close } : prev))
+      readerAPI.saveAudioConfig(book.id, { open_credits: open, close_credits: close }).catch(() => undefined)
+    },
+    [book],
+  )
+
   const goPrev = useCallback(() => {
     if (contentType === 'audio') {
       goChapter(-1)
@@ -334,7 +392,69 @@ export default function ReaderViewPage() {
     return () => window.removeEventListener('keydown', onKey)
   }, [goPrev, goNext, menuOpen, panel])
 
+  // ── 鼠标滚轮翻页（仅翻页模式） ──
+  // 往上滚=上一页，往下滚=下一页。滚动模式保持浏览器原生滚动，不做接管。
+  // 滚轮必须用原生监听器：React 的 onWheel 是 passive 的，调不了 preventDefault。
+  useEffect(() => {
+    const el = readerRef.current
+    if (!el) return
+    // 滚动模式/听书面板/漫画滚动交给浏览器自己处理；菜单打开时不翻页
+    if (settings.pageMode !== 'page' || menuOpen) return
+    if (contentType !== 'text' && contentType !== 'image') return
+
+    const turn = (forward: boolean) => (forward ? goNext() : goPrev())
+    const onWheel = (e: WheelEvent) => {
+      // ctrl+滚轮是浏览器缩放，别抢
+      if (e.ctrlKey || e.metaKey || e.deltaY === 0) return
+      e.preventDefault()
+      const now = Date.now()
+      // deltaMode: 0=像素 1=行 2=页，统一折算成像素
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 100 : 1
+      const delta = e.deltaY * unit
+      if (now - wheelLastEventRef.current > WHEEL_GESTURE_GAP) {
+        wheelAccumRef.current = 0
+        wheelSwipeLockedRef.current = false
+      }
+      wheelLastEventRef.current = now
+
+      if (Math.abs(delta) >= WHEEL_NOTCH) {
+        // 鼠标滚轮：一格一页，但至少隔一次翻页动画的时间
+        if (now - wheelLastTurnRef.current < WHEEL_TURN_COOLDOWN) return
+        wheelLastTurnRef.current = now
+        wheelAccumRef.current = 0
+        turn(delta > 0)
+        return
+      }
+      // 触控板：小步长累计到阈值再翻，一次手势只翻一页，避免惯性连翻
+      if (wheelSwipeLockedRef.current) return
+      wheelAccumRef.current += delta
+      if (Math.abs(wheelAccumRef.current) < WHEEL_SWIPE_THRESHOLD) return
+      const forward = wheelAccumRef.current > 0
+      wheelAccumRef.current = 0
+      wheelSwipeLockedRef.current = true
+      wheelLastTurnRef.current = now
+      turn(forward)
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [settings.pageMode, menuOpen, contentType, goPrev, goNext])
+
   const currentChapter = chapterIndex !== null ? chapters[chapterIndex] : null
+
+  // 顶栏高度量一次：菜单打开时正文下移，开头几行不被顶栏压住。
+  // 用 transform 而不是 padding，避免改变视口高度触发重新分页。
+  const menuShiftStyle = useMemo(
+    () => (menuOpen && menuInset > 0 ? { transform: `translateY(${menuInset}px)` } : undefined),
+    [menuOpen, menuInset],
+  )
+  useLayoutEffect(() => {
+    if (!menuOpen) {
+      setMenuInset(0)
+      return
+    }
+    const h = topBarRef.current?.offsetHeight ?? 0
+    setMenuInset((cur) => (cur === h ? cur : h))
+  }, [menuOpen])
 
   // 菜单进度条按内容类型适配：文本=页/滚动位置，音频=章节，漫画=图片序号
   const imageCount = media?.images?.length ?? 0
@@ -344,7 +464,7 @@ export default function ReaderViewPage() {
         min: 0,
         max: Math.max(0, chapters.length - 1),
         value: Math.max(0, chapterIndex ?? 0),
-        onChange: (v: number) => setChapterIndex(v),
+        onChange: (v: number) => jumpToChapter(v),
       }
     }
     if (contentType === 'image') {
@@ -376,6 +496,27 @@ export default function ReaderViewPage() {
   })()
   const paragraphs = (content ?? '').split('\n').map((p) => p.trim()).filter(Boolean)
 
+  // 正文段落：普通段落按缩进排版，[img] 行渲染成居中图片
+  const renderParagraph = (line: string, key: number) => {
+    if (line.startsWith(IMG_MARK)) {
+      return (
+        <p key={key} style={{ marginBottom: settings.paragraphSpacing, textAlign: 'center' }}>
+          <img
+            src={line.slice(IMG_MARK.length)}
+            alt=""
+            referrerPolicy="no-referrer"
+            style={{ maxWidth: '100%', maxHeight: '70vh', margin: '0 auto', objectFit: 'contain' }}
+          />
+        </p>
+      )
+    }
+    return (
+      <p key={key} style={{ textIndent: '2em', marginBottom: settings.paragraphSpacing }}>
+        {line}
+      </p>
+    )
+  }
+
   // ── 渲染 ──
   if (error && !book) {
     return (
@@ -389,7 +530,7 @@ export default function ReaderViewPage() {
   }
 
   return (
-    <div className="fixed inset-0 z-40 flex flex-col" style={{ backgroundColor: theme.bg, color: theme.text }}>
+    <div ref={readerRef} className="fixed inset-0 z-40 flex flex-col" style={{ backgroundColor: theme.bg, color: theme.text }}>
       {/* 正文视口 */}
       <div className="relative flex-1 overflow-hidden">
         <div className="mx-auto h-full w-full max-w-[900px]">
@@ -398,12 +539,21 @@ export default function ReaderViewPage() {
               <ReaderAudioPanel
                 src={media.tracks[0]}
                 title={currentChapter?.title ?? book?.name ?? '播放'}
+                cover={book?.cover_url ?? ''}
                 theme={theme}
                 initialPos={restorePos}
+                openCredits={book?.open_credits ?? 0}
+                closeCredits={book?.close_credits ?? 0}
+                chapters={chapters}
+                chapterIndex={chapterIndex}
+                hasNext={hasNextAudioChapter}
+                transcoding={media.transcoding ?? false}
                 onProgress={throttledMediaSave}
                 onPrevChapter={() => goChapter(-1)}
                 onNextChapter={() => goChapter(1)}
+                onSelectChapter={jumpToChapter}
                 onEnded={() => goChapter(1)}
+                onCreditsChange={saveAudioCredits}
                 onToggleMenu={() => setMenuOpen((v) => !v)}
               />
             ) : (
@@ -429,25 +579,26 @@ export default function ReaderViewPage() {
               onScrolled={() => setScrollToImage(null)}
             />
           ) : settings.pageMode === 'page' ? (
-            <div ref={viewportRef} className="relative h-full overflow-hidden">
-              <div
-                ref={contentRef}
-                className="h-full"
-                style={{
-                  columnWidth: `${Math.max(vw, 1)}px`,
-                  columnGap: `${COLUMN_GAP}px`,
-                  columnFill: 'auto',
-                  transform: `translateX(-${page * (vw + COLUMN_GAP)}px)`,
-                  transition: 'transform 220ms ease',
-                  fontSize: settings.fontSize,
-                  lineHeight: settings.lineHeight,
-                }}
-              >
-                {paragraphs.map((p, i) => (
-                  <p key={i} style={{ textIndent: '2em', marginBottom: settings.paragraphSpacing }}>
-                    {p}
-                  </p>
-                ))}
+            /* 左右/上下留边（legado 默认左右16/上下6），避免正文贴屏幕边；
+               菜单打开时整体下移一个顶栏高度，顶栏不再压住正文（用 transform，
+               不改高度也就不触发重新分页） */
+            <div className={`h-full px-4 py-2 ${MENU_SHIFT}`} style={menuShiftStyle}>
+              <div ref={viewportRef} className="relative h-full overflow-hidden">
+                <div
+                  ref={contentRef}
+                  className="h-full"
+                  style={{
+                    columnWidth: `${Math.max(vw, 1)}px`,
+                    columnGap: `${COLUMN_GAP}px`,
+                    columnFill: 'auto',
+                    transform: `translateX(-${page * (vw + COLUMN_GAP)}px)`,
+                    transition: 'transform 220ms ease',
+                    fontSize: settings.fontSize,
+                    lineHeight: settings.lineHeight,
+                  }}
+                >
+                  {paragraphs.map((p, i) => renderParagraph(p, i))}
+                </div>
               </div>
             </div>
           ) : (
@@ -465,15 +616,11 @@ export default function ReaderViewPage() {
                   }
                 }
               }}
-              className="h-full overflow-y-auto px-1"
-              style={{ fontSize: settings.fontSize, lineHeight: settings.lineHeight }}
+              className={`h-full overflow-y-auto px-4 ${MENU_SHIFT}`}
+              style={{ fontSize: settings.fontSize, lineHeight: settings.lineHeight, ...menuShiftStyle }}
             >
               <div className="py-4">
-                {paragraphs.map((p, i) => (
-                  <p key={i} style={{ textIndent: '2em', marginBottom: settings.paragraphSpacing }}>
-                    {p}
-                  </p>
-                ))}
+                {paragraphs.map((p, i) => renderParagraph(p, i))}
               </div>
             </div>
           )}
@@ -541,6 +688,7 @@ export default function ReaderViewPage() {
           />
           {/* 顶栏 */}
           <div
+            ref={topBarRef}
             className="fixed inset-x-0 top-0 z-50 flex items-center gap-3 border-b px-4 py-3 backdrop-blur"
             style={{ backgroundColor: theme.bg, borderColor: theme.text + '22' }}
           >
@@ -619,46 +767,6 @@ export default function ReaderViewPage() {
               ))}
             </div>
 
-            {/* 目录抽屉 */}
-            {panel === 'toc' && (
-              <div
-                className="absolute bottom-full right-0 top-0 w-72 overflow-hidden border-l sm:w-80"
-                style={{ backgroundColor: theme.bg, borderColor: theme.text + '22' }}
-              >
-                <div className="flex h-full flex-col" style={{ color: theme.text }}>
-                  <p className="border-b px-4 py-3 text-xs font-bold" style={{ borderColor: theme.text + '22' }}>
-                    目录（{chapters.length} 章）
-                  </p>
-                  <div className="min-h-0 flex-1">
-                    <Virtuoso
-                      data={chapters}
-                      initialTopMostItemIndex={Math.max(0, chapterIndex ?? 0)}
-                      itemContent={(_, ch) => {
-                        const idx = chapters.indexOf(ch)
-                        const isCurrent = idx === chapterIndex
-                        return (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setChapterIndex(idx)
-                              setPanel('none')
-                              setMenuOpen(false)
-                            }}
-                            className={`block w-full truncate px-4 py-2.5 text-left text-xs ${
-                              ch.is_volume ? 'font-bold opacity-70' : ''
-                            }`}
-                            style={isCurrent ? { color: theme.accent, fontWeight: 700 } : undefined}
-                          >
-                            {ch.title}
-                          </button>
-                        )
-                      }}
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-
             {/* 界面设置面板（主题 / 字号 / 行距 / 段距） */}
             {panel === 'style' && (
               <div
@@ -681,8 +789,8 @@ export default function ReaderViewPage() {
                     )
                   })}
                 </div>
-                <div className="mt-4 flex items-center gap-6 text-xs">
-                  <div className="flex items-center gap-2">
+                <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-3 text-xs">
+                  <div className="flex shrink-0 items-center gap-2">
                     <span className="opacity-70">字号</span>
                     <button type="button" onClick={() => settings.setFontSize(settings.fontSize - 1)} className="rounded-lg border px-2 py-0.5" style={{ borderColor: theme.text + '44' }}>
                       <Minus size={12} />
@@ -692,7 +800,7 @@ export default function ReaderViewPage() {
                       <Plus size={12} />
                     </button>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex shrink-0 items-center gap-2">
                     <span className="opacity-70">行距</span>
                     <button type="button" onClick={() => settings.setLineHeight(settings.lineHeight - 0.1)} className="rounded-lg border px-2 py-0.5" style={{ borderColor: theme.text + '44' }}>
                       <Minus size={12} />
@@ -702,7 +810,7 @@ export default function ReaderViewPage() {
                       <Plus size={12} />
                     </button>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex shrink-0 items-center gap-2">
                     <span className="opacity-70">段距</span>
                     <button type="button" onClick={() => settings.setParagraphSpacing(settings.paragraphSpacing - 2)} className="rounded-lg border px-2 py-0.5" style={{ borderColor: theme.text + '44' }}>
                       <Minus size={12} />
@@ -716,6 +824,58 @@ export default function ReaderViewPage() {
               </div>
             )}
           </div>
+
+          {/* 目录：整屏面板。必须放在底部菜单之外——菜单带 backdrop-blur，
+              会成为 fixed 后代的包含块，放里面高度会被算成菜单的高度。 */}
+          {panel === 'toc' && (
+            <div
+              className="fixed inset-0 z-[60] flex flex-col"
+              style={{ backgroundColor: theme.bg, color: theme.text }}
+            >
+              <div
+                className="flex items-center gap-3 border-b px-4 py-3"
+                style={{ borderColor: theme.text + '22' }}
+              >
+                <button
+                  type="button"
+                  onClick={() => setPanel('none')}
+                  className="rounded-xl p-1.5 opacity-70 hover:opacity-100"
+                  aria-label="收起目录"
+                >
+                  <ArrowLeft size={18} />
+                </button>
+                <p className="flex-1 truncate text-sm font-bold">
+                  {book?.name ?? '目录'}
+                  <span className="ml-2 text-2xs font-normal opacity-60">目录（{chapters.length} 章）</span>
+                </p>
+              </div>
+              <div className="min-h-0 flex-1">
+                <Virtuoso
+                  data={chapters}
+                  initialTopMostItemIndex={Math.max(0, chapterIndex ?? 0)}
+                  itemContent={(index, ch) => {
+                    const isCurrent = index === chapterIndex
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPanel('none')
+                          setMenuOpen(false)
+                          jumpToChapter(index)
+                        }}
+                        className={`block w-full truncate px-4 py-2.5 text-left text-xs ${
+                          ch.is_volume ? 'font-bold opacity-70' : ''
+                        }`}
+                        style={isCurrent ? { color: theme.accent, fontWeight: 700 } : undefined}
+                      >
+                        {ch.title}
+                      </button>
+                    )
+                  }}
+                />
+              </div>
+            </div>
+          )}
         </>
       )}
 

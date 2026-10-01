@@ -136,9 +136,9 @@ func TestLoginMissingCredentials(t *testing.T) {
 	}
 }
 
-// TestStartBrowserAwaitRecordsURL startBrowserAwait 应记录待打开地址并明确报错，
-// 避免书源逻辑把空 body 当成校验成功。
-func TestStartBrowserAwaitRecordsURL(t *testing.T) {
+// TestStartBrowserAwaitWithoutHost startBrowserAwait 在未注入宿主浏览器时应
+// 明确报错，并记录待打开地址，避免书源逻辑把空 body 当成校验成功。
+func TestStartBrowserAwaitWithoutHost(t *testing.T) {
 	state := NewMemoryState()
 	r := newSampleRunner(t, state)
 	loginJS := loadTestdata(t, "sample_loginUrl.js")
@@ -146,7 +146,7 @@ func TestStartBrowserAwaitRecordsURL(t *testing.T) {
 	// 先造出登录态，让 user() 走到 startBrowserAwait
 	state.SetCookie("https://v1.example-aggregate.com", "qttoken=TOKEN_abcdefghijklmn")
 	_, err := r.EvalAction(loginJS+"\nuser()", nil)
-	if err == nil || !strings.Contains(err.Error(), "无浏览器") {
+	if err == nil || !strings.Contains(err.Error(), "浏览器") {
 		t.Fatalf("应明确报不支持，实际: %v", err)
 	}
 	browsers := state.Browsers()

@@ -410,7 +410,13 @@ func newJavaObject(vm *goja.Runtime, r *JSRunner, a *AnalyzeRule) *goja.Object {
 		bindSourceState(vm, set, r.state, r.cfg.SourceProps)
 	}
 
-	// ── 宿主交互：服务端无 UI，转为可回传前端的提示 / 待打开链接 ──
+	// ── 宿主交互：提示、浏览器页面、登录界面刷新 ──
+	//
+	// legado 用内置 WebView 承载页面：startBrowser / startBrowserAwait 打开一个
+	// 页面让用户完成防爬校验、登录或参数选择，Await 版本还会把用户操作后的
+	// 页面源码作为 StrResponse 返回。真实的聚合类书源（如光遇聚合）把「线路
+	// 切换」「用户后台」「书源设置」全部建在这两个函数上，因此这里必须真正
+	// 把页面交给前端，而不是记录个地址就算完。
 	if r.state != nil {
 		toast := func(call goja.FunctionCall) goja.Value {
 			if len(call.Arguments) > 0 {
@@ -420,17 +426,59 @@ func newJavaObject(vm *goja.Runtime, r *JSRunner, a *AnalyzeRule) *goja.Object {
 		}
 		set("toast", toast)
 		set("longToast", toast)
-		// startBrowser(url, title)：记录待打开地址，前端可代开新标签。
+
+		// startBrowser(url, title[, html])：展示页面，不等待用户完成。
 		set("startBrowser", func(call goja.FunctionCall) goja.Value {
-			r.state.OpenBrowser(stringArg(call, 0), stringArgOr(call, 1, ""))
+			if err := r.openBrowser(parseBrowserArgs(call)); err != nil {
+				bridgeErr("startBrowser", err)
+			}
 			return goja.Null()
 		})
-		// startBrowserAwait：服务端无 WebView，无法等待人工校验。
-		// 记录地址后抛出明确错误，避免书源逻辑误把空 body 当成功。
+		// showBrowser(url, html, preloadJs, config)：legado 中同样是「打开即返回」
+		// 的对话框，只是参数含义不同，这里统一按展示处理。
+		set("showBrowser", func(call goja.FunctionCall) goja.Value {
+			req := parseBrowserArgs(call)
+			if req.Title == "" {
+				req.Title = stringArgOr(call, 2, "")
+			}
+			if err := r.openBrowser(req); err != nil {
+				bridgeErr("showBrowser", err)
+			}
+			return goja.Null()
+		})
+		// startBrowserAwait(url, title[, refetchAfterSuccess][, html])：
+		// 展示页面并阻塞等待用户完成后回传页面内容（对应 legado StrResponse）。
 		set("startBrowserAwait", func(call goja.FunctionCall) goja.Value {
-			url := stringArg(call, 0)
-			r.state.OpenBrowser(url, stringArgOr(call, 1, ""))
-			panic(vm.ToValue("java.startBrowserAwait: 服务端无浏览器，需要人工操作的页面请手动打开：" + url))
+			req := parseBrowserArgs(call)
+			if len(call.Arguments) > 2 && !goja.IsUndefined(call.Arguments[2]) && !goja.IsNull(call.Arguments[2]) {
+				if _, isStr := call.Arguments[2].Export().(string); !isStr {
+					req.Refetch = call.Arguments[2].ToBoolean()
+				}
+			}
+			res, err := r.awaitBrowser(req)
+			if err != nil {
+				bridgeErr("startBrowserAwait", err)
+			}
+			finalURL := res.URL
+			if finalURL == "" {
+				finalURL = req.URL
+			}
+			return newResponseObject(vm, res.Body, 200, finalURL, nil)
+		})
+
+		// reLoginView / refreshExplore：请求宿主重新渲染登录表单。
+		// MeBox 每次登录动作后都会重新拉取 loginUi 并重建表单，因此这是真实
+		// 生效的信号，而不是静默空实现。
+		for _, name := range []string{"reLoginView", "refreshExplore"} {
+			set(name, func(call goja.FunctionCall) goja.Value {
+				r.requestUIRefresh()
+				return goja.Null()
+			})
+		}
+		// upLoginData(data)：书源把服务端返回的值回填进登录表单。
+		set("upLoginData", func(call goja.FunctionCall) goja.Value {
+			r.applyLoginData(call.Arguments)
+			return goja.Null()
 		})
 	}
 	// 设备标识：部分源用 deviceID/androidId 做"是否支持该环境"探测，
@@ -440,10 +488,13 @@ func newJavaObject(vm *goja.Runtime, r *JSRunner, a *AnalyzeRule) *goja.Object {
 			panic(vm.ToValue("java." + name + ": 服务端无设备标识"))
 		})
 	}
-	// 刷新发现页 / 打开界面：纯 UI 动作，服务端空实现。
-	for _, name := range []string{"refreshExplore", "open", "showBrowser", "reLoginView", "qread"} {
-		set(name, func(call goja.FunctionCall) goja.Value { return goja.Null() })
-	}
+	// 说明：下面这些名字在服务端刻意不定义，调用即抛异常，以对齐 legado 的
+	// 真实可用面，避免「静默空实现」让书源误判运行环境：
+	//   qread / showReadingBrowser / startBrowserDp —— legado 中并不存在
+	//   （例如 checkEnv 用 java.qread() 探测「轻阅」，旧实现返回成功会让书源
+	//    误认为运行在轻阅里，从而跳过它自己的降级分支）
+	//   open / searchBook —— legado 中仅做原生界面跳转（打开搜索页 / 登录页），
+	//                        服务端没有对应页面，谎报成功会让书源走错分支
 
 	// 需要真正无头浏览器/本地文件系统的能力：明确抛出不支持
 	unsupported := func(name string) func(goja.FunctionCall) goja.Value {

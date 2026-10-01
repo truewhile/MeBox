@@ -95,6 +95,7 @@ web/src/
 - 搜索：`POST /search {keyword}` → 后台聚合任务，结果经 WS `reader:search` 增量推送；结果可一键加入书架
 - 发现：`GET /explore?source=&group=`（解析 exploreUrl 的 `分组名::url` 结构）
 - 书架：`GET/POST/DELETE /books`、`GET /books/:id/info`、`GET /books/:id/toc`、`POST /books/:id/refresh`（追更）
+- 本地书籍：`POST /local/books`（multipart 上传 TXT/EPUB，导入即入书架）
 - 内容：`GET /books/:id/chapters/:idx/content` —— 按书籍类型返回：
   - 文本：`{type:"text", content:"..."}`（服务端已合并 nextContentUrl 翻页、已应用替换规则）
   - 音频：`{type:"audio", tracks:[{url,title}]}`（含代理路径与所需请求头）
@@ -121,10 +122,11 @@ web/src/
 | P0 引擎地基 ✅ | 规则引擎核心（四分析器 + 规则拆分/组合/变量）+ AnalyzeUrl v1（GET/POST/charset/headers/变量/页码模式）+ 表结构 + 书源导入/管理 API + 搜索/详情/目录/正文/书架/进度/调试 API | 已完成：`internal/service/reader/rule/`（规则引擎，~2800 行，对齐 AnalyzeRule/AnalyzeByJSoup/AnalyzeByJSonPath/AnalyzeByXPath/AnalyzeByRegex/AnalyzeUrl/RuleAnalyzer）+ 服务层 + `/api/reader/*` 路由 + 单测/端到端测试全绿 |
 | P1 文本源全链路 + 首页切换 | 搜索聚合（WS 进度）/详情/目录/正文（nextContentUrl 合并、缓存）+ 前端首页切换、书架、搜索、详情、文本阅读器 v1（阅读器样式仿 legado：9 宫格点击、主题、翻页动画） | 用纯规则型文本源完成「搜书→加入→阅读」全流程 |
 | P2 JS 与兼容率爬坡 ✅ | goja 接入 + `java.*` 桥（网络/编解码/摘要/对称加密全家桶/规则回调，函数名对齐 JsExtensions）+ URL 规则 JS（analyzeJs/{{}}/js/bodyJs）+ cookie jar + 用户替换净化规则（含正则超时保护）+ 替换净化页 + 结构化冒烟链路（SmokeChain）+ `cmd/reader-smoke` 冒烟 CLI | JS 源可用；冒烟 CLI 跑公开书源集出各阶段通过率报告 |
-| P3 音频源 ✅ | 正文按音频类型返回播放列表（绝对化）+ `/api/reader/media` 签名媒体代理（HMAC 防滥用、Range 透传支持拖动、m3u8 分片/密钥地址重写）+ 阅读器音频面板（hls.js 播 m3u8、直链 `<audio>`、上一章/播放暂停/下一章、倍速 0.75–2x、进度按秒记忆、播完自动下一章） | 音频源可听 |
+| P3 音频源 ✅ | 正文按音频类型返回播放列表（绝对化）+ `/api/reader/media` 签名媒体代理（HMAC 防滥用、Range 透传支持拖动、m3u8 分片/密钥地址重写）+ 听书面板（hls.js 播 m3u8、直链 `<audio>`、上一章/-15s/播放暂停/+15s/下一章、章节选择抽屉、定时关闭 0–180 分钟、倍速 0.5–3.0、跳过片头片尾按书持久化 `PUT /api/reader/books/:id/audio-config`、进度按秒记忆、播完/片尾到点自动下一章） | 音频源可听 |
 | P4 漫画/图片源 ✅ | 图片列表绝对化 + 经签名代理（带书源 Referer 防盗链头）+ 漫画阅读器（上下滚动/左右单页双模式、图片懒加载与加载失败占位、点击分区翻页/呼菜单、菜单进度条按图片序号、进度按图片序号记忆、下一章预取）+ imageStyle 透传 | 漫画源可看 |
 | P4.5 书源登录 ✅ | `jsLib` 一次装载（对应 legado SharedJsScope）+ `source.*` 会话方法（getVariable/setVariable/getLoginInfo/putLoginInfo/getLoginHeader/putLoginHeader/get/put）+ `cookie.*`（getCookie/setCookie/replaceCookie/removeCookie/getKey，按 eTLD+1 隔离）+ 请求自动携带 Cookie 与 loginHeader + `loginUrl`/`loginUi`（解析表单 → 按钮 action 拼在 loginUrl 后执行 → result 为表单值）+ `loginCheckJs`（会话失效自动重登/重取）+ 源变量落库 + 登录信息/Cookie 加密存储 + 服务端 toast/startBrowser 回传前端 + 登录面板与变量编辑器 | 登录类书源可登录、可留存登录态 |
-| P5 体验完善 | 换源（ChangeBookSourceDialog 四档排序）、追更（定时刷新目录 + 缓存清理）、发现页（exploreUrl 标签条）、阅读器高级设置（页眉页脚提示、点击区域自定义）、书源编辑器六 Tab、备份导出；可选：本地 TXT/EPUB | 完整体验 |
+| P4.6 本地书籍 ✅ | `POST /api/reader/local/books` 上传 TXT / EPUB（上限 64MB）→ 落盘 `data/reader/local/<bookID>.<txt\|epub>` + 解析目录入 `reader_chapters` + 落库为 `origin=""`、`is_local=true` 的书架条目；TXT 自动识别 BOM/UTF-8/GBK/Big5/UTF-16 并按 legado 默认 TXT 目录规则切章（RE2 无 lookbehind，改行首锚定 + 句子启发式过滤），章定位信息存字节区间 `start:end`，读章只读该区间；EPUB 走 container.xml → OPF spine，标题优先取 NCX/NAV，正文去标签与实体；移出书架同步删落盘文件；同名重复导入覆盖更新并尽量保留进度 | 本地书可上传、可读、可删 |
+| P5 体验完善 | 换源（ChangeBookSourceDialog 四档排序）、追更（定时刷新目录 + 缓存清理）、发现页（exploreUrl 标签条）、阅读器高级设置（页眉页脚提示、点击区域自定义）、书源编辑器六 Tab、备份导出 | 完整体验 |
 
 P0–P2 是主体（约全部工作量 60–70%），P3/P4 相对独立可并行。
 

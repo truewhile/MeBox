@@ -12,6 +12,4 @@ var (
 	ErrJsUnsupported = errors.New("书源使用了 JS 规则，当前阶段暂不支持")
 	// ErrWebJSUnsupported 书源依赖 webView/webJs 抓取，服务端无头浏览器不在支持范围。
 	ErrWebJSUnsupported = errors.New("书源依赖 webView 抓取，暂不支持")
-	// ErrTypeUnsupported 书源 URL 声明了 type（zip/file 等），暂不支持。
-	ErrTypeUnsupported = errors.New("书源 URL 声明了不支持的 type")
 )

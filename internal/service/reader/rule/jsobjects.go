@@ -107,6 +107,85 @@ func newCookieObject(vm *goja.Runtime, state SourceState) *goja.Object {
 	return o
 }
 
+// ─── 书籍 / 章节对象 ───────────────────────────────────────────────────────
+
+// newBookObject 构造规则 JS 里的 `book`（对应 legado 的 Book 实体）。
+//
+// 书源会读它的元数据（name / author / coverUrl / durChapterIndex / order / type…）、
+// 给它赋值（book.type = …、book.imageStyle = …）、调用 setUseReplaceRule()，
+// 以及用 getVariable / putVariable 读写书籍自定义变量。
+//
+// 早期这里只绑了 {"name": ...}，书源一碰 `book.setUseReplaceRule(false)`
+// 就 TypeError，整段详情/目录规则 JS 直接失败（表现为「详情空白、目录 0 章」）。
+func newBookObject(vm *goja.Runtime, a *AnalyzeRule) *goja.Object {
+	o := vm.NewObject()
+	set := func(k string, v any) {
+		_ = o.Set(k, v)
+	}
+	for k, v := range a.bookMeta {
+		if k == "type" {
+			continue // type 用访问器，见下
+		}
+		set(k, v)
+	}
+	// name 以 SetBookContext 的值为准（legado 里 book.name 就是这个）
+	set("name", a.bookName)
+	set("bookName", a.bookName)
+
+	// book.type：书源会赋值来声明书籍类型（听书=1 / 漫画=2 …），
+	// legado 会把它写回 Book.type，服务层据此决定正文按文本/音频/图片返回。
+	// 用访问器把写入记下来，否则赋值只活在本次 JS 里，读完仍是文本。
+	_ = o.DefineAccessorProperty("type",
+		vm.ToValue(func(call goja.FunctionCall) goja.Value { return vm.ToValue(a.bookTypeValue()) }),
+		vm.ToValue(func(call goja.FunctionCall) goja.Value {
+			if len(call.Arguments) > 0 && !goja.IsUndefined(call.Arguments[0]) && !goja.IsNull(call.Arguments[0]) {
+				a.SetBookType(int(call.Arguments[0].ToInteger()))
+			}
+			return goja.Undefined()
+		}),
+		goja.FLAG_FALSE, goja.FLAG_TRUE)
+
+	// readConfig：书源读 book.readConfig.useReplaceRule，并可能回写
+	rc := vm.NewObject()
+	_ = rc.Set("useReplaceRule", false)
+	set("readConfig", rc)
+	set("setUseReplaceRule", func(call goja.FunctionCall) goja.Value {
+		if len(call.Arguments) > 0 {
+			_ = rc.Set("useReplaceRule", call.Arguments[0].ToBoolean())
+		}
+		return goja.Null()
+	})
+
+	// 书籍自定义变量（legado Book.variableMap）。
+	//
+	// 注意「缺省返回空串」：legado 的 RuleDataInterface.getVariable 是
+	//   variableMap[key] ?: getBigVariable(key) ?: ""
+	// 返回 "" 而不是 null。书源会直接写 `String(book.getVariable('custom')) || ''`，
+	// 若这里返回 null，String(null) 得到字符串 "null"（真值），会被当成
+	// tone_id 发给站点，站点直接返回空正文（表现为「正文 0 字」）。
+	set("getVariable", func(call goja.FunctionCall) goja.Value {
+		return vm.ToValue(a.bookCustom[stringArg(call, 0)])
+	})
+	set("putVariable", func(call goja.FunctionCall) goja.Value {
+		if a.bookCustom == nil {
+			a.bookCustom = map[string]string{}
+		}
+		a.bookCustom[stringArg(call, 0)] = stringArgOr(call, 1, "")
+		return goja.Null()
+	})
+	return o
+}
+
+// newChapterObject 构造规则 JS 里的 `chapter`（对应 legado 的 BookChapter）。
+func newChapterObject(vm *goja.Runtime, a *AnalyzeRule) *goja.Object {
+	o := vm.NewObject()
+	_ = o.Set("title", a.chapterTitle)
+	_ = o.Set("index", a.chapterIndex)
+	_ = o.Set("isVip", false)
+	_ = o.Set("isPay", false)
+	return o
+}
+
 // newSourceObject 构造 JS 的 `source` 对象。
 // 对应 legado BaseSource 的变量与登录信息读写。
 func newSourceObject(vm *goja.Runtime, state SourceState, props map[string]any) *goja.Object {

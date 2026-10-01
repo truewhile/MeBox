@@ -24,7 +24,6 @@ import {
   HomeLoadingState,
 } from './HomePageSections'
 import { ReaderHomeContent } from './reader/ReaderHomeContent'
-import { ReaderModeSwitch } from './reader/ReaderModeSwitch'
 import { useReaderSettingsStore } from '../stores/readerSettings'
 
 const hasArtwork = (media?: Media | null) => !!(media?.poster_url || media?.backdrop_url)
@@ -323,7 +322,7 @@ export function HomePage() {
   if (homeMode === 'reading') {
     return (
       <div className="space-y-6 pb-16">
-        <ReaderHomeContent />
+        <ReaderHomeContent embedded />
       </div>
     )
   }
@@ -340,7 +339,6 @@ export function HomePage() {
 
   return (
     <div className="space-y-12 pb-16">
-      <ReaderModeSwitch />
       {/* 1. 顶部海报轮播区 */}
       {carouselItems.length > 0 && (
         <HomeCarouselSection items={carouselItems} libraryMap={libraryMap} />

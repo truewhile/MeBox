@@ -1,15 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import toast from 'react-hot-toast'
 import { ExternalLink, KeyRound, Loader2, LogOut, RefreshCw, Save, X } from 'lucide-react'
 
-import { readerAPI, type ReaderLoginField, type ReaderSourceLogin } from '../../api/reader'
+import { readerAPI, type ReaderBrowserPage, type ReaderLoginField, type ReaderSourceLogin } from '../../api/reader'
+import BrowserPanel from './BrowserPanel'
 
 // 书源登录面板（仿 legado SourceLoginDialog）。
 //
 // 后端按 legado 的登录模型执行：loginUi 是表单描述，loginUrl 是登录逻辑，
 // 点按钮时不区分类型，统统把 action 拼在 loginUrl 之后执行。
-// 服务端没有弹窗，java.toast/longToast 的提示与 java.startBrowser 的地址
-// 都通过返回值回传，这里负责展示并代为打开浏览器。
+// 服务端没有弹窗，java.toast/longToast 的提示通过返回值回传展示；
+// java.startBrowser / startBrowserAwait 则把页面登记成「待办」，这里轮询到后
+// 用内嵌 iframe 承载（见 BrowserPanel），用户的「√」会把 DOM 回传给书源。
 
 interface Props {
   sourceId: string
@@ -38,6 +40,10 @@ export default function SourceLoginDialog({ sourceId, sourceName, onClose, onLog
   const [variable, setVariable] = useState('')
   const [showVariable, setShowVariable] = useState(false)
   const [showLoginJS, setShowLoginJS] = useState(false)
+  // 书源交给宿主浏览器承载的页面（java.startBrowser / startBrowserAwait）
+  const [browserPage, setBrowserPage] = useState<ReaderBrowserPage | null>(null)
+  // 已处理过的页面 ID：避免轮询把刚关掉的页面又弹出来
+  const handledPages = useRef<Set<string>>(new Set())
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -58,33 +64,46 @@ export default function SourceLoginDialog({ sourceId, sourceName, onClose, onLog
     void load()
   }, [load])
 
+  // 轮询书源登记的待办页面。
+  // java.startBrowserAwait 会阻塞在服务端，前端必须在动作执行期间去取页面，
+  // 否则用户永远看不到「切换线路」「用户后台」这些按钮真正要展示的东西。
+  const pollBrowserPages = useCallback(async () => {
+    try {
+      const pages = await readerAPI.browserPending(sourceId)
+      const next = pages.find((p) => !handledPages.current.has(p.id))
+      if (next) setBrowserPage(next)
+    } catch {
+      // 轮询失败不打断正在执行的动作
+    }
+  }, [sourceId])
+
   // 按钮分为「登录动作」与「其他工具按钮」两类，便于排版。
   const buttons = useMemo(() => info?.fields.filter((f) => f.type === 'button') ?? [], [info])
   const inputs = useMemo(() => info?.fields.filter((f) => f.type !== 'button') ?? [], [info])
   const selects = useMemo(() => info?.fields.filter((f) => f.type === 'toggle' || f.type === 'select') ?? [], [info])
 
-  const runAction = async (action: string, opts: { saveFields?: boolean } = {}) => {
+  const runAction = async (action: string, opts: { fieldsOverride?: Record<string, string> } = {}) => {
     const key = action || '__login__'
+    // 注意用 fieldsOverride 而不是闭包里的 form：select/toggle 的 onPick 里
+    // setForm 是异步的，同一轮事件里读 form 拿到的还是旧值，
+    // 会让书源按旧线路执行（表现为「切了但没生效」）。
+    const fields = opts.fieldsOverride ?? form
     setRunning(key)
     setToasts([])
     setError('')
+    // 动作可能阻塞等待人工操作，期间持续轮询待办页面
+    const poll = window.setInterval(() => void pollBrowserPages(), 600)
     try {
-      const res = await readerAPI.runSourceLogin(sourceId, { action, fields: form })
+      const res = await readerAPI.runSourceLogin(sourceId, { action, fields })
       const messages = [...(res.toasts ?? [])]
       if (res.error) messages.push(res.error)
-      setToasts(messages)
-      if (res.browsers?.length) {
-        // 服务端无法弹窗：把需要人工操作的页面提示给用户
-        for (const b of res.browsers) {
-          messages.push(`需要浏览器操作：${b.title || b.url}`)
-        }
-        setToasts([...messages])
+      // 服务端未注入宿主浏览器时（非登录链路），这里退化为提示 + 可打开的地址
+      for (const b of res.browsers ?? []) {
+        messages.push(`需要浏览器操作：${b.title || ''} ${b.url}`.trim())
       }
+      setToasts(messages)
       // 同步回最新登录信息（书源可能在动作里回填字段）
       if (res.values) setForm((prev) => ({ ...prev, ...res.values }))
-      if (opts.saveFields && !res.ok) {
-        // 动作失败也保留用户输入，便于改完重试
-      }
       onLoggedInChange?.(res.logged_in)
       const nextInfo = await readerAPI.sourceLogin(sourceId)
       setInfo(nextInfo)
@@ -96,9 +115,19 @@ export default function SourceLoginDialog({ sourceId, sourceName, onClose, onLog
       setError(msg)
       toast.error(msg)
     } finally {
+      window.clearInterval(poll)
       setRunning('')
+      // 收尾再取一次，避免最后一个待办落在轮询间隙里
+      void pollBrowserPages()
     }
   }
+
+  const closeBrowserPage = useCallback(() => {
+    setBrowserPage((cur) => {
+      if (cur) handledPages.current.add(cur.id)
+      return null
+    })
+  }, [])
 
   const saveLoginInfo = async () => {
     try {
@@ -141,7 +170,14 @@ export default function SourceLoginDialog({ sourceId, sourceName, onClose, onLog
   const cookieEntries = Object.entries(info?.cookies ?? {})
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      // 页面承载面板打开时不允许点遮罩关闭：书源正阻塞等待用户在这块面板里
+      // 操作，把对话框一起关掉会让回传链路断在半路。
+      onClick={() => {
+        if (!browserPage) onClose()
+      }}
+    >
       <div
         className="flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel)]"
         onClick={(e) => e.stopPropagation()}
@@ -216,8 +252,11 @@ export default function SourceLoginDialog({ sourceId, sourceName, onClose, onLog
                       value={form[f.name] ?? f.default ?? ''}
                       disabled={!!running}
                       onPick={(v) => {
-                        setForm((prev) => ({ ...prev, [f.name]: v }))
-                        if (f.action) void runAction(f.action)
+                        // 必须把新值显式带进 action：setForm 是异步的，
+                        // runAction 读闭包里的 form 会拿到切换前的旧值。
+                        const next = { ...form, [f.name]: v }
+                        setForm(next)
+                        if (f.action) void runAction(f.action, { fieldsOverride: next })
                       }}
                     />
                   ))}
@@ -332,6 +371,9 @@ export default function SourceLoginDialog({ sourceId, sourceName, onClose, onLog
           </button>
         </div>
       </div>
+
+      {/* 书源页面承载面板：startBrowserAwait 会等这里的「完成」把 DOM 回传 */}
+      {browserPage && <BrowserPanel page={browserPage} onClose={closeBrowserPage} />}
     </div>
   )
 }

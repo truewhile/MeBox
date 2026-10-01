@@ -19,6 +19,13 @@
 - 长按书 → 跳转书籍详情页；长按分组 → 重命名/删除对话框；style1 长按 tab 删除分组。
 - 右上菜单：搜索、Wi-Fi 传书、刷新目录、书架布局切换、分组管理、导出/导入书架、下载离线、本地导入、网址添加、日志。
 
+**MeBox 的「影视 / 阅读」首页模式**（`stores/readerSettings.homeMode` + 顶栏 `LayoutReaderModeToggle`）
+- 切换入口在**顶栏**，位于搜索框与账号菜单之间，**只显示图标不显示文字**：影视模式显示场记板图标，阅读模式显示书图标（并带品牌色高亮），点一下切到另一个模块、图标随之变化。悬停提示写明「当前是 X 模式，点击切换到 Y」，不在首页时点击会先跳回 `/`。
+- 两种模式共用一个首页路由 `/`：影视模式渲染媒体首页，阅读模式渲染书架（`ReaderHomeContent embedded`）。首页内容区不再放分段式「影视 / 阅读」开关（原 `ReaderModeSwitch` 仅留给独立布局的 `/reader` 首页兜底）。
+- 切到阅读模式时，顶部搜索框换成**书搜索**（`LayoutHeaderBookSearch`，占位「搜索书籍…」）：聚焦即下拉书架（本地即时过滤书名/作者，点条目进阅读器），回车优先打开书架首条；下拉底部固定一行「在书源中搜索「xxx」」，带 `?key=` 跳到 `/reader/search` 由多源聚合搜索页自动开搜。账号/主题菜单照常显示。
+- 阅读模式下移动端底部导航（首页/媒体库/收藏/列表/更多）隐藏，避免影视导航混进书架。
+- `/reader/*` 本来就是独立全屏布局（不套影视 Layout），不受影响。
+
 ## 2. 阅读界面（重点）
 
 文件：`<src>ui/book/read/`（ReadBookActivity、ReadMenu、SearchMenu、MangaMenu、config/*Dialog）、`ui/book/read/page/`（ReadView、PageView、ContentTextView、ChapterProvider）。
@@ -60,11 +67,32 @@
 
 默认排版：textSize 20、letterSpacing 0.1、lineSpacingExtra 12、paragraphSpacing 2、缩进「　　」、padding 上下6/左右16、页脚线 true。未选样式时默认：bg #EEEEEE / 夜 #000000 / E-Ink #FFFFFF，文字 #3E3D3B / 夜 #ADADAD，强调 #E53935 / 夜 #FE4D55。
 
-**音频书播放条（ReadAloudDialog 底部弹层）**
-- transport 行：上一章 | 上一个/播放暂停/停止/下一个 | 下一章。
-- 定时面板：定时关闭 + 进度条；TTS 语速面板（跟随系统 + 减/加 + 语速条）。
-- 底部动作行：目录、主菜单、后台播放、设置。
-- 音频播放参数存 Book.readConfig：playMode(0 顺序)、playSpeed(1.0)、openCredits/closeCredits(片头片尾章数)。
+**MeBox 文本阅读器已实现的排版/菜单细节**（`ReaderViewPage.tsx`）
+- 正文留边：左右 16px、上下 8px（对齐 legado 默认左右16/上下6），分页列宽按留边后的视口宽计算，正文不贴屏幕边。
+- 菜单打开时正文整体下移一个顶栏高度（用 `transform`，不改视口高度、不触发重新分页），顶栏不再压住开头 1–2 行。
+- 界面面板的字号/行距/段距三个调节组用 `flex-wrap`，窄屏自动折行，不会把「段距」挤出屏幕。
+- 鼠标滚轮翻页（仅翻页模式）：向上滚=上一页，向下滚=下一页；滚动模式保留浏览器原生滚动不接管，菜单打开时也不翻页。鼠标滚轮一格一页（间隔至少 220ms，与翻页动画对齐），触控板小步长累计到阈值翻一页且一次手势只翻一页（避免惯性连翻）。`ctrl/cmd+滚轮` 保留浏览器缩放。
+- 目录：整屏面板（顶部返回 + 书名 + 章数，Virtuoso 虚拟列表，定位并高亮当前章，点章跳转）。**必须渲染在底部菜单之外**：菜单带 `backdrop-blur`，会成为 `fixed` 后代的包含块，放里面 `h-full` 只能拿到菜单高度；历史上它写的是 `top-0 + bottom-full`，两者同时存在时高度被算成 0，整块目录完全看不见。
+
+**本地书籍（对应 legado 本地 TXT / EPUB）**
+- 入口：书架页右上「本地导入」按钮（书架为空时另有「上传本地书籍」），支持 TXT / EPUB，单文件上限 64MB，上传后自动入库并直接进入阅读页。
+- 书架卡片：本地书打「本地」角标，右上角有删除按钮（二次确认），删除会连服务器上的文件一起清掉。
+- 存储：正文落盘 `data/reader/local/<bookID>.<txt|epub>`；目录信息与网络书共用 `reader_chapters`，用 `Tag` 记定位：TXT 存 UTF-8 规范化后文件内的字节区间 `start:end`，EPUB 存 zip 内的 XHTML 条目路径。读章只取所需区间/条目，不整本载入内存。
+- TXT：自动识别 BOM(UTF-8/UTF-16) 与 UTF-8 / GBK / Big5，统一转 UTF-8 落盘；目录按 legado 默认 TXT 规则切章（`第X章/节/卷/集/部/篇`、序章、楔子、番外等），并对「第一章的正文内容」这类正文行做启发式过滤，切不出章名时整本当一章「全文」，章前内容（书名/简介）并入第一章。
+- EPUB：`META-INF/container.xml` → OPF → `spine` 顺序出章。目录标题优先取 NCX / EPUB3 NAV，**逐 token 走并用栈收任意层级的 navPoint**——Epubor 等工具导出的 EPUB 常漏 `</navPoint>`，标题会整棵嵌进上一个节点，按固定层级解会丢掉一大半标题；取不到时依次退回正文首行 → 封面页（文件名含 cover 且该页只有图）标「封面」→ `<title>`（过滤 Cover/Table of Contents 这类无信息量的）→ `第 N 章`。
+- EPUB 图片：正文里的 `<img>` 在转纯文本时就地换成 `[img]<zip 条目>` 标记行（相对路径按该 XHTML 所在目录解析），下发前把标记换成签名地址 `/api/reader/local/asset?b=&p=&s=`（HMAC，`<img>` 带不了 JWT），前端把 `[img]` 开头的行渲染成居中图片（`max-width:100%` + `max-height:70vh`，保证不撑破分栏）。网络书正文不受影响。
+- 进度：与网络书同一套 `durChapter*` 字段，跨端一致；同名文件重复上传按覆盖更新处理（章数不变则保留进度）。
+
+**音频书播放条（AudioPlayActivity + AudioPlayService，即「听书」）**
+- 背景与封面：书籍封面强模糊（blur 32px）铺满做底，叠一层很淡的主题底色（opacity 0.3）保住日/夜对比度；正中圆形显示封面原图（对应 legado `upCover` 的 ivBg 模糊图 + ivCover 圆图）。封面缺失或加载失败时退回主题色圆点，不留破图。
+- transport 行：上一章 | -15s | 播放暂停 | +15s | 下一章（SEEK_STEP=15s，进度按秒）。
+- 动作行（常驻底部，抽屉打开时仍可点）：章节（目录选择，见下）、定时关闭、倍速、片头片尾。
+- 章节选择：底部抽屉列全部章节，定位到当前章、当前章高亮、点章即跳；卷名行不可点。
+- 定时关闭：0/5/10/15/30/60/90/180 分钟；暂停期间不倒计时；归零自动暂停播放；选定值持久化为下次默认（对应 AppConfig.ttsTimer 在服务启动时 setTimer）。
+- 倍速：滑杆 0.5–3.0（步进 0.1）+ 0.5/0.75/1/1.25/1.5/1.75/2/2.5/3 快捷档；持久化（对应 AudioPlay.playSpeed，Android 6 以下不支持调速）。
+- 跳过片头片尾：抽屉内两条滑杆（片头/片尾，秒，0 不跳过，上限 300），按书持久化（Book.openCredits/closeCredits，落库 books.open_credits / close_credits）。语义：全新开播（该章进度为 0）时 seek 到片头秒数；播放到 duration-片尾秒数即等同播完，有下一章则自动续播，末章则停在片尾处。**单位是秒，不是章数。**
+- 播放进度按秒记忆（节流 10s 上报），跨端一致；播完自动下一章。
+- legado 的「播放模式」（顺序/单章循环/随机/列表循环）与「音频服务唤醒锁」是客户端能力，Web 端未实现。
 
 ## 3. 搜索
 

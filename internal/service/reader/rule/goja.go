@@ -1,6 +1,7 @@
 package rule
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -68,6 +69,80 @@ type JSConfig struct {
 	// StateOnly 只构建会话状态与 jsLib 环境（登录交互用），
 	// 不注入 book/result 等规则上下文。
 	StateOnly bool
+	// Browser 宿主浏览器实现（java.startBrowser / startBrowserAwait）。
+	// nil 时这两个函数抛出不支持错误。
+	Browser BrowserHost
+	// Ctx 本次执行的可取消上下文，透传给 BrowserHost 的等待。
+	Ctx context.Context
+}
+
+// interruptGuard 是 JS 执行超时的看门狗：到期后中断虚拟机。
+//
+// 单独抽出来的原因是 java.startBrowserAwait 会阻塞等待用户在网页上操作
+// （可达数分钟），这段时间必须暂停计时，否则默认 10s 的超时会在用户还没
+// 点完 √ 时就把脚本打断。Pause/Resume 之间不计时，Resume 后重新起算完整
+// 的一段预算——语义即「每一段自动执行各有一次预算，等人不算」。
+type interruptGuard struct {
+	vm      *goja.Runtime
+	timeout time.Duration
+	reason  string
+	mu      sync.Mutex
+	paused  int
+	stopped bool
+	timer   *time.Timer
+}
+
+func newInterruptGuard(vm *goja.Runtime, timeout time.Duration, reason string) *interruptGuard {
+	g := &interruptGuard{vm: vm, timeout: timeout, reason: reason}
+	g.start()
+	return g
+}
+
+// start 起一个新的超时计时（调用方需持锁或处于初始化阶段）。
+func (g *interruptGuard) start() {
+	g.timer = time.AfterFunc(g.timeout, func() {
+		g.mu.Lock()
+		skip := g.stopped || g.paused > 0
+		g.mu.Unlock()
+		if !skip {
+			g.vm.Interrupt(g.reason)
+		}
+	})
+}
+
+// Pause 暂停计时（等待人工操作），返回恢复函数。
+func (g *interruptGuard) Pause() func() {
+	g.mu.Lock()
+	g.paused++
+	if g.timer != nil {
+		g.timer.Stop()
+		g.timer = nil
+	}
+	g.mu.Unlock()
+	return g.Resume
+}
+
+// Resume 恢复计时。
+func (g *interruptGuard) Resume() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.paused > 0 {
+		g.paused--
+	}
+	if g.paused == 0 && !g.stopped && g.timer == nil {
+		g.start()
+	}
+}
+
+// Stop 永久停止计时（本次 JS 执行结束）。
+func (g *interruptGuard) Stop() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.stopped = true
+	if g.timer != nil {
+		g.timer.Stop()
+		g.timer = nil
+	}
 }
 
 // JSRunner 是一个单协程使用的 JS 运行时（每个 AnalyzeRule 一个实例）。
@@ -78,6 +153,28 @@ type JSRunner struct {
 	state SourceState
 	// jsLibErr 记录 jsLib 执行失败原因（登录接口需要如实回报）。
 	jsLibErr error
+	// guard 当前执行的超时看门狗；java.startBrowserAwait 阻塞期间置为 nil。
+	guardMu sync.Mutex
+	guard   *interruptGuard
+}
+
+// setGuard 记录/清除当前执行的看门狗。
+func (r *JSRunner) setGuard(g *interruptGuard) {
+	r.guardMu.Lock()
+	r.guard = g
+	r.guardMu.Unlock()
+}
+
+// pauseTimeout 暂停当前 JS 执行的超时计时，返回恢复函数。
+// 供 java.startBrowserAwait 在等待人工操作期间调用。
+func (r *JSRunner) pauseTimeout() func() {
+	r.guardMu.Lock()
+	g := r.guard
+	r.guardMu.Unlock()
+	if g == nil {
+		return func() {}
+	}
+	return g.Pause()
 }
 
 // NewJSRunner 创建运行时：注入全局对象 cookie / cache / source，并执行 jsLib。
@@ -119,8 +216,12 @@ func (r *JSRunner) loadJSLib() {
 		r.jsLibErr = fmt.Errorf("jsLib 编译失败: %w", err)
 		return
 	}
-	timer := time.AfterFunc(r.cfg.Timeout, func() { r.vm.Interrupt("jsLib 执行超时") })
-	defer timer.Stop()
+	g := newInterruptGuard(r.vm, r.cfg.Timeout, "jsLib 执行超时")
+	r.setGuard(g)
+	defer func() {
+		g.Stop()
+		r.setGuard(nil)
+	}()
 	if _, err := r.vm.RunProgram(prog); err != nil {
 		r.jsLibErr = fmt.Errorf("jsLib 执行失败: %v", err)
 	}
@@ -160,8 +261,12 @@ func (r *JSRunner) EvalAction(js string, bindings map[string]any) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("JS 编译失败: %w", err)
 	}
-	timer := time.AfterFunc(r.cfg.Timeout, func() { vm.Interrupt("JS 执行超时") })
-	defer timer.Stop()
+	g := newInterruptGuard(vm, r.cfg.Timeout, "JS 执行超时")
+	r.setGuard(g)
+	defer func() {
+		g.Stop()
+		r.setGuard(nil)
+	}()
 	v, err := vm.RunProgram(prog)
 	if err != nil {
 		return nil, fmt.Errorf("JS 执行失败: %v", err)
@@ -187,8 +292,12 @@ func (r *JSRunner) EvalLoginCheck(js, body string, code int, finalURL string) (s
 	if err != nil {
 		return "", false, fmt.Errorf("loginCheckJs 编译失败: %w", err)
 	}
-	timer := time.AfterFunc(r.cfg.Timeout, func() { vm.Interrupt("loginCheckJs 执行超时") })
-	defer timer.Stop()
+	g := newInterruptGuard(vm, r.cfg.Timeout, "loginCheckJs 执行超时")
+	r.setGuard(g)
+	defer func() {
+		g.Stop()
+		r.setGuard(nil)
+	}()
 	v, err := vm.RunProgram(prog)
 	if err != nil {
 		return "", false, fmt.Errorf("loginCheckJs 执行失败: %v", err)
@@ -232,8 +341,8 @@ func (r *JSRunner) Run(a *AnalyzeRule, js string, result any, baseURL string) (a
 	r.installJava(a)
 	// 上下文绑定
 	if a != nil {
-		vm.Set("book", map[string]any{"name": a.bookName})
-		vm.Set("chapter", map[string]any{"title": a.chapterTitle})
+		vm.Set("book", newBookObject(vm, a))
+		vm.Set("chapter", newChapterObject(vm, a))
 		vm.Set("title", a.chapterTitle)
 		if a.content != nil {
 			vm.Set("src", resultString(a.content))
@@ -247,11 +356,18 @@ func (r *JSRunner) Run(a *AnalyzeRule, js string, result any, baseURL string) (a
 		vm.Set("src", nil)
 	}
 	base := baseURL
+	// baseUrl 绑定优先用「解析器当前处理的页面地址」再退回书源地址。
+	//
+	// 对应 legado：evalJS 里 bindings["baseUrl"] = analyzeRule.baseUrl，
+	// 而 baseUrl 由各阶段 setBaseUrl(bookUrl / tocUrl / chapterUrl) 设定。
+	// 这一点很关键：聚合类书源会用 String(baseUrl).startsWith("data:")
+	// 判断「当前这一层是不是书源自搭的参数信封」，若把 baseUrl 固定成书源地址，
+	// 书源会走 else 分支直接把 hex 原文当结果返回，详情/目录随之全空。
+	if base == "" && a != nil {
+		base = a.baseUrl
+	}
 	if base == "" {
 		base = r.cfg.BaseURL
-		if a != nil && base == "" {
-			base = a.baseUrl
-		}
 	}
 	vm.Set("baseUrl", base)
 	vm.Set("result", toJSValue(vm, result))
@@ -267,17 +383,46 @@ func (r *JSRunner) Run(a *AnalyzeRule, js string, result any, baseURL string) (a
 	}
 	vm.Set("nextChapterUrl", nil)
 
-	prog, err := compileCached(js)
+	prog, err := compileCached(scopedRuleJS(js))
 	if err != nil {
 		return nil, fmt.Errorf("JS 编译失败: %w", err)
 	}
-	timer := time.AfterFunc(r.cfg.Timeout, func() { vm.Interrupt("JS 执行超时") })
-	defer timer.Stop()
+	g := newInterruptGuard(vm, r.cfg.Timeout, "JS 执行超时")
+	r.setGuard(g)
+	defer func() {
+		g.Stop()
+		r.setGuard(nil)
+	}()
 	v, err := vm.RunProgram(prog)
 	if err != nil {
 		return nil, fmt.Errorf("JS 执行失败: %v", err)
 	}
 	return exportValue(v), nil
+}
+
+// scopedRuleJS 把一段规则 JS 包进块作用域后编译。
+//
+// 同一个 goja Runtime 会被一个书源的所有规则 JS 复用，而顶层 let/const 会留在
+// 全局词法环境里，于是「前一个脚本声明过的名字，后一个脚本再声明」会直接报
+// `SyntaxError: Identifier 'x' has already been declared`。
+//
+// 典型触发（光遇聚合）：搜索列表规则是
+//
+//	<js>const { key, tab, sourcesKey, page, ... } = res; ...</js>$.data
+//
+// 而单本书的 bookUrl 规则是
+//
+//	<js>let book_id = ...; let tab = result.tab || '小说'; ...</js>
+//
+// 两者在同一轮解析里先后执行，第二个必然编译失败；因为失败发生在「逐条取字段」
+// 阶段且被 continue 跳过，表现出来就是「搜索有结果但一条都读不出来」。
+// legado 用的 Rhino 对顶层 let 更宽松，所以同一书源在阅读 App 里是正常的。
+//
+// 包一层块即可隔离词法声明，同时保留块最后表达式的值（JS 规范中块的完成值就是
+// 最后一条语句的值），也不改变 this（仍是全局对象，书源的 this.getVariable /
+// this.BaseUrl 照常可用）。
+func scopedRuleJS(js string) string {
+	return "{\n" + js + "\n}"
 }
 
 // exportValue 把 JS 返回值转为 Go 值（字符串/数值/映射/切片）。

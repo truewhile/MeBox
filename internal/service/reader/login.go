@@ -58,23 +58,27 @@ type SourceLoginInfo struct {
 
 // LoginResult 登录动作执行结果。
 type LoginResult struct {
-	OK       bool                `json:"ok"`
-	Error    string              `json:"error,omitempty"`
-	Toasts   []string            `json:"toasts,omitempty"`
+	OK       bool                  `json:"ok"`
+	Error    string                `json:"error,omitempty"`
+	Toasts   []string              `json:"toasts,omitempty"`
 	Browsers []rule.BrowserRequest `json:"browsers,omitempty"`
+	// UIRefresh 书源通过 java.reLoginView / refreshExplore / upLoginData
+	// 要求重新渲染登录表单（前端据此重建 loginUi）。
+	UIRefresh bool `json:"ui_refresh,omitempty"`
 	// Values 执行后的登录信息（可能与执行前不同，如 checkStatus 回填邮箱）。
-	Values map[string]string `json:"values"`
-	Cookies map[string]string `json:"cookies"`
-	LoggedIn bool            `json:"logged_in"`
+	Values   map[string]string `json:"values"`
+	Cookies  map[string]string `json:"cookies"`
+	LoggedIn bool              `json:"logged_in"`
 }
 
 // GetSourceLogin 返回书源登录界面描述与当前登录状态。
-func (s *ReaderService) GetSourceLogin(ctx context.Context, sourceID string) (*SourceLoginInfo, error) {
+func (s *ReaderService) GetSourceLogin(ctx context.Context, userID, sourceID string) (*SourceLoginInfo, error) {
 	src, bs, err := s.loadSource(ctx, sourceID)
 	if err != nil {
 		return nil, err
 	}
 	sess := s.newSession(ctx, src, bs)
+	sess.userID = userID
 	defer sess.close()
 	state := sess.state
 
@@ -137,12 +141,16 @@ func (s *ReaderService) resolveLoginFields(sess *sourceSession, bs *BookSource, 
 // action 为 loginUi 里某个控件的 action（如 "login(true)" / "checkStatus()"）；
 // fields 为前端提交的表单值，会与已保存的登录信息合并后作为 result 传入。
 // action 为空时执行 loginUrl 里的 login()（即 legado 的「确认登录」）。
-func (s *ReaderService) RunLoginAction(ctx context.Context, sourceID, action string, fields map[string]string) (*LoginResult, error) {
+func (s *ReaderService) RunLoginAction(ctx context.Context, userID, sourceID, action string, fields map[string]string) (*LoginResult, error) {
 	src, bs, err := s.loadSource(ctx, sourceID)
 	if err != nil {
 		return nil, err
 	}
 	sess := s.newSession(ctx, src, bs)
+	sess.userID = userID
+	// 登录动作里才注入宿主浏览器：书源的「切换线路」「用户后台」等按钮
+	// 依赖 java.startBrowserAwait 打开页面并等待用户操作。
+	sess.browserEnabled = true
 	defer sess.close()
 	state := sess.state
 
@@ -181,11 +189,12 @@ func (s *ReaderService) RunLoginAction(ctx context.Context, sourceID, action str
 	state.flush()
 
 	res := &LoginResult{
-		OK:       runErr == nil,
-		Toasts:   state.toasts,
-		Browsers: state.browsers,
-		Values:   values,
-		Cookies:  state.snapshotCookies(),
+		OK:        runErr == nil,
+		Toasts:    state.toasts,
+		Browsers:  state.browsers,
+		UIRefresh: state.UIRefreshRequested(),
+		Values:    values,
+		Cookies:   state.snapshotCookies(),
 	}
 	if runErr != nil {
 		res.Error = runErr.Error()

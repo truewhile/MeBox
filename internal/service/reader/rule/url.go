@@ -39,10 +39,14 @@ type Request struct {
 	IsForm     bool // Body 为已编码的 form 数据
 	IsJSON     bool // 以 application/json 发送
 	Charset    string
+	// HexBody 对应 URL 选项里的 type：声明了 type 时，响应按「原始字节的 hex」
+	// 返回而不是解码成文本（对应 legado AnalyzeUrl.type）。
+	// 书源用它配合 data: 地址当参数信封，见 datauri.go。
+	HexBody bool
 	// BodyJsFn 对应 UrlOption.bodyJs：响应体二次处理（JS 执行闭包）。
 	BodyJsFn func(body string) string
 	// Unsupported 非 nil 表示该请求依赖当前阶段不支持的能力，
-	// 值为对应错误（webView/type；JS 在接入 runner 后已支持）。
+	// 值为对应错误（webView；JS 在接入 runner 后已支持）。
 	Unsupported error
 }
 
@@ -198,8 +202,10 @@ func ParseAnalyzeUrlWithJS(mUrl, key string, page int, baseUrl string, runner *J
 			}
 		}
 		req.Charset = option.Charset
-		if option.Type != "" && req.Unsupported == nil {
-			req.Unsupported = ErrTypeUnsupported
+		// 对应 legado AnalyzeUrl.type：值本身不参与判断，只要非空就把响应按
+		// 「原始字节的 hex」返回。书源借此把 data: 地址当参数信封用。
+		if option.Type != "" {
+			req.HexBody = true
 		}
 		if option.WebJs != "" && req.Unsupported == nil {
 			req.Unsupported = ErrWebJSUnsupported
@@ -232,6 +238,13 @@ func ParseAnalyzeUrlWithJS(mUrl, key string, page int, baseUrl string, runner *J
 	}
 
 	// ── query / body 编码（对应 analyzeUrl 尾部） ──
+	//
+	// query 一律先做一次百分号编码规范化：legado 底层的 OkHttp 会把非 ASCII 与
+	// 非法字符编码掉，而 Go 的 http 客户端会把 RawQuery 原样写进请求行 —— 原生
+	// 中文、花括号、引号会直接上线，服务端多半回 400/空响应（书源侧表现为
+	// request() 判定「线路报错」，把全部线路试一遍后返回空串）。
+	// POST 同样要编码：query 并不会挪进 body。
+	req.URL = normalizeQuery(req.URL, req.Charset)
 	if req.Method == "POST" {
 		req.URLNoQuery = req.URL
 		body := req.Body
@@ -241,21 +254,30 @@ func ParseAnalyzeUrlWithJS(mUrl, key string, page int, baseUrl string, runner *J
 		} else if isJSONStr(body) && req.Headers["Content-Type"] == "" {
 			req.IsJSON = true
 		}
+	} else if pos := strings.Index(req.URL, "?"); pos != -1 {
+		req.URLNoQuery = req.URL[:pos]
 	} else {
-		pos := strings.Index(req.URL, "?")
-		if pos != -1 {
-			query := encodeParams(req.URL[pos+1:], req.Charset, true)
-			req.URLNoQuery = req.URL[:pos]
-			if query != "" {
-				req.URL = req.URLNoQuery + "?" + query
-			} else {
-				req.URL = req.URLNoQuery
-			}
-		} else {
-			req.URLNoQuery = req.URL
-		}
+		req.URLNoQuery = req.URL
 	}
 	return req, nil
+}
+
+// normalizeQuery 把 URL 的 query 规范化成百分号编码形式。
+// 已经编码好的 query 原样保留（对应 NetworkUtils.encodedQuery 的短路），data: 地址不动。
+func normalizeQuery(rawURL, charset string) string {
+	if IsDataURI(rawURL) {
+		return rawURL
+	}
+	pos := strings.Index(rawURL, "?")
+	if pos < 0 {
+		return rawURL
+	}
+	base := rawURL[:pos]
+	query := encodeParams(rawURL[pos+1:], charset, true)
+	if query == "" {
+		return base
+	}
+	return base + "?" + query
 }
 
 var pagePatternRe = regexp.MustCompile(`<([^>]*)>`)

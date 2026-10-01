@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Film, LoaderCircle, Menu, Search, Star, X } from 'lucide-react'
+import { ArrowLeft, BookOpen, Film, LoaderCircle, Menu, Search, Star, X } from 'lucide-react'
 
 import { ARTWORK, imageURL } from '../api/client'
 import { mediaAPI } from '../api/library'
+import { readerAPI, type ReaderBook } from '../api/reader'
 import type { Media, PlayProfile, User } from '../types'
 import { favouriteMediaLink } from '../utils/mediaNavigation'
 import { resolveHeaderBack } from './layoutNavigation'
 import { LayoutThemeToggle } from './LayoutThemeToggle'
 import { LayoutUserMenu } from './LayoutUserMenu'
+import { LayoutReaderModeToggle } from './LayoutReaderModeToggle'
 import type { useLayoutProfiles } from './useLayoutProfiles'
 import type { ThemeMode, useThemeMode } from './useThemeMode'
 
@@ -31,6 +33,10 @@ type LayoutHeaderProps = {
   onLogout: () => void
   showSidebar?: boolean
   hideSearch?: boolean
+  /** 阅读模式：顶部搜索换成书搜索，并保留账号菜单。 */
+  readingMode?: boolean
+  /** 是否显示顶栏的「影视 / 阅读」图标切换（只在首页）。 */
+  showReaderToggle?: boolean
   pathname?: string
 }
 
@@ -44,6 +50,8 @@ export function LayoutHeader({
   onLogout,
   showSidebar,
   hideSearch,
+  readingMode,
+  showReaderToggle,
   pathname = '',
 }: LayoutHeaderProps) {
   const navigate = useNavigate()
@@ -85,8 +93,10 @@ export function LayoutHeader({
 
       {/* Middle: Search Box */}
       <div className="flex min-w-0 flex-1 max-w-xl mx-auto">
-        {!hideSearch && <LayoutHeaderSearch />}
+        {readingMode ? <LayoutHeaderBookSearch /> : !hideSearch && <LayoutHeaderSearch />}
       </div>
+
+      {showReaderToggle && <LayoutReaderModeToggle />}
 
       {/* Right: Actions (Theme Toggle & User Menu) */}
       <LayoutHeaderActions
@@ -105,6 +115,191 @@ export function LayoutHeader({
         onLogout={onLogout}
       />
     </header>
+  )
+}
+
+// 阅读模式的顶部搜索：先搜书架（本地即时过滤），
+// 再给一个「在书源中搜索」的入口跳到多源聚合搜索页。
+function LayoutHeaderBookSearch() {
+  const navigate = useNavigate()
+  const [query, setQuery] = useState('')
+  const [isOpen, setIsOpen] = useState(false)
+  const [books, setBooks] = useState<ReaderBook[] | null>(null)
+  const [loading, setLoading] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  const openDropdown = () => {
+    setIsOpen(true)
+    if (books !== null || loading) return
+    setLoading(true)
+    readerAPI
+      .listBooks()
+      .then(setBooks)
+      .catch(() => setBooks([]))
+      .finally(() => setLoading(false))
+  }
+
+  const close = () => setIsOpen(false)
+
+  useEffect(() => {
+    if (!isOpen) return
+    const onPointerDown = (e: PointerEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) close()
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => document.removeEventListener('pointerdown', onPointerDown)
+  }, [isOpen])
+
+  const keyword = query.trim().toLowerCase()
+  const matched = (books ?? [])
+    .filter(
+      (b) =>
+        !keyword ||
+        b.name.toLowerCase().includes(keyword) ||
+        (b.author ?? '').toLowerCase().includes(keyword),
+    )
+    .slice(0, 8)
+
+  const openBook = (book: ReaderBook) => {
+    close()
+    setQuery('')
+    navigate(`/reader/view/${book.id}`)
+  }
+
+  const searchSources = () => {
+    const key = query.trim()
+    if (!key) return
+    close()
+    navigate(`/reader/search?key=${encodeURIComponent(key)}`)
+  }
+
+  return (
+    <div ref={containerRef} className="relative w-full">
+      <div className="relative flex items-center">
+        <Search
+          size={15}
+          className="absolute left-3 text-[var(--app-muted)] pointer-events-none transition-colors group-focus-within:text-brand-500 sm:left-3.5 sm:text-[16px]"
+        />
+        <input
+          ref={inputRef}
+          type="text"
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value)
+            setIsOpen(true)
+          }}
+          onFocus={openDropdown}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              if (matched.length > 0) openBook(matched[0])
+              else searchSources()
+            } else if (e.key === 'Escape') {
+              close()
+            }
+          }}
+          placeholder="搜索书籍…"
+          className="w-full h-9 sm:h-10 pl-8 sm:pl-10 pr-8 sm:pr-9 rounded-xl sm:rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel)] text-xs sm:text-sm text-[var(--app-text)] placeholder:text-[var(--app-muted)] shadow-sm outline-none transition-all duration-200 focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 focus:bg-[var(--app-panel-elevated)]"
+        />
+        {loading ? (
+          <LoaderCircle size={15} className="absolute right-3.5 text-brand-500 animate-spin" />
+        ) : query ? (
+          <button
+            type="button"
+            onClick={() => {
+              setQuery('')
+              inputRef.current?.focus()
+              setIsOpen(true)
+            }}
+            className="absolute right-3 text-[var(--app-muted)] hover:text-[var(--app-text)] p-0.5 rounded-lg"
+            aria-label="清空"
+          >
+            <X size={15} />
+          </button>
+        ) : null}
+      </div>
+
+      {isOpen && (
+        <div className="absolute top-full left-0 right-0 mt-2 max-h-96 overflow-y-auto overscroll-contain rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel)] p-2 shadow-2xl z-50 backdrop-blur-xl">
+          {books === null || loading ? (
+            <div className="flex items-center justify-center gap-2 py-8 text-xs text-[var(--app-muted)]">
+              <LoaderCircle size={14} className="text-brand-500 animate-spin" />
+              正在加载书架…
+            </div>
+          ) : matched.length === 0 ? (
+            <div className="py-8 text-center text-xs text-[var(--app-muted)]">
+              {query.trim() ? `书架里没有与 “${query}” 相关的书` : '书架还是空的，先导入书源或本地书籍'}
+            </div>
+          ) : (
+            <div className="space-y-1">
+              <p className="px-2 pb-1 pt-1 text-[10px] font-bold text-[var(--app-muted)]">
+                {query.trim() ? '书架匹配' : '书架'}
+              </p>
+              {matched.map((book) => (
+                <button
+                  key={book.id}
+                  type="button"
+                  onPointerDown={(e) => {
+                    if (e.button !== 0) return
+                    e.preventDefault()
+                    openBook(book)
+                  }}
+                  onClick={() => openBook(book)}
+                  className="flex w-full items-center gap-3 rounded-xl p-2 text-left transition-colors hover:bg-[var(--app-hover)] group"
+                >
+                  <div className="relative h-12 w-9 shrink-0 overflow-hidden rounded-lg bg-[var(--app-panel-soft)]">
+                    {book.cover_url ? (
+                      <img
+                        src={book.cover_url}
+                        alt=""
+                        referrerPolicy="no-referrer"
+                        loading="lazy"
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center text-[var(--app-muted)]">
+                        <BookOpen size={14} />
+                      </div>
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <p className="truncate text-xs font-bold text-[var(--app-text)] group-hover:text-brand-500">
+                        {book.name}
+                      </p>
+                      {book.is_local && (
+                        <span className="shrink-0 rounded border border-[var(--app-border)] bg-[var(--app-panel-elevated)] px-1.5 py-0.5 text-[9px] text-[var(--app-muted)]">
+                          本地
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-0.5 flex items-center gap-2 text-[10px] text-[var(--app-muted)]">
+                      <span className="truncate">{book.author || '佚名'}</span>
+                      {book.dur_chapter_title && <span className="truncate">读到 {book.dur_chapter_title}</span>}
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+
+          <button
+            type="button"
+            onPointerDown={(e) => {
+              if (e.button !== 0) return
+              e.preventDefault()
+              searchSources()
+            }}
+            onClick={searchSources}
+            disabled={!query.trim()}
+            className="mt-1 flex w-full items-center gap-2 rounded-xl border border-dashed border-[var(--app-border)] px-3 py-2 text-left text-xs font-bold text-brand-600 transition-colors hover:bg-[var(--app-hover)] disabled:opacity-50"
+          >
+            <Search size={13} />
+            {query.trim() ? `在书源中搜索「${query.trim()}」` : '输入关键词后可在书源中搜索'}
+          </button>
+        </div>
+      )}
+    </div>
   )
 }
 

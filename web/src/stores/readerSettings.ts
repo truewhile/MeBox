@@ -55,7 +55,24 @@ interface ReaderSettingsState {
 
   paragraphSpacing: number
   setParagraphSpacing: (v: number) => void
+
+  // ── 听书（音频源播放器）偏好，对齐 legado AudioPlayService ──
+  /** 播放倍速（AudioPlay.playSpeed），0.5–3.0，步进 0.1。 */
+  audioSpeed: number
+  setAudioSpeed: (v: number) => void
+  /** 定时关闭默认分钟数（AppConfig.ttsTimer 语义），0 表示不定时。 */
+  audioTimerMinutes: number
+  setAudioTimerMinutes: (v: number) => void
 }
+
+/** 听书倍速可选值（legado 是 0.1 步进的浮点，这里收在 0.5–3.0）。 */
+export const AUDIO_SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3]
+
+/** 定时关闭预设分钟数（legado ReadAloudDialog times 数组）。 */
+export const AUDIO_TIMERS = [0, 5, 10, 15, 30, 60, 90, 180]
+
+/** 片头/片尾秒数上限（0 表示不跳过）。 */
+export const AUDIO_CREDITS_MAX = 300
 
 export const useReaderSettingsStore = create<ReaderSettingsState>()(
   persist(
@@ -81,6 +98,14 @@ export const useReaderSettingsStore = create<ReaderSettingsState>()(
       paragraphSpacing: 8,
       setParagraphSpacing: (paragraphSpacing) =>
         set({ paragraphSpacing: Math.min(32, Math.max(0, paragraphSpacing)) }),
+
+      audioSpeed: 1,
+      setAudioSpeed: (audioSpeed) =>
+        set({ audioSpeed: Math.min(3, Math.max(0.5, Math.round(audioSpeed * 10) / 10)) }),
+
+      audioTimerMinutes: 0,
+      setAudioTimerMinutes: (audioTimerMinutes) =>
+        set({ audioTimerMinutes: Math.min(180, Math.max(0, Math.round(audioTimerMinutes))) }),
     }),
     { name: 'mebox-reader-settings' },
   ),

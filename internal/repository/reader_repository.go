@@ -139,7 +139,8 @@ func (r *ReaderRepository) DeleteBook(ctx context.Context, userID, id string) er
 // ReplaceChapters 覆盖式刷新章节列表。
 func (r *ReaderRepository) ReplaceChapters(ctx context.Context, bookID string, chapters []model.ReaderChapter) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Delete(&model.ReaderChapter{}, "book_id = ?", bookID).Error; err != nil {
+		// 章节是纯缓存（软删会留下行，撞上 (book_id, index) 唯一索引），这里物理删除
+		if err := tx.Unscoped().Delete(&model.ReaderChapter{}, "book_id = ?", bookID).Error; err != nil {
 			return err
 		}
 		if len(chapters) == 0 {
@@ -154,6 +155,32 @@ func (r *ReaderRepository) ListChapters(ctx context.Context, bookID string) ([]m
 	var out []model.ReaderChapter
 	err := r.db.WithContext(ctx).Where("book_id = ?", bookID).Order("`index` ASC").Find(&out).Error
 	return out, err
+}
+
+// CountChaptersByBook 一次统计多本书已缓存的章节数（书架显示未读章数用，避免逐本查询）。
+// 没有目录缓存的书籍不会出现在返回结果里。
+func (r *ReaderRepository) CountChaptersByBook(ctx context.Context, bookIDs []string) (map[string]int, error) {
+	out := make(map[string]int, len(bookIDs))
+	if len(bookIDs) == 0 {
+		return out, nil
+	}
+	var rows []struct {
+		BookID string
+		Total  int
+	}
+	err := r.db.WithContext(ctx).
+		Model(&model.ReaderChapter{}).
+		Select("book_id, COUNT(*) AS total").
+		Where("book_id IN ?", bookIDs).
+		Group("book_id").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		out[row.BookID] = row.Total
+	}
+	return out, nil
 }
 
 // GetChapter 取指定章节。
