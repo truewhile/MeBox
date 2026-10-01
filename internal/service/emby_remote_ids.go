@@ -106,4 +106,9 @@ func rewriteEmbyRemoteIDsMap(m map[string]any, accountID string) {
 	if items, ok := m["Items"]; ok {
 		RewriteEmbyRemoteIDs(items, accountID)
 	}
+	// 人物条目同样以 Id 回指 /Items/{Id}/Images/...。若不递归重写，客户端会
+	// 把远程演员 ID 当成本地 ID，头像最终只能命中占位图。
+	if people, ok := m["People"]; ok {
+		RewriteEmbyRemoteIDs(people, accountID)
+	}
 }

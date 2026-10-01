@@ -27,7 +27,7 @@ func NewExternalHTTPClient(timeout time.Duration) *http.Client {
 }
 
 // NewInternalHTTPClient builds an HTTP client for LAN / Docker-internal
-// services such as qBittorrent, Transmission and Aria2. These endpoints are
+// services such as downloaders and other local tools. These endpoints are
 // usually 127.0.0.1, host.docker.internal, 172.17.0.1 or a NAS LAN IP; sending
 // them through HTTP_PROXY/SOCKS proxies makes local WebUI logins hang or fail.
 func NewInternalHTTPClient(timeout time.Duration) *http.Client {

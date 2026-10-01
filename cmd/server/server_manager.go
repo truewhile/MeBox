@@ -130,26 +130,35 @@ func (m *serverManager) Shutdown(ctx context.Context) error {
 // desiredPair 根据当前配置计算目标监听形态：nil 表示明文 HTTP，非 nil 表示 TLS。
 // 证书/私钥按"路径优先、内容兜底"解析，并校验是否匹配。
 func (m *serverManager) desiredPair() (*tlsPair, error) {
-	if m.cfg == nil || !m.cfg.App.HTTPSEnabled {
+	// 与 ApplyRuntimeSetting 的写锁配对：HTTPS 相关字段可能被运行时设置
+	// 热更新，无锁读存在数据竞争（string 撕裂）。
+	config.RuntimeMu.RLock()
+	httpsEnabled := m.cfg != nil && m.cfg.App.HTTPSEnabled
+	cert := m.cfg.App.SSLCert
+	certPath := m.cfg.App.SSLCertPath
+	key := m.cfg.App.SSLKey
+	keyPath := m.cfg.App.SSLKeyPath
+	config.RuntimeMu.RUnlock()
+	if !httpsEnabled {
 		return nil, nil
 	}
-	certPEM, err := service.ResolveSSLMaterial(m.cfg.App.SSLCert, m.cfg.App.SSLCertPath, "证书")
+	certPEM, err := service.ResolveSSLMaterial(cert, certPath, "证书")
 	if err != nil {
 		return nil, err
 	}
-	keyPEM, err := service.ResolveSSLMaterial(m.cfg.App.SSLKey, m.cfg.App.SSLKeyPath, "私钥")
+	keyPEM, err := service.ResolveSSLMaterial(key, keyPath, "私钥")
 	if err != nil {
 		return nil, err
 	}
 	if err := service.ValidateSSLKeyPair(certPEM, keyPEM); err != nil {
 		return nil, err
 	}
-	cert, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	pairCert, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
 	if err != nil {
 		return nil, fmt.Errorf("SSL 证书/私钥无效：%v", err)
 	}
 	return &tlsPair{
-		cert:    cert,
+		cert:    pairCert,
 		certPEM: certPEM,
 		keyPEM:  keyPEM,
 		version: certPEM + "\x00" + keyPEM,
@@ -171,6 +180,8 @@ func (m *serverManager) maybeStartAutoReloadLocked() {
 
 // pathBased 是否至少有一侧证书/私钥通过文件路径配置。
 func (m *serverManager) pathBased() bool {
+	config.RuntimeMu.RLock()
+	defer config.RuntimeMu.RUnlock()
 	return strings.TrimSpace(m.cfg.App.SSLCertPath) != "" || strings.TrimSpace(m.cfg.App.SSLKeyPath) != ""
 }
 

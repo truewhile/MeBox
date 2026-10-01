@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import toast from 'react-hot-toast'
 import {
   AlertCircle,
@@ -8,12 +8,7 @@ import {
   Copy,
   Download,
   Eye,
-  File,
-  FileText,
-  Film,
-  Image as ImageIcon,
   Loader2,
-  MessageSquare,
   PlayCircle,
   RefreshCw,
   Search,
@@ -26,6 +21,9 @@ import { strmAPI } from '../api/strm'
 import type { StrmQueueSnapshot, StrmTask, StrmTaskStatus } from '../types/strm'
 import { STRM_PROVIDER_LABELS } from '../types/strm'
 import { apiErrorMessage, formatBytes, formatTime, taskStatusMeta } from './StrmManagePage'
+import { TaskDetailModal } from './strm-queue/TaskDetailModal'
+import { getFileIcon } from './strm-queue/taskFileIcon'
+import { copyToClipboard, useTaskSelection } from './queue-shared'
 
 const FILTERS: { key: 'all' | StrmTaskStatus; label: string; icon: typeof Clock; color: string }[] = [
   { key: 'all', label: '全部', icon: Clock, color: 'text-ink-600' },
@@ -37,23 +35,6 @@ const FILTERS: { key: 'all' | StrmTaskStatus; label: string; icon: typeof Clock;
 ]
 
 const PAGE_SIZE = 50
-
-function getFileIcon(filename: string): ReactNode {
-  const ext = filename.split('.').pop()?.toLowerCase() ?? ''
-  if (['nfo', 'txt', 'xml', 'json'].includes(ext)) {
-    return <FileText size={15} className="text-amber-500 shrink-0" />
-  }
-  if (['jpg', 'jpeg', 'png', 'webp', 'bmp', 'gif', 'svg'].includes(ext)) {
-    return <ImageIcon size={15} className="text-blue-500 shrink-0" />
-  }
-  if (['srt', 'ass', 'ssa', 'sub', 'vtt'].includes(ext)) {
-    return <MessageSquare size={15} className="text-purple-500 shrink-0" />
-  }
-  if (['mkv', 'mp4', 'avi', 'mov', 'wmv', 'ts', 'flv', 'iso', 'm4v', 'strm'].includes(ext)) {
-    return <Film size={15} className="text-emerald-500 shrink-0" />
-  }
-  return <File size={15} className="text-gray-400 shrink-0" />
-}
 
 export function StrmQueuePanel({
   kind,
@@ -71,8 +52,11 @@ export function StrmQueuePanel({
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [batchBusy, setBatchBusy] = useState(false)
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const { selectedIds, setSelectedIds, reset: clearSelection, toggleRow: toggleSelectRow, toggleAll: toggleAllIds } = useTaskSelection()
   const [detailTask, setDetailTask] = useState<StrmTask | null>(null)
+  // 轮询/翻页/切筛选并发时用递增序号丢弃过期响应
+  const refreshSeqRef = useRef(0)
+  const [pollFailures, setPollFailures] = useState(0)
 
   const isDownload = kind === 'download'
   const Icon = isDownload ? Download : Upload
@@ -80,11 +64,15 @@ export function StrmQueuePanel({
   const refresh = useCallback(
     async (showLoading = false) => {
       if (showLoading) setIsRefreshing(true)
+      const seq = ++refreshSeqRef.current
       try {
         const status = filter === 'all' ? undefined : filter
         const data = isDownload
           ? await strmAPI.downloads(status, page, PAGE_SIZE)
           : await strmAPI.uploads(status, page, PAGE_SIZE)
+        // 序号不符说明已有更新的请求发出（翻页/切筛选/轮询并发），丢弃旧响应
+        if (seq !== refreshSeqRef.current) return
+        setPollFailures(0)
         const tp = Math.max(1, Math.ceil((data.total ?? data.tasks.length) / PAGE_SIZE))
         if (page > tp) {
           setPage(tp)
@@ -93,7 +81,8 @@ export function StrmQueuePanel({
         setTotalPages(tp)
         setSnapshot(data)
       } catch {
-        /* keep existing data */
+        // 保留旧数据；连续失败 ≥3 次时页头徽标切换为「连接失败，重试中」
+        if (seq === refreshSeqRef.current) setPollFailures((n) => n + 1)
       } finally {
         setLoading(false)
         if (showLoading) setIsRefreshing(false)
@@ -109,6 +98,7 @@ export function StrmQueuePanel({
   useEffect(() => {
     if (!autoRefresh) return
     const timer = setInterval(() => {
+      if (document.hidden) return
       refresh().catch(() => undefined)
     }, 3000)
     return () => clearInterval(timer)
@@ -116,13 +106,10 @@ export function StrmQueuePanel({
 
   // Clear selections when changing filter or page
   useEffect(() => {
-    setSelectedIds(new Set())
-  }, [filter, page])
+    clearSelection()
+  }, [filter, page, clearSelection])
 
-  const copyText = (text: string, label: string) => {
-    navigator.clipboard.writeText(text)
-    toast.success(`已复制${label}`)
-  }
+  const copyText = copyToClipboard
 
   // Task actions
   const cancelTask = async (task: StrmTask) => {
@@ -204,9 +191,8 @@ export function StrmQueuePanel({
   }
 
   // Filter and search tasks in memory
-  const tasks = snapshot?.tasks ?? []
   const filteredTasks = useMemo(() => {
-    let list = tasks
+    let list = snapshot?.tasks ?? []
     if (filter !== 'all') {
       list = list.filter((t) => t.status === filter)
     }
@@ -221,30 +207,20 @@ export function StrmQueuePanel({
       )
     }
     return list
-  }, [tasks, filter, search])
+  }, [snapshot?.tasks, filter, search])
 
   const counts = snapshot?.counts
-  const activeTaskCount = (counts?.pending ?? 0) + (counts?.running ?? 0)
+  const pendingCount = counts?.pending ?? 0
+  const runningCount = counts?.running ?? 0
+  const activeTaskCount = pendingCount + runningCount
+  const doneCount = counts?.done ?? 0
   const failedCount = counts?.failed ?? 0
+  const canceledCount = counts?.canceled ?? 0
+  const finishedCount = doneCount + failedCount + canceledCount
   const allCurrentChecked =
     filteredTasks.length > 0 && filteredTasks.every((t) => selectedIds.has(t.id))
 
-  const toggleSelectAll = () => {
-    if (allCurrentChecked) {
-      setSelectedIds(new Set())
-    } else {
-      setSelectedIds(new Set(filteredTasks.map((t) => t.id)))
-    }
-  }
-
-  const toggleSelectRow = (id: string) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
+  const toggleSelectAll = () => toggleAllIds(filteredTasks.map((t) => t.id))
 
   return (
     <div className="space-y-6">
@@ -259,12 +235,18 @@ export function StrmQueuePanel({
               <h1 className="font-display text-2xl font-bold text-ink-600 sm:text-3xl">
                 {isDownload ? '下载队列' : '上传队列'}
               </h1>
-              {autoRefresh && (
-                <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300/40 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-600">
-                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
-                  实时同步
-                </span>
-              )}
+              {autoRefresh &&
+                (pollFailures >= 3 ? (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-rose-300/40 bg-rose-500/10 px-2 py-0.5 text-[11px] font-semibold text-rose-600">
+                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-rose-500" />
+                    连接失败，重试中
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300/40 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-600">
+                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+                    实时同步
+                  </span>
+                ))}
             </div>
             <p className="text-xs text-sand-500 mt-0.5">
               {isDownload
@@ -475,8 +457,8 @@ export function StrmQueuePanel({
           )}
         </div>
 
-        {/* Selected Batch Toolbar */}
-        {selectedIds.size > 0 && (
+        {/* Batch Actions Toolbar */}
+        {selectedIds.size > 0 ? (
           <div className="flex flex-wrap items-center gap-2 rounded-xl border border-brand-500/30 bg-primary-400/10 px-3 py-2 text-xs animate-in fade-in zoom-in-95">
             <span className="font-bold text-brand-500">已选中 {selectedIds.size} 项</span>
             <div className="h-3.5 w-px bg-brand-300/40 mx-1" />
@@ -515,6 +497,251 @@ export function StrmQueuePanel({
             >
               <X size={13} />
             </button>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            {/* 当前状态专属快捷批量按钮 */}
+            {filter === 'all' && (
+              <>
+                {failedCount > 0 && (
+                  <button
+                    type="button"
+                    disabled={batchBusy}
+                    onClick={() =>
+                      runGlobalBatch(
+                        () => (isDownload ? strmAPI.retryFailedDownloads() : strmAPI.retryFailedUploads()),
+                        '确定重新入队所有失败任务？',
+                      )
+                    }
+                    className="inline-flex items-center gap-1 rounded-xl border border-brand-500/40 bg-white px-3 py-1.5 text-xs font-semibold text-brand-500 hover:bg-brand-50 disabled:opacity-50"
+                  >
+                    <RefreshCw size={12} />
+                    全部重试 ({failedCount})
+                  </button>
+                )}
+                {activeTaskCount > 0 && (
+                  <button
+                    type="button"
+                    disabled={batchBusy}
+                    onClick={() =>
+                      runGlobalBatch(
+                        () => (isDownload ? strmAPI.cancelPendingDownloads() : strmAPI.cancelPendingUploads()),
+                        '确定取消所有排队及进行中的任务？',
+                      )
+                    }
+                    className="inline-flex items-center gap-1 rounded-xl border border-amber-300 bg-white px-3 py-1.5 text-xs font-semibold text-amber-600 hover:bg-amber-50 disabled:opacity-50"
+                  >
+                    <Ban size={12} />
+                    全部取消 ({activeTaskCount})
+                  </button>
+                )}
+                {finishedCount > 0 && (
+                  <button
+                    type="button"
+                    disabled={batchBusy}
+                    onClick={() =>
+                      runGlobalBatch(
+                        () => (isDownload ? strmAPI.clearFinishedDownloads() : strmAPI.clearFinishedUploads()),
+                        '确定清空所有已完成、失败及取消的历史记录？',
+                      )
+                    }
+                    className="inline-flex items-center gap-1 rounded-xl border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 disabled:opacity-50"
+                  >
+                    <Trash2 size={12} />
+                    全部删除 ({finishedCount})
+                  </button>
+                )}
+              </>
+            )}
+
+            {(filter === 'pending' || filter === 'running') && (
+              <button
+                type="button"
+                disabled={batchBusy || activeTaskCount === 0}
+                onClick={() =>
+                  runGlobalBatch(
+                    () => (isDownload ? strmAPI.cancelPendingDownloads() : strmAPI.cancelPendingUploads()),
+                    '确定取消所有排队及进行中的任务？',
+                  )
+                }
+                className="inline-flex items-center gap-1 rounded-xl border border-amber-300 bg-white px-3 py-1.5 text-xs font-semibold text-amber-600 hover:bg-amber-50 disabled:opacity-50"
+              >
+                <Ban size={12} />
+                全部取消{activeTaskCount > 0 ? ` (${activeTaskCount})` : ''}
+              </button>
+            )}
+
+            {filter === 'done' && (
+              <button
+                type="button"
+                disabled={batchBusy || doneCount === 0}
+                onClick={() =>
+                  runGlobalBatch(
+                    () => (isDownload ? strmAPI.clearDoneDownloads() : strmAPI.clearDoneUploads()),
+                    '确定清空所有已完成记录？',
+                  )
+                }
+                className="inline-flex items-center gap-1 rounded-xl border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 disabled:opacity-50"
+              >
+                <Trash2 size={12} />
+                全部删除{doneCount > 0 ? ` (${doneCount})` : ''}
+              </button>
+            )}
+
+            {filter === 'failed' && (
+              <>
+                <button
+                  type="button"
+                  disabled={batchBusy || failedCount === 0}
+                  onClick={() =>
+                    runGlobalBatch(
+                      () => (isDownload ? strmAPI.retryFailedDownloads() : strmAPI.retryFailedUploads()),
+                      '确定重新入队所有失败任务？',
+                    )
+                  }
+                  className="inline-flex items-center gap-1 rounded-xl border border-brand-500/40 bg-white px-3 py-1.5 text-xs font-semibold text-brand-500 hover:bg-brand-50 disabled:opacity-50"
+                >
+                  <RefreshCw size={12} />
+                  全部重试{failedCount > 0 ? ` (${failedCount})` : ''}
+                </button>
+                <button
+                  type="button"
+                  disabled={batchBusy || failedCount === 0}
+                  onClick={() =>
+                    runGlobalBatch(
+                      () => (isDownload ? strmAPI.clearFailedDownloads() : strmAPI.clearFailedUploads()),
+                      '确定清空所有失败记录？',
+                    )
+                  }
+                  className="inline-flex items-center gap-1 rounded-xl border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 disabled:opacity-50"
+                >
+                  <Trash2 size={12} />
+                  全部删除{failedCount > 0 ? ` (${failedCount})` : ''}
+                </button>
+              </>
+            )}
+
+            {filter === 'canceled' && (
+              <button
+                type="button"
+                disabled={batchBusy || canceledCount === 0}
+                onClick={() =>
+                  runGlobalBatch(
+                    () => (isDownload ? strmAPI.clearCanceledDownloads() : strmAPI.clearCanceledUploads()),
+                    '确定清空所有已取消的任务记录？',
+                  )
+                }
+                className="inline-flex items-center gap-1 rounded-xl border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 disabled:opacity-50"
+              >
+                <Trash2 size={12} />
+                全部删除{canceledCount > 0 ? ` (${canceledCount})` : ''}
+              </button>
+            )}
+
+            {/* 下拉批量操作菜单：随时可做任意全局操作 */}
+            <details className="relative inline-block">
+              <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 py-1.5 text-xs font-semibold text-ink-100 shadow-sm transition hover:border-gray-300 hover:bg-gray-50 [&::-webkit-details-marker]:hidden">
+                <Trash2 size={12} className="text-sand-500" />
+                <span>批量清理</span>
+              </summary>
+              <div className="absolute right-0 top-9 z-30 min-w-44 rounded-xl border border-gray-200 bg-white p-1.5 shadow-xl backdrop-blur">
+                {failedCount > 0 && (
+                  <button
+                    type="button"
+                    disabled={batchBusy}
+                    onClick={(e) => {
+                      e.currentTarget.closest('details')?.removeAttribute('open')
+                      runGlobalBatch(
+                        () => (isDownload ? strmAPI.retryFailedDownloads() : strmAPI.retryFailedUploads()),
+                        '确定重新入队所有失败任务？',
+                      )
+                    }}
+                    className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-brand-500 hover:bg-brand-50"
+                  >
+                    <RefreshCw size={13} />
+                    <span>重试所有失败 ({failedCount})</span>
+                  </button>
+                )}
+                {activeTaskCount > 0 && (
+                  <button
+                    type="button"
+                    disabled={batchBusy}
+                    onClick={(e) => {
+                      e.currentTarget.closest('details')?.removeAttribute('open')
+                      runGlobalBatch(
+                        () => (isDownload ? strmAPI.cancelPendingDownloads() : strmAPI.cancelPendingUploads()),
+                        '确定取消所有排队及进行中的任务？',
+                      )
+                    }}
+                    className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-amber-600 hover:bg-amber-50"
+                  >
+                    <Ban size={13} />
+                    <span>取消所有进行中 ({activeTaskCount})</span>
+                  </button>
+                )}
+                <div className="my-1 border-t border-gray-100" />
+                <button
+                  type="button"
+                  disabled={batchBusy}
+                  onClick={(e) => {
+                    e.currentTarget.closest('details')?.removeAttribute('open')
+                    runGlobalBatch(
+                      () => (isDownload ? strmAPI.clearDoneDownloads() : strmAPI.clearDoneUploads()),
+                      '确定清空所有已完成记录？',
+                    )
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-ink-100 hover:bg-gray-50"
+                >
+                  <CheckCircle2 size={13} className="text-emerald-500" />
+                  <span>清空已完成记录 ({doneCount})</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={batchBusy}
+                  onClick={(e) => {
+                    e.currentTarget.closest('details')?.removeAttribute('open')
+                    runGlobalBatch(
+                      () => (isDownload ? strmAPI.clearFailedDownloads() : strmAPI.clearFailedUploads()),
+                      '确定清空所有失败记录？',
+                    )
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-rose-500 hover:bg-rose-50"
+                >
+                  <AlertCircle size={13} />
+                  <span>清空失败记录 ({failedCount})</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={batchBusy}
+                  onClick={(e) => {
+                    e.currentTarget.closest('details')?.removeAttribute('open')
+                    runGlobalBatch(
+                      () => (isDownload ? strmAPI.clearCanceledDownloads() : strmAPI.clearCanceledUploads()),
+                      '确定清空所有已取消的任务记录？',
+                    )
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-ink-100 hover:bg-gray-50"
+                >
+                  <Ban size={13} className="text-amber-500" />
+                  <span>清空已取消记录 ({canceledCount})</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={batchBusy}
+                  onClick={(e) => {
+                    e.currentTarget.closest('details')?.removeAttribute('open')
+                    runGlobalBatch(
+                      () => (isDownload ? strmAPI.clearFinishedDownloads() : strmAPI.clearFinishedUploads()),
+                      '确定清空所有已完成、失败及取消的历史记录？',
+                    )
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-rose-500 hover:bg-rose-50"
+                >
+                  <Trash2 size={13} />
+                  <span>清空全部历史记录 ({finishedCount})</span>
+                </button>
+              </div>
+            </details>
           </div>
         )}
       </div>
@@ -742,201 +969,6 @@ export function StrmQueuePanel({
           onCopy={copyText}
         />
       )}
-    </div>
-  )
-}
-
-function TaskDetailModal({
-  task,
-  isDownload,
-  onClose,
-  onRetry,
-  onCancel,
-  onDelete,
-  onCopy,
-}: {
-  task: StrmTask
-  isDownload: boolean
-  onClose: () => void
-  onRetry: (t: StrmTask) => void
-  onCancel: (t: StrmTask) => void
-  onDelete: (t: StrmTask) => void
-  onCopy: (text: string, label: string) => void
-}) {
-  const status = taskStatusMeta(task.status)
-
-  return (
-    <div
-      className="fixed inset-0 z-[110] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-xl rounded-3xl border border-gray-200 bg-white shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
-          <div className="flex items-center gap-2">
-            {getFileIcon(task.file_name)}
-            <h3 className="font-display text-base font-bold text-ink-600">任务详情</h3>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-xl p-1 text-gray-400 hover:bg-gray-100 hover:text-ink-600 transition"
-          >
-            <X size={18} />
-          </button>
-        </div>
-
-        <div className="space-y-4 p-6 max-h-[70vh] overflow-y-auto text-xs">
-          {/* Main Info Box */}
-          <div className="rounded-2xl border border-gray-100 bg-gray-50/70 p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-sand-500 font-medium">任务 ID</span>
-              <span className="font-mono text-ink-100 select-all">{task.id}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sand-500 font-medium">文件名称</span>
-              <span className="font-bold text-ink-600 select-all">{task.file_name}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sand-500 font-medium">文件大小</span>
-              <span className="font-mono text-ink-100">{formatBytes(task.size)}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sand-500 font-medium">当前状态</span>
-              <span
-                className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold ${status.cls}`}
-              >
-                {status.label}
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sand-500 font-medium">云盘提供方</span>
-              <span className="font-medium text-ink-100">
-                {STRM_PROVIDER_LABELS[task.provider] ?? task.provider}
-              </span>
-            </div>
-            {task.retry_count > 0 && (
-              <div className="flex items-center justify-between">
-                <span className="text-sand-500 font-medium">已重试次数</span>
-                <span className="font-bold text-amber-600">{task.retry_count} 次</span>
-              </div>
-            )}
-          </div>
-
-          {/* Paths */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-sand-500 font-medium">
-              <span>{isDownload ? '本地输出目标路径' : '本地来源路径'}</span>
-              <button
-                type="button"
-                onClick={() => onCopy(task.local_path, '本地路径')}
-                className="inline-flex items-center gap-1 text-brand-500 hover:underline"
-              >
-                <Copy size={11} /> 复制
-              </button>
-            </div>
-            <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-3 font-mono text-[11px] text-ink-600 break-all select-all">
-              {task.local_path}
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-sand-500 font-medium">
-              <span>远端网盘路径</span>
-              <button
-                type="button"
-                onClick={() => onCopy(task.remote_path, '远端路径')}
-                className="inline-flex items-center gap-1 text-brand-500 hover:underline"
-              >
-                <Copy size={11} /> 复制
-              </button>
-            </div>
-            <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-3 font-mono text-[11px] text-ink-600 break-all select-all">
-              {task.remote_path}
-            </div>
-          </div>
-
-          {/* Error Message Box */}
-          {task.error && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between text-rose-500 font-medium">
-                <span className="flex items-center gap-1">
-                  <AlertCircle size={13} /> 错误详情
-                </span>
-                <button
-                  type="button"
-                  onClick={() => onCopy(task.error!, '错误信息')}
-                  className="inline-flex items-center gap-1 text-rose-500 hover:underline"
-                >
-                  <Copy size={11} /> 复制错误
-                </button>
-              </div>
-              <div className="rounded-xl border border-rose-200 bg-rose-50/60 p-3 font-mono text-[11px] text-rose-700 break-all select-all whitespace-pre-wrap">
-                {task.error}
-              </div>
-            </div>
-          )}
-
-          {/* Timeline */}
-          <div className="grid grid-cols-2 gap-3 pt-2 text-[11px] text-sand-500 border-t border-gray-100">
-            <div>创建时间：{formatTime(task.created_at)}</div>
-            {task.started_at && <div>开始时间：{formatTime(task.started_at)}</div>}
-            {task.finished_at && <div>结束时间：{formatTime(task.finished_at)}</div>}
-          </div>
-        </div>
-
-        {/* Footer Actions */}
-        <div className="flex items-center justify-between border-t border-gray-100 px-6 py-4 bg-gray-50/50">
-          <div>
-            {(task.status === 'done' ||
-              task.status === 'failed' ||
-              task.status === 'canceled') && (
-              <button
-                type="button"
-                onClick={() => onDelete(task)}
-                className="inline-flex items-center gap-1 rounded-xl border border-rose-200 bg-white px-3 py-2 text-xs font-semibold text-rose-500 hover:bg-rose-50 transition"
-              >
-                <Trash2 size={13} />
-                删除记录
-              </button>
-            )}
-          </div>
-
-          <div className="flex items-center gap-2">
-            {(task.status === 'pending' || task.status === 'running') && (
-              <button
-                type="button"
-                onClick={() => onCancel(task)}
-                className="inline-flex items-center gap-1 rounded-xl border border-amber-200 bg-white px-4 py-2 text-xs font-semibold text-amber-600 hover:bg-amber-50 transition"
-              >
-                <Ban size={13} />
-                取消任务
-              </button>
-            )}
-
-            {(task.status === 'failed' || task.status === 'canceled') && (
-              <button
-                type="button"
-                onClick={() => onRetry(task)}
-                className="neon-button !py-2 !px-4 text-xs font-semibold"
-              >
-                <RefreshCw size={13} />
-                重新入队
-              </button>
-            )}
-
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-xl border border-gray-200 bg-white px-4 py-2 text-xs font-semibold text-ink-100 hover:bg-gray-50 transition"
-            >
-              关闭
-            </button>
-          </div>
-        </div>
-      </div>
     </div>
   )
 }

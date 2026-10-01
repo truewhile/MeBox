@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/truewhile/MeBox/internal/helper"
 )
 
 // JobStatus is a snapshot suitable for the admin UI.
@@ -142,7 +144,8 @@ func (s *SchedulerService) beginRun(j *scheduledJob) error {
 }
 
 func (s *SchedulerService) runReserved(ctx context.Context, j *scheduledJob) error {
-	err := j.run(ctx)
+	// 任务 panic 转为 error，保证下方 running/lastErr 状态照常清理、调度循环存活。
+	err := helper.Recover(s.log, "scheduler.job."+j.name, func() error { return j.run(ctx) })
 	s.mu.Lock()
 	j.lastRun = s.currentTime()
 	if err != nil {

@@ -121,9 +121,19 @@ func (s *StrmService) resolveLocalPlay(ctx context.Context, rawPath string) (*St
 // 支持：
 //   - /api/strm/play/{provider}/video{ext}?acct=..&pickcode=.. （常规格式，含账号）
 //   - /api/cloud/play/{type}?ref=.. （旧格式，无账号 → 取该类型第一个启用账号）
-//   - 绝对 http(s) 链接（直接透传）
+//   - 绝对 http(s) 链接（直接透传，包含别的 MeBox / MediaStationGo 实例的播放端点）
 //   - 其余协议（webdav:// 等）返回错误，由调用方决定是否静默跳过
 func (s *StrmService) ResolvePlayTarget(ctx context.Context, raw string) (*StrmPlayResult, error) {
+	return s.ResolvePlayTargetWithUA(ctx, raw, "")
+}
+
+// ResolvePlayTargetWithUA 与 ResolvePlayTarget 相同，但会把调用方的 User-Agent
+// 透传给需要按 UA 换取直链的提供方（115 直链绑定换取时的 UA，换错会被 CDN 拒绝）。
+//
+// 用途：播放链路在服务端直接把 strm 目标解析成最终直链并 302（见
+// StreamService.resolveDirectPlayTargetURL），此时必须带上播放器的 UA，才能拿到
+// 与 /api/strm/play 端点一致的、按 UA 分键缓存的那条直链。
+func (s *StrmService) ResolvePlayTargetWithUA(ctx context.Context, raw, userAgent string) (*StrmPlayResult, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, errors.New("空播放目标")
@@ -132,6 +142,17 @@ func (s *StrmService) ResolvePlayTarget(ctx context.Context, raw string) (*StrmP
 	if err != nil {
 		return nil, fmt.Errorf("解析播放目标失败: %w", err)
 	}
+	// 别的 MeBox / MediaStationGo 实例的播放端点：本机没有对应账号，按普通外部
+	// 直链处理——客户端与 ffmpeg 直接跟随 302 去对方实例取流（/api/strm/play 是
+	// 公开端点，不需要本机凭据），不能拿本机账号去查别人的 pickcode。
+	if isPlaybackAPIPath(u.Path) && !s.isLocalPlaybackTarget(ctx, raw) {
+		switch strings.ToLower(strings.TrimSpace(u.Scheme)) {
+		case "http", "https":
+			return &StrmPlayResult{RedirectURL: raw}, nil
+		default:
+			return nil, fmt.Errorf("不支持的播放目标协议: %s", u.Scheme)
+		}
+	}
 	lowerPath := strings.ToLower(u.Path)
 	switch {
 	case strings.HasPrefix(lowerPath, "/api/strm/play/"):
@@ -139,14 +160,14 @@ func (s *StrmService) ResolvePlayTarget(ctx context.Context, raw string) (*StrmP
 		if len(segs) < 1 || strings.TrimSpace(segs[0]) == "" {
 			return nil, errors.New("无效的 strm 播放地址")
 		}
-		return s.ResolvePlay(ctx, segs[0], u.Query())
+		return s.ResolvePlay(ctx, segs[0], playbackQueryWithUA(u, userAgent))
 	case strings.HasPrefix(lowerPath, "/api/cloud/play/"):
 		typ := strings.TrimSpace(strings.TrimPrefix(u.Path, "/api/cloud/play/"))
 		acct, err := s.firstEnabledAccountOf(ctx, typ)
 		if err != nil || acct == nil {
 			return nil, errors.New("没有可用的网盘账号，无法解析直链")
 		}
-		q := u.Query()
+		q := playbackQueryWithUA(u, userAgent)
 		q.Set("acct", acct.ID)
 		return s.ResolvePlay(ctx, typ, q)
 	case u.Scheme == "http" || u.Scheme == "https":
@@ -154,6 +175,29 @@ func (s *StrmService) ResolvePlayTarget(ctx context.Context, raw string) (*StrmP
 	default:
 		return nil, fmt.Errorf("不支持的播放目标协议: %s", u.Scheme)
 	}
+}
+
+// playbackQueryWithUA 复制播放目标的查询串并注入 __ua。ResolvePlay 的云盘提供方
+// 据此按播放器 UA 换取直链，与 /api/strm/play 端点写入 __ua 的语义保持一致。
+func playbackQueryWithUA(u *url.URL, userAgent string) url.Values {
+	q := url.Values{}
+	if u != nil {
+		q = url.Values(u.Query())
+	}
+	if ua := strings.TrimSpace(userAgent); ua != "" {
+		q.Set("__ua", ua)
+	}
+	return q
+}
+
+// isLocalPlaybackTarget 报告播放地址是否属于本机。这里没有 HTTP 请求上下文，
+// 「本机」由 strm.base_url / 各同步目录覆盖的 base_url / 本机网盘账号共同界定
+// （见 isInternalPlaybackTarget）。
+func (s *StrmService) isLocalPlaybackTarget(ctx context.Context, raw string) bool {
+	if s == nil {
+		return true
+	}
+	return isInternalPlaybackTarget(ctx, s.repo, s.cfg, nil, raw)
 }
 
 // firstEnabledAccountOf 返回指定提供方第一个凭据可用的启用账号。
@@ -174,38 +218,111 @@ func (s *StrmService) firstEnabledAccountOf(ctx context.Context, provider string
 	return nil, nil
 }
 
+// ErrStrmProxyNotApplicable 表示该媒体没有需要服务端转发的直链（本地文件本身同源）。
+var ErrStrmProxyNotApplicable = errors.New("strm proxy not applicable")
+
+// ProxyMediaDirect 把媒体行的网盘/STRM 直链解析为真实地址后由服务端反向代理给
+// 客户端，让浏览器拿到「同源」数据。画质与原文件完全一致，不触发任何转码。
+//
+// 用途：VR 全景播放要把视频帧读进 WebGL 纹理，而跨域直链（网盘 302 跳到 CDN）
+// 在浏览器里属于被污染的资源，WebGL 读取会抛 SecurityError；把流量经服务端转发
+// 是「原画 + VR」唯一可行的办法。
+func (s *StrmService) ProxyMediaDirect(ctx context.Context, w http.ResponseWriter, r *http.Request, m *model.Media) error {
+	if s == nil || m == nil {
+		return ErrStrmProxyNotApplicable
+	}
+	raw := strings.TrimSpace(m.STRMURL)
+	if raw == "" {
+		path := strings.TrimSpace(m.Path)
+		if !strings.HasSuffix(strings.ToLower(path), ".strm") {
+			return ErrStrmProxyNotApplicable
+		}
+		target, err := readLocalSTRMTarget(path)
+		if err != nil {
+			return err
+		}
+		raw = strings.TrimSpace(target)
+	}
+	if raw == "" {
+		return ErrStrmProxyNotApplicable
+	}
+	result, err := s.ResolvePlayTarget(ctx, raw)
+	if err != nil {
+		return err
+	}
+	switch {
+	case result.Link != nil && result.Link.URL != "":
+		return s.ProxyDirect(ctx, w, r, result.Link)
+	case result.RedirectURL != "":
+		return s.ProxyDirect(ctx, w, r, &cloud.DirectLink{URL: result.RedirectURL})
+	default:
+		// 本地文件（LocalPath）由静态文件处理器提供，本身就是同源。
+		return ErrStrmProxyNotApplicable
+	}
+}
+
 // ProxyDirect 反向代理渲染直链内容（保留 Range 请求头以支持拖动播放）。
 func (s *StrmService) ProxyDirect(ctx context.Context, w http.ResponseWriter, r *http.Request, link *cloud.DirectLink) error {
 	if link == nil || link.URL == "" {
 		return errors.New("空直链")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link.URL, nil)
+	method := http.MethodGet
+	if r != nil && r.Method == http.MethodHead {
+		method = http.MethodHead
+	}
+	req, err := http.NewRequestWithContext(ctx, method, link.URL, nil)
 	if err != nil {
 		return err
 	}
 	for k, v := range link.Headers {
 		req.Header.Set(k, v)
 	}
-	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
-		req.Header.Set("Range", rangeHeader)
+	if r != nil {
+		if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
+			req.Header.Set("Range", rangeHeader)
+		}
+		// 部分网盘直链按 UA 防盗链；解析时未绑定 UA 的直链沿用浏览器 UA 更稳。
+		if ua := strings.TrimSpace(r.Header.Get("User-Agent")); ua != "" && req.Header.Get("User-Agent") == "" {
+			req.Header.Set("User-Agent", ua)
+		}
 	}
-	resp, err := s.http.Do(req)
+	resp, err := s.streamHTTP.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	for _, header := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag"} {
+	for _, header := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified"} {
 		if value := resp.Header.Get(header); value != "" {
 			w.Header().Set(header, value)
 		}
 	}
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		w.WriteHeader(http.StatusOK)
-	} else {
-		w.WriteHeader(resp.StatusCode)
+	// 原样透传上游状态码：Range 请求必须回 206，改写成 200 会让浏览器误判
+	// 响应长度，拖动进度条时反复重新拉流。
+	w.WriteHeader(resp.StatusCode)
+	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
+		return nil
 	}
-	if resp.StatusCode == http.StatusPartialContent || resp.StatusCode == http.StatusOK {
-		_, _ = io.Copy(w, resp.Body)
+	if method == http.MethodHead {
+		return nil
 	}
-	return nil
+	// 边转发边 flush，避免大体积视频被 net/http 的写缓冲切成一段段卡顿。
+	writer := io.Writer(w)
+	if flusher, ok := w.(http.Flusher); ok {
+		writer = &flushWriter{writer: w, flusher: flusher}
+	}
+	_, err = io.Copy(writer, resp.Body)
+	return err
+}
+
+type flushWriter struct {
+	writer  io.Writer
+	flusher http.Flusher
+}
+
+func (f *flushWriter) Write(p []byte) (int, error) {
+	n, err := f.writer.Write(p)
+	if f.flusher != nil {
+		f.flusher.Flush()
+	}
+	return n, err
 }

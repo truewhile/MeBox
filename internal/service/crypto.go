@@ -1,6 +1,6 @@
 // Package service — AES-GCM crypto helper for at-rest secrets.
 //
-// Sensitive fields (third-party API keys, qBittorrent passwords, …) are
+// Sensitive fields (third-party API keys, service passwords, …) are
 // stored in SQLite. We encrypt them with AES-256-GCM keyed off the JWT
 // secret so a stolen DB file alone is not enough to recover the
 // plaintext credentials.
@@ -12,96 +12,52 @@
 package service
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"errors"
 	"strings"
 
 	"go.uber.org/zap"
+
+	"github.com/truewhile/MeBox/internal/helper"
 )
 
 // encPrefix tags ciphertext rows so we can tell them apart from legacy
-// plaintext values.
-const encPrefix = "enc:v1:"
+// plaintext values. Kept as an alias of the shared helper's prefix so both
+// implementations stay wire-compatible.
+const encPrefix = helper.EncPrefix
 
 // CryptoService wraps an AES-GCM cipher derived from a stable per-install
 // secret (the JWT secret).
+//
+// The cipher itself lives in helper.SecretCipher so lower layers (e.g. the
+// reader subsystem, which cannot import this package) can share one
+// implementation; this type keeps the service-layer logging and API.
 type CryptoService struct {
-	log  *zap.Logger
-	aead cipher.AEAD
+	log    *zap.Logger
+	cipher *helper.SecretCipher
 }
 
 // NewCryptoService derives a 256-bit key from the given secret via
 // SHA-256 and constructs an AES-GCM AEAD. Empty secrets yield a service
 // whose Encrypt/Decrypt methods are pass-throughs (used in unit tests).
 func NewCryptoService(secret string, log *zap.Logger) *CryptoService {
-	c := &CryptoService{log: log}
-	if strings.TrimSpace(secret) == "" {
-		return c
-	}
-	sum := sha256.Sum256([]byte(secret))
-	block, err := aes.NewCipher(sum[:])
-	if err != nil {
-		log.Error("crypto: aes.NewCipher", zap.Error(err))
-		return c
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		log.Error("crypto: cipher.NewGCM", zap.Error(err))
-		return c
-	}
-	c.aead = aead
-	return c
+	return &CryptoService{log: log, cipher: helper.NewSecretCipher(secret)}
 }
 
 // Encrypt returns the base64-encoded ciphertext (with prefix) for plain.
 // Empty inputs round-trip unchanged.
 func (c *CryptoService) Encrypt(plain string) string {
-	if plain == "" || c.aead == nil {
-		return plain
-	}
-	if strings.HasPrefix(plain, encPrefix) {
-		return plain
-	}
-	nonce := make([]byte, c.aead.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return plain
-	}
-	cipherBytes := c.aead.Seal(nonce, nonce, []byte(plain), nil)
-	return encPrefix + base64.StdEncoding.EncodeToString(cipherBytes)
+	return c.cipher.Encrypt(plain)
 }
 
 // Decrypt returns the plaintext for an encrypted value. Plaintext rows
 // (no prefix) are returned unchanged.
 func (c *CryptoService) Decrypt(value string) string {
-	if value == "" || c.aead == nil {
-		return value
-	}
-	if !strings.HasPrefix(value, encPrefix) {
-		return value
-	}
-	raw := strings.TrimPrefix(value, encPrefix)
-	data, err := base64.StdEncoding.DecodeString(raw)
-	if err != nil {
-		return value
-	}
-	if len(data) < c.aead.NonceSize() {
-		return value
-	}
-	nonce, cipherBytes := data[:c.aead.NonceSize()], data[c.aead.NonceSize():]
-	plain, err := c.aead.Open(nil, nonce, cipherBytes, nil)
-	if err != nil {
-		return value
-	}
-	return string(plain)
+	return c.cipher.Decrypt(value)
 }
 
 // IsEncrypted returns true if value carries the encrypted prefix.
 func (c *CryptoService) IsEncrypted(value string) bool {
-	return strings.HasPrefix(value, encPrefix)
+	return c.cipher.IsEncrypted(value)
 }
 
 // MaskAPIKey returns "abcd****wxyz" so the key can be displayed in the

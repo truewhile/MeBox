@@ -3,9 +3,10 @@ import toast from 'react-hot-toast'
 
 import { api } from '../api/client'
 import { libraryAPI } from '../api/library'
-import { recycleAPI } from '../api/recycle'
+import { mediaAPI } from '../api/library'
 import { toolsAPI } from '../api/tools'
-import { confirmAction } from '../components/confirmAction'
+import { confirmAction, confirmActionResult } from '../components/confirmAction'
+import { useEpisodeArtworkPreference } from '../hooks/useEpisodeArtworkPreference'
 import type { Library, Media } from '../types'
 import { seriesTitle, type SeriesCard } from '../utils/groupSeries'
 import { LibraryMovieActions } from './LibraryMovieActions'
@@ -33,7 +34,7 @@ export function useLibraryAdminActions({
   setManualMovie,
 }: UseLibraryAdminActionsOptions) {
   const [scraping, setScraping] = useState(false)
-  const [scrapeEpisodeArtwork, setScrapeEpisodeArtwork] = useState(false)
+  const [scrapeEpisodeArtwork, setScrapeEpisodeArtwork] = useEpisodeArtworkPreference()
   const [repairing, setRepairing] = useState(false)
   const [seriesToolBusy, setSeriesToolBusy] = useState('')
   const [movieToolBusy, setMovieToolBusy] = useState('')
@@ -92,7 +93,7 @@ export function useLibraryAdminActions({
   }
 
   const handleSeriesNFO = () => {
-    runSeriesTool('nfo', '整剧 NFO 写出', (media) => recycleAPI.exportNFO(media.id))
+    runSeriesTool('nfo', '整剧 NFO 写出', (media) => mediaAPI.exportNFO(media.id))
   }
 
   const handleSeriesOrganize = async () => {
@@ -128,14 +129,16 @@ export function useLibraryAdminActions({
     }
   }
 
-  const handleSeriesSoftDelete = async () => {
+  const handleSeriesDelete = async () => {
     if (!selectedSeries || selectedSeriesEpisodes.length === 0) return
-    if (!(await confirmAction({
-      title: '移入回收站',
-      message: `将「${seriesTitle(selectedSeries.rep)}」的 ${selectedSeriesEpisodes.length} 个媒体移至回收站? (磁盘文件保留)`,
-      confirmText: '移入回收站',
-    }))) return
-    await runSeriesTool('delete', '整剧移入回收站', (media) => recycleAPI.softDelete(media.id))
+    const result = await confirmActionResult({
+      title: '删除整剧',
+      message: `确定从媒体库删除「${seriesTitle(selectedSeries.rep)}」的 ${selectedSeriesEpisodes.length} 个媒体？\n默认仅移除索引记录，磁盘文件会保留。`,
+      confirmText: '删除',
+      checkboxLabel: '同时删除本地文件（含同名 NFO）',
+    })
+    if (!result.confirmed) return
+    await runSeriesTool('delete', '整剧删除', (media) => mediaAPI.delete(media.id, { deleteFiles: result.checked }))
     clearSelectedSeries()
   }
 
@@ -166,16 +169,18 @@ export function useLibraryAdminActions({
   }
 
   const handleMovieNFO = (media: Media) => {
-    runMovieTool(media, 'nfo', 'NFO 写出', (item) => recycleAPI.exportNFO(item.id))
+    runMovieTool(media, 'nfo', 'NFO 写出', (item) => mediaAPI.exportNFO(item.id))
   }
 
-  const handleMovieSoftDelete = async (media: Media) => {
-    if (!(await confirmAction({
-      title: '移入回收站',
-      message: `将「${media.title}」移至回收站? (磁盘文件保留)`,
-      confirmText: '移入回收站',
-    }))) return
-    await runMovieTool(media, 'delete', '移入回收站', (item) => recycleAPI.softDelete(item.id))
+  const handleMovieDelete = async (media: Media) => {
+    const result = await confirmActionResult({
+      title: '删除媒体',
+      message: `确定从媒体库删除「${media.title}」？\n默认仅移除索引记录，磁盘文件会保留。`,
+      confirmText: '删除',
+      checkboxLabel: '同时删除本地文件（含同名 NFO）',
+    })
+    if (!result.confirmed) return
+    await runMovieTool(media, 'delete', '删除', (item) => mediaAPI.delete(item.id, { deleteFiles: result.checked }))
   }
 
   const movieActions = (media: Media): ReactNode => {
@@ -188,7 +193,7 @@ export function useLibraryAdminActions({
         onManualScrape={setManualMovie}
         onProbe={handleMovieProbe}
         onNFO={handleMovieNFO}
-        onSoftDelete={handleMovieSoftDelete}
+        onDelete={handleMovieDelete}
       />
     )
   }
@@ -205,7 +210,7 @@ export function useLibraryAdminActions({
     handleSeriesProbe,
     handleSeriesNFO,
     handleSeriesOrganize,
-    handleSeriesSoftDelete,
+    handleSeriesDelete,
     movieActions,
   }
 }

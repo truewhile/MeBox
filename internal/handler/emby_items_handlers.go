@@ -13,13 +13,7 @@ import (
 func parseEmbyItemsParams(c *gin.Context) service.ItemsParams {
 	limit, _ := strconv.Atoi(embyFirstNonEmptyString(firstQueryValue(c, "Limit", "limit"), "50"))
 	offset, _ := strconv.Atoi(embyFirstNonEmptyString(firstQueryValue(c, "StartIndex", "startIndex", "startindex"), "0"))
-	uid := c.Param("userId")
-	if uid == "" {
-		uid = firstQueryValue(c, "UserId", "userId", "userid")
-	}
-	if uid == "" {
-		uid = embyUserID(c)
-	}
+	uid := embyEffectiveUserID(c)
 	splitOpt := func(s string) []string {
 		if s == "" {
 			return nil
@@ -46,7 +40,26 @@ func parseEmbyItemsParams(c *gin.Context) service.ItemsParams {
 		SortOrder:        firstQueryValue(c, "SortOrder", "sortOrder", "sortorder"),
 		Limit:            limit,
 		StartIndex:       offset,
+		SeasonIndex:      parseEmbySeasonIndexQuery(c),
 	}
+}
+
+// parseEmbySeasonIndexQuery 读取客户端请求的季序号。
+//
+// Emby 客户端有两种表达方式：SeasonId（虚拟季 ID）与 Season / SeasonIndex
+// （季序号，特别篇为 0）。两者都是合法入参，SeasonId 更精确。这里只解析季序号，
+// 返回 nil 表示客户端没有按季过滤（区别于 Season=0 的特别篇）。
+func parseEmbySeasonIndexQuery(c *gin.Context) *int {
+	raw := firstQueryValue(c, "Season", "season", "SeasonIndex", "seasonIndex", "seasonindex")
+	if raw == "" {
+		return nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		// 客户端偶尔传入季名称之类的非数字值；按「未过滤」处理，避免整季空结果。
+		return nil
+	}
+	return &value
 }
 
 func embyFirstNonEmptyString(values ...string) string {
@@ -73,10 +86,7 @@ func embyItemsHandler(svc *service.Container) gin.HandlerFunc {
 func embyItemByIDHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
-		uid := c.Param("userId")
-		if uid == "" {
-			uid = embyUserID(c)
-		}
+		uid := embyEffectiveUserID(c)
 		out, err := svc.Emby.Item(c.Request.Context(), id, uid)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -106,13 +116,7 @@ func embyUserItemByIDHandler(svc *service.Container) gin.HandlerFunc {
 
 func embyLatestItemsHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		uid := c.Param("userId")
-		if uid == "" {
-			uid = firstQueryValue(c, "UserId", "userId", "userid")
-		}
-		if uid == "" {
-			uid = embyUserID(c)
-		}
+		uid := embyEffectiveUserID(c)
 		limit, _ := strconv.Atoi(embyFirstNonEmptyString(firstQueryValue(c, "Limit", "limit"), "20"))
 		out, err := svc.Emby.LatestItems(c.Request.Context(), uid, firstQueryValue(c, "ParentId", "parentId", "parentid"), limit)
 		if err != nil {
@@ -126,15 +130,12 @@ func embyLatestItemsHandler(svc *service.Container) gin.HandlerFunc {
 
 func embyResumeItemsHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		uid := c.Param("userId")
-		if uid == "" {
-			uid = firstQueryValue(c, "UserId", "userId", "userid")
-		}
-		if uid == "" {
-			uid = embyUserID(c)
-		}
+		uid := embyEffectiveUserID(c)
 		limit, _ := strconv.Atoi(embyFirstNonEmptyString(firstQueryValue(c, "Limit", "limit"), "20"))
-		out, err := svc.Emby.ResumeItems(c.Request.Context(), uid, limit)
+		startIndex, _ := strconv.Atoi(embyFirstNonEmptyString(firstQueryValue(c, "StartIndex", "startIndex", "startindex"), "0"))
+		// ParentId / SeriesId 收窄到当前库或当前剧，避免详情页继续播放串到全站历史。
+		parentID := firstQueryValue(c, "ParentId", "parentId", "parentid", "SeriesId", "seriesId", "seriesid")
+		out, err := svc.Emby.ResumeItems(c.Request.Context(), uid, parentID, limit, startIndex)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -147,13 +148,7 @@ func embyResumeItemsHandler(svc *service.Container) gin.HandlerFunc {
 func embyItemsCountsHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if svc != nil && svc.Emby != nil {
-			uid := firstQueryValue(c, "UserId", "userId")
-			if uid == "" {
-				uid = c.Param("userId")
-			}
-			if uid == "" {
-				uid = embyUserID(c)
-			}
+			uid := embyEffectiveUserID(c)
 			out, err := svc.Emby.ItemCounts(c.Request.Context(), uid)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -209,7 +204,7 @@ func embySaveDisplayPreferencesHandler(_ *service.Container) gin.HandlerFunc {
 func embyShowSeasonsHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		params := service.ItemsParams{
-			UserID:   firstQueryValue(c, "UserId", "userId"),
+			UserID:   embyEffectiveUserID(c),
 			ParentID: c.Param("id"),
 			Limit:    500,
 		}
@@ -226,15 +221,35 @@ func embyShowSeasonsHandler(svc *service.Container) gin.HandlerFunc {
 func embyShowEpisodesHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		parentID := firstQueryValue(c, "SeasonId", "seasonId")
+		// 客户端常用季序号而不是虚拟季 ID 请求剧集。缺了这层过滤，
+		// /Shows/{id}/Episodes?Season=2 会把整部剧的所有季都返回。
+		seasonIndex := parseEmbySeasonIndexQuery(c)
 		if parentID == "" {
 			parentID = c.Param("id")
+		} else {
+			// SeasonId 已经限定了具体季，忽略同时传来的季序号，避免两者
+			// 不一致时把结果过滤成空集。
+			seasonIndex = nil
+		}
+		// Emby 客户端按 StartIndex/Limit 分页拉取分集，并在已收条目数小于
+		// TotalRecordCount 时继续请求下一页。忽略这两个参数会让客户端永远
+		// 停在第一页、反复重发同一请求（现象是分集列表一直加载不出来）。
+		limit, _ := strconv.Atoi(embyFirstNonEmptyString(firstQueryValue(c, "Limit", "limit"), "500"))
+		if limit <= 0 {
+			limit = 500
+		}
+		startIndex, _ := strconv.Atoi(embyFirstNonEmptyString(firstQueryValue(c, "StartIndex", "startIndex", "startindex"), "0"))
+		if startIndex < 0 {
+			startIndex = 0
 		}
 		params := service.ItemsParams{
-			UserID:           firstQueryValue(c, "UserId", "userId"),
+			UserID:           embyEffectiveUserID(c),
 			ParentID:         parentID,
 			IncludeItemTypes: []string{"Episode"},
 			Recursive:        true,
-			Limit:            500,
+			Limit:            limit,
+			StartIndex:       startIndex,
+			SeasonIndex:      seasonIndex,
 		}
 		out, err := svc.Emby.Items(c.Request.Context(), params)
 		if err != nil {

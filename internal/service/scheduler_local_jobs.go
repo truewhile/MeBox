@@ -8,9 +8,6 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-	"gorm.io/gorm"
-
-	"github.com/truewhile/MeBox/internal/model"
 )
 
 // jobScanLibraries re-walks every enabled library.
@@ -172,6 +169,14 @@ func (s *SchedulerService) organizeSourceInterval(ctx context.Context) time.Dura
 	return time.Duration(seconds) * time.Second
 }
 
+// jobTelegramExpiryWarning 每日巡检即将到期的账号并提醒用户。
+func (s *SchedulerService) jobTelegramExpiryWarning(ctx context.Context) error {
+	if s.expiryWatcher == nil {
+		return nil
+	}
+	return s.expiryWatcher.RunOnce(ctx)
+}
+
 // jobCleanTranscodeCache deletes HLS artefacts older than 24h.
 func (s *SchedulerService) jobCleanTranscodeCache(ctx context.Context) error {
 	if s.cacheDir == "" {
@@ -181,41 +186,19 @@ func (s *SchedulerService) jobCleanTranscodeCache(ctx context.Context) error {
 	return walkAndPrune(s.cacheDir+"/hls", cutoff)
 }
 
-// jobPurgeRecycleBin permanently deletes media rows soft-deleted >30 days
-// ago. The on-disk file is left untouched (delete is operator-driven).
-func (s *SchedulerService) jobPurgeRecycleBin(ctx context.Context) error {
-	cutoff := time.Now().Add(-30 * 24 * time.Hour)
-	res := s.repo.DB.WithContext(ctx).
-		Unscoped().
-		Where("deleted_at IS NOT NULL AND deleted_at < ?", cutoff).
-		Delete(&model.Media{})
-	if res.Error != nil && !isMissingTableErr(res.Error) {
-		return res.Error
-	}
-	return pruneRecycleBinRows(ctx, s.repo.DB, maxRecycleBinRecords)
-}
-
-// isMissingTableErr lets the test harness ignore "no such table" errors
-// that show up before AutoMigrate has run.
-func isMissingTableErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	return err == gorm.ErrInvalidDB
-}
-
-// jobCleanImageCache prunes image proxy cache files when disk usage exceeds the configured limit.
+// jobCleanImageCache prunes the image proxy cache: 原图按保留时长与独立配额
+// 优先淘汰，总量超限时再淘汰派生成品。
 func (s *SchedulerService) jobCleanImageCache(ctx context.Context) error {
 	if s.cacheDir == "" {
 		return nil
 	}
-	maxMB := s.imagesMaxSizeMB()
-	if maxMB <= 0 {
+	policy := s.imageCachePolicy()
+	if policy.TotalBytes <= 0 && policy.OriginalsBytes <= 0 && policy.OriginalsAge <= 0 {
 		return nil
 	}
 	imagesDir := filepath.Join(s.cacheDir, "images")
-	maxSizeBytes := int64(maxMB) * 1024 * 1024
-	res, err := PruneImageCache(imagesDir, maxSizeBytes)
+	pools := ImageCachePools(imagesDir, policy.OriginalsBytes, policy.OriginalsAge)
+	res, err := PruneImageCachePools(pools, policy.TotalBytes)
 	if err != nil {
 		if s.log != nil {
 			s.log.Warn("scheduled image cache cleanup failed", zap.Error(err))

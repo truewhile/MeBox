@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { Media, Playlist } from '../types'
+import type { Media, PlaybackSegmentsResponse, Playlist } from '../types'
 
 // History rows arrive joined with their Media row; the backend returns null
 // for orphaned rows whose media has been removed.
@@ -27,6 +27,15 @@ export interface ExternalPlayer {
   url: string
 }
 
+export interface PlaybackProgressRequest {
+  media_id: string
+  position_ms: number
+  duration_ms: number
+  session_id?: string
+  session_started_at_ms?: number
+  sequence?: number
+}
+
 function publicOriginHeader() {
   if (typeof window === 'undefined' || !window.location?.origin) return undefined
   return { 'X-MeBox-Public-Origin': window.location.origin }
@@ -38,14 +47,15 @@ export const playbackAPI = {
       .get<{ position_ms: number; duration_ms: number; completed: boolean }>(`/playback/${mediaId}/resume`)
       .then((r) => r.data),
 
-  recordProgress: (mediaId: string, positionMs: number, durationMs: number) =>
+  // 片头/片尾片段：播放开始后再调用，服务端可能需要几秒去外部数据库取数，
+  // 因此绝不能让它挡在起播路径上。
+  segments: (mediaId: string) =>
     api
-      .post('/history', {
-        media_id: mediaId,
-        position_ms: positionMs,
-        duration_ms: durationMs,
-      })
+      .get<PlaybackSegmentsResponse>(`/playback/${encodeURIComponent(mediaId)}/segments`)
       .then((r) => r.data),
+
+  recordProgress: (payload: PlaybackProgressRequest) =>
+    api.post('/history', payload).then((r) => r.data),
 
   recentHistory: () =>
     api.get<{ items: HistoryItem[] }>('/history').then((r) => r.data.items),
@@ -57,6 +67,14 @@ export const playbackAPI = {
 
   listFavourites: () =>
     api.get<{ items: Media[] }>('/favourites').then((r) => r.data.items),
+
+  listFavouriteIDs: () =>
+    api.get<{ ids: string[] }>('/favourites', { params: { ids: 1 } }).then((r) => r.data.ids ?? []),
+
+  favouriteStatus: (mediaId: string) =>
+    api
+      .get<{ favourite: boolean }>(`/media/${encodeURIComponent(mediaId)}/favorite/status`)
+      .then((r) => r.data.favourite),
 
   listPlaylists: () =>
     api.get<{ items: Playlist[] }>('/playlists').then((r) => r.data.items),

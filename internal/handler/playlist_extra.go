@@ -27,6 +27,9 @@ func reorderPlaylistHandler(svc *service.Container) gin.HandlerFunc {
 			return
 		}
 		pid := c.Param("id")
+		if _, _, ok := playlistWriteGuard(c, svc, pid); !ok {
+			return
+		}
 		for i, mid := range req.Order {
 			if err := svc.Repo.DB.WithContext(c.Request.Context()).
 				Model(&model.PlaylistItem{}).
@@ -44,8 +47,12 @@ func reorderPlaylistHandler(svc *service.Container) gin.HandlerFunc {
 // /playlists/:id/items/:item_id (vs. the existing /:media_id variant).
 func deletePlaylistItemByIDHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		pid := c.Param("id")
+		if _, _, ok := playlistWriteGuard(c, svc, pid); !ok {
+			return
+		}
 		if err := svc.Repo.DB.WithContext(c.Request.Context()).
-			Where("playlist_id = ? AND id = ?", c.Param("id"), c.Param("item_id")).
+			Where("playlist_id = ? AND id = ?", pid, c.Param("item_id")).
 			Delete(&model.PlaylistItem{}).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

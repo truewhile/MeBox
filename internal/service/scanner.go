@@ -170,9 +170,12 @@ type existingLocalMedia struct {
 	TheTVDBID     string
 	SeasonNum     int
 	EpisodeNum    int
-	Genres        string
-	Countries     string
-	Languages     string
-	NSFW          bool
-	ScrapeStatus  string
+	// EpisodeFraction 是集号的小数部分（S01E11.5 → 0.5）；变化同样要触发刷新，
+	// 否则已有行上的「半集」标记不会被写回。
+	EpisodeFraction float64
+	Genres          string
+	Countries       string
+	Languages       string
+	NSFW            bool
+	ScrapeStatus    string
 }

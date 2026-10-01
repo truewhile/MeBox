@@ -1,6 +1,7 @@
 package service
 
 import (
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -24,6 +25,14 @@ type ScraperService struct {
 	hub     *Hub
 	cache   *RuntimeCacheService
 	images  *ImageProxy
+
+	// Caches provider-chain results keyed by media kind/query/year. Per-instance
+	// so services with different provider config never share results.
+	lookupCache *scrapeLookupCache
+
+	// Serializes final sidecar replacement. Windows cannot rename over an
+	// existing file, and concurrent scrapes can target the same sidecar.
+	artworkWriteMu sync.Mutex
 }
 
 // NewScraperService is the constructor.
@@ -45,6 +54,7 @@ func NewScraperService(
 	return &ScraperService{
 		cfg: cfg, log: log, repo: repo,
 		tmdb: tmdb, bangumi: bangumi, thetvdb: thetvdb, fanart: fanart, adult: adultProvider, hub: hub,
+		lookupCache: newScrapeLookupCache(),
 	}
 }
 

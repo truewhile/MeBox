@@ -262,7 +262,10 @@ func (c *OpenClient) Upload(ctx context.Context, filePath, parentCID, signKey, s
 	}
 	switch status {
 	case UploadInitStatusRapidUploaded:
-		// 秒传成功
+		// 秒传成功：必须带远端文件定位信息，否则视为异常响应
+		if initResult.FileId == "" || initResult.PickCode == "" {
+			return nil, fmt.Errorf("115: 秒传成功但缺少 file_id/pick_code（status=%d）", status)
+		}
 		return &UploadCompleteResult{FileId: initResult.FileId, PickCode: initResult.PickCode}, nil
 	case UploadInitStatusSignFailed:
 		return nil, fmt.Errorf("115: 签名验证后失败")
@@ -271,7 +274,8 @@ func (c *OpenClient) Upload(ctx context.Context, filePath, parentCID, signKey, s
 	case UploadInitStatusNeedUpload:
 		// 真实上传：OSS multipart
 	default:
-		return &UploadCompleteResult{FileId: initResult.FileId, PickCode: initResult.PickCode}, nil
+		// 未知状态不能当成功返回（会静默丢文件），显式报错便于排查
+		return nil, fmt.Errorf("115: 未知的 upload/init 状态 %d", status)
 	}
 
 	if initResult.Bucket == "" || initResult.Object == "" {

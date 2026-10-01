@@ -9,17 +9,30 @@ import (
 )
 
 // WaitReady blocks (with a deadline) until the playlist file shows up on
-// disk. Returns true on success.
+// disk for the *current* job generation. Stale playlists left behind by a
+// failed RemoveAll / still-exiting ffmpeg must not unblock a mid-file restart.
 func (t *TranscoderService) WaitReady(ctx context.Context, mediaID string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for {
-		if _, err := os.Stat(t.PlaylistPath(mediaID)); err == nil {
-			t.mu.Lock()
-			if j, ok := t.jobs[mediaID]; ok {
-				j.playlistOK = true
+		t.mu.Lock()
+		job, ok := t.jobs[mediaID]
+		var started time.Time
+		if ok {
+			started = job.startedAt
+		}
+		t.mu.Unlock()
+		if ok {
+			if info, err := os.Stat(t.PlaylistPath(mediaID)); err == nil {
+				// Allow a small clock skew; reject anything older than this job.
+				if !info.ModTime().Before(started.Add(-2 * time.Second)) {
+					t.mu.Lock()
+					if j, exists := t.jobs[mediaID]; exists {
+						j.playlistOK = true
+					}
+					t.mu.Unlock()
+					return true
+				}
 			}
-			t.mu.Unlock()
-			return true
 		}
 		if time.Now().After(deadline) || ctx.Err() != nil {
 			return false
@@ -32,14 +45,18 @@ func (t *TranscoderService) WaitReady(ctx context.Context, mediaID string, timeo
 	}
 }
 
-// StopJob cancels a running ffmpeg process for mediaID, if any.
+// StopJob cancels a running ffmpeg process for mediaID, if any, and waits
+// briefly for it to exit so a subsequent EnsureJobFrom cannot race-write the
+// same HLS directory.
 func (t *TranscoderService) StopJob(mediaID string) {
+	gate := t.mediaStartGate(mediaID)
+	gate.Lock()
+	defer gate.Unlock()
+
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	if j, ok := t.jobs[mediaID]; ok {
-		j.cancel()
-		delete(t.jobs, mediaID)
-	}
+	prev := t.detachJobLocked(mediaID)
+	t.mu.Unlock()
+	waitJobExit(prev, 12*time.Second)
 }
 
 // TouchJob records client activity for the HLS playlist or segment. The idle
@@ -60,10 +77,13 @@ func (t *TranscoderService) touchJobLocked(mediaID string) {
 // StopAll terminates every running transcode (called on graceful shutdown).
 func (t *TranscoderService) StopAll() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	for id, j := range t.jobs {
-		j.cancel()
-		delete(t.jobs, id)
+	pending := make([]*hlsJob, 0, len(t.jobs))
+	for id := range t.jobs {
+		pending = append(pending, t.detachJobLocked(id))
+	}
+	t.mu.Unlock()
+	for _, j := range pending {
+		waitJobExit(j, 5*time.Second)
 	}
 }
 

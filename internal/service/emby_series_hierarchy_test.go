@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -156,6 +157,12 @@ func TestEmbySeriesGroupingPaginatesAfterFullLibraryGrouping(t *testing.T) {
 	}
 }
 
+func TestEmbyLatestSeriesRowLimitCoversGroupedFixture(t *testing.T) {
+	if got := embyLatestSeriesRowLimit(25); got < 25*40 {
+		t.Fatalf("latest window %d is smaller than the 25x40 fixture", got)
+	}
+}
+
 func TestEmbyItemsKeepSpecialsInSeasonZero(t *testing.T) {
 	svc := newTestEmbyService(t)
 	lib := model.Library{Name: "番剧", Path: `F:\downloads\日番`, Type: "anime", Enabled: true}
@@ -209,6 +216,147 @@ func TestEmbyItemsKeepSpecialsInSeasonZero(t *testing.T) {
 	}
 }
 
+func TestEmbySeparatesOVAAndOADFromSeasonOne(t *testing.T) {
+	svc := newTestEmbyService(t)
+	lib := model.Library{Name: "动漫", Path: `/media/影视库/动漫`, Type: "anime", Enabled: true}
+	if err := svc.repo.Library.Create(t.Context(), &lib); err != nil {
+		t.Fatalf("create library: %v", err)
+	}
+	for _, media := range []model.Media{
+		{
+			Base:       model.Base{ID: "tolove-s01e01"},
+			LibraryID:  lib.ID,
+			Title:      "出包王女",
+			Path:       `/media/影视库/动漫/出包王女/S01/To LOVE-Ru S01E01.mkv.strm`,
+			SeasonNum:  1,
+			EpisodeNum: 1,
+		},
+		{
+			Base:       model.Base{ID: "tolove-ova01"},
+			LibraryID:  lib.ID,
+			Title:      "出包王女",
+			Path:       `/media/影视库/动漫/出包王女/S01/To LOVE-Ru [OVA01].mkv.strm`,
+			SeasonNum:  0,
+			EpisodeNum: 1,
+		},
+		{
+			Base:       model.Base{ID: "tolove-oad01"},
+			LibraryID:  lib.ID,
+			Title:      "出包王女",
+			Path:       `/media/影视库/动漫/出包王女/OAD/To LOVE-Ru Darkness [OAD01].mkv.strm`,
+			SeasonNum:  -1,
+			EpisodeNum: 1,
+		},
+	} {
+		if err := svc.repo.DB.Create(&media).Error; err != nil {
+			t.Fatalf("create media: %v", err)
+		}
+	}
+
+	root, err := svc.Items(t.Context(), ItemsParams{ParentID: lib.ID, Limit: 50})
+	if err != nil {
+		t.Fatalf("library items: %v", err)
+	}
+	rootItems := root["Items"].([]map[string]any)
+	if len(rootItems) != 1 || rootItems[0]["Type"] != "Series" {
+		t.Fatalf("expected one series card, got %#v", rootItems)
+	}
+	if rootItems[0]["ChildCount"] != 3 {
+		t.Fatalf("series ChildCount = %#v, want 3", rootItems[0]["ChildCount"])
+	}
+
+	seasons, err := svc.Items(t.Context(), ItemsParams{ParentID: rootItems[0]["Id"].(string), Limit: 50})
+	if err != nil {
+		t.Fatalf("series seasons: %v", err)
+	}
+	seasonItems := seasons["Items"].([]map[string]any)
+	if len(seasonItems) != 3 {
+		t.Fatalf("expected season 1, OVA and OAD separately, got %#v", seasonItems)
+	}
+	for i, want := range []int{1, embySeasonOVA, embySeasonOAD} {
+		if seasonItems[i]["IndexNumber"] != want {
+			t.Fatalf("season order [%d] = %#v, want %d", i, seasonItems[i], want)
+		}
+	}
+
+	seasonByIndex := make(map[int]map[string]any, len(seasonItems))
+	for _, season := range seasonItems {
+		index, ok := season["IndexNumber"].(int)
+		if !ok {
+			t.Fatalf("season index has unexpected type: %#v", season)
+		}
+		seasonByIndex[index] = season
+	}
+	for index, name := range map[int]string{
+		1:             "第 1 季",
+		embySeasonOVA: "OVA",
+		embySeasonOAD: "OAD",
+	} {
+		season := seasonByIndex[index]
+		if season == nil || season["Name"] != name || season["ChildCount"] != 1 {
+			t.Fatalf("season %d = %#v, want name=%q with one episode", index, season, name)
+		}
+		episodes, err := svc.Items(t.Context(), ItemsParams{
+			ParentID:         season["Id"].(string),
+			IncludeItemTypes: []string{"Episode"},
+			Recursive:        true,
+			Limit:            50,
+		})
+		if err != nil {
+			t.Fatalf("season %d episodes: %v", index, err)
+		}
+		episodeItems := episodes["Items"].([]map[string]any)
+		if len(episodeItems) != 1 || episodeItems[0]["ParentIndexNumber"] != index {
+			t.Fatalf("season %d episodes = %#v", index, episodeItems)
+		}
+	}
+}
+
+func TestEmbySeasonSortOrderMatchesWeb(t *testing.T) {
+	seasons := []int{
+		embySeasonNCED,
+		embySeasonOAD,
+		2,
+		embySeasonTheatrical,
+		1,
+		embySeasonGenericSpecial,
+		embySeasonOVA,
+	}
+	sort.SliceStable(seasons, func(i, j int) bool {
+		return embySeasonSortOrder(seasons[i]) < embySeasonSortOrder(seasons[j])
+	})
+	want := []int{
+		1,
+		2,
+		embySeasonGenericSpecial,
+		embySeasonTheatrical,
+		embySeasonOVA,
+		embySeasonOAD,
+		embySeasonNCED,
+	}
+	for i := range want {
+		if seasons[i] != want[i] {
+			t.Fatalf("season order = %#v, want %#v", seasons, want)
+		}
+	}
+}
+
+func TestEmbySeasonCandidatesCoverPersistedSpecialNumbers(t *testing.T) {
+	for _, persisted := range []int{0, -1} {
+		candidates := embySeasonCandidates(persisted)
+		found := map[int]bool{}
+		for _, seasonNum := range candidates {
+			found[seasonNum] = true
+		}
+		if !found[embySeasonOVA] || !found[embySeasonOAD] {
+			t.Fatalf("candidates for persisted season %d = %#v, want OVA and OAD", persisted, candidates)
+		}
+	}
+	if candidates := embySeasonCandidates(2); len(candidates) != 1 || candidates[0] != 2 {
+		t.Fatalf("regular season candidates = %#v, want [2]", candidates)
+	}
+}
+
 func TestEmbyEpisodeStillIsPrimaryImageNotArt(t *testing.T) {
 	svc := newTestEmbyService(t)
 	lib := model.Library{Name: "剧集", Path: `/media/tv`, Type: "tv", Enabled: true}
@@ -229,7 +377,7 @@ func TestEmbyEpisodeStillIsPrimaryImageNotArt(t *testing.T) {
 		t.Fatalf("create media: %v", err)
 	}
 
-	item := svc.itemPayload(t.Context(), &media, false, 0)
+	item := svc.itemPayload(t.Context(), &media, false, 0, false)
 	if tags, ok := item["ImageTags"].(map[string]string); !ok || tags["Primary"] != "ep-still" {
 		t.Fatalf("episode should expose a primary image tag: %#v", item["ImageTags"])
 	}
@@ -293,6 +441,71 @@ func TestEmbyVirtualSeriesArtworkUsesListCache(t *testing.T) {
 	}
 	if backdrop != "/backdrop.jpg" {
 		t.Fatalf("backdrop = %q, want cached backdrop", backdrop)
+	}
+}
+
+func TestEmbyVirtualSeriesArtworkRebuildsAfterMemoryDrop(t *testing.T) {
+	svc := newTestEmbyService(t)
+	svc.cache = NewRuntimeCacheService(nil, nil)
+	lib := model.Library{Name: "番剧", Path: `/media/anime`, Type: "anime", Enabled: true}
+	if err := svc.repo.Library.Create(t.Context(), &lib); err != nil {
+		t.Fatalf("create library: %v", err)
+	}
+	media := model.Media{
+		Base:        model.Base{ID: "ep-hero"},
+		LibraryID:   lib.ID,
+		Title:       "树海之魔",
+		Path:        `/media/anime/树海之魔/Season 01/树海之魔 - S01E01.mkv`,
+		PosterURL:   `/poster.jpg`,
+		BackdropURL: `/backdrop.jpg`,
+		SeasonNum:   1,
+		EpisodeNum:  1,
+	}
+	if err := svc.repo.DB.Create(&media).Error; err != nil {
+		t.Fatalf("create media: %v", err)
+	}
+
+	items, err := svc.LatestItems(t.Context(), "", lib.ID, 5)
+	if err != nil {
+		t.Fatalf("latest items: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("latest len = %d, want 1", len(items))
+	}
+	seriesID, _ := items[0]["Id"].(string)
+	tags, _ := items[0]["BackdropImageTags"].([]string)
+	if seriesID == "" || len(tags) != 1 || tags[0] != seriesID+embyVirtualBackdropTagSuffix {
+		t.Fatalf("hero item should advertise a cache-busted backdrop tag, got id=%q tags=%#v", seriesID, items[0]["BackdropImageTags"])
+	}
+
+	svc.virtualMu.Lock()
+	svc.virtualArtwork = nil
+	svc.virtualSeries = nil
+	svc.virtualSeasons = nil
+	svc.virtualMu.Unlock()
+
+	backdrop, err := svc.ImageURL(t.Context(), seriesID, "Backdrop")
+	if err != nil {
+		t.Fatalf("backdrop after memory drop: %v", err)
+	}
+	if backdrop != "/backdrop.jpg" {
+		t.Fatalf("backdrop = %q, want rebuilt backdrop", backdrop)
+	}
+
+	svc.virtualMu.Lock()
+	svc.virtualArtwork = nil
+	svc.virtualMu.Unlock()
+	if _, err := svc.LatestItems(t.Context(), "", lib.ID, 5); err != nil {
+		t.Fatalf("cached latest: %v", err)
+	}
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	backdrop, err = svc.ImageURL(cancelled, seriesID, "Backdrop")
+	if err != nil {
+		t.Fatalf("backdrop from rewarmed cache: %v", err)
+	}
+	if backdrop != "/backdrop.jpg" {
+		t.Fatalf("rewarmed backdrop = %q, want cached backdrop", backdrop)
 	}
 }
 
@@ -434,5 +647,124 @@ func TestInferSeriesNameFromPath(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("inferSeriesNameFromPath(%q) = %q, want %q", tc.path, got, tc.want)
 		}
+	}
+}
+
+func TestEmbySeriesSortByDateLastMediaAdded(t *testing.T) {
+	svc := newTestEmbyService(t)
+	lib := model.Library{Name: "测试剧库", Path: `/media/tv`, Type: "tv", Enabled: true}
+	if err := svc.repo.Library.Create(t.Context(), &lib); err != nil {
+		t.Fatalf("create library: %v", err)
+	}
+	t0 := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	tOld := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
+	tNew := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+
+	// Series A: 较早创建，但最近添加了新一集 (Last episode at tNew)
+	// Series B: 较晚创建，但最后一集在 tOld
+	rows := []model.Media{
+		{
+			Base:       model.Base{ID: "showA-ep01", CreatedAt: t0, UpdatedAt: t0},
+			LibraryID:  lib.ID,
+			Title:      "剧集A",
+			Path:       `/media/tv/剧集A/Season 01/剧集A.S01E01.mkv`,
+			SeasonNum:  1,
+			EpisodeNum: 1,
+		},
+		{
+			Base:       model.Base{ID: "showA-ep02", CreatedAt: tNew, UpdatedAt: tNew},
+			LibraryID:  lib.ID,
+			Title:      "剧集A",
+			Path:       `/media/tv/剧集A/Season 01/剧集A.S01E02.mkv`,
+			SeasonNum:  1,
+			EpisodeNum: 2,
+		},
+		{
+			Base:       model.Base{ID: "showB-ep01", CreatedAt: tOld.Add(-24 * time.Hour), UpdatedAt: tOld.Add(-24 * time.Hour)},
+			LibraryID:  lib.ID,
+			Title:      "剧集B",
+			Path:       `/media/tv/剧集B/Season 01/剧集B.S01E01.mkv`,
+			SeasonNum:  1,
+			EpisodeNum: 1,
+		},
+		{
+			Base:       model.Base{ID: "showB-ep02", CreatedAt: tOld, UpdatedAt: tOld},
+			LibraryID:  lib.ID,
+			Title:      "剧集B",
+			Path:       `/media/tv/剧集B/Season 01/剧集B.S01E02.mkv`,
+			SeasonNum:  1,
+			EpisodeNum: 2,
+		},
+	}
+	for _, m := range rows {
+		if err := svc.repo.DB.Create(&m).Error; err != nil {
+			t.Fatalf("create media: %v", err)
+		}
+	}
+
+	// 降序排序：剧集A最后一集在 tNew，剧集B最后一集在 tOld，剧集A应排在第一位
+	res, err := svc.Items(t.Context(), ItemsParams{
+		ParentID:  lib.ID,
+		SortBy:    "DateLastMediaAdded",
+		SortOrder: "Descending",
+		Limit:     10,
+	})
+	if err != nil {
+		t.Fatalf("items DateLastMediaAdded: %v", err)
+	}
+	items := res["Items"].([]map[string]any)
+	if len(items) != 2 {
+		t.Fatalf("items count = %d, want 2", len(items))
+	}
+	if items[0]["Name"] != "剧集A" {
+		t.Fatalf("first item = %v, want 剧集A (last episode at tNew)", items[0]["Name"])
+	}
+	if items[1]["Name"] != "剧集B" {
+		t.Fatalf("second item = %v, want 剧集B", items[1]["Name"])
+	}
+	if items[0]["DateLastMediaAdded"] != tNew {
+		t.Fatalf("DateLastMediaAdded = %v, want %v", items[0]["DateLastMediaAdded"], tNew)
+	}
+}
+
+func TestEmbySeriesLibraryListUsesRuntimeCache(t *testing.T) {
+	svc := newTestEmbyService(t)
+	svc.cache = NewRuntimeCacheService(nil, nil)
+	lib := model.Library{Name: "番剧", Path: `/media/anime`, Type: "anime", Enabled: true}
+	if err := svc.repo.Library.Create(t.Context(), &lib); err != nil {
+		t.Fatalf("create library: %v", err)
+	}
+	for i := 1; i <= 2; i++ {
+		media := model.Media{
+			Base:       model.Base{ID: fmt.Sprintf("cache-ep-%d", i)},
+			LibraryID:  lib.ID,
+			Title:      "缓存测试番",
+			Path:       fmt.Sprintf(`/media/anime/缓存测试番/Season 01/缓存测试番.S01E%02d.mkv`, i),
+			SeasonNum:  1,
+			EpisodeNum: i,
+		}
+		if err := svc.repo.DB.Create(&media).Error; err != nil {
+			t.Fatalf("create media: %v", err)
+		}
+	}
+
+	first, err := svc.Items(t.Context(), ItemsParams{ParentID: lib.ID, Limit: 20})
+	if err != nil {
+		t.Fatalf("first items call: %v", err)
+	}
+	if first["TotalRecordCount"] != 1 {
+		t.Fatalf("first series total = %#v, want 1", first["TotalRecordCount"])
+	}
+	if err := svc.repo.DB.Unscoped().Where("library_id = ?", lib.ID).Delete(&model.Media{}).Error; err != nil {
+		t.Fatalf("delete media: %v", err)
+	}
+
+	second, err := svc.Items(t.Context(), ItemsParams{ParentID: lib.ID, Limit: 20})
+	if err != nil {
+		t.Fatalf("second items call: %v", err)
+	}
+	items, _ := second["Items"].([]map[string]any)
+	if second["TotalRecordCount"] != 1 || len(items) != 1 {
+		t.Fatalf("cached series list = %#v, want the first response", second)
 	}
 }

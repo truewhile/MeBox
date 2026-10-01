@@ -1,6 +1,18 @@
 import { api, BATCH_REQUEST_TIMEOUT, LONG_REQUEST_TIMEOUT } from './client'
-import type { Library, LibraryRoot, Media, ScanResult } from '../types'
+import type { Library, LibraryRoot, Media, PlaybackInfo, ScanResult } from '../types'
 import type { SeriesCard } from '../utils/groupSeries'
+import {
+  EMPTY_LIBRARY_FILTERS,
+  toFilterQuery,
+  type LibraryFilterParams,
+} from '../utils/libraryFilters'
+
+/** 媒体库筛选面板的可选项。 */
+export interface LibraryFacets {
+  genres: Array<{ name: string; count: number }>
+  year_min: number
+  year_max: number
+}
 
 export interface MediaPage {
   items: Media[]
@@ -71,6 +83,8 @@ export interface MediaMetadataUpdate {
   rating?: number
   season_num?: number
   episode_num?: number
+  /** 集号的小数部分（11.5 的 0.5）；与 episode_num 一起构成显示集号。 */
+  episode_fraction?: number
   tmdb_id?: number
   bangumi_id?: number
   douban_id?: string
@@ -87,16 +101,31 @@ export interface LibraryWithPreview extends Library {
 }
 
 export const libraryAPI = {
-  list: (options?: { includeHidden?: boolean; withPreview?: boolean; previewLimit?: number }) =>
+  list: (options?: { includeHidden?: boolean; withPreview?: boolean; previewLimit?: number; ids?: string[] }) =>
     api
       .get<LibraryWithPreview[]>('/libraries', {
         params: {
           ...(options?.includeHidden ? { include_hidden: 1 } : {}),
           ...(options?.withPreview ? { with_preview: 1 } : {}),
           ...(options?.previewLimit ? { preview_limit: options.previewLimit } : {}),
+          ...(options?.ids && options.ids.length > 0 ? { ids: options.ids.join(',') } : {}),
         },
       })
       .then((r) => r.data),
+
+  listPreviews: (ids: string[], previewLimit = 10) => {
+    if (ids.length === 0) return Promise.resolve<LibraryWithPreview[]>([])
+    return api
+      .get<LibraryWithPreview[]>('/libraries', {
+        params: {
+          with_preview: 1,
+          include_total: 0,
+          preview_limit: previewLimit,
+          ids: ids.join(','),
+        },
+      })
+      .then((r) => r.data)
+  },
 
   get: (id: string, options?: { includeHidden?: boolean }) =>
     api
@@ -146,22 +175,65 @@ export const libraryAPI = {
   scrape: (id: string, options?: ScrapeOptions) =>
     api.post(`/libraries/${id}/scrape`, options ?? null, { timeout: BATCH_REQUEST_TIMEOUT }).then((r) => r.data),
 
-  listMedia: (id: string, page = 1, pageSize = 50, options?: { groupVersions?: boolean }) =>
+  listMedia: (
+    id: string,
+    page = 1,
+    pageSize = 50,
+    options?: {
+      groupVersions?: boolean
+      sort?: string
+      order?: 'asc' | 'desc'
+      filters?: LibraryFilterParams
+    },
+  ) =>
     api
       .get<MediaPage>(`/libraries/${id}/media`, {
         params: {
           page,
           page_size: pageSize,
           group_versions: options?.groupVersions === false ? 0 : undefined,
+          sort: options?.sort,
+          order: options?.order,
+          ...toFilterQuery(options?.filters ?? EMPTY_LIBRARY_FILTERS),
         },
         timeout: LONG_REQUEST_TIMEOUT,
       })
       .then((r) => r.data),
 
-  listSeries: (id: string, page = 1, pageSize = 500) =>
+  /** 媒体库筛选面板的可选项：类型清单与年份区间。 */
+  facets: (id: string) =>
+    api
+      .get<LibraryFacets>(`/libraries/${id}/facets`, { timeout: LONG_REQUEST_TIMEOUT })
+      .then((r) => r.data),
+
+  /** 「随便看看」：按同一套筛选条件随机取一条，无命中时抛 404。 */
+  random: (id: string, filters?: LibraryFilterParams) =>
+    api
+      .get<Media>(`/libraries/${id}/random`, {
+        params: toFilterQuery(filters ?? EMPTY_LIBRARY_FILTERS),
+        timeout: LONG_REQUEST_TIMEOUT,
+      })
+      .then((r) => r.data),
+
+  listSeries: (
+    id: string,
+    page = 1,
+    pageSize = 500,
+    options?: {
+      sort?: string
+      order?: 'asc' | 'desc'
+      filters?: LibraryFilterParams
+    },
+  ) =>
     api
       .get<SeriesPage>(`/libraries/${id}/series`, {
-        params: { page, page_size: pageSize },
+        params: {
+          page,
+          page_size: pageSize,
+          sort: options?.sort,
+          order: options?.order,
+          ...toFilterQuery(options?.filters ?? EMPTY_LIBRARY_FILTERS),
+        },
         timeout: LONG_REQUEST_TIMEOUT,
       })
       .then((r) => r.data),
@@ -179,10 +251,18 @@ export const mediaAPI = {
   recent: (limit = 24) =>
     api.get<SeriesCard[]>('/media/recent', { params: { limit } }).then((r) => r.data),
 
-  search: (q: string, limit = 50) =>
-    api.get<MediaSearchPage>('/media', { params: { q, limit } }).then((r) => r.data),
+  search: (q: string, limit = 50, options?: { groupSeries?: boolean }) =>
+    api
+      .get<MediaSearchPage>('/media', {
+        params: {
+          q,
+          limit,
+          ...(options?.groupSeries ? { group_series: 1 } : {}),
+        },
+      })
+      .then((r) => r.data),
 
-  searchPage: (q: string, page = 1, pageSize = 50, options?: { groupVersions?: boolean }) =>
+  searchPage: (q: string, page = 1, pageSize = 50, options?: { groupVersions?: boolean; groupSeries?: boolean }) =>
     api
       .get<MediaSearchPage>('/media', {
         params: {
@@ -190,12 +270,25 @@ export const mediaAPI = {
           page,
           page_size: pageSize,
           group_versions: options?.groupVersions === false ? 0 : undefined,
+          ...(options?.groupSeries ? { group_series: 1 } : {}),
         },
         timeout: LONG_REQUEST_TIMEOUT,
       })
       .then((r) => r.data),
 
   get: (id: string) => api.get<Media>(`/media/${id}`).then((r) => r.data),
+
+  playbackInfo: (id: string, quality?: number) =>
+    api
+      .get<PlaybackInfo>(`/media/${id}/playback`, {
+        params: quality && quality > 0 ? { quality } : undefined,
+      })
+      .then((r) => r.data),
+
+  startCloudTranscode: (id: string, definition: number) =>
+    api
+      .post<PlaybackInfo>(`/media/${id}/transcode`, { definition })
+      .then((r) => r.data),
 
   getEpisodes: (id: string) =>
     api.get<{ items: Media[]; total: number }>(`/media/${id}/episodes`).then((r) => r.data),
@@ -225,6 +318,19 @@ export const mediaAPI = {
         { timeout: BATCH_REQUEST_TIMEOUT },
       )
       .then((r) => r.data),
+
+  delete: (id: string, options?: { deleteFiles?: boolean }) =>
+    api
+      .delete(`/media/${id}`, {
+        params: options?.deleteFiles ? { delete_files: true } : undefined,
+      })
+      .then((r) => r.data),
+
+  exportNFO: (id: string) =>
+    api.post<{ path: string }>(`/media/${id}/nfo`).then((r) => r.data),
+
+  exportLibraryNFO: (id: string) =>
+    api.post<{ written: number }>(`/libraries/${id}/nfo`).then((r) => r.data),
 }
 
 function episodeImageOption(options?: ScrapeOptions): boolean | undefined {

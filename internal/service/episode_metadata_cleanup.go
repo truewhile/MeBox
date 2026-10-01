@@ -19,7 +19,7 @@ const pollutedEpisodeCleanupSettingKey = "media.polluted_episode_cleanup_v2_done
 
 // seasonFolderTailRE 去掉路径末尾的「季文件夹 + 文件名」,得到整剧目录(show_dir)。
 // 例: /tv/国漫/遮天 (2023)/Season 01/遮天 - S01E01.mkv → /tv/国漫/遮天 (2023)
-var seasonFolderTailRE = regexp.MustCompile(`(?i)[\\/](?:season[\s._-]*\d+|s\d{1,2}|specials?|sp|ova|oad|extra|extras|第\s*[0-9一二三四五六七八九十百零两]+\s*季|特别篇|特別篇|番外|特典)[\\/][^\\/]*$`)
+var seasonFolderTailRE = regexp.MustCompile(`(?i)[\\/](?:season[\s._-]*\d+|s\d{1,2}|specials?|sp|ovas?|oads?|ovds?|onas?|extras?|bonus(?:es)?|omake|picture[\s._-]*drama|ncop|nced|第\s*[0-9一二三四五六七八九十百零两]+\s*季|特别篇|特別篇|番外|特典|画像特典)[\\/][^\\/]*$`)
 
 // showDirFromEpisodePath 从单集路径推出整剧目录, 作为「同一部剧」的聚合键。
 // 若没有季文件夹, 则退而去掉文件名取其父目录。

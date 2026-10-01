@@ -75,7 +75,7 @@ func (e *EmbyService) mediaItems(ctx context.Context, p ItemsParams) (map[string
 		orderIncludesDirection = false
 	case "premieredate", "productionyear":
 		order = mediaReleaseOrderSQL(desc)
-	case "datecreated":
+	case "datecreated", "datelastmediaadded", "datelastcontentadded":
 		order = "media.created_at"
 		orderIncludesDirection = false
 	case "dateplayed":
@@ -121,16 +121,31 @@ func (e *EmbyService) mediaItems(ctx context.Context, p ItemsParams) (map[string
 
 func (e *EmbyService) episodeItems(ctx context.Context, rows []model.Media, p ItemsParams) (map[string]any, error) {
 	rows = e.filterMediaRowsForUser(ctx, rows, p.UserID)
-	if p.SearchTerm != "" {
-		filtered := rows[:0]
-		needle := strings.ToLower(p.SearchTerm)
-		for _, row := range rows {
-			if strings.Contains(strings.ToLower(row.Title), needle) || strings.Contains(strings.ToLower(row.OriginalName), needle) {
-				filtered = append(filtered, row)
+	// rows 可能来自 series 分组的内存 memo（embySeriesGroup.Episodes）。过滤必须
+	// 分配新切片：就地复用 rows[:0] 会覆写 memo 里的元素，让后续请求看到被前一次
+	// 过滤污染的剧集列表（例如按季筛选一次之后，特别篇就从缓存分组里消失了）。
+	if p.SeasonIndex != nil {
+		filtered := make([]model.Media, 0, len(rows))
+		for i := range rows {
+			if embyRowMatchesSeasonIndex(&rows[i], p.SeasonIndex) {
+				filtered = append(filtered, rows[i])
 			}
 		}
 		rows = filtered
 	}
+	if p.SearchTerm != "" {
+		needle := strings.ToLower(p.SearchTerm)
+		filtered := make([]model.Media, 0, len(rows))
+		for i := range rows {
+			if strings.Contains(strings.ToLower(rows[i].Title), needle) || strings.Contains(strings.ToLower(rows[i].OriginalName), needle) {
+				filtered = append(filtered, rows[i])
+			}
+		}
+		rows = filtered
+	}
+	// sort.SliceStable 同样会就地重排：先拷贝一份，避免把 memo 分组里的剧集顺序
+	// 按每次请求的分页/筛选结果固定下来。
+	rows = append([]model.Media(nil), rows...)
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].SeasonNum != rows[j].SeasonNum {
 			return rows[i].SeasonNum < rows[j].SeasonNum
@@ -138,8 +153,15 @@ func (e *EmbyService) episodeItems(ctx context.Context, rows []model.Media, p It
 		if rows[i].EpisodeNum != rows[j].EpisodeNum {
 			return rows[i].EpisodeNum < rows[j].EpisodeNum
 		}
+		if rows[i].EpisodeFraction != rows[j].EpisodeFraction {
+			return rows[i].EpisodeFraction < rows[j].EpisodeFraction
+		}
 		return rows[i].CreatedAt.Before(rows[j].CreatedAt)
 	})
+	// 先折叠同集的多个版本再统计总数与分页，与 payloadsForMedia 内部保持同一步骤。
+	// 若按未折叠的行数报 TotalRecordCount（例如 S01E11 与 S01E11.5 两行折叠成一条），
+	// 客户端会认为还有一条没取到，反复请求下一页 —— 分集列表就会一直加载不出来。
+	rows = e.collapseMediaVersionRows(ctx, rows)
 	total := len(rows)
 	items, err := e.payloadsForMedia(ctx, pageSlice(rows, p.StartIndex, p.Limit), p.UserID)
 	if err != nil {
@@ -149,6 +171,9 @@ func (e *EmbyService) episodeItems(ctx context.Context, rows []model.Media, p It
 }
 
 func (e *EmbyService) payloadsForMedia(ctx context.Context, rows []model.Media, userID string) ([]map[string]any, error) {
+	// 请求级缓存：库类型与 series 标题整页只查一次，消除逐条目 N+1。
+	ctx = e.withPayloadCache(ctx)
+	e.prefetchPayloadCache(ctx, rows)
 	rows = e.collapseMediaVersionRows(ctx, rows)
 	userFavs := map[string]bool{}
 	userPos := map[string]int64{}
@@ -178,7 +203,7 @@ func (e *EmbyService) payloadsForMedia(ctx context.Context, rows []model.Media, 
 
 	items := make([]map[string]any, 0, len(rows))
 	for _, m := range rows {
-		items = append(items, e.itemPayload(ctx, &m, userFavs[m.ID], userPos[m.ID]))
+		items = append(items, e.itemPayload(ctx, &m, userFavs[m.ID], userPos[m.ID], false))
 	}
 	return items, nil
 }
@@ -222,6 +247,17 @@ func (e *EmbyService) collapseMediaVersionRows(ctx context.Context, rows []model
 }
 
 func (e *EmbyService) seriesItemsForLibrary(ctx context.Context, libraryID string, p ItemsParams) (map[string]any, error) {
+	cacheKey := e.embyItemsCacheKey("series-items-v1", p)
+	var cached embyItemsCacheValue
+	if e.cache != nil && e.cache.GetJSON(ctx, cacheKey, &cached) {
+		e.rememberArtworkRefs(cached.Artwork)
+		return map[string]any{
+			"Items":            cached.Items,
+			"TotalRecordCount": int(cached.TotalRecordCount),
+			"StartIndex":       cached.StartIndex,
+		}, nil
+	}
+
 	q := e.repo.DB.WithContext(ctx).Model(&model.Media{}).Where("season_num > 0 OR episode_num > 0")
 	q = e.applyUserMediaVisibility(ctx, q, p.UserID)
 	if libraryID != "" {
@@ -240,12 +276,22 @@ func (e *EmbyService) seriesItemsForLibrary(ctx context.Context, libraryID strin
 	if err := q.Order(mediaReleaseOrderSQL(true)).Limit(embySeriesGroupingLimit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	groups := e.seriesGroupsFromMedia(rows)
+	groups := e.seriesGroupsFromMedia(ctx, rows)
 	sortSeriesGroups(groups, p)
 	total := len(groups)
-	items := make([]map[string]any, 0, minInt(p.Limit, len(groups)))
-	for _, group := range pageSlice(groups, p.StartIndex, p.Limit) {
+	pageGroups := pageSlice(groups, p.StartIndex, p.Limit)
+	items := make([]map[string]any, 0, len(pageGroups))
+	for _, group := range pageGroups {
 		items = append(items, e.seriesPayload(group))
 	}
-	return map[string]any{"Items": items, "TotalRecordCount": total, "StartIndex": p.StartIndex}, nil
+	out := map[string]any{"Items": items, "TotalRecordCount": total, "StartIndex": p.StartIndex}
+	if e.cache != nil {
+		e.cache.SetJSON(ctx, cacheKey, embyItemsCacheValue{
+			Items:            items,
+			TotalRecordCount: int64(total),
+			StartIndex:       p.StartIndex,
+			Artwork:          e.artworkRefsForSeriesGroups(pageGroups),
+		}, time.Duration(e.mediaCacheTTLSeconds())*time.Second)
+	}
+	return out, nil
 }

@@ -3,7 +3,7 @@ import { Database, HardDrive, PieChart, RefreshCw } from 'lucide-react'
 
 import { storageAPI, type StorageBreakdown } from '../api/storage'
 
-export function fmtBytes(n: number): string {
+function fmtBytes(n: number): string {
   if (!n) return '0 B'
   const u = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
   let v = n
@@ -15,7 +15,7 @@ export function fmtBytes(n: number): string {
   return `${v.toFixed(2)} ${u[i]}`
 }
 
-export function fmtHours(seconds: number): string {
+function fmtHours(seconds: number): string {
   if (!seconds) return '—'
   const h = Math.floor(seconds / 3600)
   return `${h.toLocaleString()} h`

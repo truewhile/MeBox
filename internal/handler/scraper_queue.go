@@ -101,6 +101,17 @@ func clearCanceledScrapeTasksHandler(svc *service.Container) gin.HandlerFunc {
 	}
 }
 
+func clearFailedScrapeTasksHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		n, err := svc.Scraper.ClearFailedScrapeTasks(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"deleted": n})
+	}
+}
+
 func retryAllFailedScrapeTasksHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		n, err := svc.Scraper.RetryAllFailedScrapeTasks(c.Request.Context())

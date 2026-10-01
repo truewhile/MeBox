@@ -78,6 +78,13 @@ func pathHintMetadata(raw string, seriesLike bool) (*LocalMetadata, mediaExterna
 	title, year := "", 0
 	if seriesLike {
 		title, year = CleanQuery(source)
+	} else if patTheatricalTitle.MatchString(raw) || patTheatricalFolder.MatchString(raw) {
+		base := pathBaseSlash(raw)
+		stem := mediaFileStem(base)
+		if stem == "" {
+			stem = strings.TrimSuffix(base, filepath.Ext(base))
+		}
+		title, year = CleanQuery(stem)
 	} else {
 		title, year = cloudSeriesTitleFromMediaPath(source)
 		if title == "" {

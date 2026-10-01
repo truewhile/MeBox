@@ -37,6 +37,7 @@ export function AdultSettingsPanel() {
   const [values, setValues] = useState<Record<string, string>>({})
   const [dirty, setDirty] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
   const [saving, setSaving] = useState(false)
   const [libraries, setLibraries] = useState<Library[]>([])
   const [showToken, setShowToken] = useState(false)
@@ -79,6 +80,13 @@ export function AdultSettingsPanel() {
       setValues(idx)
       setLibraries(libs as Library[])
       setDirty(new Set())
+      setLoadError('')
+    } catch (err: unknown) {
+      // 加载失败时保留错误态，避免把表单默认值误当成已保存的配置
+      const msg =
+        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '加载成人设置失败'
+      setLoadError(msg)
+      toast.error(msg)
     } finally {
       setLoading(false)
     }
@@ -192,6 +200,19 @@ export function AdultSettingsPanel() {
     return (
       <div className="flex justify-center py-12 text-ink-50">
         <Loader2 className="animate-spin" />
+      </div>
+    )
+  }
+
+  if (loadError) {
+    return (
+      <div className="glass-panel flex flex-col items-center gap-3 py-10 text-center">
+        <XCircle className="text-rose-500" size={24} />
+        <p className="text-sm text-ink-100">成人设置加载失败：{loadError}</p>
+        <p className="text-xs text-sand-500">当前展示的并非已保存配置，请重新加载后再修改</p>
+        <button type="button" onClick={() => refresh()} className="neon-button !px-4 !py-1.5 !text-xs">
+          重试
+        </button>
       </div>
     )
   }
@@ -404,7 +425,7 @@ export function AdultSettingsPanel() {
                 <span className="text-sm font-semibold text-ink-600">MetaTube 后端配置</span>
               </div>
               <a
-                href="https://github.com/metatube-community/metatube-server"
+                href="https://metatube-community.github.io/README_ZH/"
                 target="_blank"
                 rel="noreferrer"
                 className="text-xs text-brand-500 hover:underline flex items-center gap-1"

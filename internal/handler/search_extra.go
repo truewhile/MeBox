@@ -7,6 +7,7 @@ package handler
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -16,15 +17,25 @@ import (
 // searchUnifiedHandler is the basic /api/search endpoint.
 func searchUnifiedHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		ctx := c.Request.Context()
 		q := c.Query("q")
 		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "30"))
 		if limit <= 0 || limit > 200 {
 			limit = 30
 		}
-		items, err := svc.Media.SearchMediaVisible(c.Request.Context(), q, limit, mediaVisibilityForRequest(c, svc))
+		visibility := mediaVisibilityForRequest(c, svc)
+		items, err := svc.Media.SearchMediaVisible(ctx, q, limit, visibility)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
+		}
+		if svc.EmbyRemote != nil && strings.TrimSpace(q) != "" {
+			if remoteItems, _ := svc.EmbyRemote.RemoteSearchMedia(ctx, q, limit, visibility); len(remoteItems) > 0 {
+				items = append(items, remoteItems...)
+				if len(items) > limit {
+					items = items[:limit]
+				}
+			}
 		}
 		c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
 	}
@@ -36,15 +47,25 @@ func searchUnifiedHandler(svc *service.Container) gin.HandlerFunc {
 // them back. This keeps API parity without a giant query builder.
 func searchAdvancedHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		ctx := c.Request.Context()
 		q := c.Query("q")
 		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "30"))
 		if limit <= 0 || limit > 200 {
 			limit = 30
 		}
-		items, err := svc.Media.SearchMediaVisible(c.Request.Context(), q, limit, mediaVisibilityForRequest(c, svc))
+		visibility := mediaVisibilityForRequest(c, svc)
+		items, err := svc.Media.SearchMediaVisible(ctx, q, limit, visibility)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
+		}
+		if svc.EmbyRemote != nil && strings.TrimSpace(q) != "" {
+			if remoteItems, _ := svc.EmbyRemote.RemoteSearchMedia(ctx, q, limit, visibility); len(remoteItems) > 0 {
+				items = append(items, remoteItems...)
+				if len(items) > limit {
+					items = items[:limit]
+				}
+			}
 		}
 		c.JSON(http.StatusOK, gin.H{
 			"items": items,

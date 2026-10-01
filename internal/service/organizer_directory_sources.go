@@ -40,7 +40,7 @@ func (o *OrganizerService) OrganizeSourceCandidates(ctx context.Context) []Organ
 		out = append(out, OrganizeSourceCandidate{Label: label, Path: clean, Kind: kind})
 	}
 	add("默认整理源", o.settingValue(ctx, "organize.source_dir"), "source")
-	add("下载器保存目录", o.settingValue(ctx, "qbittorrent.savepath"), "download")
+	add("下载器保存目录", o.downloaderSavepath(ctx), "download")
 	add("下载目录", envOrDefault("MEBOX_DOWNLOAD_CONTAINER_DIR", "/downloads"), "download")
 	add("媒体目录", envOrDefault("MEBOX_MEDIA_CONTAINER_DIR", "/media"), "media")
 	return out
@@ -56,8 +56,17 @@ func (o *OrganizerService) settingValue(ctx context.Context, key string) string 
 	return ""
 }
 
+// downloaderSavepath 返回下载器保存目录，优先新键 downloader.savepath，
+// 兼容历史键名 qbittorrent.savepath（旧版本部署已写入的配置不丢失）。
+func (o *OrganizerService) downloaderSavepath(ctx context.Context) string {
+	if v := o.settingValue(ctx, "downloader.savepath"); v != "" {
+		return v
+	}
+	return o.settingValue(ctx, "qbittorrent.savepath")
+}
+
 // defaultSourceRoot resolves the source root for a directory organize:
-// explicit override → organize.source_dir setting → qB default save path →
+// explicit override → organize.source_dir setting → downloader save path →
 // download container dir.
 func (o *OrganizerService) defaultSourceRoot(ctx context.Context, override string) string {
 	if r := strings.TrimSpace(override); r != "" {
@@ -66,7 +75,7 @@ func (o *OrganizerService) defaultSourceRoot(ctx context.Context, override strin
 	if v := o.settingValue(ctx, "organize.source_dir"); v != "" {
 		return v
 	}
-	if v := o.settingValue(ctx, "qbittorrent.savepath"); v != "" {
+	if v := o.downloaderSavepath(ctx); v != "" {
 		return v
 	}
 	return envOrDefault("MEBOX_DOWNLOAD_CONTAINER_DIR", "/downloads")

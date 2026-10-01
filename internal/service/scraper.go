@@ -63,12 +63,17 @@ func (s *ScraperService) EnrichOneWithOptions(ctx context.Context, m *model.Medi
 		}
 	}
 
+	// Same stale-negative problem as the library path: a single-item retry
+	// (queue task / manual rescrape) must get a fresh provider round-trip.
+	if options.RetryNoMatch && s != nil {
+		s.lookupCache.clearNegatives()
+	}
 	candidates := scrapeQueryCandidatesWithRecognition(ctx, s.repo, m, lib)
 	var query string
 	match := (*Match)(nil)
 	for _, candidate := range candidates {
 		query = candidate
-		candidateMatch := s.lookup(ctx, lib, m, candidate, year)
+		candidateMatch := s.lookup(ctx, lib, m, candidate, year, options.ForceRematch)
 		if candidateMatch == nil {
 			continue
 		}
@@ -93,7 +98,11 @@ func (s *ScraperService) EnrichOneWithOptions(ctx context.Context, m *model.Medi
 	}
 	if match == nil {
 		if local != nil && !local.PathHint {
-			return s.applyLocalMetadataMatch(ctx, m, local)
+			err := s.applyLocalMetadataMatch(ctx, m, local)
+			if err == nil {
+				options.recordProvider("local")
+			}
+			return err
 		}
 		if err := s.repo.DB.WithContext(ctx).Model(&model.Media{}).Where("id = ?", m.ID).
 			Update("scrape_status", "no_match").Error; err != nil {
@@ -119,8 +128,22 @@ func (s *ScraperService) applyProviderMatch(ctx context.Context, m *model.Media,
 func (s *ScraperService) applyProviderMatchWithOptions(ctx context.Context, m *model.Media, lib *model.Library, match *Match, options ScrapeOptions) error {
 	posterCandidate := match.PosterURL
 	backdropCandidate := match.BackdropURL
-	posterURL, removePoster := s.prepareScrapedArtworkURL(ctx, m.ID, "poster_url", m.PosterURL, posterCandidate)
-	backdropURL, removeBackdrop := s.prepareScrapedArtworkURL(ctx, m.ID, "backdrop_url", m.BackdropURL, backdropCandidate)
+	currentPoster := m.PosterURL
+	currentBackdrop := m.BackdropURL
+	if options.RebuildIdentity {
+		currentPoster = ""
+		currentBackdrop = ""
+	}
+	posterURL, removePoster := s.prepareScrapedArtworkURL(ctx, m.ID, "poster_url", currentPoster, posterCandidate)
+	backdropURL, removeBackdrop := s.prepareScrapedArtworkURL(ctx, m.ID, "backdrop_url", currentBackdrop, backdropCandidate)
+	if options.RebuildIdentity {
+		if strings.TrimSpace(m.PosterURL) != posterURL {
+			removePoster = m.PosterURL
+		}
+		if strings.TrimSpace(m.BackdropURL) != backdropURL {
+			removeBackdrop = m.BackdropURL
+		}
+	}
 	updates := map[string]any{
 		"title":         match.Title,
 		"overview":      match.Overview,
@@ -141,6 +164,12 @@ func (s *ScraperService) applyProviderMatchWithOptions(ctx context.Context, m *m
 		updates["countries"] = strings.Join(match.Countries, ",")
 		updates["languages"] = strings.Join(match.Languages, ",")
 		updates["nsfw"] = match.NSFW
+	}
+	if options.RebuildIdentity {
+		updates["season_num"] = m.SeasonNum
+		updates["episode_num"] = m.EpisodeNum
+		updates["episode_title"] = ""
+		updates["series_id"] = ""
 	}
 	if match.ReleaseDate != "" {
 		updates["release_date"] = match.ReleaseDate
@@ -207,6 +236,11 @@ func (s *ScraperService) applyProviderMatchWithOptions(ctx context.Context, m *m
 		"thetvdb_id": match.TheTVDBID,
 		"source":     map[bool]string{true: "adult"}[match.NSFW],
 	})
+	provider := strings.ToLower(strings.TrimSpace(match.Provider))
+	if provider == "" {
+		provider = "unknown"
+	}
+	options.recordProvider(provider)
 	return nil
 }
 

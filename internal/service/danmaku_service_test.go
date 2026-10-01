@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/glebarez/sqlite"
@@ -22,7 +24,8 @@ func newDanmakuTestService(t *testing.T) *DanmakuService {
 	// 独立临时文件库，避免测试间通过共享内存库串数据。
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "danmaku-test.db")), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.Setting{}, &model.Media{}))
+	// 需要 users 表：弹幕合并偏好按用户存储在 user 行上。
+	require.NoError(t, db.AutoMigrate(&model.Setting{}, &model.Media{}, &model.User{}))
 	repos := repository.New(db)
 	t.Cleanup(func() {
 		sqlDB, err := db.DB()
@@ -57,6 +60,7 @@ func seedDanmakuMedia(t *testing.T, svc *DanmakuService, id, title, originalName
 type danmakuSourceServer struct {
 	server         *httptest.Server
 	lastSearch     string // full query (anime=...&episode=...)
+	lastHeaders    http.Header
 	searchResponse string // JSON body served for /api/v2/search/episodes
 }
 
@@ -73,6 +77,7 @@ func newDanmakuSourceServerWithSearch(t *testing.T, searchResponse string) *danm
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v2/search/episodes", func(w http.ResponseWriter, r *http.Request) {
 		ds.lastSearch = r.URL.RawQuery
+		ds.lastHeaders = r.Header.Clone()
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, ds.searchResponse)
 	})
@@ -324,4 +329,118 @@ func TestDanmakuFetchDetectsJSONSource(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "xml", res2.SourceType)
 	require.Contains(t, res2.Raw, "弹幕A")
+}
+
+// 同一集在缓存 TTL 内重复请求时不应再访问上游（搜索和评论都只发一次）。
+func TestDanmakuFetchCachesRepeatedRequests(t *testing.T) {
+	var searchCalls, commentCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/search/episodes", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&searchCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"hasMore":false,"animes":[{"animeId":1001,"animeTitle":"测试动画","episodes":[{"episodeId":25484,"episodeTitle":"第1话"}]}]}`)
+	})
+	mux.HandleFunc("/api/v2/comment/25484", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&commentCalls, 1)
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, `<?xml version="1.0"?><i><d p="0.5,1,16777215,user1">缓存测试</d></i>`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	svc := newDanmakuTestService(t)
+	ctx := context.Background()
+	require.NoError(t, svc.repo.Setting.Set(ctx, DanmakuSourceKey, srv.URL))
+	seedDanmakuMedia(t, svc, "cache-media", "测试动画", "", 1)
+
+	first, err := svc.Fetch(ctx, "cache-media", "", "")
+	require.NoError(t, err)
+	require.NotEmpty(t, first.Raw)
+
+	second, err := svc.Fetch(ctx, "cache-media", "", "")
+	require.NoError(t, err)
+	require.Equal(t, first.Raw, second.Raw)
+	require.EqualValues(t, 1, atomic.LoadInt32(&searchCalls))
+	require.EqualValues(t, 1, atomic.LoadInt32(&commentCalls))
+}
+
+// 并发的同一集请求应被 singleflight 合并，上游只被访问一次。
+func TestDanmakuFetchCoalescesConcurrentRequests(t *testing.T) {
+	var searchCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/search/episodes", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&searchCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"hasMore":false,"animes":[{"animeId":1001,"animeTitle":"测试动画","episodes":[{"episodeId":25484,"episodeTitle":"第1话"}]}]}`)
+	})
+	mux.HandleFunc("/api/v2/comment/25484", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, `<?xml version="1.0"?><i><d p="0.5,1,16777215,user1">并发测试</d></i>`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	svc := newDanmakuTestService(t)
+	ctx := context.Background()
+	require.NoError(t, svc.repo.Setting.Set(ctx, DanmakuSourceKey, srv.URL))
+	seedDanmakuMedia(t, svc, "concurrent-media", "测试动画", "", 1)
+
+	const workers = 8
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := svc.Fetch(ctx, "concurrent-media", "", "")
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.EqualValues(t, 1, atomic.LoadInt32(&searchCalls))
+}
+
+func TestDanmakuFetchUsesPerUserSourceAndCredentials(t *testing.T) {
+	srv := newDanmakuSourceServer(t)
+	svc := newDanmakuTestService(t)
+	ctx := context.Background()
+
+	user := model.User{Username: "danmaku-user", PasswordHash: "x", Role: "user", IsActive: true}
+	user.ID = "danmaku-user-1"
+	user.DanmakuEnabled = true
+	user.DanmakuSource = srv.URL()
+	user.DanmakuAppID = "user-app-id"
+	user.DanmakuAppKey = "user-app-secret"
+	user.DanmakuOpacity = 0.65
+	user.DanmakuFontSize = 30
+	user.DanmakuArea = 0.7
+	user.PlayerVolume = 0.42
+	require.NoError(t, svc.repo.User.Create(ctx, &user))
+	seedDanmakuMedia(t, svc, "per-user-media", "测试动画", "", 0)
+
+	res, err := svc.FetchWithOptions(ctx, "per-user-media", "", "", DanmakuFetchOptions{UserID: user.ID})
+	require.NoError(t, err)
+	require.Contains(t, res.Raw, "弹幕A")
+	require.Equal(t, srv.URL(), res.Source)
+	require.Equal(t, 0.42, res.Volume)
+	require.Equal(t, "0.65", res.Opacity)
+	require.Equal(t, "30", res.FontSize)
+	require.Equal(t, srv.lastHeaders.Get("X-AppId"), "user-app-id")
+	require.NotEmpty(t, srv.lastHeaders.Get("X-Signature"))
+
+	// Credential rotation must invalidate the cached fetch for the same user.
+	require.NoError(t, svc.repo.User.UpdateFields(ctx, user.ID, map[string]any{
+		"danmaku_app_id":  "user-app-id-2",
+		"danmaku_app_key": "user-app-secret-2",
+	}))
+	_, err = svc.FetchWithOptions(ctx, "per-user-media", "", "", DanmakuFetchOptions{UserID: user.ID})
+	require.NoError(t, err)
+	require.Equal(t, "user-app-id-2", srv.lastHeaders.Get("X-AppId"))
 }

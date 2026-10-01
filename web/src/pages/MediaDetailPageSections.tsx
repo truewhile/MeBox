@@ -5,6 +5,7 @@ import { PageBackButton } from '../components/PageBackButton'
 
 import { ExternalPlayerButton } from '../components/ExternalPlayerButton'
 import { ManualScrapeDialog } from '../components/ManualScrapeDialog'
+import { MediaVersionSwitcher } from '../components/MediaVersionSwitcher'
 import { MetadataEditDialog } from '../components/MetadataEditDialog'
 import { OrganizeMediaDialog } from '../components/OrganizeMediaDialog'
 import type { Media } from '../types'
@@ -18,6 +19,7 @@ interface MediaDetailPlaybackActionsProps {
   media: Media
   favourite: boolean
   onToggleFavourite: () => void
+  playTargetId?: string
 }
 
 interface MediaDetailMainContentProps extends MediaDetailPlaybackActionsProps {
@@ -30,7 +32,7 @@ interface MediaDetailMainContentProps extends MediaDetailPlaybackActionsProps {
   onOrganize: () => void
   onProbe: () => void
   onExportNFO: () => void
-  onSoftDelete: () => void
+  onDelete: () => void
 }
 
 interface MediaDetailDialogsProps {
@@ -83,7 +85,7 @@ export function MediaDetailBackButton({ onBack }: { onBack: () => void }) {
         className="btn-ghost gap-2 bg-white/80 shadow-sm backdrop-blur hover:bg-white"
       >
         <ArrowLeft size={16} />
-        <span>返回媒体库</span>
+        <span>返回</span>
       </button>
     </div>
   )
@@ -93,31 +95,37 @@ export function MediaDetailPlaybackActions({
   media,
   favourite,
   onToggleFavourite,
+  playTargetId,
 }: MediaDetailPlaybackActionsProps) {
+  const targetId = media.id || playTargetId || ''
   return (
-    <div className="flex flex-wrap gap-3">
-      <Link to={`/play/${media.id}`} state={{ from: `/media/${media.id}` }} className="btn-primary px-6 py-3.5 shadow-sm">
+    <div className="flex flex-wrap items-center gap-2.5">
+      <Link
+        to={`/play/${targetId}`}
+        state={{ from: `/media/${media.id}` }}
+        className="btn-primary h-11 px-6 shadow-sm"
+      >
         <Play size={16} fill="currentColor" />
         <span>立即播放</span>
       </Link>
 
       {!isDirectStreamMedia(media) && (
         <Link
-        to={`/play/${media.id}?mode=hls`}
-        state={{ from: `/media/${media.id}` }}
-        className="btn-outline border-brand-500/30 hover:border-brand-500 text-[#c9954a] hover:bg-brand-50 px-5"
-      >
-          <RefreshCw size={14} className="animate-spin-slow" />
+          to={`/play/${targetId}?mode=hls`}
+          state={{ from: `/media/${media.id}` }}
+          className="btn-outline h-11 border-brand-500/30 px-5 text-[#c9954a] hover:border-brand-500 hover:bg-brand-50"
+        >
+          <RefreshCw size={14} />
           <span>HLS 兼容转码播放</span>
         </Link>
       )}
 
-      <ExternalPlayerButton mediaId={media.id} />
+      <ExternalPlayerButton mediaId={targetId} />
 
       <button
         onClick={onToggleFavourite}
         className={
-          'btn-outline gap-2 ' +
+          'btn-outline h-11 gap-2 ' +
           (favourite
             ? '!border-red-200 !bg-red-50 !text-red-600 hover:!bg-red-100/50'
             : 'hover:border-red-200 hover:text-red-600 hover:bg-red-50/50')
@@ -134,6 +142,7 @@ export function MediaDetailMainContent({
   media,
   isAdmin,
   favourite,
+  playTargetId,
   scrapeEpisodeArtwork,
   onToggleFavourite,
   onScrapeEpisodeArtworkChange,
@@ -143,32 +152,38 @@ export function MediaDetailMainContent({
   onOrganize,
   onProbe,
   onExportNFO,
-  onSoftDelete,
+  onDelete,
 }: MediaDetailMainContentProps) {
   return (
     <div className="relative z-10 p-6 sm:p-10 flex flex-col md:flex-row gap-8 lg:gap-12">
       <MediaDetailPoster media={media} />
 
-      <div className="flex-1 space-y-6">
+      <div className="min-w-0 flex-1 space-y-5">
         <MediaDetailMetadata media={media} />
-        <div className="divider border-gray-200/60" />
-        <div className="flex flex-col gap-5">
-          <MediaDetailPlaybackActions media={media} favourite={favourite} onToggleFavourite={onToggleFavourite} />
-          {isAdmin && (
-            <MediaDetailAdminPanel
-              media={media}
-              scrapeEpisodeArtwork={scrapeEpisodeArtwork}
-              onScrapeEpisodeArtworkChange={onScrapeEpisodeArtworkChange}
-              onSmartScrape={onSmartScrape}
-              onManualScrape={onManualScrape}
-              onMetadataEdit={onMetadataEdit}
-              onOrganize={onOrganize}
-              onProbe={onProbe}
-              onExportNFO={onExportNFO}
-              onSoftDelete={onSoftDelete}
-            />
-          )}
+        <div className="divider" />
+        <div className="space-y-4">
+          <MediaDetailPlaybackActions
+            media={media}
+            favourite={favourite}
+            onToggleFavourite={onToggleFavourite}
+            playTargetId={playTargetId}
+          />
+          <MediaVersionSwitcher media={media} />
         </div>
+        {isAdmin && (
+          <MediaDetailAdminPanel
+            media={media}
+            scrapeEpisodeArtwork={scrapeEpisodeArtwork}
+            onScrapeEpisodeArtworkChange={onScrapeEpisodeArtworkChange}
+            onSmartScrape={onSmartScrape}
+            onManualScrape={onManualScrape}
+            onMetadataEdit={onMetadataEdit}
+            onOrganize={onOrganize}
+            onProbe={onProbe}
+            onExportNFO={onExportNFO}
+            onDelete={onDelete}
+          />
+        )}
       </div>
     </div>
   )

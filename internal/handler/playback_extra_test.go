@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -344,6 +346,9 @@ func newPlaybackScopeTestRouter(t *testing.T) (*gin.Engine, *service.Container, 
 		&model.Library{},
 		&model.Media{},
 		&model.PlayProfile{},
+		&model.Series{},
+		&model.MediaSegment{},
+		&model.MediaSegmentFetch{},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -359,6 +364,7 @@ func newPlaybackScopeTestRouter(t *testing.T) (*gin.Engine, *service.Container, 
 		Auth:        auth,
 		Media:       service.NewMediaService(cfg, log, repos),
 		Stream:      service.NewStreamService(cfg, log, repos, nil),
+		Subtitle:    service.NewSubtitleService(cfg, log, repos),
 		Permissions: permissions,
 	}
 	if err := repos.User.Create(t.Context(), &model.User{
@@ -405,6 +411,7 @@ func newPlaybackScopeTestRouter(t *testing.T) (*gin.Engine, *service.Container, 
 	api := router.Group("/api")
 	api.Use(middleware.AuthRequired(cfg.Secrets.JWTSecret))
 	api.GET("/playback/:id/info", playbackInfoHandler(svc))
+	api.GET("/playback/:id/segments", playbackSegmentsHandler(svc))
 	api.GET("/playback/:id/external-url", externalURLHandler(svc))
 	api.GET("/playback/:id/external-players", externalPlayersHandler(svc))
 	api.GET("/stream/:id", streamHandler(svc))
@@ -413,7 +420,7 @@ func newPlaybackScopeTestRouter(t *testing.T) (*gin.Engine, *service.Container, 
 	return router, svc, cfg.Secrets.JWTSecret
 }
 
-func TestPlaybackInfoForSTRMMediaDisablesHLS(t *testing.T) {
+func TestPlaybackInfoForSTRMMediaIncludesHLS(t *testing.T) {
 	router, _, secret := newPlaybackScopeTestRouter(t)
 	loginToken := signedTestToken(t, secret)
 
@@ -435,8 +442,40 @@ func TestPlaybackInfoForSTRMMediaDisablesHLS(t *testing.T) {
 	if payload.StreamURL == "" {
 		t.Fatalf("expected non-empty stream_url")
 	}
-	if payload.HlsURL != "" {
-		t.Fatalf("expected empty hls_url for STRM media, got %q", payload.HlsURL)
+	if payload.HlsURL == "" || !strings.Contains(payload.HlsURL, "/api/hls/media-1/") {
+		t.Fatalf("expected strm hls_url, got %q", payload.HlsURL)
+	}
+}
+
+func TestSubtitleListOnlyProbesEmbeddedTracksForHLS(t *testing.T) {
+	router, svc, secret := newPlaybackScopeTestRouter(t)
+	loginToken := signedTestToken(t, secret)
+	resolveCalls := 0
+	svc.Subtitle.SetStrmPlayTargetResolver(func(context.Context, string) (*service.StrmPlayResult, error) {
+		resolveCalls++
+		return nil, errors.New("probe resolver called")
+	})
+
+	request := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "http://nas.local"+path, nil)
+		req.Header.Set("Authorization", "Bearer "+loginToken)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w
+	}
+
+	if w := request("/api/media/media-1/subtitles"); w.Code != http.StatusOK {
+		t.Fatalf("direct subtitle status = %d body=%s", w.Code, w.Body.String())
+	}
+	if resolveCalls != 0 {
+		t.Fatalf("direct subtitle request resolved cloud media %d times, want 0", resolveCalls)
+	}
+
+	if w := request("/api/media/media-1/subtitles?include_embedded=true"); w.Code != http.StatusOK {
+		t.Fatalf("HLS subtitle status = %d body=%s", w.Code, w.Body.String())
+	}
+	if resolveCalls != 1 {
+		t.Fatalf("HLS subtitle request resolved cloud media %d times, want 1", resolveCalls)
 	}
 }
 

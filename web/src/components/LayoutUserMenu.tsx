@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, useLocation } from 'react-router-dom'
-import { AnimatePresence, motion } from 'framer-motion'
-import { Cast, ChevronDown, Clock, Heart, ListMusic, LogOut, Settings, UserCog } from 'lucide-react'
+import { Cast, ChevronDown, Clock, Heart, ListMusic, LogOut, Settings, Tv, UserCog } from 'lucide-react'
 import clsx from 'clsx'
 
 import type { PlayProfile } from '../types'
 import { LayoutThemeToggle } from './LayoutThemeToggle'
+import { TemporaryPasswordDialog } from './TemporaryPasswordDialog'
 import type { ThemeMode } from './useThemeMode'
 
 type MenuPosition = {
@@ -52,8 +52,11 @@ export function LayoutUserMenu({
   const triggerRef = useRef<HTMLButtonElement>(null)
   const onCloseRef = useRef(onClose)
   const [menuPosition, setMenuPosition] = useState<MenuPosition | null>(null)
+  const [isOtpOpen, setIsOtpOpen] = useState(false)
 
-  onCloseRef.current = onClose
+  useEffect(() => {
+    onCloseRef.current = onClose
+  }, [onClose])
 
   const updateMenuPosition = useCallback(() => {
     const trigger = triggerRef.current
@@ -99,33 +102,36 @@ export function LayoutUserMenu({
 
   const menuPortal = isOpen && menuPosition && typeof document !== 'undefined'
     ? createPortal(
-        <AnimatePresence>
-          <motion.div
+        <>
+          <div
             key="layout-user-menu-backdrop"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.12 }}
-            className="fixed inset-0 z-[120]"
+            className="fixed inset-0 z-[120] animate-overlay-in"
             aria-hidden="true"
             onPointerDown={onClose}
           />
-          <motion.div
+          <div
             key="layout-user-menu-panel"
-            initial={{ opacity: 0, y: 10, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 10, scale: 0.95 }}
-            transition={{ duration: 0.15 }}
             role="menu"
             style={{ top: menuPosition.top, right: menuPosition.right }}
-            className="fixed z-[121] w-56 origin-top-right rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel)] p-2 shadow-xl"
+            className="fixed z-[121] w-56 origin-top-right rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel)] p-2 shadow-xl animate-menu-in"
             onPointerDown={(event) => event.stopPropagation()}
           >
-            <UserMenuLink to="/profile" icon={<Settings size={16} />} label="设置" onNavigate={onClose} />
-            <UserMenuLink to="/favourites" icon={<Heart size={16} />} label="我的收藏" onNavigate={onClose} />
-            <UserMenuLink to="/playlists" icon={<ListMusic size={16} />} label="播放列表" onNavigate={onClose} />
-            <UserMenuLink to="/history" icon={<Clock size={16} />} label="观看历史" onNavigate={onClose} />
-            <UserMenuLink to="/dlna" icon={<Cast size={16} />} label="DLNA投屏" onNavigate={onClose} />
+	            <UserMenuLink to="/profile" icon={<Settings size={16} />} label="设置" onNavigate={onClose} />
+	            <UserMenuLink to="/favourites" icon={<Heart size={16} />} label="我的收藏" onNavigate={onClose} />
+	            <UserMenuLink to="/playlists" icon={<ListMusic size={16} />} label="播放列表" onNavigate={onClose} />
+	            <UserMenuLink to="/history" icon={<Clock size={16} />} label="观看历史" onNavigate={onClose} />
+	            <UserMenuLink to="/dlna" icon={<Cast size={16} />} label="DLNA投屏" onNavigate={onClose} />
+	            <button
+	              type="button"
+	              onClick={() => {
+	                onClose()
+	                setIsOtpOpen(true)
+	              }}
+	              className="flex w-full items-center gap-3 rounded-xl px-3 py-2 text-sm text-[var(--app-subtle)] transition-colors hover:bg-[var(--app-hover)] hover:text-[var(--app-text)]"
+	            >
+	              <Tv size={16} />
+	              <span>电视端临时登录码</span>
+	            </button>
             {themeMode && onThemeChange ? (
               <div className="px-3 py-2 sm:hidden">
                 <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-[var(--app-muted)]">
@@ -176,8 +182,8 @@ export function LayoutUserMenu({
               <LogOut size={16} />
               <span>安全登出系统</span>
             </button>
-          </motion.div>
-        </AnimatePresence>,
+          </div>
+        </>,
         document.body,
       )
     : null
@@ -203,6 +209,7 @@ export function LayoutUserMenu({
         <ChevronDown size={14} className="text-[var(--app-muted)]" />
       </button>
       {menuPortal}
+      <TemporaryPasswordDialog isOpen={isOtpOpen} onClose={() => setIsOtpOpen(false)} />
     </div>
   )
 }

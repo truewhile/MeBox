@@ -16,6 +16,8 @@ type RateLimiter struct {
 	window   time.Duration
 	max      int
 	requests map[string][]time.Time
+	stop     chan struct{}
+	stopped  sync.Once
 }
 
 // NewRateLimiter creates a rate limiter allowing max requests per window
@@ -25,14 +27,27 @@ func NewRateLimiter(max int, window time.Duration) *RateLimiter {
 		window:   window,
 		max:      max,
 		requests: make(map[string][]time.Time),
+		stop:     make(chan struct{}),
 	}
 	go rl.cleanup()
 	return rl
 }
 
+// Close 停止后台清理 goroutine：清理循环此前无停止机制，每建一个实例
+// 就永久滞留一条 goroutine（测试场景会随实例创建不断累积）。
+func (rl *RateLimiter) Close() {
+	rl.stopped.Do(func() { close(rl.stop) })
+}
+
 func (rl *RateLimiter) cleanup() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
 	for {
-		time.Sleep(5 * time.Minute)
+		select {
+		case <-rl.stop:
+			return
+		case <-ticker.C:
+		}
 		rl.mu.Lock()
 		now := time.Now()
 		for ip, times := range rl.requests {

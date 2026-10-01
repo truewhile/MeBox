@@ -54,39 +54,76 @@ func mergeArtworkMetadata(meta *LocalMetadata, mediaPath, showBaseDir string) {
 }
 
 func localPosterCandidates(mediaPath string) []string {
-	base := strings.TrimSuffix(filepath.Base(mediaPath), filepath.Ext(mediaPath))
-	names := []string{
-		base + "-poster",
-		base + ".poster",
-		"poster",
-		"folder",
-		"cover",
-		"movie",
-		"show",
-		base + "-cover",
-		base + ".cover",
-		base,
-		base + "-thumb",
-		base + ".thumb",
-		"thumb",
+	names := make([]string, 0, 24)
+	seen := map[string]struct{}{}
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		names = append(names, name)
 	}
+	for _, base := range mediaSidecarBaseVariants(mediaPath) {
+		add(base + "-poster")
+		add(base + ".poster")
+		add(base + "-cover")
+		add(base + ".cover")
+		add(base)
+	}
+	for _, name := range []string{"poster", "folder", "cover", "movie", "show"} {
+		add(name)
+	}
+	for _, base := range mediaSidecarBaseVariants(mediaPath) {
+		add(base + "-thumb")
+		add(base + ".thumb")
+	}
+	add("thumb")
 	return append(adultArtworkNameCandidates(mediaPath, "poster"), names...)
 }
 
 func localBackdropCandidates(mediaPath string) []string {
-	base := strings.TrimSuffix(filepath.Base(mediaPath), filepath.Ext(mediaPath))
-	names := []string{
-		base + "-fanart",
-		base + ".fanart",
-		base + "-backdrop",
-		base + ".backdrop",
-		base + "-background",
-		"fanart",
-		"backdrop",
-		"background",
-		"landscape",
-		"banner",
-		"clearart",
+	names := make([]string, 0, 24)
+	seen := map[string]struct{}{}
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		names = append(names, name)
+	}
+	_, episode := ParseEpisode(mediaPath)
+	for _, base := range mediaSidecarBaseVariants(mediaPath) {
+		// Jellyfin/Emby commonly stores an episode still beside the video as
+		// "<episode>-thumb.jpg" or "<episode>.jpg". Episode-specific artwork
+		// must win over a series-level fanart.jpg in the parent folder,
+		// otherwise a rescan flattens every episode to the same backdrop.
+		add(base + "-thumb")
+		add(base + ".thumb")
+		if episode > 0 {
+			add(base + "-still")
+			add(base + ".still")
+			add(base + "-scene")
+			add(base + ".scene")
+			add(base)
+		}
+		add(base + "-fanart")
+		add(base + ".fanart")
+		add(base + "-backdrop")
+		add(base + ".backdrop")
+		add(base + "-background")
+	}
+	for _, name := range []string{"fanart", "backdrop", "background", "landscape", "banner", "clearart"} {
+		add(name)
 	}
 	return append(adultArtworkNameCandidates(mediaPath, "backdrop"), names...)
 }
@@ -135,7 +172,7 @@ func firstExistingImage(dir string, names ...string) string {
 		return ""
 	}
 	for _, name := range names {
-		for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tbn"} {
+		for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tbn", ".img"} {
 			path := filepath.Join(dir, name+ext)
 			if fileExists(path) {
 				return filepath.Clean(path)
@@ -198,7 +235,7 @@ func firstExistingPosterImage(dir string, names ...string) string {
 		if isRejectedPosterName(name) {
 			continue
 		}
-		for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tbn"} {
+		for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tbn", ".img"} {
 			path := filepath.Join(dir, name+ext)
 			if fileExists(path) && likelyPosterImage(path) {
 				return filepath.Clean(path)
@@ -217,7 +254,7 @@ func firstAdultLooseImage(dir, kind string) string {
 	fallback := []string{}
 	for _, path := range matches {
 		ext := strings.ToLower(filepath.Ext(path))
-		if ext != ".jpg" && ext != ".jpeg" && ext != ".png" && ext != ".webp" && ext != ".gif" && ext != ".bmp" && ext != ".tbn" {
+		if ext != ".jpg" && ext != ".jpeg" && ext != ".png" && ext != ".webp" && ext != ".gif" && ext != ".bmp" && ext != ".tbn" && ext != ".img" {
 			continue
 		}
 		name := strings.ToLower(strings.TrimSuffix(filepath.Base(path), ext))

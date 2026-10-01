@@ -40,7 +40,7 @@ func (s *ApiConfigService) TestConnection(ctx context.Context, provider string) 
 }
 
 // testTMDb 测试 TMDb API 连接。
-func (s *ApiConfigService) testTMDb(cfg *model.ApiConfig) (string, error) {
+func (s *ApiConfigService) testTMDb(cfg *model.APIConfig) (string, error) {
 	if cfg.APIKey == "" {
 		return "error", errors.New("API key is required")
 	}
@@ -74,7 +74,7 @@ func (s *ApiConfigService) testTMDb(cfg *model.ApiConfig) (string, error) {
 }
 
 // testOpenAI 测试 OpenAI API 连接。
-func (s *ApiConfigService) testOpenAI(cfg *model.ApiConfig) (string, error) {
+func (s *ApiConfigService) testOpenAI(cfg *model.APIConfig) (string, error) {
 	if cfg.APIKey == "" {
 		return "error", errors.New("API key is required")
 	}
@@ -108,7 +108,7 @@ func (s *ApiConfigService) testOpenAI(cfg *model.ApiConfig) (string, error) {
 }
 
 // testDeepSeek 测试 DeepSeek API 连接。
-func (s *ApiConfigService) testDeepSeek(cfg *model.ApiConfig) (string, error) {
+func (s *ApiConfigService) testDeepSeek(cfg *model.APIConfig) (string, error) {
 	if cfg.APIKey == "" {
 		return "error", errors.New("API key is required")
 	}
@@ -142,7 +142,7 @@ func (s *ApiConfigService) testDeepSeek(cfg *model.ApiConfig) (string, error) {
 }
 
 // testSiliconFlow 测试 SiliconFlow API 连接。
-func (s *ApiConfigService) testSiliconFlow(cfg *model.ApiConfig) (string, error) {
+func (s *ApiConfigService) testSiliconFlow(cfg *model.APIConfig) (string, error) {
 	if cfg.APIKey == "" {
 		return "error", errors.New("API key is required")
 	}
@@ -176,7 +176,7 @@ func (s *ApiConfigService) testSiliconFlow(cfg *model.ApiConfig) (string, error)
 }
 
 // testAdult 测试 Adult (JavDB/JavBus) 刮削数据源连接与年龄验证。
-func (s *ApiConfigService) testAdult(ctx context.Context, cfg *model.ApiConfig) (string, error) {
+func (s *ApiConfigService) testAdult(ctx context.Context, cfg *model.APIConfig) (string, error) {
 	bases := []string{}
 	if cfg.BaseURL != "" {
 		bases = append(bases, adultConfiguredBases(cfg.BaseURL)...)
@@ -245,7 +245,7 @@ func (s *ApiConfigService) testAdult(ctx context.Context, cfg *model.ApiConfig) 
 }
 
 // testMetaTube 测试 MetaTube Server 连接与 Token。
-func (s *ApiConfigService) testMetaTube(ctx context.Context, cfg *model.ApiConfig) (string, error) {
+func (s *ApiConfigService) testMetaTube(ctx context.Context, cfg *model.APIConfig) (string, error) {
 	serverURL := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
 	if serverURL == "" {
 		serverURL = "http://127.0.0.1:7700"

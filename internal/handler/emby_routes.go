@@ -23,6 +23,14 @@ func registerEmbyRoutes(r *gin.Engine, jwtSecret string, svc *service.Container)
 		auth := grp.Group("", embyAuthRequiredWithSessionFallback(jwtSecret), activeEmbyUserRequired(svc), embyRealtimeSessionActivity(svc))
 		registerEmbyAuthenticatedRoutes(auth, prefix, svc)
 	}
+
+	// 为没有设置 NoRoute 的 Engine 提供 Emby 路径前缀与大小写纠偏（如单测或独立挂载环境）
+	r.NoRoute(func(c *gin.Context) {
+		if TryHandleEmbyNormalizedRoute(c, r) {
+			return
+		}
+		c.Status(404)
+	})
 }
 
 type embyRouteHandlerFactory func(*service.Container) gin.HandlerFunc
@@ -107,12 +115,31 @@ func registerEmbyPublicClientRoutes(grp *gin.RouterGroup, jwtSecret string, svc 
 
 func registerEmbyPublicImageRoutes(grp *gin.RouterGroup, svc *service.Container) {
 	// 图片公开（Infuse 缓存 URL 时会丢 token）
+	//
+	// 不带 Type 的 /Items/{Id}/Images 返回图片清单（ImageInfo 数组），与下面
+	// 带 Type 的图片字节流是不同接口，必须单独注册，否则会落到 NoRoute 并
+	// 返回 text/plain 的 404。
+	grp.GET("/Items/:id/Images", embyItemImagesHandler(svc))
+	grp.HEAD("/Items/:id/Images", embyItemImagesHandler(svc))
+	grp.GET("/items/:id/images", embyItemImagesHandler(svc))
 	grp.GET("/Items/:id/Images/:type", embyItemImageHandler(svc))
 	grp.GET("/Items/:id/Images/:type/:index", embyItemImageHandler(svc))
 	grp.HEAD("/Items/:id/Images/:type", embyItemImageHandler(svc))
 	grp.GET("/items/:id/images/:type", embyItemImageHandler(svc))
 	grp.GET("/items/:id/images/:type/:index", embyItemImageHandler(svc))
 	grp.HEAD("/items/:id/images/:type", embyItemImageHandler(svc))
+	// 官方 Emby 客户端也可能使用 /Persons/{Name}/Images/{Type} 获取演职人员头像。
+	grp.GET("/Persons/:name/Images/:type", embyPersonImageHandler(svc))
+	grp.GET("/Persons/:name/Images/:type/:index", embyPersonImageHandler(svc))
+	grp.HEAD("/Persons/:name/Images/:type", embyPersonImageHandler(svc))
+	grp.GET("/persons/:name/images/:type", embyPersonImageHandler(svc))
+	grp.GET("/persons/:name/images/:type/:index", embyPersonImageHandler(svc))
+	grp.HEAD("/persons/:name/images/:type", embyPersonImageHandler(svc))
+	// 用户头像。没有头像时返回带缓存头的 404，避免客户端反复重试。
+	grp.GET("/Users/:userId/Images/:type", embyUserImageHandler(svc))
+	grp.HEAD("/Users/:userId/Images/:type", embyUserImageHandler(svc))
+	grp.GET("/users/:userId/images/:type", embyUserImageHandler(svc))
+	grp.HEAD("/users/:userId/images/:type", embyUserImageHandler(svc))
 }
 
 func registerEmbyGetRoutes(grp *gin.RouterGroup, svc *service.Container, paths []string, factory embyRouteHandlerFactory) {
@@ -169,15 +196,20 @@ func registerEmbyAuthenticatedItemRoutes(auth *gin.RouterGroup, svc *service.Con
 	auth.GET("/Shows/:id/Episodes", embyShowEpisodesHandler(svc))
 	auth.GET("/Users/:userId/Shows/:id/Seasons", embyShowSeasonsHandler(svc))
 	auth.GET("/Users/:userId/Shows/:id/Episodes", embyShowEpisodesHandler(svc))
-	auth.GET("/Shows/NextUp", embyEmptyItemsHandler(svc))
-	auth.GET("/Users/:userId/Shows/NextUp", embyEmptyItemsHandler(svc))
-	auth.GET("/MediaSegments/:id", embyEmptyItemsHandler(svc))
+	auth.GET("/Shows/NextUp", embyNextUpHandler(svc))
+	auth.GET("/Users/:userId/Shows/NextUp", embyNextUpHandler(svc))
+	// 部分客户端用路径形式 /Shows/{seriesId}/NextUp，而不是 query SeriesId。
+	auth.GET("/Shows/:id/NextUp", embyShowNextUpHandler(svc))
+	auth.GET("/Users/:userId/Shows/:id/NextUp", embyShowNextUpHandler(svc))
+	auth.GET("/MediaSegments/:id", embyMediaSegmentsHandler(svc))
+	auth.GET("/Items/:id/MediaSegments", embyMediaSegmentsHandler(svc))
+	auth.GET("/Users/:userId/Items/:id/MediaSegments", embyMediaSegmentsHandler(svc))
 	auth.GET("/Artists", embyEmptyItemsHandler(svc))
 	auth.GET("/Persons", embyEmptyItemsHandler(svc))
-	auth.GET("/Genres", embyEmptyItemsHandler(svc))
+	auth.GET("/Genres", embyGenresHandler(svc))
 	auth.GET("/Shows/Upcoming", embyEmptyItemsHandler(svc))
 	auth.GET("/Users/:userId/Shows/Upcoming", embyEmptyItemsHandler(svc))
-	auth.GET("/Items/:id/Similar", embyEmptyItemsHandler(svc))
+	auth.GET("/Items/:id/Similar", embySimilarHandler(svc))
 	auth.GET("/Items/:id/ThumbnailSet", embyEmptyItemsHandler(svc))
 	auth.GET("/Items/:id/ThemeMedia", embyThemeMediaHandler(svc))
 	auth.GET("/Users/:userId/Items/:id/SpecialFeatures", embyEmptyItemsHandler(svc))
@@ -194,6 +226,12 @@ func registerEmbyAuthenticatedPlaybackRoutes(auth *gin.RouterGroup, prefix strin
 	auth.POST("/Users/:userId/Items/:id/PlaybackInfo", embyPlaybackInfoHandler(svc))
 
 	registerEmbyVideoStreamRoutes(auth, svc, "/Videos")
+	// Emby 官方接口：附加片段清单。MeBox 不提供附加片段，但必须返回空数组
+	// 而不是 404 —— 部分客户端（RodelPlayer）在详情页无条件请求它，404 会
+	// 让它们把条目判定为不完整。必须注册成静态段，否则会被
+	// /Videos/:id/:seg 的 HLS 兜底路由抢先匹配并返回空 404。
+	auth.GET("/Videos/:id/AdditionalParts", embyEmptyArrayHandler(svc))
+	auth.HEAD("/Videos/:id/AdditionalParts", embyEmptyArrayHandler(svc))
 	auth.GET("/Videos/:id/Subtitles/:index/Stream", embySubtitleStreamHandler(svc))
 	auth.HEAD("/Videos/:id/Subtitles/:index/Stream", embySubtitleStreamHandler(svc))
 	auth.GET("/Users/:userId/Videos/:id/Subtitles/:index/Stream", embySubtitleStreamHandler(svc))

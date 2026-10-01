@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/truewhile/MeBox/internal/helper"
 	"github.com/truewhile/MeBox/internal/service"
 )
 
@@ -41,7 +42,11 @@ func scanLibraryHandler(svc *service.Container) gin.HandlerFunc {
 		task := startScanHTTPTask(svc, "手动扫描入库", lib.Name, lib.Path)
 		go func(libraryID string, task *service.TaskHandle, finish func()) {
 			defer finish()
-			res, err := svc.Scan.ScanLibrary(context.Background(), libraryID)
+			var res *service.ScanResult
+			var err error
+			helper.Run(svc.Log, "scan.library", func() {
+				res, err = svc.Scan.ScanLibrary(context.Background(), libraryID)
+			})
 			if err != nil {
 				finishHTTPTask(task, err, "scan", "手动扫描入库失败", scanTaskMetrics(res), scanTaskDetails(res, 20))
 				return
@@ -75,7 +80,11 @@ func scanLibraryRootHandler(svc *service.Container) gin.HandlerFunc {
 		task := startScanHTTPTask(svc, "手动扫描媒体库路径", id, rootID)
 		go func(libraryID, libraryRootID string, task *service.TaskHandle, finish func()) {
 			defer finish()
-			res, err := svc.Scan.ScanLibraryRoot(context.Background(), libraryID, libraryRootID)
+			var res *service.ScanResult
+			var err error
+			helper.Run(svc.Log, "scan.libraryRoot", func() {
+				res, err = svc.Scan.ScanLibraryRoot(context.Background(), libraryID, libraryRootID)
+			})
 			if err != nil {
 				finishHTTPTask(task, err, "scan", "手动扫描路径失败", scanTaskMetrics(res), scanTaskDetails(res, 20))
 				return
@@ -110,11 +119,13 @@ func queueLibraryRootScan(svc *service.Container, libraryID, rootID string) {
 	}
 	go func() {
 		defer finish()
-		if strings.TrimSpace(rootID) == "" {
-			_, _ = svc.Scan.ScanLibrary(context.Background(), libraryID)
-			return
-		}
-		_, _ = svc.Scan.ScanLibraryRoot(context.Background(), libraryID, rootID)
+		helper.Run(svc.Log, "scan.queuedRoot", func() {
+			if strings.TrimSpace(rootID) == "" {
+				_, _ = svc.Scan.ScanLibrary(context.Background(), libraryID)
+				return
+			}
+			_, _ = svc.Scan.ScanLibraryRoot(context.Background(), libraryID, rootID)
+		})
 	}()
 }
 

@@ -76,6 +76,9 @@ func TestServeSPAServesAssetsImmutableAndBypassesAPIRoutes(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(webDir, "assets"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(webDir, "fonts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join(webDir, "brand"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -83,6 +86,9 @@ func TestServeSPAServesAssetsImmutableAndBypassesAPIRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(webDir, "assets", "app.js"), []byte("console.log('ok')"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(webDir, "fonts", "geist-400.woff2"), []byte("wOF2-test-font"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(webDir, "brand", "mebox-logo.svg"), []byte("<svg></svg>"), 0o644); err != nil {
@@ -103,6 +109,29 @@ func TestServeSPAServesAssetsImmutableAndBypassesAPIRoutes(t *testing.T) {
 	}
 	if got := assetResp.Header().Get("Cache-Control"); !strings.Contains(got, "immutable") {
 		t.Fatalf("asset Cache-Control = %q, want immutable", got)
+	}
+
+	fontReq := httptest.NewRequest(http.MethodGet, "/fonts/geist-400.woff2", nil)
+	fontResp := httptest.NewRecorder()
+	router.ServeHTTP(fontResp, fontReq)
+	if fontResp.Code != http.StatusOK {
+		t.Fatalf("font status = %d, want 200", fontResp.Code)
+	}
+	if got := fontResp.Header().Get("Cache-Control"); !strings.Contains(got, "max-age=86400") {
+		t.Fatalf("font Cache-Control = %q, want max-age=86400", got)
+	}
+	if got := fontResp.Body.String(); got != "wOF2-test-font" {
+		t.Fatalf("font body = %q, want wOF2-test-font", got)
+	}
+
+	missingFontReq := httptest.NewRequest(http.MethodGet, "/fonts/missing.woff2", nil)
+	missingFontResp := httptest.NewRecorder()
+	router.ServeHTTP(missingFontResp, missingFontReq)
+	if missingFontResp.Code != http.StatusNotFound {
+		t.Fatalf("missing font status = %d, want 404", missingFontResp.Code)
+	}
+	if strings.Contains(missingFontResp.Body.String(), "index") {
+		t.Fatalf("missing font should not serve SPA index: %q", missingFontResp.Body.String())
 	}
 
 	brandReq := httptest.NewRequest(http.MethodGet, "/brand/mebox-logo.svg", nil)

@@ -31,8 +31,9 @@ type LibrarySeriesDetailSectionProps = {
   onProbe: () => void
   onNFO: () => void
   onOrganize: () => void
-  onSoftDelete: () => void
+  onDelete: () => void
   onSeasonChange: (season: number) => void
+  onManualScrapeMedia: (media: Media) => void
 }
 
 export function LibrarySeriesDetailSection({
@@ -56,8 +57,9 @@ export function LibrarySeriesDetailSection({
   onProbe,
   onNFO,
   onOrganize,
-  onSoftDelete,
+  onDelete,
   onSeasonChange,
+  onManualScrapeMedia,
 }: LibrarySeriesDetailSectionProps) {
   return (
     <AnimatePresence mode="wait">
@@ -70,7 +72,6 @@ export function LibrarySeriesDetailSection({
         >
           <LibrarySeriesDetailHeader
             series={selectedSeries}
-            visibleEpisodes={visibleEpisodes}
             allEpisodes={allEpisodes}
             playbackFrom={playbackFrom}
             isAdmin={isAdmin}
@@ -86,7 +87,7 @@ export function LibrarySeriesDetailSection({
             onProbe={onProbe}
             onNFO={onNFO}
             onOrganize={onOrganize}
-            onSoftDelete={onSoftDelete}
+            onDelete={onDelete}
           />
 
           <LibrarySeriesEpisodesPanel
@@ -95,7 +96,9 @@ export function LibrarySeriesDetailSection({
             selectedSeason={selectedSeason}
             visibleEpisodes={visibleEpisodes}
             playbackFrom={playbackFrom}
+            isAdmin={isAdmin}
             onSeasonChange={onSeasonChange}
+            onManualScrape={onManualScrapeMedia}
           />
         </motion.div>
       )}
@@ -109,7 +112,9 @@ type LibrarySeriesEpisodesPanelProps = {
   selectedSeason: number | null
   visibleEpisodes: Media[]
   playbackFrom: string
+  isAdmin: boolean
   onSeasonChange: (season: number) => void
+  onManualScrape: (media: Media) => void
 }
 
 function LibrarySeriesEpisodesPanel({
@@ -118,7 +123,9 @@ function LibrarySeriesEpisodesPanel({
   selectedSeason,
   visibleEpisodes,
   playbackFrom,
+  isAdmin,
   onSeasonChange,
+  onManualScrape,
 }: LibrarySeriesEpisodesPanelProps) {
   return (
     <div className="space-y-6">
@@ -128,7 +135,9 @@ function LibrarySeriesEpisodesPanel({
         selectedSeason={selectedSeason}
         visibleEpisodes={visibleEpisodes}
         playbackFrom={playbackFrom}
+        isAdmin={isAdmin}
         onSeasonChange={onSeasonChange}
+        onManualScrape={onManualScrape}
       />
     </div>
   )

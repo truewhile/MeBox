@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"strings"
 
+	"go.uber.org/zap"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/truewhile/MeBox/internal/middleware"
@@ -45,8 +47,8 @@ func playbackInfoHandler(svc *service.Container) gin.HandlerFunc {
 		token := externalPlaybackToken(c, svc, m.ID, m.DurationSec)
 		profileQuery := externalProfileQuery(c)
 		hlsURL := "/api/hls/" + m.ID + "/index.m3u8?token=" + url.QueryEscape(token) + profileQuery
-		if service.IsEmbyRemoteID(m.ID) || service.IsStrmMediaRow(m) {
-			// Emby 远程挂载与 STRM 媒体一样，默认直连播放，不提供转码地址
+		if service.IsEmbyRemoteID(m.ID) {
+			// 远程 Emby 挂载没有本地文件，不能提供转码地址。STRM 默认直连，直连失败时可走 HLS。
 			hlsURL = ""
 		}
 		c.JSON(http.StatusOK, gin.H{
@@ -173,10 +175,20 @@ func externalPlaybackToken(c *gin.Context, svc *service.Container, mediaID strin
 	uid, _ := c.Get(middleware.CtxUserID)
 	u, err := svc.Repo.User.FindByID(c.Request.Context(), toString(uid))
 	if err != nil || u == nil {
+		if svc.Log != nil {
+			svc.Log.Warn("external playback token: user lookup failed",
+				zap.String("media_id", mediaID), zap.Error(err))
+		}
 		return ""
 	}
 	token, err := svc.Auth.IssueExternalPlaybackToken(u, mediaID, durationSec)
 	if err != nil {
+		// 静默返回空串会让 stream_url 变成 ?token=（空）、外部播放器只看到
+		// 401 无从排查，至少在服务端日志里留下原因。
+		if svc.Log != nil {
+			svc.Log.Warn("issue external playback token failed",
+				zap.String("media_id", mediaID), zap.Error(err))
+		}
 		return ""
 	}
 	return token

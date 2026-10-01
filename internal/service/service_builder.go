@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/truewhile/MeBox/internal/config"
+	"github.com/truewhile/MeBox/internal/helper"
 	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/repository"
+	"github.com/truewhile/MeBox/internal/service/reader"
 )
 
 type serviceContainerBuilder struct {
@@ -29,9 +32,10 @@ func newServiceContainer(cfg *config.Config, log *zap.Logger, repos *repository.
 		repos:   repos,
 		version: normalizeSystemUpdateVersion(version),
 		c: &Container{
-			Cfg:  cfg,
-			Log:  log,
-			Repo: repos,
+			Version: normalizeSystemUpdateVersion(version),
+			Cfg:     cfg,
+			Log:     log,
+			Repo:    repos,
 		},
 	}
 	builder.startRealtimeServices()
@@ -39,19 +43,30 @@ func newServiceContainer(cfg *config.Config, log *zap.Logger, repos *repository.
 	builder.initContentServices()
 	builder.initAccessAndStorageServices()
 	builder.initIdentityServices()
+	// Telegram 在 initIdentityServices 里构建，这里把失败告警接到任务状态机上。
+	builder.wireTaskNotifications()
 	builder.initImageProxy()
 	builder.attachRuntimeContext()
 	return builder.c
 }
 
+// wireTaskNotifications 把任务失败通知接到 Telegram。必须在 Tasks 与 Telegram
+// 都已构建之后调用：早于两者其一会静默漏接。
+func (b *serviceContainerBuilder) wireTaskNotifications() {
+	if b.c.Tasks == nil || b.c.Telegram == nil {
+		return
+	}
+	b.c.Tasks.SetFailureNotifier(b.c.Telegram.SendToAdmin)
+}
+
 func (b *serviceContainerBuilder) startRealtimeServices() {
 	b.c.WSHub = NewHub(b.log)
-	go b.c.WSHub.Run()
+	helper.Go(b.log, "ws.hub", b.c.WSHub.Run)
 	b.c.Tasks = NewTaskTrackerService(b.log, b.c.WSHub)
 	b.c.SystemUpdate = NewSystemUpdateService(b.cfg, b.log, b.repos, b.c.Tasks, b.version)
 
 	b.c.SSEHub = NewSSEHub(b.log)
-	go b.c.SSEHub.Run()
+	helper.Go(b.log, "sse.hub", b.c.SSEHub.Run)
 }
 
 func (b *serviceContainerBuilder) initProviderServices() {
@@ -68,6 +83,7 @@ func (b *serviceContainerBuilder) initProviderServices() {
 	b.c.Fanart = NewFanartProvider(b.cfg, b.log)
 	b.c.RecognitionWords = NewRecognitionWordsService(b.log, b.repos)
 	b.c.Danmaku = NewDanmakuService(b.log, b.repos)
+	b.c.Reader = reader.NewReaderService(b.cfg, b.log, b.repos)
 
 	adult := NewAdultProvider(b.log, b.c.APIConfig, b.repos)
 	b.c.Scraper = NewScraperService(
@@ -86,7 +102,9 @@ func (b *serviceContainerBuilder) configureMediaSearchBackend() {
 	}
 	b.repos.Media.SetSearchBackend(searchBackend)
 	if b.log != nil {
-		b.log.Info("opensearch media search enabled", zap.String("index", b.cfg.Search.Index), zap.String("url", b.cfg.Search.OpenSearchURL))
+		b.log.Info("opensearch media search enabled",
+			zap.String("index", b.cfg.Search.Index),
+			zap.String("url", redactSensitiveURL(b.cfg.Search.OpenSearchURL)))
 	}
 }
 
@@ -104,21 +122,41 @@ func (b *serviceContainerBuilder) initContentServices() {
 	b.c.FileManager = NewFileManagerService(b.cfg, b.log, b.repos)
 	b.c.DLNA = NewDLNAService(b.log)
 	b.c.Storage = NewStorageService(b.log, b.repos)
-	b.c.Emby = NewEmbyService(b.cfg, b.log, b.repos)
+	b.c.Emby = NewEmbyService(b.cfg, b.log, b.repos).SetTMDbProvider(b.c.TMDb).SetAdultProvider(b.c.Scraper.adult)
+	// 发现类查询（NextUp / Similar / Genres）：Emby 兼容层与媒体库筛选共用。
+	b.c.Discovery = NewMediaDiscoveryService(b.log, b.repos)
+	b.c.Emby.SetDiscovery(b.c.Discovery)
 	b.c.EmbyRemote = NewEmbyRemoteService(b.cfg, b.log, b.repos, b.c.Crypto).SetRuntimeCache(b.c.Cache)
 	b.c.Emby.SetEmbyRemote(b.c.EmbyRemote)
 	b.c.Backup = NewBackupService(b.cfg, b.log, b.repos.DB)
 	b.c.Media = NewMediaService(b.cfg, b.log, b.repos).SetRuntimeCache(b.c.Cache)
 	b.c.Stream = NewStreamService(b.cfg, b.log, b.repos, b.c.Transcoder)
 	b.c.Playback = NewPlaybackService(b.log, b.repos).SetEmbyRemote(b.c.EmbyRemote)
+	// 片头/片尾片段：播放时按需向 TheIntroDB 补齐并落库，供下次直接命中。
+	b.c.Segments = NewMediaSegmentService(b.log, b.repos).SetIntroDB(NewIntroDBService(b.log))
 	b.c.Subtitle = NewSubtitleService(b.cfg, b.log, b.repos)
 	b.c.Profile = NewProfileService(b.log, b.repos)
 	b.c.Audit = NewAuditService(b.log, b.repos)
 	b.c.Strm = NewStrmService(b.cfg, b.log, b.repos, b.c.Crypto)
+	b.c.Cloud115 = NewCloud115PlaybackService(b.cfg, b.log, b.repos, b.c.Strm)
+	// 本地 HLS 档位的可用性取决于 ffmpeg 是否可用；未注入时按不可用处理。
+	b.c.Cloud115.SetTranscoder(b.c.Transcoder)
 	// ffmpeg/ffprobe 一键下载安装（data/tools/ffmpeg/）。
 	b.c.FFTools = NewFFmpegToolsService(b.cfg, b.log, b.repos)
 	// 弹幕 hash 识别需要把 strm 指向解析成可拉取的直链/本地路径。
 	b.c.Danmaku.SetStrmResolver(b.c.Strm.ResolvePlay)
+	// STRM 直连失败后的 HLS 转码：把 .strm 解析成 ffmpeg 可读取的本地路径或 HTTP 直链。
+	b.c.Transcoder.SetStrmPlayTargetResolver(b.c.Strm.ResolvePlayTarget)
+	b.c.Transcoder.SetProbe(b.c.FFprobe)
+	b.c.Subtitle.SetStrmPlayTargetResolver(b.c.Strm.ResolvePlayTarget)
+	// 播放时的媒体信息提取（ffprobe 章节 → 跳过片头/片尾）：完全异步，播放链路
+	// 只读缓存。换链复用与转码/字幕同一条路径，避免 CDN 防盗链 403。
+	b.c.MediaProbe = NewMediaProbeService(b.log, b.repos, b.c.FFprobe).
+		SetPlayTargetResolver(b.c.Strm.ResolvePlayTargetWithUA)
+	b.c.Segments.SetProbe(b.c.MediaProbe)
+	// 播放链路：/Videos/{id}/stream 与 /api/stream/{id} 在服务端完成换链后直接
+	// 302 到最终直链，客户端少跟随一次 302（高延迟线路上省一个往返）。
+	b.c.Stream.SetStrmPlayTargetResolver(b.c.Strm.ResolvePlayTargetWithUA)
 	// 弹幕识别需要把远程 Emby 条目解析为 Media 元数据及可拉取前 16MB 的直链 URL。
 	if b.c.EmbyRemote != nil {
 		b.c.Danmaku.SetRemoteMediaResolver(func(ctx context.Context, encodedID string) (*model.Media, string, error) {
@@ -149,17 +187,28 @@ func (b *serviceContainerBuilder) initAccessAndStorageServices() {
 	b.c.Database = NewDatabaseAdminService(b.cfg, b.log, b.repos, b.repos.DB)
 	b.c.Emby.SetRuntimeCache(b.c.Cache)
 	b.c.Emby.SetSubtitleService(b.c.Subtitle)
+	b.c.Emby.SetDiscovery(b.c.Discovery)
 	b.c.Scheduler = NewSchedulerService(
 		b.log, b.repos, b.c.Scan, b.c.Transcoder,
 		b.c.Organizer, b.c.WSHub, b.cfg.Cache.CacheDir,
 	)
 	b.c.Scheduler.SetTaskTracker(b.c.Tasks)
 	b.c.Scheduler.SetOrganizePipeline(b.c.OrganizePipeline)
-	b.c.Scheduler.SetImagesMaxSizeMBProvider(func() int {
+	b.c.Scheduler.SetSegments(b.c.Segments)
+	b.c.Scheduler.SetImageCachePolicyProvider(func() ImageCachePolicy {
 		if b.cfg == nil {
-			return 0
+			return ImageCachePolicy{}
 		}
-		return b.cfg.Cache.ImagesMaxSizeMB
+		policy := ImageCachePolicy{
+			TotalBytes: int64(b.cfg.Cache.ImagesMaxSizeMB) * 1024 * 1024,
+		}
+		if b.cfg.Cache.ImagesOriginalsMaxSizeMB > 0 {
+			policy.OriginalsBytes = int64(b.cfg.Cache.ImagesOriginalsMaxSizeMB) * 1024 * 1024
+		}
+		if b.cfg.Cache.ImagesOriginalsTTLHours > 0 {
+			policy.OriginalsAge = time.Duration(b.cfg.Cache.ImagesOriginalsTTLHours) * time.Hour
+		}
+		return policy
 	})
 }
 
@@ -169,12 +218,26 @@ func (b *serviceContainerBuilder) initIdentityServices() {
 	b.c.Sessions = NewSessionTrackerService(b.log)
 	b.c.Device = NewDeviceService(b.log, b.repos)
 	b.c.Device.SetSessionTracker(b.c.Sessions)
+	// Telegram 通知：未启用时 Start 不会占用 goroutine，SendToUser 静默跳过。
+	b.c.Telegram = NewTelegramService(b.log, b.repos)
+	b.c.Device.SetNotifier(b.c.Telegram.SendToUser)
+	b.c.Device.SetAdminNotifier(b.c.Telegram.SendToAdmin)
+	// 账号到期巡检：只负责发现与去重，发送复用同一个 Telegram 通道。
+	b.c.TelegramExpiry = NewTelegramExpiryWatcher(b.log, b.repos)
+	b.c.TelegramExpiry.SetUserNotifier(b.c.Telegram.SendToUser)
+	// SetExpiryWatcher must run AFTER TelegramExpiry is constructed.
+	b.c.Scheduler.SetExpiryWatcher(b.c.TelegramExpiry)
 	b.c.ApiConfig = NewApiConfigService(b.cfg, b.log, b.repos, b.c.Crypto)
 }
 
 func (b *serviceContainerBuilder) initImageProxy() {
 	b.c.ImageProxy = NewImageProxy(b.cfg, b.log)
 	b.c.ImageProxy.SetLibraryRootsProvider(b.libraryRoots)
+	if b.c.EmbyRemote != nil {
+		b.c.ImageProxy.SetAllowedRemoteHostsProvider(func() []string {
+			return b.c.EmbyRemote.ConfiguredRemoteHosts(context.Background())
+		})
+	}
 	b.c.Scan.SetImageProxy(b.c.ImageProxy)
 	b.c.Scraper.SetImageProxy(b.c.ImageProxy)
 }

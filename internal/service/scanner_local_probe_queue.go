@@ -7,6 +7,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/truewhile/MeBox/internal/helper"
 	"github.com/truewhile/MeBox/internal/model"
 )
 
@@ -45,7 +46,7 @@ func (s *ScannerService) startLocalMediaProbeWorkers() {
 	s.localMediaProbeOnce.Do(func() {
 		workers := s.ffprobeWorkerCount()
 		for i := 0; i < workers; i++ {
-			go s.localMediaProbeWorker()
+			helper.Go(s.log, "scanner.probeWorker", s.localMediaProbeWorker)
 		}
 	})
 }

@@ -5,15 +5,22 @@ import (
 	"time"
 )
 
-// ApiConfig 存储第三方 API 密钥和配置信息。
-// APIKey 字段在 JSON 序列化时隐藏（json:"-"），通过加密存储。
-type ApiConfig struct {
+// APIConfig 存储第三方 API 密钥和配置信息。
+// APIKey 字段在 JSON 序列化时隐藏（json:"-"），通过加密存储（AES-GCM 密文，
+// base64 后常超 512 字符，因此必须是 text 而非 varchar(512)）。
+//
+// NOTE: 历史上曾有 APIConfig / ApiConfig 两个结构体映射到同一张 api_configs
+// 表，AutoMigrate 每次启动互相改列（provider/api_key 长度来回切换），且
+// varchar(512) 收窄会让长密文入库后下一次启动迁移直接失败。现已合并为本
+// 结构体，字段取两者并集，请勿再拆分。
+type APIConfig struct {
 	Base
-	Provider     string     `gorm:"size:64;uniqueIndex;not null" json:"provider"`
-	APIKey       string     `gorm:"size:512" json:"-"`
-	BaseURL      string     `gorm:"size:512" json:"base_url,omitempty"`
-	Extra        string     `gorm:"type:text" json:"extra,omitempty"`
-	Enabled      bool       `gorm:"default:true" json:"enabled"`
+	Provider string `gorm:"uniqueIndex;size:64;not null" json:"provider"`
+	APIKey   string `gorm:"type:text" json:"-"` // ciphertext (never serialised)
+	BaseURL  string `gorm:"size:512" json:"base_url,omitempty"`
+	Extra    string `gorm:"type:text" json:"extra,omitempty"` // free-form JSON
+	Enabled  bool   `gorm:"default:true" json:"enabled"`
+
 	Description  string     `gorm:"size:255" json:"description,omitempty"`
 	LastTestedAt *time.Time `json:"last_tested_at,omitempty"`
 	TestResult   string     `gorm:"size:32" json:"test_result,omitempty"`

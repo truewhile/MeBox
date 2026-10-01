@@ -7,6 +7,7 @@ const (
 	defaultDatabaseMaxIdleConns = 4
 	defaultLicenseServerURL     = "https://mgosever.3jzs.com"
 	defaultLicensePublicKey     = "MCowBQYDK2VwAyEABRXnXy+urjrbKit6Yu/HiezWgP0NdsZW3tsegJWRrtI="
+	DefaultCacheMemoryMaxSizeMB = 128
 )
 
 func setDefaults(v *viper.Viper) {
@@ -43,11 +44,14 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("logging.max_backups", 10)
 
 	v.SetDefault("cache.cache_dir", "./cache")
-	v.SetDefault("cache.images_max_size_mb", 500)
-	v.SetDefault("cache.cleanup_interval_min", 60)
+	v.SetDefault("cache.images_max_size_mb", 2000)
+	v.SetDefault("cache.images_originals_max_size_mb", 256)
+	v.SetDefault("cache.images_originals_ttl_hours", 168)
+	v.SetDefault("cache.memory_max_size_mb", DefaultCacheMemoryMaxSizeMB)
 	v.SetDefault("cache.redis_url", "")
 	v.SetDefault("cache.redis_prefix", "mebox")
-	v.SetDefault("cache.media_ttl_seconds", 15)
+	v.SetDefault("cache.media_ttl_seconds", 90)
+	v.SetDefault("cache.emby_latest_ttl_seconds", 300)
 
 	v.SetDefault("search.backend", "")
 	v.SetDefault("search.opensearch_url", "")

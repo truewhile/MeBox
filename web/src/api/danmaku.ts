@@ -27,20 +27,32 @@ export interface DanmakuFetchResult {
   font_size: string
   area: string
   raw?: string
+  /** Number of sources merged into `raw`; absent/0 means not merged. */
+  merged_sources?: number
   candidates?: DanmakuAnime[]
+  /**
+   * Same episode, other sources. Unlike `candidates` (which means "pick one
+   * before anything loads"), `alternatives` arrives together with a loaded
+   * library: the backend already auto-picked one and offers the rest so the
+   * user can switch without re-searching. Aggregating sources such as LogVar
+   * return several libraries for the same episode.
+   */
+  alternatives?: DanmakuAnime[]
   anime_title?: string
   episode_title?: string
   episode_id?: number
-  match_mode?: 'hash' | 'filename' | 'search' | 'manual' | string
+  match_mode?: 'hash' | 'filename' | 'metadata' | 'search' | 'manual' | string
 }
 
 export interface DanmakuLoadedInfo {
   animeTitle?: string
   episodeTitle?: string
   episodeId?: number | string
-  matchMode?: 'hash' | 'filename' | 'search' | 'manual' | string
+  matchMode?: 'hash' | 'filename' | 'metadata' | 'search' | 'manual' | string
   totalCount: number
   sourceType?: 'auto' | 'xml' | 'json'
+  /** Number of sources merged into the loaded comments (0 = not merged). */
+  mergedSources?: number
 }
 
 export type DanmakuFetchOptions = {
@@ -48,6 +60,37 @@ export type DanmakuFetchOptions = {
   kw?: string
   /** Forces a specific danmaku library chosen by the user. */
   episodeId?: number | string
+}
+
+export interface DanmakuConfig {
+  enabled: boolean
+  source?: string
+  app_id?: string
+  app_key_configured: boolean
+  opacity: string
+  font_size: string
+  area: string
+  volume: number
+  /** 当前用户是否已经看过 VR 全景播放的首次操作说明（按用户存储）。 */
+  vr360_guide_seen: boolean
+  /** Per-user preference: merge the same episode's multiple sources. */
+  merge_sources: boolean
+}
+
+export interface DanmakuSettingsPatch {
+  enabled?: boolean
+  source?: string
+  app_id?: string
+  /** 留空不会修改密钥；清空请使用 clear_app_key。 */
+  app_key?: string
+  clear_app_key?: boolean
+  opacity?: number
+  font_size?: number
+  area?: number
+  merge_sources?: boolean
+  volume?: number
+  /** 看过 VR 操作说明后置为 true，之后不再弹出。 */
+  vr360_guide_seen?: boolean
 }
 
 // danmakuAPI fetches danmaku comments for a media item. The backend resolves
@@ -63,16 +106,11 @@ export const danmakuAPI = {
       })
       .then((r) => r.data),
 
-  // config returns the renderer knobs so the player can initialize its
-  // danmaku control panel without admin privileges.
+  // config returns the current user's player volume and danmaku preferences.
   config: () =>
-    api
-      .get<{
-        enabled: boolean
-        source?: string
-        opacity: string
-        font_size: string
-        area: string
-      }>('/danmaku/config')
-      .then((r) => r.data),
+    api.get<DanmakuConfig>('/danmaku/config').then((r) => r.data),
+
+  // updateSettings persists a partial per-user player/danmaku settings patch.
+  updateSettings: (settings: DanmakuSettingsPatch) =>
+    api.put<DanmakuConfig>('/danmaku/settings', settings).then((r) => r.data),
 }

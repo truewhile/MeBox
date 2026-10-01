@@ -4,15 +4,19 @@ package handler
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/truewhile/MeBox/internal/helper"
 	"github.com/truewhile/MeBox/internal/middleware"
 	"github.com/truewhile/MeBox/internal/model"
+	"github.com/truewhile/MeBox/internal/repository"
 	"github.com/truewhile/MeBox/internal/service"
 )
 
@@ -30,10 +34,10 @@ type createLibraryReq struct {
 // 统一结构（远程库附加 is_remote_emby / remote_source 只读标记）。
 type webLibraryPayload struct {
 	model.Library
-	IsRemoteEmby bool                 `json:"is_remote_emby,omitempty"`
-	RemoteSource string               `json:"remote_source,omitempty"`
-	Total        int64                `json:"total,omitempty"`
-	Cards        []service.SeriesCard `json:"cards,omitempty"`
+	IsRemoteEmby bool                     `json:"is_remote_emby,omitempty"`
+	RemoteSource string                   `json:"remote_source,omitempty"`
+	Total        int64                    `json:"total,omitempty"`
+	Cards        []service.SeriesCardView `json:"cards,omitempty"`
 }
 
 // remoteLibraryItemTypes 远程库内容拉取时按 CollectionType 过滤直属条目，
@@ -69,6 +73,26 @@ func listLibrariesHandler(svc *service.Container) gin.HandlerFunc {
 			}
 			libs = filtered
 		}
+		rawIDs := strings.TrimSpace(c.Query("ids"))
+		var targetSet map[string]struct{}
+		if rawIDs != "" {
+			targetSet = make(map[string]struct{})
+			for _, id := range strings.Split(rawIDs, ",") {
+				id = strings.TrimSpace(id)
+				if id != "" {
+					targetSet[id] = struct{}{}
+				}
+			}
+		}
+		if len(targetSet) > 0 {
+			filtered := libs[:0]
+			for _, lib := range libs {
+				if _, ok := targetSet[lib.ID]; ok {
+					filtered = append(filtered, lib)
+				}
+			}
+			libs = filtered
+		}
 		withPreview := c.Query("with_preview") == "1" || c.Query("with_preview") == "true"
 		limit := 10
 		if withPreview {
@@ -81,31 +105,81 @@ func listLibrariesHandler(svc *service.Container) gin.HandlerFunc {
 		}
 		out := make([]webLibraryPayload, 0, len(libs)+8)
 		if withPreview {
-			previews, err := svc.Media.ListLibrariesWithPreview(ctx, libs, mediaVisibilityForRequest(c, svc), limit)
+			var previews []service.LibraryPreviewItem
+			if c.Query("include_total") == "0" {
+				previews, err = svc.Media.ListLibraryPreviews(ctx, libs, mediaVisibilityForRequest(c, svc), limit)
+			} else {
+				previews, err = svc.Media.ListLibrariesWithPreview(ctx, libs, mediaVisibilityForRequest(c, svc), limit)
+			}
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}
 			for _, p := range previews {
-				out = append(out, webLibraryPayload{Library: p.Library, Total: p.Total, Cards: p.Cards})
+				out = append(out, webLibraryPayload{
+					Library: p.Library,
+					Total:   p.Total,
+					Cards:   service.NewSeriesCardViews(p.Cards),
+				})
 			}
 		} else {
+			visibility := mediaVisibilityForRequest(c, svc)
+			libIDs := make([]string, len(libs))
+			for i, l := range libs {
+				libIDs[i] = l.ID
+			}
+			counts, _ := svc.Media.CountLibrariesCached(ctx, libIDs, repository.MediaQueryFilter{
+				IncludeNSFW:       visibility.IncludeNSFW,
+				AllowedLibraryIDs: visibility.AllowedLibraryIDs,
+				HiddenLibraryIDs:  visibility.HiddenLibraryIDs,
+			})
 			for _, l := range libs {
-				out = append(out, webLibraryPayload{Library: l})
+				var total int64
+				if counts != nil {
+					total = counts[l.ID]
+				}
+				out = append(out, webLibraryPayload{Library: l, Total: total})
 			}
 		}
-		// 远程 Emby 挂载库追加在本地库之后。
-		if svc.EmbyRemote != nil {
+		// 精确指定目标库时，如果目标全是本地库，就不必枚举远程挂载。
+		// 首页预览会拆成多个小批次请求，跳过无关远程调用可以明显缩短
+		// 每批次的尾延迟；未指定 ids 的完整库列表仍保持原行为。
+		includeRemote := true
+		if len(targetSet) > 0 {
+			includeRemote = false
+			for id := range targetSet {
+				if service.IsEmbyRemoteID(id) {
+					includeRemote = true
+					break
+				}
+			}
+		}
+
+		// 远程 Emby 挂载库追加在本地库之后（非管理员视图仍受 allowed_library_ids 约束）。
+		if includeRemote && svc.EmbyRemote != nil {
 			if views, err := svc.EmbyRemote.RemoteLibraries(ctx); err == nil {
-				remotePayloads := make([]webLibraryPayload, len(views))
-				for i, v := range views {
+				visibility := mediaVisibilityForRequest(c, svc)
+				allowedViews := make([]service.RemoteLibraryView, 0, len(views))
+				for _, v := range views {
+					if !includeHidden && !service.LibraryVisibleForUser(ctx, svc.Repo, v.Library, visibility) {
+						continue
+					}
+					if len(targetSet) > 0 {
+						if _, ok := targetSet[v.Library.ID]; !ok {
+							continue
+						}
+					}
+					allowedViews = append(allowedViews, v)
+				}
+				remotePayloads := make([]webLibraryPayload, len(allowedViews))
+				for i, v := range allowedViews {
 					remotePayloads[i] = webLibraryPayload{Library: v.Library, IsRemoteEmby: true, RemoteSource: v.AccountName}
 				}
-				if withPreview && len(views) > 0 {
+				if withPreview && len(allowedViews) > 0 {
 					const maxRemotePreviewWorkers = 6
 					sem := make(chan struct{}, maxRemotePreviewWorkers)
 					var wg sync.WaitGroup
-					for i, v := range views {
+					for i, v := range allowedViews {
 						i, v := i, v
 						wg.Add(1)
 						go func() {
@@ -116,18 +190,26 @@ func listLibrariesHandler(svc *service.Container) gin.HandlerFunc {
 							case <-ctx.Done():
 								return
 							}
-							acct := svc.EmbyRemote.AccountByID(ctx, v.AccountID)
-							if acct == nil {
-								return
-							}
-							tmpMount := &model.EmbyMount{Base: model.Base{ID: v.MountID}}
-							itemTypes := remoteLibraryItemTypes(v.CollectionType)
-							if _, total, err := svc.EmbyRemote.RemoteLibraryMedia(ctx, tmpMount, acct, v.RemoteID, itemTypes, 0, 1); err == nil {
-								remotePayloads[i].Total = total
-							}
-							if cards, err := svc.EmbyRemote.RemoteLatestCards(ctx, tmpMount, acct, v.RemoteID, limit); err == nil {
-								remotePayloads[i].Cards = cards
-							}
+							helper.Run(svc.Log, "media.remotePreview", func() {
+								acct := svc.EmbyRemote.AccountByID(ctx, v.AccountID)
+								if acct == nil {
+									return
+								}
+								tmpMount := &model.EmbyMount{
+									Base:           model.Base{ID: v.MountID},
+									AccountID:      v.AccountID,
+									RemoteViewID:   v.RemoteID,
+									CollectionType: v.CollectionType,
+									Name:           v.Library.Name,
+								}
+								itemTypes := remoteLibraryItemTypes(v.CollectionType)
+								if _, total, err := svc.EmbyRemote.RemoteLibraryMedia(ctx, tmpMount, acct, v.RemoteID, itemTypes, 0, 1); err == nil {
+									remotePayloads[i].Total = total
+								}
+								if cards, err := svc.EmbyRemote.RemoteLatestCards(ctx, tmpMount, acct, v.RemoteID, limit); err == nil {
+									remotePayloads[i].Cards = service.NewSeriesCardViews(cards)
+								}
+							})
 						}()
 					}
 					wg.Wait()
@@ -148,6 +230,12 @@ func getLibraryHandler(svc *service.Container) gin.HandlerFunc {
 			mountID, remoteID, _ := service.DecodeEmbyRemoteID(id)
 			view, err := svc.EmbyRemote.RemoteLibraryByID(ctx, mountID, remoteID)
 			if err != nil || view == nil {
+				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+				return
+			}
+			role, _ := c.Get(middleware.CtxUserRole)
+			includeHidden := role == "admin" && (c.Query("include_hidden") == "1" || c.Query("include_hidden") == "true" || c.Query("all") == "1")
+			if !includeHidden && !service.LibraryVisibleForUser(ctx, svc.Repo, view.Library, mediaVisibilityForRequest(c, svc)) {
 				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 				return
 			}
@@ -311,9 +399,99 @@ func deleteLibraryHandler(svc *service.Container) gin.HandlerFunc {
 		}
 		uid, _ := c.Get("ctx_user_id")
 		svc.Audit.Record(c.Request.Context(), toString(uid), "library.delete", id, c.ClientIP(), "")
-		go func() { _ = svc.Watcher.Refresh(context.Background()) }()
+		// goroutine 内的 panic 无法被 gin.Recovery 捕获，会直接崩掉进程：
+		// 与其他调用点一致先判空。
+		if svc.Watcher != nil {
+			go func() { _ = svc.Watcher.Refresh(context.Background()) }()
+		}
 		c.Status(http.StatusNoContent)
 	}
+}
+
+// parseLibraryFilters 解析媒体库列表的筛选查询参数。
+//
+// 全部参数都是可选的：缺省时返回零值，`MediaListFilters.empty()` 为真，列表
+// 行为与此前完全一致（不引入任何默认筛选）。
+//
+// 参数约定：
+//   - genre=Action&genre=Comedy  类型多选（或关系，整词匹配）
+//   - year_min / year_max        年份区间，0 或非法值表示不限
+//   - rating_min                 评分下限（浮点）
+//   - unwatched=1                仅显示未看完；用户 ID 取自会话
+func parseLibraryFilters(c *gin.Context) service.MediaListFilters {
+	filters := service.MediaListFilters{
+		Genres:    parseRepeatedQueryValues(c, "genre"),
+		YearMin:   parseNonNegativeInt(firstQueryValue(c, "year_min", "yearMin")),
+		YearMax:   parseNonNegativeInt(firstQueryValue(c, "year_max", "yearMax")),
+		RatingMin: parseNonNegativeFloat(firstQueryValue(c, "rating_min", "ratingMin")),
+	}
+	if isTruthyQuery(firstQueryValue(c, "unwatched", "unwatched_only", "unwatchedOnly")) {
+		filters.Unwatched = true
+		filters.UserID = toString(mustSessionUserID(c))
+	}
+	return filters
+}
+
+// parseRepeatedQueryValues 读取可重复出现的查询参数，去重并丢弃空值。
+// 同时接受 key[] 括号格式（axios 1.x 默认序列化方式）作为向后兼容回退，
+// 在前端 paramsSerializer 未正确配置时不会静默返回空结果。
+func parseRepeatedQueryValues(c *gin.Context, key string) []string {
+	raw := c.QueryArray(key)
+	if len(raw) == 0 {
+		// fallback: axios bracket format (e.g. genre[]=Action&genre[]=Comedy)
+		raw = c.QueryArray(key + "[]")
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, value := range raw {
+		// 客户端可能把多值拼成一次逗号分隔，两种形式都要接受。
+		for _, part := range strings.Split(value, ",") {
+			trimmed := strings.TrimSpace(part)
+			if trimmed == "" {
+				continue
+			}
+			if _, ok := seen[trimmed]; ok {
+				continue
+			}
+			seen[trimmed] = struct{}{}
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+func parseNonNegativeInt(raw string) int {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value < 0 {
+		return 0
+	}
+	return value
+}
+
+func parseNonNegativeFloat(raw string) float64 {
+	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || value < 0 || math.IsNaN(value) {
+		return 0
+	}
+	return value
+}
+
+func isTruthyQuery(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// mustSessionUserID 取会话用户 ID，缺失时返回空串（筛选逻辑会忽略它）。
+func mustSessionUserID(c *gin.Context) any {
+	uid, _ := c.Get(middleware.CtxUserID)
+	return uid
 }
 
 func listMediaHandler(svc *service.Container) gin.HandlerFunc {
@@ -327,6 +505,10 @@ func listMediaHandler(svc *service.Container) gin.HandlerFunc {
 			mountID, remoteID, _ := service.DecodeEmbyRemoteID(id)
 			mount, acct, _ := svc.EmbyRemote.ResolveMount(ctx, mountID)
 			if mount == nil || acct == nil {
+				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+				return
+			}
+			if !service.EmbyMountLibraryAllowed(mediaVisibilityForRequest(c, svc), mount) {
 				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 				return
 			}
@@ -350,9 +532,15 @@ func listMediaHandler(svc *service.Container) gin.HandlerFunc {
 			})
 			return
 		}
+		sortSpec := parseMediaSort(c)
+		var history map[string]time.Time
+		if sortSpec.Field == "last_played" {
+			history = mediaHistoryMap(c, svc)
+		}
+		filters := parseLibraryFilters(c)
 		groupVersions := c.DefaultQuery("group_versions", "1") != "0"
 		if !groupVersions {
-			items, total, err := svc.Media.ListMediaVisible(c.Request.Context(), id, page, size, mediaVisibilityForRequest(c, svc))
+			items, total, err := svc.Media.ListMediaVisibleFiltered(ctx, id, page, size, mediaVisibilityForRequest(c, svc), filters)
 			if err != nil {
 				writeInternalOrCanceled(c, err)
 				return
@@ -368,17 +556,19 @@ func listMediaHandler(svc *service.Container) gin.HandlerFunc {
 			})
 			return
 		}
-		items, total, err := svc.Media.ListMediaVisibleGrouped(c.Request.Context(), id, page, size, mediaVisibilityForRequest(c, svc))
+		grouped, err := svc.Media.GroupedMediaVisibleFiltered(ctx, id, mediaVisibilityForRequest(c, svc), filters)
 		if err != nil {
 			writeInternalOrCanceled(c, err)
 			return
 		}
+		grouped = service.SortMediaItems(grouped, sortSpec.Field, sortSpec.Order, history)
+		items := service.PaginateMediaItems(grouped, page, size)
 		if items == nil {
 			items = []service.MediaItem{}
 		}
 		c.JSON(http.StatusOK, gin.H{
 			"items":     items,
-			"total":     total,
+			"total":     len(grouped),
 			"page":      page,
 			"page_size": size,
 		})
@@ -394,6 +584,10 @@ func getMediaHandler(svc *service.Container) gin.HandlerFunc {
 			mountID, remoteID, _ := service.DecodeEmbyRemoteID(id)
 			mount, acct, _ := svc.EmbyRemote.ResolveMount(ctx, mountID)
 			if mount == nil || acct == nil {
+				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+				return
+			}
+			if !service.EmbyMountLibraryAllowed(mediaVisibilityForRequest(c, svc), mount) {
 				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 				return
 			}
@@ -413,7 +607,7 @@ func getMediaHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusOK, m)
 			return
 		}
-		m, err := svc.Media.GetMedia(ctx, id)
+		m, err := svc.Media.GetMediaItem(ctx, id)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -422,7 +616,7 @@ func getMediaHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
 		}
-		if !mediaVisibleForRequest(c, svc, m) {
+		if !mediaVisibleForRequest(c, svc, &m.Media) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
 		}
@@ -452,54 +646,146 @@ func updateMediaMetadataHandler(svc *service.Container) gin.HandlerFunc {
 	}
 }
 
+func paginateSlice[T any](items []T, page, size int) []T {
+	if page < 1 {
+		page = 1
+	}
+	if size <= 0 {
+		size = 50
+	}
+	if len(items) == 0 {
+		return []T{}
+	}
+	start := (page - 1) * size
+	if start >= len(items) {
+		return []T{}
+	}
+	end := start + size
+	if end > len(items) {
+		end = len(items)
+	}
+	return items[start:end]
+}
+
 func searchMediaHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		ctx := c.Request.Context()
 		q := c.Query("q")
+		visibility := mediaVisibilityForRequest(c, svc)
 		groupVersions := c.DefaultQuery("group_versions", "1") != "0"
-		if c.Query("page") != "" || c.Query("page_size") != "" {
-			page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-			size, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
-			if !groupVersions {
-				items, total, err := svc.Media.SearchMediaVisiblePage(c.Request.Context(), q, page, size, mediaVisibilityForRequest(c, svc))
-				if err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-					return
-				}
+
+		fetchRemote := func(limit int) []model.Media {
+			if svc.EmbyRemote == nil || strings.TrimSpace(q) == "" {
+				return nil
+			}
+			remoteItems, _ := svc.EmbyRemote.RemoteSearchMedia(ctx, q, limit, visibility)
+			return remoteItems
+		}
+
+		if c.DefaultQuery("group_series", "0") != "0" {
+			localItems, err := svc.Media.SearchMediaVisible(ctx, q, 50000, visibility)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			remoteItems := fetchRemote(50000)
+			all := service.GroupMediaSeriesItems(append(localItems, remoteItems...))
+
+			if c.Query("page") != "" || c.Query("page_size") != "" {
+				page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+				size, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
+				paged := paginateSlice(all, page, size)
 				c.JSON(http.StatusOK, gin.H{
-					"items":     items,
-					"total":     total,
+					"items":     paged,
+					"total":     len(all),
 					"page":      page,
 					"page_size": size,
 				})
 				return
 			}
-			items, total, err := svc.Media.SearchMediaVisiblePageGrouped(c.Request.Context(), q, page, size, mediaVisibilityForRequest(c, svc))
+
+			limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+			if limit <= 0 {
+				limit = 50
+			}
+			if len(all) > limit {
+				all = all[:limit]
+			}
+			c.JSON(http.StatusOK, gin.H{"items": all})
+			return
+		}
+
+		if c.Query("page") != "" || c.Query("page_size") != "" {
+			page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+			size, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
+			if !groupVersions {
+				localItems, _, err := svc.Media.SearchMediaVisiblePage(ctx, q, 1, 50000, visibility)
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+					return
+				}
+				remoteItems := fetchRemote(size * 2)
+				all := append(localItems, remoteItems...)
+				paged := paginateSlice(all, page, size)
+				c.JSON(http.StatusOK, gin.H{
+					"items":     paged,
+					"total":     len(all),
+					"page":      page,
+					"page_size": size,
+				})
+				return
+			}
+			localItems, err := svc.Media.SearchMediaVisible(ctx, q, 50000, visibility)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}
+			remoteItems := fetchRemote(size * 2)
+			all := append(localItems, remoteItems...)
+			grouped := service.GroupMediaVersions(all)
+			paged := service.PaginateMediaItems(grouped, page, size)
 			c.JSON(http.StatusOK, gin.H{
-				"items":     items,
-				"total":     total,
+				"items":     paged,
+				"total":     len(grouped),
 				"page":      page,
 				"page_size": size,
 			})
 			return
 		}
+
 		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+		if limit <= 0 {
+			limit = 50
+		}
 		if !groupVersions {
-			items, err := svc.Media.SearchMediaVisible(c.Request.Context(), q, limit, mediaVisibilityForRequest(c, svc))
+			localItems, err := svc.Media.SearchMediaVisible(ctx, q, limit, visibility)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}
-			c.JSON(http.StatusOK, gin.H{"items": items})
+			remoteItems := fetchRemote(limit)
+			all := append(localItems, remoteItems...)
+			if len(all) > limit {
+				all = all[:limit]
+			}
+			if all == nil {
+				all = []model.Media{}
+			}
+			c.JSON(http.StatusOK, gin.H{"items": all})
 			return
 		}
-		items, err := svc.Media.SearchMediaVisibleGrouped(c.Request.Context(), q, limit, mediaVisibilityForRequest(c, svc))
+
+		localItems, err := svc.Media.SearchMediaVisible(ctx, q, 50000, visibility)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
+		}
+		remoteItems := fetchRemote(limit)
+		all := append(localItems, remoteItems...)
+		grouped := service.GroupMediaVersions(all)
+		items := service.FirstMediaItems(grouped, limit)
+		if items == nil {
+			items = []service.MediaItem{}
 		}
 		c.JSON(http.StatusOK, gin.H{"items": items})
 	}
@@ -520,7 +806,13 @@ func streamHandler(svc *service.Container) gin.HandlerFunc {
 				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 				return
 			}
-			if mount.ProxyPlay {
+			if !service.EmbyMountLibraryAllowed(mediaVisibilityForRequest(c, svc), mount) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+				return
+			}
+			// 远程 Emby 条目的同源转发：VR 全景需要浏览器读帧（见 stream_proxy.go），
+			// 与挂载账号的 proxy_play 开关等价。
+			if mount.ProxyPlay || wantSameOriginProxy(c) {
 				if err := svc.Emby.ProxyRemoteVideoStream(ctx, c.Writer, c.Request, mountID, remoteID); err != nil {
 					if !c.Writer.Written() {
 						c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
@@ -531,6 +823,17 @@ func streamHandler(svc *service.Container) gin.HandlerFunc {
 			target, err := svc.EmbyRemote.WebStreamURL(ctx, acct, remoteID)
 			if err != nil {
 				c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+				return
+			}
+			// 现代浏览器在 HTTPS 页面中请求不安全源（HTTP 视频流）会直接报 Mixed Content 拦截导致播放失败。
+			// 仅当当前前端请求为 HTTPS 且远程直连目标为 HTTP 时，自动降级通过本机反向代理传输流，避免播放被浏览器阻断；
+			// 其它场景（HTTP 页面访问 HTTP/HTTPS，或 HTTPS 访问 HTTPS）继续 302 直连，最大化节省服务器带宽与流量。
+			if requestIsHTTPS(c) && strings.HasPrefix(strings.ToLower(target), "http://") {
+				if err := svc.Emby.ProxyRemoteVideoStream(ctx, c.Writer, c.Request, mountID, remoteID); err != nil {
+					if !c.Writer.Written() {
+						c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+					}
+				}
 				return
 			}
 			setRedirectNoStoreHeaders(c)
@@ -544,6 +847,15 @@ func streamHandler(svc *service.Container) gin.HandlerFunc {
 		}
 		if !enforceScopedPlaybackToken(c, m.ID) {
 			return
+		}
+		// ?proxy=1：把网盘/STRM 直链改为服务端同源转发（网页端读帧、VR 全景用），
+		// 画质与原文件一致，不触发转码。
+		if wantSameOriginProxy(c) {
+			handled, proxyErr := proxySTRMStream(c, svc, m)
+			if handled {
+				writeProxyError(c, proxyErr)
+				return
+			}
 		}
 		err = svc.Stream.ServeFile(c.Writer, c.Request, c.Param("id"))
 		if errors.Is(err, service.ErrMediaNotFound) {

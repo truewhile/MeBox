@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -31,6 +32,74 @@ func TestManualRequestMatchFallsBackToCandidatePayload(t *testing.T) {
 	}
 	if match.Title != "手动选择的电影" || match.DoubanID != "1234567" || match.Year != 2026 {
 		t.Fatalf("fallback match = %#v", match)
+	}
+}
+
+func TestManualAdultMatchUsesSelectedMetaTubeDetailsAndRealBackdrop(t *testing.T) {
+	var detailCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/movies/AVE/94600" {
+			http.NotFound(w, r)
+			return
+		}
+		detailCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(struct {
+			Data MetaTubeMovieInfo `json:"data"`
+		}{
+			Data: MetaTubeMovieInfo{
+				ID:            "94600",
+				Number:        "CWPBD-138",
+				Title:         "Selected title",
+				Provider:      "AVE",
+				CoverURL:      "https://example.com/poster.jpg",
+				PreviewImages: []string{"https://example.com/backdrop.jpg"},
+			},
+		})
+	}))
+	defer upstream.Close()
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.Setting{}, &model.APIConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	repos := repository.New(db)
+	if err := repos.Setting.Set(t.Context(), "adult.scraper.engine", "metatube"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repos.Setting.Set(t.Context(), "adult.scraper.metatube_server", upstream.URL); err != nil {
+		t.Fatal(err)
+	}
+	adult := NewAdultProvider(zap.NewNop(), nil, repos)
+	scraper := &ScraperService{adult: adult}
+
+	match, err := scraper.manualRequestMatch(t.Context(), ManualScrapeRequest{
+		Source:       "adult",
+		MediaType:    "adult",
+		Title:        "CWPBD-138 Selected title",
+		OriginalName: "CWPBD-138",
+		PosterURL:    "https://example.com/search-cover.jpg",
+		BackdropURL:  "https://example.com/search-cover.jpg",
+		DoubanID:     "94600",
+		TheTVDBID:    "AVE",
+		NSFW:         true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detailCalls.Load() != 1 {
+		t.Fatalf("selected MetaTube detail calls = %d, want 1", detailCalls.Load())
+	}
+	wantPoster := upstream.URL + "/v1/images/primary/AVE/94600?auto=true&pos=1&quality=90&ratio=-1&url=https%3A%2F%2Fexample.com%2Fposter.jpg"
+	if match.PosterURL != wantPoster {
+		t.Fatalf("selected poster = %q, want %q", match.PosterURL, wantPoster)
+	}
+	wantBackdrop := upstream.URL + "/v1/images/backdrop/AVE/94600?quality=90"
+	if match.BackdropURL != wantBackdrop {
+		t.Fatalf("backdrop = %q, want %q", match.BackdropURL, wantBackdrop)
 	}
 }
 
@@ -130,7 +199,7 @@ func TestManualSearchFallsBackToMovieFolderForGenericQuery(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		if r.URL.Query().Get("query") != "inception" {
+		if !strings.EqualFold(r.URL.Query().Get("query"), "inception") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}})
 			return
 		}
@@ -179,7 +248,7 @@ func TestManualSearchFallsBackToMovieFolderForGenericQuery(t *testing.T) {
 	if len(results) != 1 || results[0].TMDbID != 27205 {
 		t.Fatalf("manual search results=%#v, want folder fallback candidate; queries=%v", results, queries)
 	}
-	if len(queries) < 2 || queries[0] != "00000" || queries[len(queries)-1] != "inception" {
+	if len(queries) < 2 || queries[0] != "00000" || !strings.EqualFold(queries[len(queries)-1], "inception") {
 		t.Fatalf("manual search queries=%v, want explicit query then folder fallback", queries)
 	}
 }
@@ -241,6 +310,80 @@ func TestManualSearchReturnsMovieFallbackForTVTypedTMDbSearch(t *testing.T) {
 	}
 	if len(paths) < 2 || paths[0] != "/search/tv" || paths[1] != "/search/movie" {
 		t.Fatalf("tmdb search paths=%v, want tv first then movie fallback", paths)
+	}
+}
+
+func TestManualSearchAnimeTheatricalPrefersTMDbMovie(t *testing.T) {
+	var paths []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/search/movie":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"results": []map[string]any{{
+					"id":             635302,
+					"title":          "鬼灭之刃 剧场版 无限列车篇",
+					"original_title": "劇場版「鬼滅の刃」無限列車編",
+					"release_date":   "2020-10-16",
+				}},
+			})
+		case "/search/tv":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"results": []map[string]any{{
+					"id":             85937,
+					"name":           "鬼灭之刃",
+					"original_name":  "鬼滅の刃",
+					"first_air_date": "2019-04-06",
+				}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.Library{}, &model.Series{}, &model.Media{}); err != nil {
+		t.Fatal(err)
+	}
+	repos := repository.New(db)
+	cfg := &config.Config{}
+	cfg.Secrets.TMDbAPIKey = "test-key"
+	cfg.Secrets.TMDbAPIProxy = upstream.URL
+	log := zap.NewNop()
+	scraper := NewScraperService(cfg, log, repos, NewTMDbProvider(cfg, log, nil), nil, nil, nil, NewHub(log))
+
+	lib := model.Library{Name: "动漫", Path: `/media/anime`, Type: "anime", Enabled: true}
+	if err := repos.DB.Create(&lib).Error; err != nil {
+		t.Fatal(err)
+	}
+	media := model.Media{
+		LibraryID: lib.ID,
+		Title:     "鬼灭之刃 剧场版 无限列车篇",
+		Path:      `/media/anime/鬼灭之刃/鬼灭之刃 剧场版 无限列车篇.mkv`,
+	}
+	if err := repos.DB.Create(&media).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := scraper.ManualSearch(t.Context(), &media, media.Title, "tmdb", "anime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 || results[0].TMDbID != 635302 || results[0].MediaType != "movie" {
+		t.Fatalf("manual theatrical results=%#v, paths=%v", results, paths)
+	}
+	if len(paths) == 0 || paths[0] != "/search/movie" {
+		t.Fatalf("TMDb search paths=%v, want movie first", paths)
+	}
+	for _, path := range paths {
+		if path == "/search/tv" {
+			t.Fatalf("manual theatrical search unexpectedly queried TV after finding movie: paths=%v", paths)
+		}
 	}
 }
 
@@ -625,5 +768,92 @@ func TestApplyManualMovieMatchClearsEpisodeMarkers(t *testing.T) {
 	}
 	if got.TMDbID != 0 || got.TheTVDBID != "" {
 		t.Fatalf("stale external IDs were not cleared for manual movie fallback: tmdb=%d thetvdb=%q", got.TMDbID, got.TheTVDBID)
+	}
+}
+
+func TestApplyManualTVMatchRebuildsEpisodeIdentityFromPath(t *testing.T) {
+	var requestedEpisodePath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/tv/69367":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":             69367,
+				"name":           "路人女主的养成方法",
+				"original_name":  "冴えない彼女の育てかた",
+				"overview":       "整剧简介",
+				"poster_path":    "/show.jpg",
+				"backdrop_path":  "/show-backdrop.jpg",
+				"first_air_date": "2015-01-09",
+				"vote_average":   7.0,
+			})
+		case "/tv/69367/season/0/episode/1":
+			requestedEpisodePath = r.URL.Path
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name":         "爱与青春的杀必死回",
+				"overview":     "特别篇简介",
+				"still_path":   "/special.jpg",
+				"air_date":     "2015-01-07",
+				"vote_average": 7.5,
+				"runtime":      24,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.Library{}, &model.Series{}, &model.Media{}); err != nil {
+		t.Fatal(err)
+	}
+	repos := repository.New(db)
+	cfg := &config.Config{}
+	cfg.Secrets.TMDbAPIKey = "test-key"
+	cfg.Secrets.TMDbAPIProxy = upstream.URL
+	log := zap.NewNop()
+	scraper := NewScraperService(cfg, log, repos, NewTMDbProvider(cfg, log, nil), nil, nil, nil, NewHub(log))
+
+	root := t.TempDir()
+	lib := model.Library{Name: "动漫", Path: root, Type: "anime", Enabled: true}
+	if err := repos.DB.Create(&lib).Error; err != nil {
+		t.Fatal(err)
+	}
+	media := model.Media{
+		LibraryID:    lib.ID,
+		Title:        "旧标题",
+		Path:         filepath.Join(root, "路人女主的养成方法 (2015)", "Season 1", "S01E00 - 爱与青春的杀必死回.strm"),
+		SeasonNum:    1,
+		EpisodeNum:   1,
+		EpisodeTitle: "错误百出的序曲",
+		SeriesID:     "stale-series",
+		TMDbID:       111,
+		BangumiID:    222,
+		ScrapeStatus: "matched",
+	}
+	if err := repos.DB.Create(&media).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := scraper.ApplyManualMatch(t.Context(), media.ID, ManualScrapeRequest{
+		Source:    "tmdb",
+		MediaType: "tv",
+		Title:     "路人女主的养成方法",
+		TMDbID:    69367,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestedEpisodePath != "/tv/69367/season/0/episode/1" {
+		t.Fatalf("episode details path = %q, want season-zero special", requestedEpisodePath)
+	}
+	if got.SeasonNum != 0 || got.EpisodeNum != 1 || got.EpisodeTitle != "爱与青春的杀必死回" {
+		t.Fatalf("rebuilt episode identity = S%02dE%02d %q", got.SeasonNum, got.EpisodeNum, got.EpisodeTitle)
+	}
+	if got.SeriesID != "" || got.TMDbID != 69367 || got.BangumiID != 0 {
+		t.Fatalf("stale scrape identity survived manual rematch: %#v", got)
 	}
 }

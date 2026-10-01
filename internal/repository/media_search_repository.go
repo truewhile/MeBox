@@ -105,11 +105,17 @@ func (r *MediaRepository) searchFilteredLIKE(ctx context.Context, query string, 
 	var total int64
 	q := r.db.WithContext(ctx).Model(&model.Media{})
 	q = applyMediaQueryFilter(q, filter)
+	// SQLite 的 LIKE 对 ASCII 不区分大小写；Postgres 的 LIKE 区分大小写，
+	// 需用 ILIKE 保持两端搜索行为一致。
+	likeOp := "LIKE"
+	if r.db.Dialector != nil && r.db.Dialector.Name() == "postgres" {
+		likeOp = "ILIKE"
+	}
 	terms := mediaSearchTerms(query)
 	for _, term := range terms {
 		like := "%" + escapeLike(term) + "%"
 		q = q.Where(
-			"(title LIKE ? ESCAPE '\\' OR original_name LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\' OR genres LIKE ? ESCAPE '\\')",
+			"(title "+likeOp+" ? ESCAPE '\\' OR original_name "+likeOp+" ? ESCAPE '\\' OR path "+likeOp+" ? ESCAPE '\\' OR genres "+likeOp+" ? ESCAPE '\\')",
 			like, like, like, like,
 		)
 	}
@@ -120,7 +126,7 @@ func (r *MediaRepository) searchFilteredLIKE(ctx context.Context, query string, 
 		prefix := escapeLike(query) + "%"
 		exact := query
 		q = q.Order(gorm.Expr(
-			"CASE WHEN title = ? THEN 0 WHEN original_name = ? THEN 1 WHEN title LIKE ? ESCAPE '\\' THEN 2 WHEN original_name LIKE ? ESCAPE '\\' THEN 3 ELSE 4 END, created_at desc",
+			"CASE WHEN title = ? THEN 0 WHEN original_name = ? THEN 1 WHEN title "+likeOp+" ? ESCAPE '\\' THEN 2 WHEN original_name "+likeOp+" ? ESCAPE '\\' THEN 3 ELSE 4 END, created_at desc",
 			exact, exact, prefix, prefix,
 		))
 	} else {
@@ -139,6 +145,9 @@ func applyQualifiedMediaQueryFilter(q *gorm.DB, filter MediaQueryFilter) *gorm.D
 	}
 	if len(filter.AllowedLibraryIDs) > 0 {
 		q = q.Where("media.library_id IN ?", filter.AllowedLibraryIDs)
+	}
+	if seriesID := strings.TrimSpace(filter.SeriesID); seriesID != "" {
+		q = q.Where("media.series_id = ?", seriesID)
 	}
 	return q
 }
@@ -259,7 +268,9 @@ func (r *MediaRepository) searchIndexEnabled(ctx context.Context) bool {
 	}
 	r.searchIndexOnce.Do(func() {
 		var count int64
-		err := r.db.WithContext(ctx).
+		// 用 Background 探测：sync.Once 只执行一次，若借用调用方的
+		// ctx 且恰好被取消，FTS 会被永久误判为不可用。
+		err := r.db.WithContext(context.Background()).
 			Raw(`SELECT COUNT(*) FROM sqlite_master WHERE name = 'media_search_fts'`).
 			Scan(&count).Error
 		r.searchIndexAvailable = err == nil && count > 0

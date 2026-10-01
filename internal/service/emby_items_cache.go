@@ -9,13 +9,22 @@ import (
 )
 
 type embyItemsCacheValue struct {
-	Items            []map[string]any `json:"items"`
-	TotalRecordCount int64            `json:"total_record_count"`
-	StartIndex       int              `json:"start_index"`
+	Items            []map[string]any          `json:"items"`
+	TotalRecordCount int64                     `json:"total_record_count"`
+	StartIndex       int                       `json:"start_index"`
+	Artwork          map[string]embyArtworkRef `json:"artwork,omitempty"`
 }
 
 type embyLatestCacheValue struct {
-	Items []map[string]any `json:"items"`
+	Items   []map[string]any          `json:"items"`
+	Artwork map[string]embyArtworkRef `json:"artwork,omitempty"`
+}
+
+type embyCountsCacheValue struct {
+	MovieCount   int64 `json:"movie_count"`
+	SeriesCount  int64 `json:"series_count"`
+	EpisodeCount int64 `json:"episode_count"`
+	ItemCount    int64 `json:"item_count"`
 }
 
 func (e *EmbyService) embyItemsCacheKey(kind string, p ItemsParams) string {
@@ -38,18 +47,52 @@ func (e *EmbyService) embyItemsCacheKey(kind string, p ItemsParams) string {
 		p.SortOrder,
 		strconv.Itoa(p.StartIndex),
 		strconv.Itoa(p.Limit),
+		formatSeasonIndexCacheKeyPart(p.SeasonIndex),
 	}, "|")))
 	return "media:emby:" + hex.EncodeToString(sum[:])
 }
 
+// formatSeasonIndexCacheKeyPart keeps "no season filter" distinct from "season 0"
+// so a client's Season=0 (specials) request never reuses an unfiltered response.
+func formatSeasonIndexCacheKeyPart(seasonIndex *int) string {
+	if seasonIndex == nil {
+		return "season:*"
+	}
+	return "season:" + strconv.Itoa(*seasonIndex)
+}
+
 func (e *EmbyService) embyLatestCacheKey(userID, parentID string, limit int) string {
-	sum := sha256.Sum256([]byte(strings.Join([]string{"latest", userID, parentID, strconv.Itoa(limit)}, "|")))
+	// v2: payload tags for virtual artwork changed so clients drop cached placeholders.
+	sum := sha256.Sum256([]byte(strings.Join([]string{"latest-v2", userID, parentID, strconv.Itoa(limit)}, "|")))
 	return "media:emby:" + hex.EncodeToString(sum[:])
+}
+
+// embySimilarCacheKey 是「相似推荐」结果的缓存键。
+//
+// userID 必须参与键名：候选集的可见性（AllowedLibraryIDs、NSFW）由用户决定，
+// 混用会把别的用户可见的条目推荐给当前用户。limit 同理影响结果条数与排序。
+func (e *EmbyService) embySimilarCacheKey(mediaID, userID string, limit int) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{"similar-v1", mediaID, userID, strconv.Itoa(limit)}, "|")))
+	return "media:emby:" + hex.EncodeToString(sum[:])
+}
+
+// defaultEmbyLatestCacheTTLSeconds 是 Emby「最新添加」缓存的兜底时长。
+const defaultEmbyLatestCacheTTLSeconds = 300
+
+// embyLatestCacheTTLSeconds 返回「最新添加」列表的缓存时长。它刻意比通用
+// 媒体缓存更长：客户端刷新首页时会同时请求全部媒体库的 Latest（生产环境
+// 观察到 73 个并发），缓存一旦集中过期，这批请求会同时穿透并各自重建
+// payload。延长后稳态下几乎全部命中缓存，冷启动频率也随之下降。
+func (e *EmbyService) embyLatestCacheTTLSeconds() int {
+	if e == nil || e.cfg == nil || e.cfg.Cache.EmbyLatestTTLSeconds < 1 {
+		return defaultEmbyLatestCacheTTLSeconds
+	}
+	return e.cfg.Cache.EmbyLatestTTLSeconds
 }
 
 func (e *EmbyService) mediaCacheTTLSeconds() int {
 	if e == nil || e.cfg == nil || e.cfg.Cache.MediaTTLSeconds < 1 {
-		return 15
+		return 90
 	}
 	return e.cfg.Cache.MediaTTLSeconds
 }

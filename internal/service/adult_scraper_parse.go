@@ -23,6 +23,7 @@ func parseAdultDetailHTML(body, code, source, detailURL string) *Match {
 	}
 
 	match := &Match{
+		Provider:     strings.ToLower(strings.TrimSpace(source)),
 		OriginalName: code,
 		MediaType:    "adult",
 		NSFW:         true,

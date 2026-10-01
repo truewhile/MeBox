@@ -64,12 +64,12 @@ services:
       MEBOX_LOGGING_LEVEL: info
       MEBOX_LOGGING_FORMAT: console
       MEBOX_LOGGING_OUTPUT_PATH: /data/logs
-      MEBOX_LOGGING_MAX_SIZE_MB: "50"
-      MEBOX_LOGGING_MAX_BACKUPS: "20"
+      MEBOX_LOGGING_MAX_SIZE_MB: "20"
+      MEBOX_LOGGING_MAX_BACKUPS: "5"
       MEBOX_LOGGING_MAX_AGE_DAYS: "30"
 
     extra_hosts:
-      # 容器访问宿主机服务用，例如 qBittorrent: http://host.docker.internal:8085
+      # 容器访问宿主机服务（如下载器等）用: http://host.docker.internal:8085
       - "host.docker.internal:host-gateway"
 
     healthcheck:
@@ -82,5 +82,5 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "50m"
-        max-file: "10"
+        max-size: "20m"
+        max-file: "3"

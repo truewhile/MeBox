@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"time"
 
@@ -10,6 +11,10 @@ import (
 
 // SystemInfo returns the full Emby identity payload.
 func (e *EmbyService) SystemInfo() map[string]any {
+	port := 8096
+	if e != nil && e.cfg != nil {
+		port = e.cfg.App.Port
+	}
 	return map[string]any{
 		"Id":                     embyServerID,
 		"ServerId":               embyServerID,
@@ -26,10 +31,10 @@ func (e *EmbyService) SystemInfo() map[string]any {
 		"SupportsLibraryMonitor": true,
 		"SupportsHttps":          false,
 		"SupportsAutoDiscovery":  true,
-		"HttpServerPortNumber":   e.cfg.App.Port,
+		"HttpServerPortNumber":   port,
 		"HttpsPortNumber":        0,
 		"PublishedServerUrl":     "",
-		"WebSocketPortNumber":    e.cfg.App.Port,
+		"WebSocketPortNumber":    port,
 		"CompletedInstallations": []any{},
 		"CanSelfRestart":         false,
 		"CanLaunchWebBrowser":    false,
@@ -39,6 +44,10 @@ func (e *EmbyService) SystemInfo() map[string]any {
 
 // SystemInfoPublic 是不需要认证的精简版（Emby Web 客户端登陆前会拉）。
 func (e *EmbyService) SystemInfoPublic() map[string]any {
+	port := 8096
+	if e != nil && e.cfg != nil {
+		port = e.cfg.App.Port
+	}
 	return map[string]any{
 		"Id":                     embyServerID,
 		"ServerId":               embyServerID,
@@ -49,7 +58,7 @@ func (e *EmbyService) SystemInfoPublic() map[string]any {
 		"OperatingSystem":        "Windows",
 		"LocalAddress":           "",
 		"WanAddress":             "",
-		"HttpServerPortNumber":   e.cfg.App.Port,
+		"HttpServerPortNumber":   port,
 		"HttpsPortNumber":        0,
 		"SupportsHttps":          false,
 		"SupportsAutoDiscovery":  true,
@@ -125,7 +134,8 @@ func (e *EmbyService) userPayload(u *model.User) map[string]any {
 }
 
 // Views 返回 Emby 中"虚拟根目录"——每个 library 一个条目，外加所有启用的
-// 远程 Emby 挂载的媒体库（联邦聚合）。
+// 远程 Emby 挂载的媒体库（联邦聚合）。顺序遵循用户置顶偏好：置顶库靠前，
+// 未置顶保持原有 sort_order / 远程挂载顺序。
 func (e *EmbyService) Views(ctx context.Context, userID string) (map[string]any, error) {
 	libs, err := e.repo.Library.List(ctx)
 	if err != nil {
@@ -141,9 +151,58 @@ func (e *EmbyService) Views(ctx context.Context, userID string) (map[string]any,
 		items = append(items, e.libraryAsView(ctx, &l))
 	}
 	for _, remote := range e.remoteViews(ctx) {
+		id, _ := remote["Id"].(string)
+		if !LibraryIDAllowed(visibility, id) {
+			continue
+		}
 		items = append(items, remote)
 	}
+	items = sortViewItemsByPinnedIDs(items, e.pinnedLibraryIDsForUser(ctx, userID))
 	return map[string]any{"Items": items, "TotalRecordCount": len(items), "StartIndex": 0}, nil
+}
+
+func (e *EmbyService) pinnedLibraryIDsForUser(ctx context.Context, userID string) []string {
+	if e == nil || e.repo == nil || e.repo.User == nil || strings.TrimSpace(userID) == "" {
+		return nil
+	}
+	user, err := e.repo.User.FindByID(ctx, userID)
+	if err != nil || user == nil {
+		return nil
+	}
+	return user.DecodePinnedLibraryIDs()
+}
+
+func sortViewItemsByPinnedIDs(items []map[string]any, pinnedIDs []string) []map[string]any {
+	if len(items) < 2 || len(pinnedIDs) == 0 {
+		return items
+	}
+	rank := make(map[string]int, len(pinnedIDs))
+	for i, id := range pinnedIDs {
+		if id == "" {
+			continue
+		}
+		if _, exists := rank[id]; !exists {
+			rank[id] = i
+		}
+	}
+	if len(rank) == 0 {
+		return items
+	}
+	sorted := append([]map[string]any(nil), items...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		iID, _ := sorted[i]["Id"].(string)
+		jID, _ := sorted[j]["Id"].(string)
+		iRank, iPinned := rank[iID]
+		jRank, jPinned := rank[jID]
+		if iPinned != jPinned {
+			return iPinned
+		}
+		if iPinned && jPinned {
+			return iRank < jRank
+		}
+		return false
+	})
+	return sorted
 }
 
 // remoteViews 返回全部启用挂载的远程媒体库视图（只有显式挂载的库才出现）。

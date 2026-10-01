@@ -95,7 +95,10 @@ export function StrmManagePage() {
   // 有进行中的同步时轮询刷新状态
   useEffect(() => {
     if (!paths.some((p) => p.last_sync_status === 'running')) return
-    const timer = setInterval(() => refresh().catch(() => undefined), 4000)
+    const timer = setInterval(() => {
+      if (document.hidden) return
+      refresh().catch(() => undefined)
+    }, 4000)
     return () => clearInterval(timer)
   }, [paths, refresh])
 
@@ -160,6 +163,22 @@ export function StrmManagePage() {
     }
   }
 
+  const openAddPathDialog = async () => {
+    try {
+      const settings = await strmAPI.getSettings()
+      const baseUrl = settings?.['strm.base_url']?.trim()
+      if (!baseUrl) {
+        toast.error('未填写strm地址')
+        setDialog('settings')
+        return
+      }
+      setEditingPath(null)
+      setDialog('path')
+    } catch (err) {
+      toast.error(apiErrorMessage(err))
+    }
+  }
+
   return (
     <div className="space-y-6">
       <header className="flex flex-wrap items-start justify-between gap-4">
@@ -183,7 +202,7 @@ export function StrmManagePage() {
             <Settings size={16} />
             STRM 设置
           </button>
-          <button type="button" onClick={() => { setEditingPath(null); setDialog('path') }} className="neon-button">
+          <button type="button" onClick={openAddPathDialog} className="neon-button">
             <FolderPlus size={16} />
             添加同步目录
           </button>
@@ -207,7 +226,7 @@ export function StrmManagePage() {
           <SyncPathSection
             paths={paths}
             actingPath={actingPath}
-            onAdd={() => { setEditingPath(null); setDialog('path') }}
+            onAdd={openAddPathDialog}
             onEdit={(path) => { setEditingPath(path); setDialog('path') }}
             onDelete={deletePath}
             onStart={startSync}
@@ -233,6 +252,7 @@ export function StrmManagePage() {
           existing={editingPath}
           onClose={() => setDialog(null)}
           onSaved={() => { setDialog(null); refresh().catch(() => undefined) }}
+          onOpenSettings={() => setDialog('settings')}
         />
       )}
     </div>
@@ -439,7 +459,12 @@ function SyncPathSection({
                   </div>
                 </div>
                 <div className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-xs text-ink-50">
-                  <span className="max-w-[45%] truncate">{path.remote_path || '（根目录）'}</span>
+                  <span
+                    className="max-w-[45%] truncate"
+                    title={path.remote_display_path || path.remote_path || '（根目录）'}
+                  >
+                    {path.remote_display_path || path.remote_path || '（根目录）'}
+                  </span>
                   <span className="text-sand-500">→</span>
                   <span className="max-w-[45%] truncate">{path.local_path}</span>
                 </div>

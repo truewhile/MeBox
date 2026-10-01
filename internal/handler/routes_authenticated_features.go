@@ -20,7 +20,7 @@ func registerAuthedDLNARoutes(authed *gin.RouterGroup, svc *service.Container) {
 	authed.POST("/dlna/cast", dlnaCastHandler(svc))
 }
 
-func registerAuthedRecycleAndRealtimeRoutes(authed *gin.RouterGroup, svc *service.Container) {
+func registerAuthedRealtimeRoutes(authed *gin.RouterGroup, svc *service.Container) {
 	authed.GET("/ws", wsHandler(svc))
 	authed.GET("/events", sseHandler(svc))
 }

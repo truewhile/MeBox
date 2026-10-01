@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"sort"
 
@@ -106,14 +107,23 @@ func (u *OSSMultipartUploader) UploadFile(ctx context.Context, input OSSMultipar
 	return result.CallbackResult, nil
 }
 
+// UploadedPart 是 OSS 已上传分片的定位信息（断点续传时复用 ETag 用）。
+type UploadedPart struct {
+	PartNumber int32
+	Size       int64
+	ETag       string
+}
+
 // UploadFileWithResult 上传文件并返回 multipart 结果。
-func (u *OSSMultipartUploader) UploadFileWithResult(ctx context.Context, input OSSMultipartUploadInput) (OSSMultipartUploadResult, error) {
+// 任一失败路径（分片上传失败 / callback 校验失败 / Complete 失败 / 文件打开失败等）
+// 都会经 defer 统一 AbortMultipartUpload 丢弃本次 Initiate 出的 multipart
+// （abort 失败仅记日志），避免 OSS 分片永久泄漏；成功路径不 Abort。
+func (u *OSSMultipartUploader) UploadFileWithResult(ctx context.Context, input OSSMultipartUploadInput) (result OSSMultipartUploadResult, err error) {
 	if input.PartRetryMax <= 0 {
 		input.PartRetryMax = 3
 	}
 	partSize := input.PartSize
 	totalParts := 0
-	var err error
 	if partSize <= 0 {
 		partSize, totalParts, err = CalculateMultipartPartSize(input.FileSize)
 		if err != nil {
@@ -124,28 +134,45 @@ func (u *OSSMultipartUploader) UploadFileWithResult(ctx context.Context, input O
 	}
 
 	uploadId := input.UploadId
-	if uploadId == "" {
-		initResult, err := u.client.InitiateMultipartUpload(ctx, &oss.InitiateMultipartUploadRequest{
+	// ownUploadId 标记 uploadId 是否为本调用 Initiate 出来的：仅自建的
+	// multipart 在失败时由本函数 Abort；调用方显式传入的 uploadId（断点续传）
+	// 失败后保留现场，由调用方决定重试或清理。
+	ownUploadId := uploadId == ""
+	if ownUploadId {
+		initResult, initErr := u.client.InitiateMultipartUpload(ctx, &oss.InitiateMultipartUploadRequest{
 			Bucket: oss.Ptr(input.Bucket),
 			Key:    oss.Ptr(input.Object),
 			RequestCommon: oss.RequestCommon{
 				Parameters: map[string]string{"sequential": "1"},
 			},
 		})
-		if err != nil {
-			return OSSMultipartUploadResult{}, fmt.Errorf("初始化 OSS multipart 失败：%w", err)
+		if initErr != nil {
+			return OSSMultipartUploadResult{}, fmt.Errorf("初始化 OSS multipart 失败：%w", initErr)
 		}
 		if initResult.UploadId == nil || *initResult.UploadId == "" {
 			return OSSMultipartUploadResult{}, fmt.Errorf("初始化 OSS multipart 返回空 upload_id")
 		}
 		uploadId = *initResult.UploadId
 	}
+	defer func() {
+		if err == nil || !ownUploadId || uploadId == "" {
+			return
+		}
+		// 失败路径统一 Abort 丢弃已上传分片；ctx 可能已取消，脱离其取消信号尽力清理
+		abortCtx := context.WithoutCancel(ctx)
+		if _, abortErr := u.client.AbortMultipartUpload(abortCtx, &oss.AbortMultipartUploadRequest{
+			Bucket:   oss.Ptr(input.Bucket),
+			Key:      oss.Ptr(input.Object),
+			UploadId: oss.Ptr(uploadId),
+		}); abortErr != nil {
+			log.Printf("115: 中止 OSS multipart 失败（upload_id=%s，可能残留分片）：%v", uploadId, abortErr)
+		}
+	}()
 
-	existingPartMap := make(map[int32]int64)
-	existingParts, err := u.ListUploadedParts(ctx, input.Bucket, input.Object, uploadId)
-	if err == nil {
+	existingPartMap := make(map[int32]UploadedPart)
+	if existingParts, listErr := u.ListUploadedParts(ctx, input.Bucket, input.Object, uploadId); listErr == nil {
 		for _, part := range existingParts {
-			existingPartMap[part.PartNumber] = part.Size
+			existingPartMap[part.PartNumber] = part
 		}
 	}
 
@@ -164,13 +191,20 @@ func (u *OSSMultipartUploader) UploadFileWithResult(ctx context.Context, input O
 		if length < 0 {
 			length = 0
 		}
-		if existingSize, ok := existingPartMap[int32(partNumber)]; ok && existingSize == length {
+		// 断点续传：分片已完整上传（大小一致即代表分片大小未变）时直接复用
+		// ListParts 返回的 ETag，跳过重传，也不再重复累加统计
+		if existing, ok := existingPartMap[int32(partNumber)]; ok && existing.Size == length && existing.ETag != "" {
 			uploadedBytes += length
 			uploadedParts++
+			completeParts = append(completeParts, oss.UploadPart{
+				PartNumber: int32(partNumber),
+				ETag:       oss.Ptr(existing.ETag),
+			})
+			continue
 		}
-		etag, err := u.uploadPartWithRetry(ctx, input, uploadId, int32(partNumber), file, offset, length)
-		if err != nil {
-			return OSSMultipartUploadResult{}, err
+		etag, uploadErr := u.uploadPartWithRetry(ctx, input, uploadId, int32(partNumber), file, offset, length)
+		if uploadErr != nil {
+			return OSSMultipartUploadResult{}, uploadErr
 		}
 		uploadedBytes += length
 		uploadedParts++
@@ -224,29 +258,34 @@ func (u *OSSMultipartUploader) UploadFileWithResult(ctx context.Context, input O
 	}, nil
 }
 
-// ListUploadedParts 查询 OSS 已上传分片。
-func (u *OSSMultipartUploader) ListUploadedParts(ctx context.Context, bucket, object, uploadId string) ([]struct {
-	PartNumber int32
-	Size       int64
-}, error) {
-	parts := []struct {
-		PartNumber int32
-		Size       int64
-	}{}
-	result, err := u.client.ListParts(ctx, &oss.ListPartsRequest{
-		Bucket:   oss.Ptr(bucket),
-		Key:      oss.Ptr(object),
-		UploadId: oss.Ptr(uploadId),
-		MaxParts: 1000,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("查询 OSS 已上传分片失败：%w", err)
-	}
-	for _, part := range result.Parts {
-		parts = append(parts, struct {
-			PartNumber int32
-			Size       int64
-		}{PartNumber: part.PartNumber, Size: part.Size})
+// ListUploadedParts 查询 OSS 已上传分片（MaxParts 上限 1000，超过时按
+// NextPartNumberMarker 自动翻页取全量，否则断点续传只能看到前 1000 片）。
+func (u *OSSMultipartUploader) ListUploadedParts(ctx context.Context, bucket, object, uploadId string) ([]UploadedPart, error) {
+	parts := []UploadedPart{}
+	var marker int32
+	for {
+		result, err := u.client.ListParts(ctx, &oss.ListPartsRequest{
+			Bucket:           oss.Ptr(bucket),
+			Key:              oss.Ptr(object),
+			UploadId:         oss.Ptr(uploadId),
+			MaxParts:         1000,
+			PartNumberMarker: marker,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("查询 OSS 已上传分片失败：%w", err)
+		}
+		for _, part := range result.Parts {
+			etag := ""
+			if part.ETag != nil {
+				etag = *part.ETag
+			}
+			parts = append(parts, UploadedPart{PartNumber: part.PartNumber, Size: part.Size, ETag: etag})
+		}
+		if !result.IsTruncated || result.NextPartNumberMarker <= marker {
+			// 防御：marker 不前进时终止循环，避免异常响应导致死循环
+			break
+		}
+		marker = result.NextPartNumberMarker
 	}
 	return parts, nil
 }

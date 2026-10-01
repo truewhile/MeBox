@@ -2,7 +2,7 @@ import { motion } from 'framer-motion'
 import { FileText, Play } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
-import { imageURL } from '../api/client'
+import { ARTWORK, imageURL } from '../api/client'
 import type { Media } from '../types'
 
 type MediaDetailArtworkProps = {
@@ -14,8 +14,10 @@ export function MediaDetailBackdrop({ media }: MediaDetailArtworkProps) {
     <div className="absolute inset-0 h-[480px] z-0 overflow-hidden">
       {media.backdrop_url || media.poster_url ? (
         <img
-          src={imageURL(media.backdrop_url || media.poster_url || '', media.updated_at)}
+          src={imageURL(media.backdrop_url || media.poster_url || '', media.updated_at, ARTWORK.backdropHero)}
           alt=""
+          decoding="async"
+          fetchPriority="low"
           className="w-full h-full object-cover opacity-[0.04] scale-110 blur-2xl"
           referrerPolicy="no-referrer"
         />
@@ -36,8 +38,10 @@ export function MediaDetailPoster({ media }: MediaDetailArtworkProps) {
       >
         {media.poster_url ? (
           <img
-            src={imageURL(media.poster_url, media.updated_at)}
+            src={imageURL(media.poster_url, media.updated_at, ARTWORK.posterDetail)}
             alt={media.title}
+            decoding="async"
+            fetchPriority="high"
             className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
             referrerPolicy="no-referrer"
           />

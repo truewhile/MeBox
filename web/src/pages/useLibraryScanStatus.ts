@@ -40,6 +40,13 @@ export function useLibraryScanStatus({
       setScanProgress(String(event.message ?? '扫描已排队，后台会自动入库'))
       return
     }
+    if (typeof event.visited === 'number' && !event.finished) {
+      setScanning(true)
+      const added = Number(event.added ?? 0)
+      const updated = Number(event.updated ?? 0)
+      setScanProgress(`正在扫描：已扫描 ${event.visited} 项 · 新增 ${added} · 更新 ${updated}`)
+      return
+    }
   }, [isAdmin, libraryID, onLibraryChanged])
 
   useWebSocket(onRealtimeEvent)
@@ -49,13 +56,19 @@ export function useLibraryScanStatus({
     setScanProgress('正在提交扫描任务…')
     try {
       const result = await libraryAPI.scan(libraryID)
-      toast.success(`扫描完成:新增 ${result.added} 项，更新 ${result.updated ?? 0} 项`)
-      setScanProgress(`扫描完成：新增 ${result.added} · 更新 ${result.updated ?? 0}`)
+      if (result.queued) {
+        const msg = result.message || '扫描任务已在后台启动，正在扫描…'
+        toast.success(msg)
+        setScanProgress(msg)
+        return
+      }
+      toast.success(`扫描完成：新增 ${result.added ?? 0} 项，更新 ${result.updated ?? 0} 项`)
+      setScanProgress(`扫描完成：新增 ${result.added ?? 0} · 更新 ${result.updated ?? 0}`)
+      setScanning(false)
       onLibraryChanged()
     } catch {
       toast.error('扫描失败')
       setScanProgress('扫描失败，请查看日志或稍后重试')
-    } finally {
       setScanning(false)
     }
   }, [libraryID, onLibraryChanged])

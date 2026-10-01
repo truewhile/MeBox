@@ -43,9 +43,9 @@ export const LAYOUT_NAV_ITEMS: LayoutNavItem[] = [
   { to: '/queue', label: '任务队列', icon: ListChecks, adminOnly: true },
   { to: '/admin', label: '用户管理', icon: Users, adminOnly: true },
   { to: '/files', label: '文件管理', icon: FolderOpen, adminOnly: true },
-  { to: '/settings', label: '系统设置', icon: Settings, adminOnly: true },
   { to: '/emby-mount', label: 'Emby 挂载', icon: Tv, adminOnly: true },
   { to: '/strm', label: 'STRM 管理', icon: FileOutput, adminOnly: true },
+  { to: '/settings', label: '系统设置', icon: Settings, adminOnly: true },
 ]
 
 /** Media browsing links for the mobile drawer when browsing libraries. */
@@ -126,6 +126,10 @@ export function isSidebarLinkActive(
 export function resolveHeaderBack(pathname: string): HeaderBackTarget | null {
   if (pathname.startsWith('/library/')) {
     return { to: '/libraries', label: '媒体库' }
+  }
+  // 统计页从观看历史进入，返回链也回到那里，而不是一路跳回首页。
+  if (pathname === '/history/stats') {
+    return { to: '/history', label: '观看历史' }
   }
   if (pathname === '/playlists' || pathname === '/favourites' || pathname === '/history') {
     return { to: '/', label: '首页' }

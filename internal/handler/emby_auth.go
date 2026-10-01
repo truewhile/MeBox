@@ -26,6 +26,13 @@ func embyUserID(c *gin.Context) string {
 	return ""
 }
 
+// embyEffectiveUserID 返回当前鉴权用户。收藏、续播、播放进度等用户态数据必须
+// 绑定到登录身份；路径/Query 里的 UserId 只是 Emby URL 形态兼容，不能覆盖鉴权结果，
+// 否则多用户会串到同一个 UserId 上。
+func embyEffectiveUserID(c *gin.Context) string {
+	return embyUserID(c)
+}
+
 const embyCompatSessionTTL = 30 * time.Minute
 
 type embyCompatSession struct {
@@ -257,7 +264,10 @@ func embyClientInfoFromRequest(c *gin.Context) embyClientInfo {
 			firstHeaderValue(c, "X-Emby-Client", "X-MediaBrowser-Client"),
 			c.Query("Client"),
 			c.Query("client"),
+			c.Query("X-Emby-Client"),
+			c.Query("X-MediaBrowser-Client"),
 			auth["Client"],
+			auth["client"],
 		),
 	}
 	ua := strings.TrimSpace(c.GetHeader("User-Agent"))
@@ -315,10 +325,36 @@ func embyClientFromUserAgent(ua string) string {
 		return "Emby"
 	case strings.Contains(lower, "jellyfin"):
 		return "Jellyfin"
+	case strings.Contains(lower, "capyplayer") || strings.Contains(lower, "capy player") || strings.Contains(lower, "卡皮巴拉"):
+		return "CapyPlayer"
+	case strings.Contains(lower, "senplayer") || strings.Contains(lower, "sen player") || strings.Contains(lower, "森播"):
+		return "SenPlayer"
 	case strings.Contains(lower, "yamby"):
 		return "Yamby"
 	case strings.Contains(lower, "vidhub"):
 		return "VidHub"
+	case strings.Contains(lower, "fileball"):
+		return "Fileball"
+	case strings.Contains(lower, "hamhub"):
+		return "HamHub"
+	case strings.Contains(lower, "afusekt") || strings.Contains(lower, "afuse"):
+		return "AfuseKt"
+	case strings.Contains(lower, "cony"):
+		return "Cony"
+	case strings.Contains(lower, "kodi"):
+		return "Kodi"
+	case strings.Contains(lower, "mrmc"):
+		return "MrMC"
+	case strings.Contains(lower, "forward"):
+		return "Forward"
+	case strings.Contains(lower, "alpha"):
+		return "Alpha"
+	case strings.Contains(lower, "dandanplay") || strings.Contains(lower, "弹弹play"):
+		return "DanDanPlay"
+	case strings.Contains(lower, "potplayer"):
+		return "PotPlayer"
+	case strings.Contains(lower, "vlc"):
+		return "VLC"
 	case strings.Contains(lower, "hills"):
 		return "Hills"
 	default:
@@ -343,7 +379,7 @@ func embyDeviceFromUserAgent(ua string) string {
 		return "Mac"
 	case strings.Contains(lower, "linux"):
 		return "Linux PC"
-	case strings.Contains(lower, "appletv") || strings.Contains(lower, "apple tv"):
+	case strings.Contains(lower, "appletv") || strings.Contains(lower, "apple tv") || strings.Contains(lower, "appletvos"):
 		return "Apple TV"
 	default:
 		return ""

@@ -14,7 +14,7 @@ import (
 func hlsPlaylistHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
-		// 远程 Emby 挂载媒体与 STRM 一样，默认直连播放，不进行转码。
+		// 远程 Emby 挂载没有本地文件，不能转码。STRM 允许直连失败后走 HLS。
 		if svc.EmbyRemote != nil && service.IsEmbyRemoteID(id) {
 			c.JSON(http.StatusConflict, gin.H{"error": "transcode disabled"})
 			return

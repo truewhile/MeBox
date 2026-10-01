@@ -30,7 +30,27 @@ import type { Media } from '../types'
  *
  * 同一组内取最早 created_at 的那条作为代表卡片，并带 count 表示集数。
  */
-export type SeriesCard = { key: string; rep: Media; linkMedia: Media; count: number }
+export type SeriesCard = {
+  key: string
+  rep: Media
+  linkMedia?: Media
+  linkLibraryId?: string
+  count: number
+  is_series?: boolean
+  last_added_at?: string
+}
+
+export const THEATRICAL_SEASON = -1
+export const OVA_SEASON = -2
+export const OAD_SEASON = -3
+export const OVD_SEASON = -4
+export const ONA_SEASON = -5
+export const EXTRA_SEASON = -6
+export const BONUS_SEASON = -7
+export const OMAKE_SEASON = -8
+export const PICTURE_DRAMA_SEASON = -9
+export const NCOP_SEASON = -10
+export const NCED_SEASON = -11
 
 export function getSeriesKey(media: Media): string {
   return compactSeriesKey(getSeriesRawKey(media))
@@ -84,23 +104,132 @@ export function isEpisodeLike(media: Media): boolean {
 // 剧集类目录名(电视剧/动漫及其二级分类)。媒体路径落在这些目录下时, 即便
 // 季集号未识别出来, 也应按剧集对待, 跳转到 /library 分类视图而非 /media 单页。
 const EPISODIC_PATH_RE =
-  /[\\/](?:电视剧|剧集|连续剧|短剧|国产剧|国剧|大陆剧|华语剧|国产电视剧|大陆电视剧|华语电视剧|欧美剧|欧美电视剧|美剧|英剧|日韩剧|日韩电视剧|日剧|韩剧|港剧|台剧|港台剧|泰剧|综艺|纪录片|儿童|动漫|番剧|国漫|日番|韩漫|美漫|欧美动漫|欧美动画|其他动漫|anime|tv|series|shows?|season[\s._-]*\d|s\d{1,2}(?:[\s._-]|[\\/])|special[\s._-]*episodes?|specials?|sp|ovas?|oads?|extras?|bonus(?:es)?|omake|特别篇|特別篇|番外篇?|特典|外传|外傳|总集篇|總集篇)[\\/]/i
+  /[\\/](?:电视剧|剧集|连续剧|短剧|国产剧|国剧|大陆剧|华语剧|国产电视剧|大陆电视剧|华语电视剧|欧美剧|欧美电视剧|美剧|英剧|日韩剧|日韩电视剧|日剧|韩剧|港剧|台剧|港台剧|泰剧|综艺|纪录片|儿童|动漫|番剧|国漫|日番|韩漫|美漫|欧美动漫|欧美动画|其他动漫|anime|tv|series|shows?|season[\s._-]*\d|s\d{1,2}(?:[\s._-]|[\\/])|special[\s._-]*episodes?|specials?|sp|ovas?|oads?|ovds?|onas?|extras?|bonus(?:es)?|omake|picture[\s._-]*drama|ncop|nced|特别篇|特別篇|番外篇?|特典|外传|外傳|总集篇|總集篇|画像特典)[\\/]/i
+
+const THEATRICAL_TITLE_RE =
+  /(?:剧场版|劇場版|动画电影|動畫電影|电影版|電影版|\bthe\s+movie\b|\bmovie\s*\d{1,2}\b)/i
+
+const THEATRICAL_FOLDER_NAME_RE =
+  /(?:剧场版|劇場版|动画电影|動畫電影|电影版|電影版)/i
+
+const THEATRICAL_FOLDER_RE =
+  /[\\/][^\\/]*(?:剧场版|劇場版|动画电影|動畫電影|电影版|電影版)[^\\/]*[\\/]/
 
 const SEASON_FOLDER_RE =
-  /^(?:s\d{1,2}|season[\s._-]*\d{1,2}|第\s*[0-9一二三四五六七八九十百零两]+\s*季|special[\s._-]*episodes?|specials?|sp|ovas?|oads?|extras?|bonus(?:es)?|omake|特别篇|特別篇|番外篇?|特典|外传|外傳|总集篇|總集篇)$/i
+  /^(?:s\d{1,2}|season[\s._-]*\d{1,2}|第\s*[0-9一二三四五六七八九十百零两]+\s*季|special[\s._-]*episodes?|specials?|sp|ovas?|oads?|ovds?|onas?|extras?|bonus(?:es)?|omake|picture[\s._-]*drama|ncop|nced|特别篇|特別篇|番外篇?|特典|外传|外傳|总集篇|總集篇|画像特典|剧场版|劇場版|动画电影|動畫電影)$/i
 
 export function pathLooksEpisodic(media: Media): boolean {
   const path = (media.path || media.display_library_path || media.library_path || '')
   return EPISODIC_PATH_RE.test(path)
 }
 
+export function isTheatricalFeature(media: Media): boolean {
+  const path = media.path || ''
+  if (SERIES_FILE_EPISODE_RE.test(path)) return false
+  return THEATRICAL_TITLE_RE.test(`${media.title || ''} ${path}`) || THEATRICAL_FOLDER_RE.test(path)
+}
+
+/**
+ * 把剧集列表展开成"每一行 media"。
+ *
+ * 剧集接口会把同一集的多版本(含被误判折叠的行)合成一个 item, 真实的行放在
+ * `versions` 里, 顶层只保留代表行。批量操作(整剧匹配 / 整剧刮削 / 编辑整剧 /
+ * 删除整剧)必须作用到每一行, 否则只会更新代表行, 折叠掉的版本被漏掉。
+ *
+ * 注意 `versions` 已包含代表行本身, 因此命中 versions 时不要再额外加回 item,
+ * 否则会重复。仅用于「操作」而非展示——展示仍按折叠后的剧集渲染版本切换器。
+ */
+export function expandSeriesMediaVersions(episodes: Media[] = []): Media[] {
+  const out: Media[] = []
+  const seen = new Set<string>()
+  for (const ep of episodes) {
+    if (!ep) continue
+    const rows = ep.versions && ep.versions.length > 0 ? ep.versions : [ep]
+    for (const row of rows) {
+      if (!row || !row.id || seen.has(row.id)) continue
+      seen.add(row.id)
+      out.push(row)
+    }
+  }
+  return out
+}
+
+const SPECIAL_SECTION_PATTERNS: Array<[number, RegExp]> = [
+  [OVA_SEASON, /(?:^|[^a-z0-9])ovas?(?:[\s._-]*\d+)?(?:[^a-z0-9]|$)/i],
+  [OAD_SEASON, /(?:^|[^a-z0-9])oads?(?:[\s._-]*\d+)?(?:[^a-z0-9]|$)/i],
+  [OVD_SEASON, /(?:^|[^a-z0-9])ovds?(?:[\s._-]*\d+)?(?:[^a-z0-9]|$)/i],
+  [ONA_SEASON, /(?:^|[^a-z0-9])onas?(?:[\s._-]*\d+)?(?:[^a-z0-9]|$)/i],
+  [PICTURE_DRAMA_SEASON, /(?:^|[^a-z0-9])(?:picture[\s._-]*drama|画像特典)(?:[^a-z0-9]|$)/i],
+  [NCOP_SEASON, /(?:^|[^a-z0-9])ncop(?:\d+)?(?:[^a-z0-9]|$)/i],
+  [NCED_SEASON, /(?:^|[^a-z0-9])nced(?:\d+)?(?:[^a-z0-9]|$)/i],
+  [EXTRA_SEASON, /(?:^|[^a-z0-9])extras?(?:[\s._-]*\d+)?(?:[^a-z0-9]|$)/i],
+  [BONUS_SEASON, /(?:^|[^a-z0-9])bonus(?:es)?(?:[\s._-]*\d+)?(?:[^a-z0-9]|$)/i],
+  [OMAKE_SEASON, /(?:^|[^a-z0-9])omake(?:[\s._-]*\d+)?(?:[^a-z0-9]|$)/i],
+]
+
+export function specialSectionForMedia(media: Media): number | null {
+  if (isTheatricalFeature(media)) return THEATRICAL_SEASON
+  const parts = (media.path || '').split(/[\\/]+/).filter(Boolean)
+  for (const part of parts) {
+    for (const [section, pattern] of SPECIAL_SECTION_PATTERNS) {
+      if (pattern.test(part)) return section
+    }
+  }
+  return null
+}
+
+/**
+ * 季按钮显示顺序:第一季、第二季 … 第 XX 季 → 特别篇 → 剧场版 → OVA → OAD → 其余特典。
+ *
+ * 正片季(季号 > 0)按季号升序排最前;特殊分区(0 / 负数季)按固定优先级排在后面。
+ * 各季分组页(剧集库 / 详情页 / 播放器选集)共用这一顺序,避免三处各排各的。
+ */
+export function seasonSortOrder(season: number): number {
+  if (season > 0) return season
+  switch (season) {
+    case 0: return 1000 // 特别篇紧随正片
+    case THEATRICAL_SEASON: return 1001 // 剧场版
+    case OVA_SEASON: return 1002
+    case OAD_SEASON: return 1003
+    case OVD_SEASON: return 1004
+    case ONA_SEASON: return 1005
+    case EXTRA_SEASON: return 1006
+    case BONUS_SEASON: return 1007
+    case OMAKE_SEASON: return 1008
+    case PICTURE_DRAMA_SEASON: return 1009
+    case NCOP_SEASON: return 1010
+    case NCED_SEASON: return 1011
+    default: return 2000 // 未知季兜底,排最后
+  }
+}
+
+export function seasonLabel(season: number): string {
+  switch (season) {
+    case 0: return '特别篇'
+    case THEATRICAL_SEASON: return '剧场版'
+    case OVA_SEASON: return 'OVA'
+    case OAD_SEASON: return 'OAD'
+    case OVD_SEASON: return 'OVD'
+    case ONA_SEASON: return 'ONA'
+    case EXTRA_SEASON: return 'Extra'
+    case BONUS_SEASON: return 'Bonus'
+    case OMAKE_SEASON: return 'Omake'
+    case PICTURE_DRAMA_SEASON: return 'Picture Drama'
+    case NCOP_SEASON: return 'NCOP'
+    case NCED_SEASON: return 'NCED'
+    default: return `第 ${season} 季`
+  }
+}
+
 export function isSeriesCard(card: SeriesCard): boolean {
+  const linkMedia = card.linkMedia ?? card.rep
   return (
+    card.is_series === true ||
     card.count > 1 ||
     isEpisodeLike(card.rep) ||
-    isEpisodeLike(card.linkMedia) ||
+    isEpisodeLike(linkMedia) ||
     pathLooksEpisodic(card.rep) ||
-    pathLooksEpisodic(card.linkMedia)
+    pathLooksEpisodic(linkMedia)
   )
 }
 
@@ -150,10 +279,10 @@ function normalizeTitle(value?: string): string {
 }
 
 const SERIES_SPECIAL_CODE_RE =
-  /\s*[[(（【]?\s*(?:s0+\s*e?\s*\d+|season\s*0+(?:\s*episode)?\s*\d*|special(?:\s*episode)?s?\s*\d*|sp\s*\d*|ovas?\s*\d*|oads?\s*\d*|extras?\s*\d*|bonus(?:es)?\s*\d*|omake\s*\d*)\s*[\])）】]?$/i
+  /\s*[[(（【]?\s*(?:s0+\s*e?\s*\d+|season\s*0+(?:\s*episode)?\s*\d*|special(?:\s*episode)?s?\s*\d*|sp\s*\d*|ovas?\s*\d*|oads?\s*\d*|ovds?\s*\d*|onas?\s*\d*|extras?\s*\d*|bonus(?:es)?\s*\d*|omake\s*\d*|picture[\s._-]*drama\s*\d*|ncop\s*\d*|nced\s*\d*)\s*[\])）】]?$/i
 
 const SERIES_SPECIAL_CJK_RE =
-  /\s*[[(（【]?\s*(?:特别篇|特別篇|番外篇?|特典|外传|外傳|总集篇|總集篇)(?:\s*第?\s*[0-9一二三四五六七八九十百零两]+(?:[集话話期])?)?\s*[\])）】]?$/i
+  /\s*[[(（【]?\s*(?:特别篇|特別篇|番外篇?|特典|外传|外傳|总集篇|總集篇|画像特典)(?:\s*第?\s*[0-9一二三四五六七八九十百零两]+(?:[集话話期])?)?\s*[\])）】]?$/i
 
 function normalizePathSeriesTitle(value?: string): string {
   const title = normalizeTitle(value)
@@ -251,14 +380,18 @@ function seriesDirectoryNameFromPath(path?: string): string {
   if (parts.length < 2) return ''
   let dirIndex = parts.length - 2
   const lastPart = parts[parts.length - 1]
-  if (!seriesPathPartLooksLikeFile(lastPart) && !SEASON_FOLDER_RE.test(lastPart)) {
+  if (!seriesPathPartLooksLikeFile(lastPart) && !isSeriesContainerFolder(lastPart)) {
     dirIndex = parts.length - 1
   }
-  while (dirIndex >= 0 && SEASON_FOLDER_RE.test(parts[dirIndex])) {
+  while (dirIndex >= 0 && isSeriesContainerFolder(parts[dirIndex])) {
     dirIndex -= 1
   }
   if (dirIndex < 0) return ''
   return parts[dirIndex]
+}
+
+function isSeriesContainerFolder(name: string): boolean {
+  return SEASON_FOLDER_RE.test(name) || THEATRICAL_FOLDER_NAME_RE.test(name)
 }
 
 function seriesExternalIDFromPath(path?: string): string {
@@ -327,30 +460,54 @@ export function groupSeries(items: Media[] = []): SeriesCard[] {
             ? compactSeriesKey(externalKey)
             : getSeriesKey(m)
 
+    const mAddedAt = m.updated_at || m.created_at || ''
     const g = groups.get(key)
     if (!g) {
-      groups.set(key, { key, rep: m, linkMedia: m, count: 1 })
+      groups.set(key, { key, rep: m, linkMedia: m, count: 1, last_added_at: mAddedAt })
     } else {
+      if (mAddedAt) {
+        if (!g.last_added_at) {
+          g.last_added_at = mAddedAt
+        } else {
+          const prevTime = new Date(g.last_added_at).getTime()
+          const curTime = new Date(mAddedAt).getTime()
+          if (!isNaN(curTime) && (isNaN(prevTime) || curTime > prevTime)) {
+            g.last_added_at = mAddedAt
+          }
+        }
+      }
       // Repeated movie IDs represent alternate locations/encodes, not
       // episodes. Fold the versions but keep the card in movie mode.
-      if (isEpisodeLike(m) || pathLooksEpisodic(m) || isEpisodeLike(g.linkMedia) || pathLooksEpisodic(g.linkMedia)) {
+      const currentLinkMedia = g.linkMedia ?? g.rep
+      if (isEpisodeLike(m) || pathLooksEpisodic(m) || isEpisodeLike(currentLinkMedia) || pathLooksEpisodic(currentLinkMedia)) {
         g.count += 1
       }
-      if (betterSeriesLinkMedia(m, g.linkMedia)) {
+      if (betterSeriesLinkMedia(m, currentLinkMedia)) {
         g.linkMedia = m
       }
-      const currentArtwork = artworkScore(m)
-      const representativeArtwork = artworkScore(g.rep)
-      if (currentArtwork > representativeArtwork) {
+      if (betterSeriesRepresentative(m, g.rep)) {
         g.rep = m
-      } else if (currentArtwork === representativeArtwork) {
-        const cur = (m.season_num ?? 0) * 10000 + (m.episode_num ?? 0)
-        const rep = (g.rep.season_num ?? 0) * 10000 + (g.rep.episode_num ?? 0)
-        if (cur > 0 && (rep === 0 || cur < rep)) g.rep = m
       }
     }
   }
   return Array.from(groups.values())
+}
+
+function betterSeriesRepresentative(candidate: Media, current: Media): boolean {
+  // A theatrical feature can have local poster/background artwork that scores
+  // higher than the TV poster. Keep the TV row as the series-card identity so
+  // the movie cannot replace the whole series title and overview.
+  const candidateTheatrical = isTheatricalFeature(candidate)
+  const currentTheatrical = isTheatricalFeature(current)
+  if (candidateTheatrical !== currentTheatrical) return !candidateTheatrical
+
+  const candidateArtwork = artworkScore(candidate)
+  const currentArtwork = artworkScore(current)
+  if (candidateArtwork !== currentArtwork) return candidateArtwork > currentArtwork
+
+  const cur = (candidate.season_num ?? 0) * 10000 + (candidate.episode_num ?? 0)
+  const rep = (current.season_num ?? 0) * 10000 + (current.episode_num ?? 0)
+  return cur > 0 && (rep === 0 || cur < rep)
 }
 
 function repeatedSeriesExternalRawKey(media: Media): string {
@@ -382,7 +539,8 @@ function mediaParentLooksLikeCollection(path?: string): boolean {
 
 export function seriesCardLink(card: SeriesCard): string {
   if (isSeriesCard(card)) {
-    return `/library/${targetLibraryID(card.linkMedia)}?series=${encodeURIComponent(card.key)}`
+    const targetLibrary = card.linkLibraryId || targetLibraryID(card.linkMedia ?? card.rep)
+    return `/library/${targetLibrary}?series=${encodeURIComponent(card.key)}`
   }
   return `/media/${card.rep.id}`
 }

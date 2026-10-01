@@ -66,6 +66,7 @@ config.yaml
 .tmp-live-backups/
 .tmp-*
 .codex-*
+.codex/
 downloads/
 media/
 *.pid
@@ -80,3 +81,4 @@ tools/
 verify-cache/
 verify-data/
 .zcode/
+.tmp-src

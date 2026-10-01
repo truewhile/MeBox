@@ -24,6 +24,13 @@ func (s *ScraperService) ManualSearch(ctx context.Context, media *model.Media, q
 			mediaType = lib.Type
 		}
 	}
+	// Keep manual scraping consistent with automatic scraping for theatrical
+	// features stored inside anime libraries. The UI may pass the library type
+	// ("anime"), which otherwise makes TMDb stop after a TV result and hide the
+	// actual movie candidate.
+	if mediaLooksLikeTheatricalFeature(media) {
+		mediaType = "movie"
+	}
 	mediaType = normalizeMediaType(mediaType, queries[0], "")
 	providers := manualSearchProviderSet(provider)
 	year := mediaYearHint(media)

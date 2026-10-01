@@ -1,13 +1,11 @@
 import type { Media } from '../types'
-import { mediaLibraryTarget } from '../utils/mediaNavigation'
 
 export function mediaLibraryBackTarget(media: Media): string {
-  const seriesTarget = mediaLibraryTarget(media)
-  if (seriesTarget) return seriesTarget
-
   const libraryID = media.display_library_id || media.library_id
-  if (!libraryID) return ''
-  return `/library/${encodeURIComponent(libraryID)}`
+  if (libraryID) {
+    return `/library/${encodeURIComponent(libraryID)}`
+  }
+  return '/libraries'
 }
 
 export function mediaDetailScrapeMediaType(media: Media): string | undefined {

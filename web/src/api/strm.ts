@@ -80,6 +80,12 @@ export const strmAPI = {
       .get<StrmRemoteEntry[]>(`/admin/strm/accounts/${accountId}/list`, { params: { dir } })
       .then((r) => r.data),
 
+  // 按远端目录引用（115 为目录 ID）反查完整展示路径
+  resolveRemoteDirPath: (accountId: string, dir: string) =>
+    api
+      .get<{ path: string }>(`/admin/strm/accounts/${accountId}/resolve`, { params: { dir } })
+      .then((r) => r.data.path),
+
   list115Sources: () =>
     api.get<Strm115Sources>('/admin/strm/115/sources').then((r) => r.data),
 
@@ -159,6 +165,9 @@ export const strmAPI = {
   clearCanceledDownloads: () =>
     api.post<{ deleted: number }>('/admin/strm/downloads/clear-canceled').then((r) => r.data),
 
+  clearFailedDownloads: () =>
+    api.post<{ deleted: number }>('/admin/strm/downloads/clear-failed').then((r) => r.data),
+
   retryFailedDownloads: () =>
     api.post<{ retried: number }>('/admin/strm/downloads/retry-failed').then((r) => r.data),
 
@@ -195,6 +204,9 @@ export const strmAPI = {
 
   clearCanceledUploads: () =>
     api.post<{ deleted: number }>('/admin/strm/uploads/clear-canceled').then((r) => r.data),
+
+  clearFailedUploads: () =>
+    api.post<{ deleted: number }>('/admin/strm/uploads/clear-failed').then((r) => r.data),
 
   retryFailedUploads: () =>
     api.post<{ retried: number }>('/admin/strm/uploads/retry-failed').then((r) => r.data),

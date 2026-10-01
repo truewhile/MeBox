@@ -13,23 +13,42 @@
 package service
 
 import (
+	"errors"
+	"net"
 	"net/http"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/truewhile/MeBox/internal/config"
 )
 
 // ImageProxy fetches and caches remote images on behalf of the browser.
 type ImageProxy struct {
-	cfg      *config.Config
-	log      *zap.Logger
-	client   *http.Client
-	cacheDir string
-	mu       sync.Mutex
+	cfg        *config.Config
+	log        *zap.Logger
+	client     *http.Client
+	cacheDir   string
+	mu         sync.Mutex
+	fetchGroup singleflight.Group
+
+	// directClient bypasses HTTP_PROXY / OS proxy settings. It is built once and
+	// shared: rebuilding the transport on every fetch discarded all keep-alive
+	// connections, so every burst of poster requests paid a fresh TCP (and TLS)
+	// handshake per image.
+	directClient *http.Client
+
+	// resizeSem bounds concurrent decode/resize jobs. Emby TV clients request
+	// poster grids in bursts; letting every request decode a source image at
+	// once causes CPU and memory spikes that make the whole UI feel sluggish.
+	resizeSemMu sync.Mutex
+	resizeSem   chan struct{}
 
 	// libraryRootsFn returns the configured media library roots so that
 	// sidecar poster/artwork files stored alongside media (under arbitrary
@@ -39,25 +58,85 @@ type ImageProxy struct {
 	libRootsMu     sync.Mutex
 	libRootsCache  []string
 	libRootsAt     time.Time
+
+	// allowedRemoteHostsFn returns hostnames or IPs of explicitly configured
+	// upstream services (e.g. remote Emby mounts) that should bypass SSRF private IP checks.
+	allowedRemoteHostsFn func() []string
+	allowedHostsMu       sync.Mutex
+	allowedHostsCache    map[string]bool
+	allowedHostsAt       time.Time
 }
 
 const (
 	imageBrowserCacheControl     = "public, max-age=2592000, immutable"
 	imagePlaceholderCacheControl = "no-store"
+	imageMaxResizeConcurrency    = 4
+
+	// imageOriginalCacheSubdir 存放上游原图（生成各种尺寸的原料，可再生）。
+	imageOriginalCacheSubdir = "originals"
+	// imageRenditionCacheSubdir 存放挂载 Emby 直接按尺寸产出的成品图：它们
+	// 已经是客户端要的最终尺寸，和派生缩略图一样属于长期保留的热路径缓存。
+	imageRenditionCacheSubdir = "renditions"
 )
 
 // NewImageProxy is the constructor.
 func NewImageProxy(cfg *config.Config, log *zap.Logger) *ImageProxy {
+	proxy := &ImageProxy{
+		cfg:      cfg,
+		log:      log,
+		cacheDir: filepath.Join(cfg.Cache.CacheDir, "images"),
+	}
+	proxy.resizeSem = make(chan struct{}, imageResizeConcurrency())
+
 	// Honor HTTP(S)_PROXY env vars so deployments behind GFW can pull
 	// from image.tmdb.org via their HTTP proxy without extra config. On
 	// Windows we also honor the current user's system proxy settings.
 	transport := NewExternalTransport()
-	return &ImageProxy{
-		cfg:      cfg,
-		log:      log,
-		cacheDir: filepath.Join(cfg.Cache.CacheDir, "images"),
-		client:   &http.Client{Timeout: 30 * time.Second, Transport: transport},
+	if proxyConfiguredForImageFetch() {
+		// 走本地代理（如 127.0.0.1:7890）时，拨号目标是代理本身，
+		// 连接层 SSRF 校验会误杀本地回环代理；此时沿用 URL 级校验。
+		log.Info("image proxy: outbound proxy detected, connection-level SSRF guard disabled")
+	} else {
+		// 仅 URL 解析层的 isPrivateHost 可被十进制/十六进制 IP、解析到
+		// 私网的域名与 DNS rebinding 绕过；在拨号层对最终连接 IP 做二次
+		// 校验（含重定向后的每条连接）堵住该旁路。
+		// 用户明确配置的远程挂载源（如内网 Emby）豁免该私网限制。
+		dialer := &net.Dialer{
+			Timeout: 15 * time.Second,
+			Control: func(_, address string, _ syscall.RawConn) error {
+				host, _, err := net.SplitHostPort(address)
+				if err != nil {
+					return err
+				}
+				if proxy.isAllowedRemoteHost(host) {
+					return nil
+				}
+				ip := net.ParseIP(host)
+				if ip == nil {
+					return errors.New("image proxy: refusing non-IP dial target")
+				}
+				if isPrivateIP(ip) {
+					return errors.New("image proxy: requests to private/internal hosts are not allowed")
+				}
+				return nil
+			},
+		}
+		transport.DialContext = dialer.DialContext
 	}
+
+	proxy.client = &http.Client{Timeout: 30 * time.Second, Transport: transport}
+	proxy.directClient = &http.Client{Timeout: 30 * time.Second, Transport: NewInternalTransport()}
+	return proxy
+}
+
+// proxyConfiguredForImageFetch 探测环境变量或系统代理是否会影响图片抓取。
+func proxyConfiguredForImageFetch() bool {
+	req, err := http.NewRequest(http.MethodGet, "https://image.tmdb.org/", nil)
+	if err != nil {
+		return false
+	}
+	proxy, err := ProxyFromEnvironmentOrSystem(req)
+	return err == nil && proxy != nil
 }
 
 // SetLibraryRootsProvider injects a callback that returns the current set of
@@ -85,11 +164,76 @@ func (p *ImageProxy) libraryRoots() []string {
 	return p.libRootsCache
 }
 
+// SetAllowedRemoteHostsProvider injects a callback that returns hostnames or IPs
+// of explicitly configured remote services (e.g. remote Emby mounts). Requests to
+// these hosts bypass SSRF private-IP restrictions.
+func (p *ImageProxy) SetAllowedRemoteHostsProvider(fn func() []string) {
+	p.allowedRemoteHostsFn = fn
+}
+
+func (p *ImageProxy) isAllowedRemoteHost(host string) bool {
+	if p == nil || p.allowedRemoteHostsFn == nil {
+		return false
+	}
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return false
+	}
+	// Strip port if present
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = strings.ToLower(strings.TrimSpace(h))
+	}
+
+	p.allowedHostsMu.Lock()
+	defer p.allowedHostsMu.Unlock()
+	if p.allowedHostsCache == nil || time.Since(p.allowedHostsAt) >= 30*time.Second {
+		rawList := p.allowedRemoteHostsFn()
+		cache := make(map[string]bool, len(rawList))
+		for _, item := range rawList {
+			item = strings.ToLower(strings.TrimSpace(item))
+			if item == "" {
+				continue
+			}
+			if h, _, err := net.SplitHostPort(item); err == nil {
+				item = strings.ToLower(strings.TrimSpace(h))
+			}
+			cache[item] = true
+		}
+		p.allowedHostsCache = cache
+		p.allowedHostsAt = time.Now()
+	}
+	return p.allowedHostsCache[host]
+}
+
+// imageResizeConcurrency keeps decode/resize concurrency within the number
+// of CPU threads the process is allowed to use, capped to avoid large
+// temporary RGBA buffers on tiny hosts.
+func imageResizeConcurrency() int {
+	n := runtime.GOMAXPROCS(0)
+	if n < 1 {
+		n = 1
+	}
+	if n > imageMaxResizeConcurrency {
+		n = imageMaxResizeConcurrency
+	}
+	return n
+}
+
 // Prune removes oldest cached images until disk usage is within the configured limit.
+// 原图池按独立配额与保留时长优先淘汰，客户端热路径读取的成品图最后淘汰。
 func (p *ImageProxy) Prune() (PruneImageCacheResult, error) {
 	if p.cfg == nil || p.cfg.Cache.ImagesMaxSizeMB <= 0 {
 		return PruneImageCacheResult{}, nil
 	}
-	maxBytes := int64(p.cfg.Cache.ImagesMaxSizeMB) * 1024 * 1024
-	return PruneImageCache(p.cacheDir, maxBytes)
+	var originalsMaxBytes int64
+	if p.cfg.Cache.ImagesOriginalsMaxSizeMB > 0 {
+		originalsMaxBytes = int64(p.cfg.Cache.ImagesOriginalsMaxSizeMB) * 1024 * 1024
+	}
+	var originalsMaxAge time.Duration
+	if p.cfg.Cache.ImagesOriginalsTTLHours > 0 {
+		originalsMaxAge = time.Duration(p.cfg.Cache.ImagesOriginalsTTLHours) * time.Hour
+	}
+	totalBytes := int64(p.cfg.Cache.ImagesMaxSizeMB) * 1024 * 1024
+	pools := ImageCachePools(p.cacheDir, originalsMaxBytes, originalsMaxAge)
+	return PruneImageCachePools(pools, totalBytes)
 }

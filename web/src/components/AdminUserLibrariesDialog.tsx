@@ -278,12 +278,19 @@ export function AdminUserLibrariesDialog({
                           <div className="min-w-0 flex-1">
                             <p className="truncate text-xs font-semibold text-ink-600">
                               {lib.name}
+                              {lib.is_remote_emby ? (
+                                <span className="ml-1.5 rounded bg-sky-50 px-1.5 py-0.5 text-[10px] font-bold text-sky-700">
+                                  Emby 挂载
+                                </span>
+                              ) : null}
                             </p>
                             <p
                               className="truncate text-[10px] text-sand-500"
-                              title={lib.path}
+                              title={lib.is_remote_emby ? lib.remote_source || lib.name : lib.path}
                             >
-                              {lib.type} · {libraryDisplayPath(lib.path)}
+                              {lib.is_remote_emby
+                                ? `远程 · ${lib.remote_source || 'Emby'}`
+                                : `${lib.type} · ${libraryDisplayPath(lib.path)}`}
                             </p>
                           </div>
                         </div>

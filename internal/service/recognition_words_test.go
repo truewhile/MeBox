@@ -20,8 +20,8 @@ One\.Piece\.S01E(89[2-9]|9\d{2}|10\d{2})\.1999 => 海贼王.S21E\1.1999 && S21E 
 
 func TestCleanQueryWithRecognitionDisabledByDefaultRepoNil(t *testing.T) {
 	title, year := CleanQueryWithRecognition(t.Context(), nil, "Dune.2021.2160p.WEB-DL.mkv")
-	if title != "dune" || year != 2021 {
-		t.Fatalf("CleanQueryWithRecognition = %q/%d, want dune/2021", title, year)
+	if title != "Dune" || year != 2021 {
+		t.Fatalf("CleanQueryWithRecognition = %q/%d, want Dune/2021", title, year)
 	}
 }
 

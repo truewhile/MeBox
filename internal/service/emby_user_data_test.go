@@ -18,16 +18,18 @@ func TestMergedRemoteUserData(t *testing.T) {
 		preserve any
 	}{
 		{
-			name: "in-progress preserves remote fields",
+			name: "in-progress preserves non-user remote fields only",
 			raw: map[string]any{
-				"PlayCount": 2,
-				"Custom":    "remote-value",
+				"PlayCount":             2,
+				"IsFavorite":            true,
+				"PlaybackPositionTicks": int64(999),
+				"Custom":                "remote-value",
 			},
 			history:  model.PlaybackHistory{PositionMs: 25_000, DurationMs: 100_000},
 			position: 250_000_000,
 			played:   false,
 			percent:  25,
-			count:    2,
+			count:    0,
 			preserve: "remote-value",
 		},
 		{
@@ -59,7 +61,44 @@ func TestMergedRemoteUserData(t *testing.T) {
 			if tt.preserve != nil && out["Custom"] != tt.preserve {
 				t.Fatalf("Custom = %#v, want %#v", out["Custom"], tt.preserve)
 			}
+			if out["IsFavorite"] != false && out["IsFavorite"] != true {
+				t.Fatalf("IsFavorite missing: %#v", out)
+			}
 		})
+	}
+}
+
+func TestApplyMeBoxUserDataClearsSharedRemoteState(t *testing.T) {
+	out := applyMeBoxUserData(map[string]any{
+		"IsFavorite":            true,
+		"PlaybackPositionTicks": int64(42_000_000),
+		"Played":                true,
+		"PlayedPercentage":      80.0,
+		"PlayCount":             3,
+		"Key":                   "keep",
+	}, nil, false)
+	if out["IsFavorite"] != false {
+		t.Fatalf("IsFavorite = %#v, want false", out["IsFavorite"])
+	}
+	if out["PlaybackPositionTicks"] != int64(0) {
+		t.Fatalf("PlaybackPositionTicks = %#v, want 0", out["PlaybackPositionTicks"])
+	}
+	if out["Played"] != false {
+		t.Fatalf("Played = %#v, want false", out["Played"])
+	}
+	if out["PlayedPercentage"] != float64(0) {
+		t.Fatalf("PlayedPercentage = %#v, want 0", out["PlayedPercentage"])
+	}
+	if out["PlayCount"] != 0 {
+		t.Fatalf("PlayCount = %#v, want 0", out["PlayCount"])
+	}
+	if out["Key"] != "keep" {
+		t.Fatalf("Key = %#v, want keep", out["Key"])
+	}
+
+	fav := applyMeBoxUserData(map[string]any{"IsFavorite": false}, nil, true)
+	if fav["IsFavorite"] != true {
+		t.Fatalf("favorite overlay IsFavorite = %#v, want true", fav["IsFavorite"])
 	}
 }
 
@@ -106,5 +145,59 @@ func TestRecordProgressFallbacksToExistingHistoryDuration(t *testing.T) {
 	}
 	if !hist.Completed {
 		t.Fatalf("expected 95%% progress to be completed")
+	}
+}
+
+func TestMarkPlayedStoresRemoteItemLocallyPerUser(t *testing.T) {
+	svc := newTestEmbyService(t)
+	remoteID := EncodeEmbyRemoteID("mount-test", "item-played")
+	alice := &model.User{Username: "alice_played", Role: "user", Tier: "free", IsActive: true}
+	bob := &model.User{Username: "bob_played", Role: "user", Tier: "free", IsActive: true}
+	if err := svc.repo.User.Create(t.Context(), alice); err != nil {
+		t.Fatalf("create alice: %v", err)
+	}
+	if err := svc.repo.User.Create(t.Context(), bob); err != nil {
+		t.Fatalf("create bob: %v", err)
+	}
+
+	if err := svc.MarkPlayed(t.Context(), alice.ID, remoteID, true); err != nil {
+		t.Fatalf("mark played: %v", err)
+	}
+
+	var aliceRows, bobRows int64
+	_ = svc.repo.DB.Model(&model.PlaybackHistory{}).Where("user_id = ? AND media_id = ?", alice.ID, remoteID).Count(&aliceRows)
+	_ = svc.repo.DB.Model(&model.PlaybackHistory{}).Where("user_id = ? AND media_id = ?", bob.ID, remoteID).Count(&bobRows)
+	if aliceRows != 1 {
+		t.Fatalf("alice history rows = %d, want 1", aliceRows)
+	}
+	if bobRows != 0 {
+		t.Fatalf("bob should not see alice remote played state, rows=%d", bobRows)
+	}
+
+	payload := map[string]any{
+		"Id": remoteID,
+		"UserData": map[string]any{
+			"IsFavorite":            true,
+			"PlaybackPositionTicks": int64(50_000_000),
+			"Played":                true,
+		},
+	}
+	if err := svc.mergeRemoteUserData(t.Context(), bob.ID, payload); err != nil {
+		t.Fatalf("merge for bob: %v", err)
+	}
+	bobData := payload["UserData"].(map[string]any)
+	if bobData["IsFavorite"] != false {
+		t.Fatalf("bob IsFavorite leaked: %#v", bobData)
+	}
+	if bobData["Played"] != false || bobData["PlaybackPositionTicks"] != int64(0) {
+		t.Fatalf("bob playback leaked: %#v", bobData)
+	}
+
+	if err := svc.mergeRemoteUserData(t.Context(), alice.ID, payload); err != nil {
+		t.Fatalf("merge for alice: %v", err)
+	}
+	aliceData := payload["UserData"].(map[string]any)
+	if aliceData["Played"] != true {
+		t.Fatalf("alice Played = %#v, want true", aliceData["Played"])
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.uber.org/zap"
@@ -24,7 +25,10 @@ func TestOrganizeDirectoryCleansReleaseNoiseBeforeMetadataClassify(t *testing.T)
 		}
 		query := r.URL.Query().Get("query")
 		queries = append(queries, query)
-		if query != "motherhood of taihang" {
+		// Real providers match the query case-insensitively; keep this stub
+		// faithful so the test guards release-noise cleaning rather than the
+		// historical lowercased query spelling.
+		if !strings.EqualFold(query, "motherhood of taihang") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}})
 			return
 		}
@@ -81,7 +85,7 @@ func TestOrganizeDirectoryCleansReleaseNoiseBeforeMetadataClassify(t *testing.T)
 	if _, err := os.Stat(want); err != nil {
 		t.Fatalf("organized media missing at %q: %v; items=%#v queries=%v", want, err, res.Items, queries)
 	}
-	if len(queries) == 0 || queries[0] != "motherhood of taihang" {
+	if len(queries) == 0 || !strings.EqualFold(queries[0], "motherhood of taihang") {
 		t.Fatalf("first metadata query = %q, want cleaned title; all queries=%v", firstQuery(queries), queries)
 	}
 }

@@ -14,21 +14,22 @@ import (
 	"github.com/truewhile/MeBox/internal/model"
 )
 
-func (e *EmbyService) seriesIDForMedia(m *model.Media) string {
+func (e *EmbyService) seriesIDForMedia(ctx context.Context, m *model.Media) string {
 	if strings.TrimSpace(m.SeriesID) != "" {
 		return m.SeriesID
 	}
-	return stableEmbyID(embyVirtualSeriesPrefix, m.LibraryID, e.seriesNameForMedia(m))
+	return stableEmbyID(embyVirtualSeriesPrefix, m.LibraryID, e.seriesNameForMedia(ctx, m))
 }
 
-func (e *EmbyService) seasonIDForMedia(m *model.Media) string {
-	return seasonID(e.seriesIDForMedia(m), m.SeasonNum)
+func (e *EmbyService) seasonIDForMedia(ctx context.Context, m *model.Media) string {
+	return seasonID(e.seriesIDForMedia(ctx, m), embySeasonNumForMedia(m))
 }
 
-func (e *EmbyService) seriesNameForMedia(m *model.Media) string {
+func (e *EmbyService) seriesNameForMedia(ctx context.Context, m *model.Media) string {
 	if strings.TrimSpace(m.SeriesID) != "" {
-		if series, err := e.repo.Series.FindByID(context.Background(), m.SeriesID); err == nil && series != nil && strings.TrimSpace(series.Title) != "" {
-			return series.Title
+		// 走请求级缓存；无缓存 ctx 时退化为单次查询。
+		if title, ok, err := e.payloadSeriesTitle(ctx, m.SeriesID); err == nil && ok && strings.TrimSpace(title) != "" {
+			return title
 		}
 	}
 	if strings.EqualFold(strings.TrimSpace(m.ScrapeStatus), "matched") && strings.TrimSpace(m.Title) != "" {
@@ -99,21 +100,158 @@ func stableEmbyID(prefix string, parts ...string) string {
 	return prefix + hex.EncodeToString(h.Sum(nil))[:32]
 }
 
-func seasonID(seriesID string, seasonNum int) string {
-	if seasonNum < 0 {
-		seasonNum = 1
+const (
+	embySeasonTheatrical     = -1
+	embySeasonOVA            = -2
+	embySeasonOAD            = -3
+	embySeasonOVD            = -4
+	embySeasonONA            = -5
+	embySeasonExtra          = -6
+	embySeasonBonus          = -7
+	embySeasonOmake          = -8
+	embySeasonPictureDrama   = -9
+	embySeasonNCOP           = -10
+	embySeasonNCED           = -11
+	embySeasonGenericSpecial = 0
+)
+
+// embySeasonNumForMedia keeps MeBox's special categories distinct in the Emby
+// hierarchy. Databases may store every special as season 0 or -1, so the path
+// classification is authoritative when it identifies a special category.
+func embySeasonNumForMedia(m *model.Media) int {
+	if m == nil {
+		return 0
 	}
+	switch mediaSpecialKind(m.Path) {
+	case mediaSpecialTheatrical:
+		return embySeasonTheatrical
+	case mediaSpecialOVA:
+		return embySeasonOVA
+	case mediaSpecialOAD:
+		return embySeasonOAD
+	case mediaSpecialOVD:
+		return embySeasonOVD
+	case mediaSpecialONA:
+		return embySeasonONA
+	case mediaSpecialExtra:
+		return embySeasonExtra
+	case mediaSpecialBonus:
+		return embySeasonBonus
+	case mediaSpecialOmake:
+		return embySeasonOmake
+	case mediaSpecialPicture:
+		return embySeasonPictureDrama
+	case mediaSpecialNCOP:
+		return embySeasonNCOP
+	case mediaSpecialNCED:
+		return embySeasonNCED
+	case mediaSpecialGeneric:
+		return embySeasonGenericSpecial
+	}
+	if m.SeasonNum < 0 {
+		return embySeasonGenericSpecial
+	}
+	return m.SeasonNum
+}
+
+// embyRowMatchesSeasonIndex 判断某条剧集是否属于客户端请求的季序号。
+// seasonIndex 为 nil 时不参与过滤。判定复用 embySeasonNumForMedia，保证与
+// /Shows/{id}/Seasons 暴露的 IndexNumber 完全一致（含特别篇的负数分类）。
+func embyRowMatchesSeasonIndex(m *model.Media, seasonIndex *int) bool {
+	if seasonIndex == nil {
+		return true
+	}
+	return embySeasonNumForMedia(m) == *seasonIndex
+}
+
+func embySeasonCandidates(seasonNum int) []int {
+	if seasonNum > 0 {
+		return []int{seasonNum}
+	}
+	return []int{
+		embySeasonGenericSpecial,
+		embySeasonTheatrical,
+		embySeasonOVA,
+		embySeasonOAD,
+		embySeasonOVD,
+		embySeasonONA,
+		embySeasonExtra,
+		embySeasonBonus,
+		embySeasonOmake,
+		embySeasonPictureDrama,
+		embySeasonNCOP,
+		embySeasonNCED,
+	}
+}
+
+func seasonID(seriesID string, seasonNum int) string {
 	return stableEmbyID(embyVirtualSeasonPrefix, seriesID, strconv.Itoa(seasonNum))
 }
 
 func seasonName(seasonNum int) string {
-	if seasonNum == 0 {
+	switch seasonNum {
+	case embySeasonGenericSpecial:
 		return "特别篇"
-	}
-	if seasonNum < 0 {
-		seasonNum = 1
+	case embySeasonTheatrical:
+		return "剧场版"
+	case embySeasonOVA:
+		return "OVA"
+	case embySeasonOAD:
+		return "OAD"
+	case embySeasonOVD:
+		return "OVD"
+	case embySeasonONA:
+		return "ONA"
+	case embySeasonExtra:
+		return "Extra"
+	case embySeasonBonus:
+		return "Bonus"
+	case embySeasonOmake:
+		return "Omake"
+	case embySeasonPictureDrama:
+		return "Picture Drama"
+	case embySeasonNCOP:
+		return "NCOP"
+	case embySeasonNCED:
+		return "NCED"
 	}
 	return fmt.Sprintf("第 %d 季", seasonNum)
+}
+
+// embySeasonSortOrder mirrors the web UI's seasonSortOrder: regular seasons
+// first in ascending order, followed by specials in a stable category order.
+func embySeasonSortOrder(seasonNum int) int {
+	if seasonNum > 0 {
+		return seasonNum
+	}
+	switch seasonNum {
+	case embySeasonGenericSpecial:
+		return 1000
+	case embySeasonTheatrical:
+		return 1001
+	case embySeasonOVA:
+		return 1002
+	case embySeasonOAD:
+		return 1003
+	case embySeasonOVD:
+		return 1004
+	case embySeasonONA:
+		return 1005
+	case embySeasonExtra:
+		return 1006
+	case embySeasonBonus:
+		return 1007
+	case embySeasonOmake:
+		return 1008
+	case embySeasonPictureDrama:
+		return 1009
+	case embySeasonNCOP:
+		return 1010
+	case embySeasonNCED:
+		return 1011
+	default:
+		return 2000
+	}
 }
 
 func sortSeriesGroups(groups []embySeriesGroup, p ItemsParams) {
@@ -125,13 +263,28 @@ func sortSeriesGroups(groups []embySeriesGroup, p ItemsParams) {
 			}
 			return groups[i].Name < groups[j].Name
 		})
-	case "datecreated":
-		sort.SliceStable(groups, func(i, j int) bool {
-			if strings.EqualFold(p.SortOrder, "Ascending") {
-				return groups[i].CreatedAt.Before(groups[j].CreatedAt)
-			}
-			return groups[i].CreatedAt.After(groups[j].CreatedAt)
-		})
+		case "datecreated":
+			sort.SliceStable(groups, func(i, j int) bool {
+				if strings.EqualFold(p.SortOrder, "Ascending") {
+					return groups[i].CreatedAt.Before(groups[j].CreatedAt)
+				}
+				return groups[i].CreatedAt.After(groups[j].CreatedAt)
+			})
+		case "datelastmediaadded", "datelastcontentadded":
+			sort.SliceStable(groups, func(i, j int) bool {
+				tI := groups[i].DateLastMediaAdded
+				if tI.IsZero() {
+					tI = groups[i].CreatedAt
+				}
+				tJ := groups[j].DateLastMediaAdded
+				if tJ.IsZero() {
+					tJ = groups[j].CreatedAt
+				}
+				if strings.EqualFold(p.SortOrder, "Ascending") {
+					return tI.Before(tJ)
+				}
+				return tI.After(tJ)
+			})
 	default:
 		sort.SliceStable(groups, func(i, j int) bool {
 			if strings.EqualFold(p.SortOrder, "Ascending") {

@@ -3,6 +3,9 @@ package handler
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -63,6 +66,7 @@ func TestStrmAdminRoutesAreRegistered(t *testing.T) {
 		"POST /api/admin/strm/uploads/retry-failed",
 		"POST /api/admin/strm/uploads/cancel-pending",
 		"GET /api/strm/play/:provider/:file",
+		"HEAD /api/strm/play/:provider/:file",
 	} {
 		if !routes[want] {
 			t.Fatalf("%s route is not registered", want)
@@ -107,5 +111,28 @@ func TestStrmAccountsCRUD(t *testing.T) {
 	router.ServeHTTP(w, req)
 	if w.Code == http.StatusInternalServerError {
 		t.Fatalf("strm play endpoint errored: %d", w.Code)
+	}
+	videoPath := filepath.Join(t.TempDir(), "sample.mkv")
+	if err := os.WriteFile(videoPath, []byte("fake-video-bytes"), 0o644); err != nil {
+		t.Fatalf("write test video: %v", err)
+	}
+	if err := repos.StrmSyncPath.Create(t.Context(), &model.StrmSyncPath{
+		Name:       "local-test",
+		Provider:   model.StrmProviderLocal,
+		RemotePath: filepath.Dir(videoPath),
+		Enabled:    true,
+	}); err != nil {
+		t.Fatalf("create local sync path: %v", err)
+	}
+
+	// VidHub 等客户端会先用 HEAD 探测 STRM 播放源，不能返回 405/404。
+	req = httptest.NewRequest(http.MethodHead, "/api/strm/play/local/video.mkv?path="+url.QueryEscape(videoPath), nil)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("HEAD strm play endpoint = %d, want 200", w.Code)
+	}
+	if w.Body.Len() != 0 {
+		t.Fatalf("HEAD strm play endpoint returned body: %q", w.Body.String())
 	}
 }

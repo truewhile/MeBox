@@ -1,3 +1,5 @@
+import type { LibraryTagSet } from './library'
+
 export interface User {
   id: string
   username: string
@@ -7,9 +9,15 @@ export interface User {
   email?: string
   avatar_url?: string
   hide_adult?: boolean
+  subtitle_chinese_mode?: 'original' | 'simplified' | 'traditional'
+  /** 本地缓存的播放器音量，服务端配置接口会刷新。 */
+  player_volume?: number
   force_password_reset: boolean
   is_active: boolean
   allowed_library_ids?: string[]
+  pinned_library_ids?: string[]
+  /** 当前用户维护的媒体库标签分组。 */
+  library_tags?: LibraryTagSet[]
   is_default_admin?: boolean
   is_protected?: boolean
   realtime_online?: boolean

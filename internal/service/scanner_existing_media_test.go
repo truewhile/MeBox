@@ -59,3 +59,34 @@ func TestExistingLocalMediaSnapshotFiltersAndCleansLocalRows(t *testing.T) {
 		t.Fatalf("identity fields not preserved: %#v", row)
 	}
 }
+
+func TestExistingLocalMediaSnapshotForRootFiltersOtherRoots(t *testing.T) {
+	db := newServiceTestDB(t, &model.Media{})
+	repos := repository.New(db)
+	scanner := NewScannerService(&config.Config{}, zap.NewNop(), repos, NewHub(zap.NewNop()), nil, nil)
+
+	root1 := t.TempDir()
+	root2 := t.TempDir()
+	path1 := filepath.Join(root1, "Root1.mkv")
+	path2 := filepath.Join(root2, "Root2.mkv")
+	if err := db.Create(&[]model.Media{
+		{LibraryID: "lib-1", LibraryRootID: "root-1", Path: path1, SizeBytes: 11},
+		{LibraryID: "lib-1", LibraryRootID: "root-2", Path: path2, SizeBytes: 22},
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := scanner.existingLocalMediaSnapshotForRoot(t.Context(), "lib-1", "root-1", root1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("snapshot len = %d, want 1: %#v", len(got), got)
+	}
+	if _, ok := got[filepath.Clean(path1)]; !ok {
+		t.Fatalf("root-1 media missing from %#v", got)
+	}
+	if _, ok := got[filepath.Clean(path2)]; ok {
+		t.Fatalf("root-2 media leaked into root-1 snapshot: %#v", got)
+	}
+}

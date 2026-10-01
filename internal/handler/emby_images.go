@@ -29,35 +29,96 @@ var embyPlaceholderPNG = []byte{
 // /api/img 会变成 401，所以这里复用 ImageProxy 但不再走 /api 路由。
 func embyItemImageHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		clearEmbyImageNoStoreHeaders(c)
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
-		defer cancel()
-		req := c.Request.WithContext(ctx)
-		id := c.Param("id")
-		imgType := strings.ToLower(c.Param("type"))
-		raw, err := svc.Emby.ImageURL(ctx, id, imgType)
-		if err != nil || raw == "" {
-			embyServePlaceholderImage(c)
+		embyServeImage(c, svc, c.Param("id"), c.Param("type"), c.Query("tag"))
+	}
+}
+
+// embyPersonImageHandler 兼容 Emby 官方的 /Persons/{Name}/Images/{Type}。
+// Name 可能是伪装后的远程人物 ID，也可能是电影详情 People 中的显示名称。
+func embyPersonImageHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		embyServeImage(c, svc, c.Param("name"), c.Param("type"), c.Query("tag"))
+	}
+}
+
+func embyServeImage(c *gin.Context, svc *service.Container, id, imageType, tag string) {
+	clearEmbyImageNoStoreHeaders(c)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
+	defer cancel()
+	req := c.Request.WithContext(ctx)
+	if svc == nil || svc.Emby == nil {
+		embyServePlaceholderImage(c)
+		return
+	}
+	// PersonImageURL handles TMDb/remote people first and falls back to regular
+	// media/library artwork, so the official /Items/{personId}/Images route
+	// works for synthetic person IDs as well as normal item IDs.
+	raw, err := svc.Emby.PersonImageURL(ctx, id, imageType, tag)
+	if err != nil || raw == "" {
+		embyServePlaceholderImage(c)
+		return
+	}
+	if svc.ImageProxy == nil {
+		embyServePlaceholderImage(c)
+		return
+	}
+	if err := svc.ImageProxy.Serve(ctx, c.Writer, req, raw); err != nil {
+		embyServePlaceholderImage(c)
+	}
+}
+
+// embyItemImagesHandler 处理不带 Type 的 GET /Items/{Id}/Images，返回图片
+// 清单（Emby 的 ImageInfo 数组）。客户端据此决定详情页加载哪些图。
+func embyItemImagesHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := strings.TrimSpace(c.Param("id"))
+		if svc == nil || svc.Emby == nil || id == "" {
+			c.JSON(http.StatusOK, []any{})
 			return
 		}
-		if svc.ImageProxy == nil {
-			embyServePlaceholderImage(c)
+		infos := svc.Emby.ImageInfos(c.Request.Context(), id)
+		if infos == nil {
+			infos = []map[string]any{}
+		}
+		c.JSON(http.StatusOK, infos)
+	}
+}
+
+// embyUserImageHandler 处理 /Users/{UserId}/Images/{Type}。Emby 对未设置
+// 头像的用户同样返回 404，但响应必须带缓存头，否则客户端每次进入设置页
+// 都会重复请求同一个空头像（日志中曾观察到每分钟重试）。
+func embyUserImageHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		uid := strings.TrimSpace(c.Param("userId"))
+		raw := ""
+		if svc != nil && svc.Emby != nil && uid != "" {
+			raw = svc.Emby.UserAvatarURL(c.Request.Context(), uid)
+		}
+		if raw == "" || svc == nil || svc.ImageProxy == nil {
+			embyMissingAvatar(c)
 			return
 		}
-		if err := svc.ImageProxy.Serve(ctx, c.Writer, req, raw); err != nil {
-			embyServePlaceholderImage(c)
+		if err := svc.ImageProxy.Serve(c.Request.Context(), c.Writer, c.Request, raw); err != nil {
+			embyMissingAvatar(c)
 		}
 	}
 }
 
+// embyMissingAvatar 以 Emby 语义返回"该用户没有头像"，并允许客户端长期缓存。
+func embyMissingAvatar(c *gin.Context) {
+	c.Header("Cache-Control", "public, max-age=86400")
+	c.Status(http.StatusNotFound)
+}
+
 func clearEmbyImageNoStoreHeaders(c *gin.Context) {
+	c.Writer.Header().Del("Cache-Control")
 	c.Writer.Header().Del("Pragma")
 	c.Writer.Header().Del("Expires")
 }
 
 func embyServePlaceholderImage(c *gin.Context) {
 	c.Header("Content-Type", "image/png")
-	c.Header("Cache-Control", "public, max-age=3600")
+	c.Header("Cache-Control", "public, max-age=86400")
 	c.Header("Content-Length", strconv.Itoa(len(embyPlaceholderPNG)))
 	if c.Request.Method == http.MethodHead {
 		c.Status(http.StatusOK)

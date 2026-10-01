@@ -9,7 +9,7 @@ import (
 )
 
 // GetEffectiveConfig 获取生效的 API 配置（数据库配置优先于配置文件）。
-func (s *ApiConfigService) GetEffectiveConfig(ctx context.Context, provider string) (*model.ApiConfig, error) {
+func (s *ApiConfigService) GetEffectiveConfig(ctx context.Context, provider string) (*model.APIConfig, error) {
 	// 首先尝试从数据库获取
 	cfg, err := s.GetByProvider(ctx, provider)
 	if err == nil && cfg != nil {
@@ -21,7 +21,7 @@ func (s *ApiConfigService) GetEffectiveConfig(ctx context.Context, provider stri
 }
 
 // getConfigFromFile 从配置文件获取 API 配置。
-func (s *ApiConfigService) getConfigFromFile(provider string) (*model.ApiConfig, error) {
+func (s *ApiConfigService) getConfigFromFile(provider string) (*model.APIConfig, error) {
 	var apiKey string
 	var hasKey bool
 
@@ -44,7 +44,7 @@ func (s *ApiConfigService) getConfigFromFile(provider string) (*model.ApiConfig,
 		return nil, ErrApiConfigNotFound
 	}
 
-	return &model.ApiConfig{
+	return &model.APIConfig{
 		Provider: provider,
 		APIKey:   apiKey,
 		Enabled:  true,

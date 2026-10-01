@@ -32,17 +32,14 @@ func (e *EmbyService) ImageURL(ctx context.Context, id, imageType string) (strin
 		}
 		return backdrop
 	}
-	if strings.HasPrefix(id, embyVirtualSeasonPrefix) {
+	if strings.HasPrefix(id, embyVirtualSeasonPrefix) || strings.HasPrefix(id, embyVirtualSeriesPrefix) {
 		if raw, ok := e.cachedArtworkURL(id, imageType); ok {
 			return raw, nil
 		}
-		return "", nil
-	}
-	if strings.HasPrefix(id, embyVirtualSeriesPrefix) {
-		if raw, ok := e.cachedArtworkURL(id, imageType); ok {
-			return raw, nil
-		}
-		return "", nil
+		// Latest JSON can outlive (or be served after) the in-memory artwork
+		// map. Rebuild from the library instead of handing the client a 1x1
+		// placeholder that it then caches as a successful image.
+		return e.resolveVirtualArtwork(ctx, id, imageType, pick)
 	}
 	m, err := e.repo.Media.FindByID(ctx, id)
 	if err == nil && m != nil {
@@ -69,6 +66,115 @@ func (e *EmbyService) ImageURL(ctx context.Context, id, imageType string) (strin
 		return raw, nil
 	}
 	return "", nil
+}
+
+func (e *EmbyService) resolveVirtualArtwork(ctx context.Context, id, imageType string, pick func(primary, backdrop string) string) (string, error) {
+	if strings.HasPrefix(id, embyVirtualSeasonPrefix) {
+		season, ok, err := e.findSeasonGroup(ctx, id, "")
+		if err != nil || !ok {
+			return "", err
+		}
+		return pick(season.Series.PosterURL, season.Series.BackdropURL), nil
+	}
+	series, ok, err := e.findSeriesGroup(ctx, id, "")
+	if err != nil || !ok {
+		return "", err
+	}
+	return pick(series.PosterURL, series.BackdropURL), nil
+}
+
+// PersonImageURL resolves a person avatar from either a disguised remote ID
+// or a person display name captured from a remote item's People field.
+func (e *EmbyService) PersonImageURL(ctx context.Context, idOrName, imageType, tag string) (string, error) {
+	idOrName = strings.TrimSpace(idOrName)
+	if idOrName == "" || e == nil {
+		return "", nil
+	}
+	if IsEmbyRemoteID(idOrName) {
+		return e.ImageURL(ctx, idOrName, imageType)
+	}
+	if personID, ok := parseTMDbPersonID(idOrName); ok && e.tmdb != nil {
+		profilePath := tmdbProfilePathFromTag(tag)
+		if profilePath == "" {
+			profilePath = e.cachedPersonImage(idOrName)
+		}
+		if profilePath != "" {
+			if raw := e.tmdb.ProfileImageURL(profilePath); raw != "" {
+				e.rememberPersonImage(idOrName, profilePath)
+				return raw, nil
+			}
+		}
+		profilePath, err := e.tmdb.PersonProfilePathByID(ctx, personID)
+		if err != nil {
+			return "", err
+		}
+		if raw := e.tmdb.ProfileImageURL(profilePath); raw != "" {
+			e.rememberPersonImage(idOrName, profilePath)
+			return raw, nil
+		}
+	}
+	if e.remote != nil {
+		if raw, ok := e.remote.ResolveRemotePersonImageURL(ctx, idOrName, imageType); ok {
+			return raw, nil
+		}
+	}
+	return e.ImageURL(ctx, idOrName, imageType)
+}
+
+// imageInfoTypes 是 GET /Items/{Id}/Images 会报告的图片类型。只列 MeBox
+// 真正存储的两类：ImageURL 对 Thumb / Logo / Banner 等其余类型会回退到
+// 主图，若一并列出会让客户端以为存在这些图并去请求，实际拿到的却是主图。
+var imageInfoTypes = []string{"Primary", "Backdrop"}
+
+// ImageInfos 返回条目的图片清单，对应 Emby 的 GET /Items/{Id}/Images。
+// 客户端用它在详情页决定要加载哪些图；缺失该接口会落到 404，部分客户端
+// 因此把条目当成"无图"而放弃渲染海报。
+func (e *EmbyService) ImageInfos(ctx context.Context, id string) []map[string]any {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil
+	}
+	out := make([]map[string]any, 0, 2)
+	seen := map[string]bool{}
+	for _, imageType := range imageInfoTypes {
+		raw, err := e.ImageURL(ctx, id, imageType)
+		if err != nil {
+			continue
+		}
+		raw = strings.TrimSpace(raw)
+		// 非 Backdrop 类型在缺图时会回退到主图，去重避免同一张图重复出现。
+		if raw == "" || seen[raw] {
+			continue
+		}
+		seen[raw] = true
+		// ImageTag 让客户端判断自己缓存的图片是否还有效：远程条目的真实
+		// ImageTags 会随远端换图变化，拿不到时才退化为条目 ID（恒定值）。
+		tag := id
+		if e.remote != nil {
+			if remoteTag := e.remote.RemoteImageTagOfEncodedID(ctx, id, imageType); remoteTag != "" {
+				tag = remoteTag
+			}
+		}
+		out = append(out, map[string]any{
+			"ImageType":  imageType,
+			"ImageIndex": 0,
+			"ImageTag":   tag,
+		})
+	}
+	return out
+}
+
+// UserAvatarURL 返回用户头像的来源地址；用户未设置头像时返回空串。
+func (e *EmbyService) UserAvatarURL(ctx context.Context, userID string) string {
+	userID = strings.TrimSpace(userID)
+	if userID == "" || e == nil || e.repo == nil || e.repo.User == nil {
+		return ""
+	}
+	user, err := e.repo.User.FindByID(ctx, userID)
+	if err != nil || user == nil {
+		return ""
+	}
+	return strings.TrimSpace(user.AvatarURL)
 }
 
 // cachedLibraryCover returns a previously resolved library cover URL within TTL.

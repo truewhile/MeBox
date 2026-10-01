@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -216,6 +218,144 @@ func TestServeFileRedirectsLocalSTRMFileTargetByDefault(t *testing.T) {
 	}
 }
 
+// 别的 MeBox / MediaStationGo 实例生成的 .strm：里面的 acct 是对方实例的账号，
+// 本机不能拿自己的账号去解析，直接把 302 透传给客户端，由客户端去对方实例取流。
+func TestServeFilePassesThroughForeignInstanceSTRMURL(t *testing.T) {
+	repos := newStreamTestRepo(t)
+	target := "http://other-mebox.example:18080/api/strm/play/cloud115/video.mkv?acct=other-acct&pickcode=xyz"
+	if err := repos.DB.Create(&model.Media{
+		Base:      model.Base{ID: "foreign-strm"},
+		Title:     "Foreign STRM",
+		Path:      "D:/media/Foreign.strm",
+		Container: "strm",
+		STRMURL:   target,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := NewStreamService(&config.Config{}, zap.NewNop(), repos, nil)
+	req := httptest.NewRequest(http.MethodGet, "http://nas.local:18080/api/stream/foreign-strm?token=jwt123", nil)
+	w := httptest.NewRecorder()
+
+	if err := svc.ServeFile(w, req, "foreign-strm"); err != nil {
+		t.Fatalf("foreign instance strm url should be passed through: %v", err)
+	}
+	if w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	if loc != target {
+		t.Fatalf("Location = %q, want untouched %q", loc, target)
+	}
+	if strings.Contains(loc, "jwt123") {
+		t.Fatalf("foreign instance url must not receive our auth token, got %q", loc)
+	}
+}
+
+// 本机自己生成的 .strm 在换了域名/IP 之后仍要认领：host 对不上，但 acct 是本机
+// 网盘账号，于是按当前请求 host 相对化，保持可播放。
+// 扫描时 .strm 内容解析失败会产生 Container=strm 但 STRMURL 为空的行：
+// 播放路径必须回读 .strm 文件内容兜底（与 MediaPlaybackProvider 等一致），
+// 而不是把 .strm 文本文件当视频流返回。
+func TestServeFileFallsBackToStrmFileContentWhenSTRMURLEmpty(t *testing.T) {
+	repos := newStreamTestRepo(t)
+	dir := t.TempDir()
+	strmPath := filepath.Join(dir, "Movie.strm")
+	target := "https://cdn.example.test/Movie.mkv?sign=direct"
+	if err := os.WriteFile(strmPath, []byte(target+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := repos.DB.Create(&model.Media{
+		Base:      model.Base{ID: "strm-empty-url"},
+		Title:     "STRM Empty URL",
+		Path:      strmPath,
+		Container: "strm",
+		STRMURL:   "",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := NewStreamService(&config.Config{}, zap.NewNop(), repos, nil)
+	req := httptest.NewRequest(http.MethodGet, "http://nas.local:18080/api/stream/strm-empty-url?token=jwt123", nil)
+	w := httptest.NewRecorder()
+
+	if err := svc.ServeFile(w, req, "strm-empty-url"); err != nil {
+		t.Fatalf("empty-STRMURL .strm row should fall back to file content: %v", err)
+	}
+	if w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", w.Code)
+	}
+	if loc := w.Header().Get("Location"); loc != target {
+		t.Fatalf("Location = %q, want %q", loc, target)
+	}
+}
+
+// .strm 内容完全解析不出播放目标时，返回明确的 502 错误，绝不把 .strm 文本
+// 文件本身当视频流吐给播放器。
+func TestServeFileRejectsStrmRowWithUnresolvableTarget(t *testing.T) {
+	repos := newStreamTestRepo(t)
+	dir := t.TempDir()
+	strmPath := filepath.Join(dir, "Broken.strm")
+	if err := os.WriteFile(strmPath, []byte("# 只有注释，没有可用播放地址\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := repos.DB.Create(&model.Media{
+		Base:      model.Base{ID: "strm-broken"},
+		Title:     "STRM Broken",
+		Path:      strmPath,
+		Container: "strm",
+		STRMURL:   "",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := NewStreamService(&config.Config{}, zap.NewNop(), repos, nil)
+	req := httptest.NewRequest(http.MethodGet, "http://nas.local:18080/api/stream/strm-broken", nil)
+	w := httptest.NewRecorder()
+
+	err := svc.ServeFile(w, req, "strm-broken")
+	if !errors.Is(err, ErrCloudPlaybackUnavailable) {
+		t.Fatalf("error = %v, want ErrCloudPlaybackUnavailable", err)
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("no bytes should be written on error, status = %d", w.Code)
+	}
+}
+
+func TestServeFileRealignsOwnSTRMURLOtherHost(t *testing.T) {
+	repos := repository.New(newServiceTestDB(t, &model.Media{}, &model.Setting{}, &model.StrmAccount{}))
+	if err := repos.StrmAccount.Create(t.Context(), &model.StrmAccount{
+		Base:     model.Base{ID: "own-acct"},
+		Name:     "own",
+		Provider: model.StrmProvider115,
+		Enabled:  true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repos.DB.Create(&model.Media{
+		Base:      model.Base{ID: "own-strm"},
+		Title:     "Own STRM",
+		Path:      "D:/media/Own.strm",
+		Container: "strm",
+		STRMURL:   "http://old-host:9011/api/strm/play/cloud115/video.mkv?acct=own-acct&pickcode=123",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := NewStreamService(&config.Config{}, zap.NewNop(), repos, nil)
+	req := httptest.NewRequest(http.MethodGet, "http://nas.local:18080/api/stream/own-strm?token=jwt123", nil)
+	w := httptest.NewRecorder()
+
+	if err := svc.ServeFile(w, req, "own-strm"); err != nil {
+		t.Fatalf("own strm url on a stale host should still play: %v", err)
+	}
+	if w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	if !strings.HasPrefix(loc, "http://nas.local:18080/api/strm/play/cloud115/video.mkv?") ||
+		!strings.Contains(loc, "acct=own-acct") ||
+		!strings.Contains(loc, "pickcode=123") {
+		t.Fatalf("own strm url should be realigned to current host, got %q", loc)
+	}
+}
+
 func TestCloudPlaybackModeUsesExplicitModeBeforeLegacySTRMFlag(t *testing.T) {
 	repos := newStreamTestRepo(t)
 	if got := CloudPlaybackMode(t.Context(), repos); got != CloudPlaybackModeRedirectProxy {
@@ -302,9 +442,12 @@ func TestRequestTokenFromMediaBrowserAuthorizationHeader(t *testing.T) {
 
 func TestAppendQueryToHLSSegments(t *testing.T) {
 	in := "#EXTM3U\n#EXTINF:4.0,\nseg_00000.ts\n#EXTINF:4.0,\nseg_00001.ts?old=1\n"
-	got := appendQueryToHLSSegments(in, "token=abc")
-	if !strings.Contains(got, "seg_00000.ts?token=abc") {
-		t.Fatalf("missing tokenized segment: %q", got)
+	got := appendQueryToHLSSegments(in, "token=abc&start=120.5&_seek=1001")
+	if !strings.Contains(got, "seg_00000.ts?token=abc&_seek=1001") {
+		t.Fatalf("missing token or seek generation on segment: %q", got)
+	}
+	if strings.Contains(got, "start=120.5") {
+		t.Fatalf("segment URL must not contain transcode start: %q", got)
 	}
 	if !strings.Contains(got, "seg_00001.ts?old=1") {
 		t.Fatalf("existing query should be preserved: %q", got)

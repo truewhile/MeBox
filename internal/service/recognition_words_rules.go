@@ -31,6 +31,11 @@ func parseRecognitionWordRule(line string) recognitionWordRule {
 		case strings.Contains(part, "<>") && strings.Contains(part, ">>"):
 			beforeAfter := strings.SplitN(part, ">>", 2)
 			bounds := strings.SplitN(beforeAfter[0], "<>", 2)
+			// A malformed rule without "<>" would otherwise index past the
+			// slice; word lists are fetched from the network, so stay defensive.
+			if len(bounds) < 2 {
+				continue
+			}
 			rule.offsetLeft = strings.TrimSpace(bounds[0])
 			rule.offsetRight = strings.TrimSpace(bounds[1])
 			rule.offsetExpr = strings.TrimSpace(beforeAfter[1])
@@ -38,56 +43,89 @@ func parseRecognitionWordRule(line string) recognitionWordRule {
 			rule.block = part
 		}
 	}
+	compileRecognitionWordRule(&rule)
 	return rule
 }
 
+var recognitionReplacementRE = regexp.MustCompile(`\\([0-9]+)`)
+
 func normalizeRecognitionReplacement(value string) string {
-	re := regexp.MustCompile(`\\([0-9]+)`)
-	return re.ReplaceAllString(value, "$$$1")
+	return recognitionReplacementRE.ReplaceAllString(value, "$$$1")
+}
+
+// compileRecognitionWordRule pre-compiles every pattern in a rule so the hot
+// clean-query path never recompiles regexes per candidate.
+func compileRecognitionWordRule(rule *recognitionWordRule) {
+	if rule == nil {
+		return
+	}
+	if rule.block != "" {
+		if re, err := regexp.Compile(rule.block); err == nil {
+			rule.blockRE = re
+		}
+	}
+	if rule.replaceFrom != "" {
+		if re, err := regexp.Compile(rule.replaceFrom); err == nil {
+			rule.replaceRE = re
+		}
+	}
+	if rule.offsetExpr != "" && (rule.offsetLeft != "" || rule.offsetRight != "") {
+		if re, err := compileRecognitionOffsetRE(rule.offsetLeft, rule.offsetRight); err == nil {
+			rule.offsetRE = re
+		}
+	}
+}
+
+func compileRecognitionOffsetRE(left, right string) (*regexp.Regexp, error) {
+	leftPattern := firstNonEmpty(left, `^`)
+	rightPattern := firstNonEmpty(right, `$`)
+	return regexp.Compile(`(?i)(` + leftPattern + `)(\d{1,5})(` + rightPattern + `)`)
 }
 
 func applyRecognitionWordRules(raw string, rules []recognitionWordRule) string {
 	out := strings.TrimSpace(raw)
 	for _, rule := range rules {
 		if rule.block != "" {
-			out = applyRecognitionBlock(out, rule.block)
+			out = applyRecognitionBlock(out, rule)
 		}
 		if rule.replaceFrom != "" {
-			out = applyRecognitionReplace(out, rule.replaceFrom, rule.replaceTo)
+			out = applyRecognitionReplace(out, rule)
 		}
 		if rule.offsetLeft != "" || rule.offsetRight != "" {
-			out = applyRecognitionOffset(out, rule.offsetLeft, rule.offsetRight, rule.offsetExpr)
+			out = applyRecognitionOffset(out, rule)
 		}
 	}
 	return strings.Join(strings.Fields(out), " ")
 }
 
-func applyRecognitionBlock(raw, block string) string {
-	if re, err := regexp.Compile(block); err == nil {
-		return re.ReplaceAllString(raw, " ")
+func applyRecognitionBlock(raw string, rule recognitionWordRule) string {
+	if rule.blockRE != nil {
+		return rule.blockRE.ReplaceAllString(raw, " ")
 	}
-	return strings.ReplaceAll(raw, block, " ")
+	return strings.ReplaceAll(raw, rule.block, " ")
 }
 
-func applyRecognitionReplace(raw, from, to string) string {
-	if re, err := regexp.Compile(from); err == nil {
-		return re.ReplaceAllString(raw, to)
+func applyRecognitionReplace(raw string, rule recognitionWordRule) string {
+	if rule.replaceRE != nil {
+		return rule.replaceRE.ReplaceAllString(raw, rule.replaceTo)
 	}
-	return strings.ReplaceAll(raw, from, to)
+	return strings.ReplaceAll(raw, rule.replaceFrom, rule.replaceTo)
 }
 
-func applyRecognitionOffset(raw, left, right, expr string) string {
-	if strings.TrimSpace(expr) == "" {
+func applyRecognitionOffset(raw string, rule recognitionWordRule) string {
+	if strings.TrimSpace(rule.offsetExpr) == "" {
 		return raw
 	}
-	leftPattern := firstNonEmpty(left, `^`)
-	rightPattern := firstNonEmpty(right, `$`)
-	re, err := regexp.Compile(`(?i)(` + leftPattern + `)(\d{1,5})(` + rightPattern + `)`)
-	if err != nil {
-		return raw
+	re := rule.offsetRE
+	if re == nil {
+		compiled, err := compileRecognitionOffsetRE(rule.offsetLeft, rule.offsetRight)
+		if err != nil {
+			return raw
+		}
+		re = compiled
 	}
 	return re.ReplaceAllStringFunc(raw, func(match string) string {
-		return applyRecognitionOffsetMatch(re, match, expr)
+		return applyRecognitionOffsetMatch(re, match, rule.offsetExpr)
 	})
 }
 

@@ -92,6 +92,13 @@ func (h *Hub) Subscribe(id string, topics []string) *Subscriber {
 		sub.topics[t] = struct{}{}
 	}
 	h.mu.Lock()
+	// Stop() 会把 subs 置 nil：停机窗口内仍在握手的 WS 连接若在此写入
+	// nil map 会直接 panic。已关闭的 hub 返回一个立刻关闭的空订阅者。
+	if h.subs == nil {
+		h.mu.Unlock()
+		close(sub.Out)
+		return sub
+	}
 	h.subs[id] = sub
 	h.mu.Unlock()
 	return sub

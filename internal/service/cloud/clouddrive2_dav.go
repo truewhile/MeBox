@@ -36,9 +36,10 @@ func (p *cloudDrive2Provider) List(ctx context.Context, dir string) ([]FileEntry
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, p.decorateDAVStatusError(resp, target)
 	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	// 流式解码：超大目录（如上万条目的网盘目录）响应可能远超旧 4MB 截断上限，
+	// 直接 xml.Unmarshal 会截断报错；这里用 LimitReader(64MB) + Decoder 边读边解
 	var multi cloudDAVMultiStatus
-	if err := xml.Unmarshal(body, &multi); err != nil {
+	if err := xml.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(&multi); err != nil {
 		return nil, fmt.Errorf("%s: decode webdav: %w", p.name, err)
 	}
 	basePath := strings.TrimRight(p.base.EscapedPath(), "/")

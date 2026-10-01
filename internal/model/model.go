@@ -38,6 +38,9 @@ func AllModels() []interface{} {
 		&Series{},
 		&Media{},
 		&PlaybackHistory{},
+		&MediaSegment{},
+		&MediaSegmentFetch{},
+		&MediaProbe{},
 		&Favorite{},
 		&Playlist{},
 		&PlaylistItem{},
@@ -46,7 +49,6 @@ func AllModels() []interface{} {
 		&APIConfig{},
 		&UserPermission{},
 		&RefreshToken{},
-		&ApiConfig{},
 		&PlayProfile{},
 		&RegistrationCode{},
 		&SignIn{},
@@ -59,5 +61,10 @@ func AllModels() []interface{} {
 		&StrmDirCache{},
 		&ScrapeTask{},
 		&EmbyMount{},
+		&ReaderBookSource{},
+		&ReaderSourceState{},
+		&ReaderBook{},
+		&ReaderChapter{},
+		&ReaderReplaceRule{},
 	}
 }

@@ -1,6 +1,9 @@
 package service
 
 import (
+	"context"
+	"html"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,6 +61,9 @@ type TaskSnapshot struct {
 type TaskTrackerService struct {
 	log *zap.Logger
 	hub *Hub
+
+	// failureNotifier 在任务以失败收尾时通知管理员（Telegram）。nil 时静默。
+	failureNotifier func(ctx context.Context, text string)
 
 	mu        sync.Mutex
 	active    map[string]*BackgroundTask
@@ -179,8 +185,48 @@ func (t *TaskTrackerService) finish(id string, err error, update TaskUpdate) {
 	if len(t.recent) > t.maxRecent {
 		t.recent = t.recent[:t.maxRecent]
 	}
+	notifier := t.failureNotifier
 	t.mu.Unlock()
 	t.publish(snapshot)
+
+	// 失败通知放在锁外发送：网络请求绝不能阻塞任务状态机。
+	if err != nil && notifier != nil {
+		notifier(context.Background(), formatTaskFailureAlert(snapshot))
+	}
+}
+
+// SetFailureNotifier 注入任务失败时的管理员通知回调。
+func (t *TaskTrackerService) SetFailureNotifier(fn func(ctx context.Context, text string)) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.failureNotifier = fn
+	t.mu.Unlock()
+}
+
+// formatTaskFailureAlert 生成面向管理员的失败摘要。错误信息可能很长
+// （ffmpeg 输出等），这里截断，避免超出 Telegram 单条消息长度。
+func formatTaskFailureAlert(task BackgroundTask) string {
+	const maxErrRunes = 500
+	text := strings.TrimSpace(task.Error)
+	runes := []rune(text)
+	if len(runes) > maxErrRunes {
+		text = string(runes[:maxErrRunes]) + "…"
+	}
+	var b strings.Builder
+	b.WriteString("⚠️ 任务失败：<b>")
+	b.WriteString(html.EscapeString(task.Name))
+	b.WriteString("</b>")
+	if task.SourcePath != "" {
+		b.WriteString("\n来源：")
+		b.WriteString(html.EscapeString(task.SourcePath))
+	}
+	if text != "" {
+		b.WriteString("\n错误：")
+		b.WriteString(html.EscapeString(text))
+	}
+	return b.String()
 }
 
 func (t *TaskTrackerService) currentTime() time.Time {

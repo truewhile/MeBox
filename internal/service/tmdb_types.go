@@ -4,6 +4,7 @@ package service
 // across providers; provider-specific IDs sit side-by-side so the scraper
 // orchestrator can write them all into a single update.
 type Match struct {
+	Provider      string   `json:"provider,omitempty"`
 	TMDbID        int      `json:"tmdb_id"`
 	BangumiID     int      `json:"bangumi_id"`
 	DoubanID      string   `json:"douban_id,omitempty"`
@@ -21,6 +22,7 @@ type Match struct {
 	Countries     []string `json:"countries,omitempty"`
 	Genres        []string `json:"genres,omitempty"`
 	Aliases       []string `json:"aliases,omitempty"`
+	People        []map[string]any `json:"-"`
 	NSFW          bool     `json:"nsfw,omitempty"`
 	SearchKeyword string   `json:"-"`
 }

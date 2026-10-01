@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"go.uber.org/zap"
@@ -73,6 +74,14 @@ func configureConnectionPool(db *gorm.DB, cfg *config.Config) error {
 	if cfg.Database.MaxIdleConns > 0 {
 		sqlDB.SetMaxIdleConns(cfg.Database.MaxIdleConns)
 	}
+	// 连接生命周期：默认 0 意味着 Postgres 重启/故障切换后的陈旧连接
+	// 永不过期，首次复用才报错，运行期断连恢复慢且可能批量报错。
+	if isPostgres(db) {
+		sqlDB.SetConnMaxLifetime(time.Hour)
+		sqlDB.SetConnMaxIdleTime(10 * time.Minute)
+	} else if isSQLite(db) {
+		sqlDB.SetConnMaxLifetime(24 * time.Hour)
+	}
 	return nil
 }
 
@@ -118,5 +127,10 @@ func (z zapStdLogger) Printf(format string, args ...interface{}) {
 	if z.log == nil {
 		return
 	}
-	z.log.Sugar().Infof(format, args...)
+	message := fmt.Sprintf(format, args...)
+	if strings.Contains(strings.ToLower(message), "context canceled") {
+		z.log.Debug(message)
+		return
+	}
+	z.log.Info(message)
 }

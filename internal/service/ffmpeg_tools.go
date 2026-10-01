@@ -21,6 +21,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/truewhile/MeBox/internal/config"
+	"github.com/truewhile/MeBox/internal/helper"
 	"github.com/truewhile/MeBox/internal/repository"
 )
 
@@ -152,7 +153,7 @@ func (s *FFmpegToolsService) StartInstall(ctx context.Context) error {
 	s.mu.Unlock()
 
 	s.setMessage("准备下载…")
-	go s.runInstall()
+	helper.Go(s.log, "ffmpeg.install", s.runInstall)
 	return nil
 }
 

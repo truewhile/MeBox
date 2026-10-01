@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -61,8 +63,9 @@ func NewRecognitionWordsService(log *zap.Logger, repo *repository.Container) *Re
 }
 
 func (s *RecognitionWordsService) Config(ctx context.Context) RecognitionWordsConfig {
-	cfg := recognitionWordsConfig(ctx, s.repo)
-	cfg.RuleCount = len(parseRecognitionWordRules(recognitionWordsCombinedText(cfg)))
+	cfg, rules := recognitionWordsRuntime(ctx, s.repo)
+	cfg = cloneRecognitionWordsConfig(cfg)
+	cfg.RuleCount = len(rules)
 	return cfg
 }
 
@@ -80,7 +83,11 @@ func (s *RecognitionWordsService) SaveConfig(ctx context.Context, cfg Recognitio
 	if err != nil {
 		return err
 	}
-	return s.repo.Setting.Set(ctx, RecognitionWordsSharedURLsKey, string(rawURLs))
+	if err := s.repo.Setting.Set(ctx, RecognitionWordsSharedURLsKey, string(rawURLs)); err != nil {
+		return err
+	}
+	invalidateRecognitionWordsRuntime(s.repo)
+	return nil
 }
 
 func (s *RecognitionWordsService) SyncShared(ctx context.Context) (RecognitionWordsConfig, error) {
@@ -104,6 +111,7 @@ func (s *RecognitionWordsService) SyncShared(ctx context.Context) (RecognitionWo
 	if err := s.repo.Setting.Set(ctx, RecognitionWordsSyncedAtKey, now); err != nil {
 		return cfg, err
 	}
+	invalidateRecognitionWordsRuntime(s.repo)
 	return s.Config(ctx), nil
 }
 
@@ -120,11 +128,10 @@ func (s *RecognitionWordsService) Test(ctx context.Context, input string) Recogn
 }
 
 func ApplyRecognitionWords(ctx context.Context, repo *repository.Container, raw string) string {
-	cfg := recognitionWordsConfig(ctx, repo)
-	if !cfg.Enabled {
+	cfg, rules := recognitionWordsRuntime(ctx, repo)
+	if !cfg.Enabled || len(rules) == 0 {
 		return raw
 	}
-	rules := parseRecognitionWordRules(recognitionWordsCombinedText(cfg))
 	return applyRecognitionWordRules(raw, rules)
 }
 
@@ -189,9 +196,69 @@ func normalizeRecognitionWordURLs(values []string) []string {
 type recognitionWordRule struct {
 	raw         string
 	block       string
+	blockRE     *regexp.Regexp
 	replaceFrom string
 	replaceTo   string
+	replaceRE   *regexp.Regexp
 	offsetLeft  string
 	offsetRight string
 	offsetExpr  string
+	offsetRE    *regexp.Regexp
+}
+
+// recognitionWordsRuntime caches the parsed rule set (with pre-compiled
+// regexes) per repository. Reading five settings rows and parsing/recompiling
+// the whole shared word list used to happen on every query candidate, which is
+// the scraper's hottest path. Writes through SaveConfig/SyncShared invalidate
+// the entry immediately; the TTL only bounds staleness for out-of-process edits.
+type recognitionWordsRuntimeEntry struct {
+	repo      *repository.Container
+	cfg       RecognitionWordsConfig
+	rules     []recognitionWordRule
+	expiresAt time.Time
+}
+
+const recognitionWordsRuntimeTTL = 30 * time.Second
+
+var recognitionWordsRuntimeCache struct {
+	sync.RWMutex
+	entry recognitionWordsRuntimeEntry
+	valid bool
+}
+
+func recognitionWordsRuntime(ctx context.Context, repo *repository.Container) (RecognitionWordsConfig, []recognitionWordRule) {
+	now := time.Now()
+	recognitionWordsRuntimeCache.RLock()
+	cached := recognitionWordsRuntimeCache.entry
+	hit := recognitionWordsRuntimeCache.valid && cached.repo == repo && now.Before(cached.expiresAt)
+	recognitionWordsRuntimeCache.RUnlock()
+	if hit {
+		return cached.cfg, cached.rules
+	}
+
+	cfg := recognitionWordsConfig(ctx, repo)
+	rules := parseRecognitionWordRules(recognitionWordsCombinedText(cfg))
+	recognitionWordsRuntimeCache.Lock()
+	recognitionWordsRuntimeCache.entry = recognitionWordsRuntimeEntry{
+		repo:      repo,
+		cfg:       cfg,
+		rules:     rules,
+		expiresAt: now.Add(recognitionWordsRuntimeTTL),
+	}
+	recognitionWordsRuntimeCache.valid = true
+	recognitionWordsRuntimeCache.Unlock()
+	return cfg, rules
+}
+
+func invalidateRecognitionWordsRuntime(repo *repository.Container) {
+	recognitionWordsRuntimeCache.Lock()
+	if recognitionWordsRuntimeCache.entry.repo == repo {
+		recognitionWordsRuntimeCache.valid = false
+	}
+	recognitionWordsRuntimeCache.Unlock()
+}
+
+func cloneRecognitionWordsConfig(cfg RecognitionWordsConfig) RecognitionWordsConfig {
+	cfg.SharedURLs = append([]string(nil), cfg.SharedURLs...)
+	return cfg
 }

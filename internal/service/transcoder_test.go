@@ -1,10 +1,13 @@
 package service
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/truewhile/MeBox/internal/config"
+	"github.com/truewhile/MeBox/internal/model"
+	"github.com/truewhile/MeBox/internal/service/cloud"
 )
 
 func TestBuildFFmpegArgs(t *testing.T) {
@@ -105,5 +108,226 @@ func TestHasFFmpegListEntry(t *testing.T) {
 	}
 	if hasFFmpegListEntry(out, "x264") {
 		t.Fatal("must match whole ffmpeg list entries only")
+	}
+}
+
+func TestResolveTranscodeInputHTTPSTRM(t *testing.T) {
+	svc := &TranscoderService{}
+	got, err := svc.resolveTranscodeInput(context.Background(), &model.Media{
+		Container: "strm",
+		STRMURL:   "https://cdn.example.com/a.wmv",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != "https://cdn.example.com/a.wmv" {
+		t.Fatalf("source = %q", got.Source)
+	}
+}
+
+func TestResolveTranscodeInputUsesResolver(t *testing.T) {
+	svc := &TranscoderService{}
+	svc.SetStrmPlayTargetResolver(func(_ context.Context, raw string) (*StrmPlayResult, error) {
+		if raw != "/api/strm/play/cloud115/a.wmv?acct=1&pickcode=x" {
+			t.Fatalf("raw = %q", raw)
+		}
+		return &StrmPlayResult{
+			RedirectURL: "https://cdn.example.com/a.wmv",
+			Link: &cloud.DirectLink{
+				URL:     "https://cdn.example.com/a.wmv",
+				Headers: map[string]string{"User-Agent": "Mozilla/5.0"},
+			},
+		}, nil
+	})
+	got, err := svc.resolveTranscodeInput(context.Background(), &model.Media{
+		Container: "strm",
+		STRMURL:   "/api/strm/play/cloud115/a.wmv?acct=1&pickcode=x",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != "https://cdn.example.com/a.wmv" {
+		t.Fatalf("source = %q", got.Source)
+	}
+	if got.Headers["User-Agent"] != "Mozilla/5.0" {
+		t.Fatalf("headers = %#v", got.Headers)
+	}
+}
+
+func TestResolveTranscodeInputRejectsUnresolvedRelativeSTRM(t *testing.T) {
+	svc := &TranscoderService{}
+	_, err := svc.resolveTranscodeInput(context.Background(), &model.Media{
+		Container: "strm",
+		STRMURL:   "/api/strm/play/cloud115/a.wmv?acct=1&pickcode=x",
+	})
+	if err == nil {
+		t.Fatal("expected unresolved relative strm to fail")
+	}
+}
+
+func TestBuildFFmpegArgsHTTPInputReconnect(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Transcoder.MaxHeight = 720
+	cfg.Transcoder.SegmentSeconds = 4
+	args := buildFFmpegArgsForInput(cfg, transcodeInput{
+		Source:  "https://cdn.example.com/a.wmv",
+		Headers: map[string]string{"User-Agent": "MeBox", "Referer": "https://cdn.example.com/"},
+	}, "/o/x.m3u8", "/o/seg_%05d.ts")
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "-reconnect") || !strings.Contains(joined, "-headers") {
+		t.Fatalf("expected http reconnect/headers, got: %s", joined)
+	}
+	if !strings.Contains(joined, "User-Agent: MeBox") || !strings.Contains(joined, "Referer: https://cdn.example.com/") {
+		t.Fatalf("expected request headers, got: %s", joined)
+	}
+	idxI, idxH := -1, -1
+	for i, arg := range args {
+		if arg == "-i" && idxI < 0 {
+			idxI = i
+		}
+		if arg == "-headers" {
+			idxH = i
+		}
+	}
+	if idxI < 0 || idxH < 0 || idxH > idxI {
+		t.Fatalf("http flags must come before -i, args=%v", args)
+	}
+}
+
+func TestBuildFFmpegArgsInputSeekBeforeDashI(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Transcoder.MaxHeight = 720
+	cfg.Transcoder.SegmentSeconds = 4
+	args := buildFFmpegArgsForInput(cfg, transcodeInput{
+		Source:   "/x.mkv",
+		StartSec: 125.5,
+	}, "/o/x.m3u8", "/o/seg_%05d.ts")
+	idxSS, idxI := -1, -1
+	for i, arg := range args {
+		if arg == "-ss" {
+			idxSS = i
+		}
+		if arg == "-i" && idxI < 0 {
+			idxI = i
+		}
+	}
+	if idxSS < 0 || idxI < 0 || idxSS > idxI {
+		t.Fatalf("expected local -ss before -i, args=%v", args)
+	}
+	if args[idxSS+1] != "125.500" {
+		t.Fatalf("start = %q", args[idxSS+1])
+	}
+}
+
+func TestBuildFFmpegArgsHTTPSeekAfterDashI(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Transcoder.MaxHeight = 720
+	cfg.Transcoder.SegmentSeconds = 4
+	cfg.Transcoder.Realtime = true
+	args := buildFFmpegArgsForInput(cfg, transcodeInput{
+		Source:   "https://cdn.example.com/a.wmv",
+		StartSec: 90,
+	}, "/o/x.m3u8", "/o/seg_%05d.ts")
+	joined := " " + strings.Join(args, " ") + " "
+	if strings.Contains(joined, " -re ") {
+		t.Fatalf("seek restart must disable -re, got: %s", joined)
+	}
+	idxSS, idxI, ssCount := -1, -1, 0
+	for i, arg := range args {
+		if arg == "-ss" {
+			ssCount++
+			if idxSS < 0 {
+				idxSS = i
+			}
+		}
+		if arg == "-i" && idxI < 0 {
+			idxI = i
+		}
+	}
+	if idxSS < 0 || idxI < 0 || idxSS > idxI {
+		t.Fatalf("expected http -ss before -i, args=%v", args)
+	}
+	if ssCount != 1 {
+		t.Fatalf("expected a single -ss, got %d in %v", ssCount, args)
+	}
+	if args[idxSS+1] != "90.000" {
+		t.Fatalf("start = %q", args[idxSS+1])
+	}
+}
+
+func TestBuildFFmpegArgsBurnsBitmapSubtitleInSoftware(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Transcoder.HardwareAccel = true
+	cfg.Transcoder.Encoder = "nvenc"
+	cfg.Transcoder.MaxHeight = 720
+	cfg.Transcoder.SegmentSeconds = 4
+	stream := 3
+	args := buildFFmpegArgsForInput(cfg, transcodeInput{
+		Source:         "/x.mkv",
+		SubtitleStream: &stream,
+	}, "/o/x.m3u8", "/o/seg_%05d.ts")
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "[0:v:0][0:3]overlay=0:0:eof_action=pass") {
+		t.Fatalf("bitmap subtitle overlay missing: %s", joined)
+	}
+	if !strings.Contains(joined, "-map [v]") || !strings.Contains(joined, "-c:v libx264") {
+		t.Fatalf("burn-in should use the filtered software video stream: %s", joined)
+	}
+	if strings.Contains(joined, "cuda") || strings.Contains(joined, "h264_nvenc") {
+		t.Fatalf("burn-in must not retain hardware-only frames: %s", joined)
+	}
+}
+
+func TestSameHLSStart(t *testing.T) {
+	if !sameHLSStart(10, 10.2) {
+		t.Fatal("expected close starts to match")
+	}
+	if sameHLSStart(10, 12) {
+		t.Fatal("expected distant starts to differ")
+	}
+}
+
+func TestShouldReplaceHLSJob(t *testing.T) {
+	existing := &hlsJob{startSec: 120, seekGen: 1000}
+	if shouldReplaceHLSJob(existing, 0, 0) {
+		t.Fatal("untagged start=0 must not clobber seek-tagged job")
+	}
+	if shouldReplaceHLSJob(existing, 0, 900) {
+		t.Fatal("older _seek must not clobber newer job")
+	}
+	if !shouldReplaceHLSJob(existing, 200, 1001) {
+		t.Fatal("newer _seek should replace")
+	}
+	if !shouldReplaceHLSJob(&hlsJob{startSec: 0, seekGen: 0}, 120, 1000) {
+		t.Fatal("seek should replace untagged head job")
+	}
+	if shouldReplaceHLSJob(existing, 120.2, 1001) {
+		t.Fatal("same start should not replace")
+	}
+}
+
+func TestBitmapSubtitleChangeReplacesHLSJob(t *testing.T) {
+	existing := &hlsJob{startSec: 120, seekGen: 1000, subtitleStream: 2}
+	if !shouldReplaceHLSJobConfiguration(existing, 120, 1001, 3) {
+		t.Fatal("changing bitmap subtitle must replace the HLS generation")
+	}
+	if !shouldReplaceHLSJobConfiguration(existing, 120, 1001, -1) {
+		t.Fatal("closing bitmap subtitle must replace the HLS generation")
+	}
+	if shouldReplaceHLSJobConfiguration(existing, 120.2, 1001, 2) {
+		t.Fatal("same subtitle and nearby start should reuse the HLS generation")
+	}
+}
+
+func TestFilterHLSSegmentQueryDropsStart(t *testing.T) {
+	got := filterHLSSegmentQuery("token=abc&start=120.5&_seek=1001&profile_id=1")
+	if strings.Contains(got, "start=") {
+		t.Fatalf("start should be stripped, got %q", got)
+	}
+	if !strings.Contains(got, "token=abc") || !strings.Contains(got, "profile_id=1") {
+		t.Fatalf("auth/profile query should remain, got %q", got)
+	}
+	if !strings.Contains(got, "_seek=1001") {
+		t.Fatalf("_seek must remain to isolate cached segment generations, got %q", got)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,9 +25,11 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/truewhile/MeBox/internal/config"
+	"github.com/truewhile/MeBox/internal/helper"
 	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/repository"
 	"github.com/truewhile/MeBox/internal/service/cloud"
+	"github.com/truewhile/MeBox/internal/service/cloud115"
 )
 
 // strm 全局设置键（存于 Setting 表，strm.* 前缀）。
@@ -40,13 +43,14 @@ const (
 	StrmSettingDownloadMeta    = "strm.download_meta"
 	StrmSettingUploadMeta      = "strm.upload_meta"
 	StrmSettingDeleteDir       = "strm.delete_dir"
+	StrmSettingKeepExt         = "strm.keep_ext"
 	StrmSettingDownloadThreads = "strm.download_threads"
 	StrmSettingUploadThreads   = "strm.upload_threads"
 )
 
 const (
 	StrmDefaultVideoExt = "mkv,mp4,avi,rmvb,rm,mov,ts,wmv,flv,m4v,iso,mpg,mpeg,webm"
-	StrmDefaultMetaExt  = "nfo,jpg,jpeg,png,srt,ass,ssa,sub,txt,bmp,webp"
+	StrmDefaultMetaExt  = "nfo,jpg,jpeg,png,srt,ass,ssa,sub,txt,bmp,webp,img"
 	StrmDefaultExclude  = "sample,trailer,预告"
 )
 
@@ -65,8 +69,9 @@ var StrmSettingDefs = map[string]struct {
 	StrmSettingMinVideoSizeMB:  {Default: "0", Label: "最小视频大小(MB)", Kind: "number", Help: "小于该大小的视频文件不生成 STRM，0 表示不限"},
 	StrmSettingAddPath:         {Default: "1", Label: "STRM 链接 path 参数", Kind: "choice", Choices: []string{"1", "2", "3"}, Help: "1=附带完整远端路径 2=仅文件名 3=不带 path"},
 	StrmSettingDownloadMeta:    {Default: "true", Label: "下载元数据", Kind: "bool", Help: "同步时把远端 nfo/图片/字幕下载到本地输出目录"},
-	StrmSettingUploadMeta:      {Default: "false", Label: "上传元数据", Kind: "bool", Help: "同步时把本地元数据上传到远端（需网盘支持写入）"},
+	StrmSettingUploadMeta:      {Default: "false", Label: "上传元数据", Kind: "bool", Help: "同步时把本地元数据上传到远端；本地与网盘元数据不同时以本地为准覆盖（需网盘支持写入）"},
 	StrmSettingDeleteDir:       {Default: "false", Label: "清理空目录", Kind: "bool", Help: "清理远端已删除的多余 .strm/元数据后，删除空目录"},
+	StrmSettingKeepExt:         {Default: "false", Label: "保留视频扩展名（多版本）", Kind: "bool", Help: "关闭（默认）：同名不同扩展（如 竞女01.mkv / 竞女01.mp4）按体积→mtime→扩展名优先级择优生成一条 name.strm；开启：分别生成 name.mkv.strm / name.mp4.strm，保留全部版本供播放切换"},
 	Strm115RelayKeySetting:     {Default: "", Label: "115 中继授权共享密钥", Kind: "text", Help: "QMediaSync/MQFamily 中继授权的共享 AES 密钥（OAUTH_RELAY_ENCRYPTION_KEY）；不配置则中继授权不可用"},
 	StrmSettingDownloadThreads: {Default: "6", Label: "下载队列线程数", Kind: "number", Help: "OpenList/CloudDrive2 元数据下载并发数（115 独立限速为 3）"},
 	StrmSettingUploadThreads:   {Default: "2", Label: "上传队列线程数", Kind: "number", Help: "元数据上传并发数"},
@@ -77,22 +82,26 @@ var StrmAccountSecretKeys = []string{"cookie", "password", "token", "access_toke
 
 // StrmService 提供 STRM 管理的能力。
 type StrmService struct {
-	log      *zap.Logger
-	repo     *repository.Container
-	cfg      *config.Config
-	crypto   *CryptoService
-	http     *http.Client
-	stopOnce sync.Once
-	stopCh   chan struct{}
-	baseCtx  context.Context // 服务级长期上下文（同步/队列不随 HTTP 请求取消）
+	log        *zap.Logger
+	repo       *repository.Container
+	cfg        *config.Config
+	crypto     *CryptoService
+	http       *http.Client
+	streamHTTP *http.Client // 视频流转发专用：无总超时（见 ProxyDirect）
+	stopOnce   sync.Once
+	stopCh     chan struct{}
+	baseCtx    context.Context // 服务级长期上下文（同步/队列不随 HTTP 请求取消）
 
 	mu            sync.Mutex
 	running       map[string]context.CancelFunc // sync path id -> cancel
 	oauthSessions map[string]*strm115AuthSession
 	wafUntil      time.Time // 115 风控/限流熔断截止时间（由 mu 保护）
 
-	downloadSem115 chan struct{} // 115 换直链+下载并发上限（风控兜底）
-	downloadSemDAV chan struct{} // WebDAV/OpenList/CloudDrive2 元数据下载并发上限
+	providerMu       sync.Mutex
+	provider115Cache map[string]cloud.Provider // account ID -> shared provider/OpenClient
+
+	downloadSem115  chan struct{} // 115 换直链+下载并发上限（风控兜底）
+	downloadSemDAV  chan struct{} // WebDAV/OpenList/CloudDrive2 元数据下载并发上限
 	downloadSemOnce sync.Once
 }
 
@@ -154,20 +163,39 @@ func (s *StrmService) releaseDownloadSlot(provider string) {
 // NewStrmService constructs the STRM service.
 func NewStrmService(cfg *config.Config, log *zap.Logger, repos *repository.Container, crypto *CryptoService) *StrmService {
 	return &StrmService{
-		log:           log,
-		repo:          repos,
-		cfg:           cfg,
-		crypto:        crypto,
-		http:          &http.Client{Timeout: 90 * time.Second},
-		stopCh:        make(chan struct{}),
-		baseCtx:       context.Background(),
-		running:       map[string]context.CancelFunc{},
-		oauthSessions: map[string]*strm115AuthSession{},
+		log:    log,
+		repo:   repos,
+		cfg:    cfg,
+		crypto: crypto,
+		http:   &http.Client{Timeout: 90 * time.Second},
+		// 视频流转发不能用带总超时的 client：http.Client.Timeout 覆盖整个
+		// 响应体读取，长视频必然超过 90s 被硬切。传输生命周期由请求 ctx
+		// （客户端断开即取消）控制，这里只保留建连/响应头阶段的兜底超时。
+		streamHTTP: &http.Client{
+			Transport: &http.Transport{
+				Proxy:                 http.ProxyFromEnvironment,
+				DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+				ForceAttemptHTTP2:     true,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: 30 * time.Second,
+				IdleConnTimeout:       90 * time.Second,
+			},
+		},
+		stopCh:           make(chan struct{}),
+		baseCtx:          context.Background(),
+		running:          map[string]context.CancelFunc{},
+		oauthSessions:    map[string]*strm115AuthSession{},
+		provider115Cache: map[string]cloud.Provider{},
 	}
 }
 
 // Start 启动下载/上传队列 worker、定时同步巡检、115 token 刷新与队列清理。
 func (s *StrmService) Start(ctx context.Context) {
+	// baseCtx 挂到服务生命周期 ctx 上（Start 由启动流程传入 stopCtx）：
+	// 此前硬编码 context.Background()，Stop() 关 stopCh 后 worker 会退出，
+	// 但进行中的全量同步（可能持续数小时）完全不受停机控制，优雅停机
+	// 窗口内仍在批量写库/写盘。
+	s.baseCtx = ctx
 	s.sync115RelayKey(ctx)
 	s.recoverInterruptedSyncs(ctx)
 	downloadThreads := s.strmIntSetting(ctx, StrmSettingDownloadThreads, 6)
@@ -186,14 +214,26 @@ func (s *StrmService) Start(ctx context.Context) {
 		uploadThreads = 4
 	}
 	for i := 0; i < downloadThreads; i++ {
-		go s.downloadWorker(ctx)
+		helper.Go(s.log, "strm.downloadWorker", func() { s.downloadWorker(ctx) })
 	}
 	for i := 0; i < uploadThreads; i++ {
-		go s.uploadWorker(ctx)
+		helper.Go(s.log, "strm.uploadWorker", func() { s.uploadWorker(ctx) })
 	}
-	go s.cronLoop(ctx)
-	go s.queueCleanupLoop(ctx)
-	go s.refresh115TokensLoop(ctx)
+	// 队列任务自愈：进程崩溃/停机遗留的 running 任务重置为 pending，
+	// 否则永久卡死并会通过 GetActiveLocalPathMap 阻塞该文件的重复下载。
+	if n, err := s.repo.StrmDownload.ResetRunningToPending(ctx); err == nil && n > 0 {
+		s.log.Warn("strm download tasks reset from running to pending after restart", zap.Int64("count", n))
+	} else if err != nil {
+		s.log.Warn("reset running strm download tasks failed", zap.Error(err))
+	}
+	if n, err := s.repo.StrmUpload.ResetRunningToPending(ctx); err == nil && n > 0 {
+		s.log.Warn("strm upload tasks reset from running to pending after restart", zap.Int64("count", n))
+	} else if err != nil {
+		s.log.Warn("reset running strm upload tasks failed", zap.Error(err))
+	}
+	helper.Go(s.log, "strm.cronLoop", func() { s.cronLoop(ctx) })
+	helper.Go(s.log, "strm.queueCleanupLoop", func() { s.queueCleanupLoop(ctx) })
+	helper.Go(s.log, "strm.refresh115TokensLoop", func() { s.refresh115TokensLoop(ctx) })
 	s.log.Info("strm service started",
 		zap.Int("download_threads", downloadThreads),
 		zap.Int("upload_threads", uploadThreads))
@@ -378,15 +418,18 @@ func (s *StrmService) UpdateStrmAccount(ctx context.Context, id, name string, en
 	if enabled != nil {
 		acct.Enabled = *enabled
 	}
-		if len(config) > 0 {
-			enc, err := s.mergeStrmAccountConfig(acct.Config, config)
-			if err != nil {
-				return nil, err
-			}
-			acct.Config = enc
+	if len(config) > 0 {
+		enc, err := s.mergeStrmAccountConfig(acct.Config, config)
+		if err != nil {
+			return nil, err
 		}
+		acct.Config = enc
+	}
 	if err := s.repo.StrmAccount.Update(ctx, acct); err != nil {
 		return nil, err
+	}
+	if acct.Provider == model.StrmProvider115 && len(config) > 0 {
+		s.invalidate115Provider(acct.ID)
 	}
 	return acct, nil
 }
@@ -405,6 +448,12 @@ func (s *StrmService) DeleteStrmAccount(ctx context.Context, id string) error {
 	if err := s.repo.StrmAccount.Delete(ctx, id); err != nil {
 		return err
 	}
+	s.invalidate115Provider(id)
+	// 级联清理远程 Emby 挂载：否则留下孤儿挂载，挂载计数/列表仍会显示。
+	// 账号已删，挂载清理失败只记日志，不让删除请求报错。
+	if _, err := s.repo.EmbyMount.DeleteByAccountID(ctx, id); err != nil && s.log != nil {
+		s.log.Warn("delete emby mounts for account failed", zap.String("account", id), zap.Error(err))
+	}
 	return nil
 }
 
@@ -415,19 +464,37 @@ func (s *StrmService) TestStrmAccount(ctx context.Context, id string) *model.Str
 		return nil
 	}
 	now := time.Now()
-	acct.LastTestAt = &now
+	result := ""
+	ok := false
 	provider, err := s.providerFor(ctx, acct)
 	if err != nil {
-		acct.LastTestResult = err.Error()
-		acct.LastTestOK = false
+		result = err.Error()
 	} else if err := provider.Ping(ctx); err != nil {
-		acct.LastTestResult = err.Error()
-		acct.LastTestOK = false
+		result = err.Error()
 	} else {
-		acct.LastTestResult = "ok"
-		acct.LastTestOK = true
+		result = "ok"
+		ok = true
 	}
-	_ = s.repo.StrmAccount.Update(ctx, acct)
+	// Ping 期间 115 客户端可能刷新 access/refresh token，并通过
+	// OnTokenRefreshed 持久化新配置。这里只写测试结果字段，不能把请求开始时
+	// 读取的旧 acct.Config 整包写回，否则会把刚轮转的 token 覆盖失效。
+	updateErr := s.repo.StrmAccount.UpdateTestResult(ctx, id, now, result, ok)
+	if updateErr != nil && s.log != nil {
+		s.log.Warn("update strm account test result failed", zap.String("account_id", id), zap.Error(updateErr))
+	}
+	// 重新读取，确保返回给前端的账号配置已经是 Ping 期间刷新后的版本。
+	if fresh, err := s.repo.StrmAccount.FindByID(ctx, id); err == nil && fresh != nil {
+		if updateErr != nil {
+			// 写库失败时仍让本次响应展示刚完成测试的结果。
+			fresh.LastTestAt = &now
+			fresh.LastTestResult = result
+			fresh.LastTestOK = ok
+		}
+		return fresh
+	}
+	acct.LastTestAt = &now
+	acct.LastTestResult = result
+	acct.LastTestOK = ok
 	return acct
 }
 
@@ -438,6 +505,23 @@ func (s *StrmService) ListAccounts(ctx context.Context) ([]model.StrmAccount, er
 
 // providerFor 依据账号配置构建网盘驱动。
 func (s *StrmService) providerFor(ctx context.Context, acct *model.StrmAccount) (cloud.Provider, error) {
+	if acct != nil && acct.Provider == model.StrmProvider115 {
+		s.providerMu.Lock()
+		defer s.providerMu.Unlock()
+		if provider := s.provider115Cache[acct.ID]; provider != nil {
+			return provider, nil
+		}
+		provider, err := s.newProvider(ctx, acct)
+		if err != nil {
+			return nil, err
+		}
+		s.provider115Cache[acct.ID] = provider
+		return provider, nil
+	}
+	return s.newProvider(ctx, acct)
+}
+
+func (s *StrmService) newProvider(ctx context.Context, acct *model.StrmAccount) (cloud.Provider, error) {
 	cfg, err := s.strmAccountConfig(acct)
 	if err != nil {
 		return nil, err
@@ -451,7 +535,36 @@ func (s *StrmService) providerFor(ctx context.Context, acct *model.StrmAccount) 
 	if err != nil {
 		return nil, err
 	}
+	// 115 开放平台：运行中自动刷新得到的新令牌必须落库。否则长任务
+	// 里的新 token 只存在于内存，定时刷新线程又用 DB 里的旧
+	// refresh_token 再刷（一次性轮转），两者互相作废，最终把有效账号
+	// 标成“授权已失效”。
+	if oc, ok := provider.(interface{ OpenClient() *cloud115.OpenClient }); ok {
+		client := oc.OpenClient()
+		client.OnTokenRefreshed = func(accessToken, refreshToken string) {
+			// 账号重新授权/修改凭据后，旧客户端可能仍有在途请求。旧请求
+			// 刷新的令牌不能覆盖新授权写入的凭据。
+			if !s.isCurrent115Client(acct.ID, client) {
+				return
+			}
+			s.persist115Tokens(acct.ID, accessToken, refreshToken)
+		}
+	}
 	return provider, nil
+}
+
+func (s *StrmService) invalidate115Provider(accountID string) {
+	s.providerMu.Lock()
+	delete(s.provider115Cache, accountID)
+	s.providerMu.Unlock()
+}
+
+func (s *StrmService) isCurrent115Client(accountID string, client *cloud115.OpenClient) bool {
+	s.providerMu.Lock()
+	defer s.providerMu.Unlock()
+	provider := s.provider115Cache[accountID]
+	openProvider, ok := provider.(interface{ OpenClient() *cloud115.OpenClient })
+	return ok && openProvider.OpenClient() == client
 }
 
 // ─── 全局设置 ──────────────────────────────────────────────────────────────────
@@ -698,6 +811,7 @@ func (s *StrmService) strmEffectiveConfig(ctx context.Context, p *model.StrmSync
 	cfg.DownloadMeta = p.DownloadMeta
 	cfg.UploadMeta = p.UploadMeta
 	cfg.DeleteDir = p.DeleteDir
+	cfg.KeepExt = p.KeepExt
 	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
 	return cfg, nil
 }
@@ -793,6 +907,10 @@ func truncateStringRuneSafe(s string, maxBytes int) string {
 
 // cleanEntryName 清理单个目录名或文件名中的非法字符、控制字符、尾部点空格及 Windows 保留字，
 // 确保在 Windows (NTFS/FAT)、Linux (ext4/btrfs/xfs) 及 NAS/SMB 挂载环境下均安全可用。
+//
+// 只裁剪**尾部**的点与空格：那是 Windows 明确禁止的部分。前导点是合法且常见的
+// （隐藏目录/文件、.staging 之类），早先按 ". " 双向裁剪会把 `.media` 静默改写成
+// `media`，导致刮削海报边车被写到去掉点后的平行目录、媒体目录反而拿不到图。
 func cleanEntryName(name string, isDir bool) string {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -801,7 +919,7 @@ func cleanEntryName(name string, isDir bool) string {
 
 	if isDir {
 		clean := sanitizeFilename(name)
-		clean = strings.Trim(clean, ". ")
+		clean = strings.TrimRight(clean, ". ")
 		if clean == "" {
 			return "unnamed"
 		}
@@ -822,7 +940,7 @@ func cleanEntryName(name string, isDir bool) string {
 	}
 
 	cleanBase := sanitizeFilename(base)
-	cleanBase = strings.Trim(cleanBase, ". ")
+	cleanBase = strings.TrimRight(cleanBase, ". ")
 	if cleanBase == "" {
 		cleanBase = "unnamed"
 	}
@@ -931,6 +1049,7 @@ type strmPathConfig struct {
 	DownloadMeta bool
 	UploadMeta   bool
 	DeleteDir    bool
+	KeepExt      bool
 }
 
 // ─── 本地目录浏览（添加同步目录用，兼容 Windows/Linux） ─────────────────────────

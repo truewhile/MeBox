@@ -34,8 +34,15 @@ func SaveDatabaseConfig(dbType, dsn string) error {
 		return fmt.Errorf("marshal config.yaml: %w", err)
 	}
 
-	if err := os.WriteFile(configPath, out, 0644); err != nil {
-		return fmt.Errorf("write config.yaml: %w", err)
+	// 原子写：临时文件 + rename，避免进程崩溃/断电留下截断的 config.yaml
+	// （下次启动会硬失败）；DSN 含数据库密码，权限收窄到 0600。
+	tmp := configPath + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return fmt.Errorf("write config.yaml.tmp: %w", err)
+	}
+	if err := os.Rename(tmp, configPath); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("replace config.yaml: %w", err)
 	}
 	return nil
 }

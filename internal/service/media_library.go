@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"time"
 
 	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/repository"
@@ -15,17 +14,49 @@ type LibraryPreviewItem struct {
 	Cards []SeriesCard `json:"cards"`
 }
 
-type libraryPreviewCacheValue struct {
-	Items []LibraryPreviewItem `json:"items"`
-}
-
 // ListLibraries returns every library configured on the server.
 func (s *MediaService) ListLibraries(ctx context.Context) ([]model.Library, error) {
 	return s.repo.Library.List(ctx)
 }
 
+// CountLibrariesCached returns per-library media totals. The homepage metadata
+// request asks for every library, and the underlying COUNT is repeated on each
+// refresh. Writes already drop the media: prefix, so a longer TTL is safe.
+func (s *MediaService) CountLibrariesCached(ctx context.Context, libraryIDs []string, filter repository.MediaQueryFilter) (map[string]int64, error) {
+	if len(libraryIDs) == 0 {
+		return map[string]int64{}, nil
+	}
+	cacheKey := s.libraryCountCacheKey(libraryIDs, filter)
+	var cached map[string]int64
+	if s.cache != nil && s.cache.GetJSON(ctx, cacheKey, &cached) && cached != nil {
+		return cached, nil
+	}
+	counts, err := s.repo.Media.CountByLibraries(ctx, libraryIDs, filter)
+	if err != nil {
+		return nil, err
+	}
+	if counts == nil {
+		counts = map[string]int64{}
+	}
+	if s.cache != nil {
+		s.cache.SetJSON(ctx, cacheKey, counts, s.derivedReadCacheTTL())
+	}
+	return counts, nil
+}
+
 // ListLibrariesWithPreview returns libraries populated with item counts and latest preview cards.
 func (s *MediaService) ListLibrariesWithPreview(ctx context.Context, libraries []model.Library, visibility MediaVisibility, cardLimit int) ([]LibraryPreviewItem, error) {
+	return s.listLibrariesWithPreview(ctx, libraries, visibility, cardLimit, true)
+}
+
+// ListLibraryPreviews returns only the latest preview cards. The metadata
+// endpoint already returns totals, so preview batches used by the home and
+// library pages can skip an otherwise repeated COUNT(*) over every library.
+func (s *MediaService) ListLibraryPreviews(ctx context.Context, libraries []model.Library, visibility MediaVisibility, cardLimit int) ([]LibraryPreviewItem, error) {
+	return s.listLibrariesWithPreview(ctx, libraries, visibility, cardLimit, false)
+}
+
+func (s *MediaService) listLibrariesWithPreview(ctx context.Context, libraries []model.Library, visibility MediaVisibility, cardLimit int, includeCounts bool) ([]LibraryPreviewItem, error) {
 	if cardLimit <= 0 {
 		cardLimit = 10
 	}
@@ -33,45 +64,65 @@ func (s *MediaService) ListLibrariesWithPreview(ctx context.Context, libraries [
 	if len(libraries) == 0 {
 		return out, nil
 	}
-
 	visibility = ExpandMediaVisibilityForMergedCloudLibraries(ctx, s.repo, visibility)
 	filter := repository.MediaQueryFilter{
 		IncludeNSFW:       visibility.IncludeNSFW,
 		AllowedLibraryIDs: visibility.AllowedLibraryIDs,
 		HiddenLibraryIDs:  visibility.HiddenLibraryIDs,
 	}
-	cacheKey := s.libraryPreviewCacheKey(libraries, cardLimit, filter)
-	var cached libraryPreviewCacheValue
-	if s.cache != nil && s.cache.GetJSON(ctx, cacheKey, &cached) {
-		return cached.Items, nil
-	}
-
-	libIDs := make([]string, 0, len(libraries))
+	pending := make([]model.Library, 0, len(libraries))
+	pendingSet := make(map[string]struct{}, len(libraries))
 	for i, lib := range libraries {
 		out[i] = LibraryPreviewItem{
 			Library: lib,
 			Total:   0,
 			Cards:   []SeriesCard{},
 		}
-		libIDs = append(libIDs, lib.ID)
+		itemKey := s.libraryPreviewCacheKey([]model.Library{lib}, cardLimit, filter, includeCounts)
+		if s.cache != nil && s.cache.GetJSON(ctx, itemKey, &out[i]) {
+			continue
+		}
+		pending = append(pending, lib)
+		pendingSet[lib.ID] = struct{}{}
+	}
+	if len(pending) == 0 {
+		return out, nil
 	}
 
-	counts, err := s.repo.Media.CountByLibraries(ctx, libIDs, filter)
-	if err != nil {
-		return nil, err
+	libIDs := make([]string, len(pending))
+	for i := range pending {
+		libIDs[i] = pending[i].ID
 	}
 
-	for i := range out {
-		if total, ok := counts[out[i].ID]; ok {
-			out[i].Total = total
+	if includeCounts {
+		counts, err := s.repo.Media.CountByLibraries(ctx, libIDs, filter)
+		if err != nil {
+			return nil, err
+		}
+		for i := range out {
+			if _, pendingItem := pendingSet[out[i].ID]; !pendingItem {
+				continue
+			}
+			out[i].Total = counts[out[i].ID]
 		}
 	}
 
-	fetchCount := cardLimit * 4
-	if fetchCount < 60 {
-		fetchCount = 60
-	} else if fetchCount > 200 {
-		fetchCount = 200
+	// Preview rows are only an internal candidate window. Keep it bounded so a
+	// library with a very long series cannot turn a homepage request into a full
+	// 50k-row scan merely to find another distinct card.
+	fetchCount := cardLimit * 12
+	minFetchCount := 120
+	if cardLimit <= 2 {
+		minFetchCount = 24
+	} else if cardLimit <= 4 {
+		// 首页/媒体库入口的马赛克只需要少量代表图，没必要为暂时不会
+		// 展示的横向货架扫描一整批 120 行候选。
+		minFetchCount = 48
+	}
+	if fetchCount < minFetchCount {
+		fetchCount = minFetchCount
+	} else if fetchCount > 400 {
+		fetchCount = 400
 	}
 
 	recentByLibrary, err := s.repo.Media.ListRecentByLibraries(ctx, libIDs, fetchCount, filter)
@@ -81,7 +132,7 @@ func (s *MediaService) ListLibrariesWithPreview(ctx context.Context, libraries [
 
 	allPreviewItems := make([]model.Media, 0, len(libIDs)*fetchCount)
 	for i := range out {
-		if out[i].Total == 0 {
+		if _, pendingItem := pendingSet[out[i].ID]; !pendingItem {
 			continue
 		}
 		items := recentByLibrary[out[i].ID]
@@ -93,11 +144,15 @@ func (s *MediaService) ListLibrariesWithPreview(ctx context.Context, libraries [
 	s.attachLibraryMetadata(ctx, allPreviewItems)
 
 	for i := range out {
-		if out[i].Total == 0 {
+		if _, pendingItem := pendingSet[out[i].ID]; !pendingItem {
 			continue
 		}
 		items := recentByLibrary[out[i].ID]
 		if len(items) == 0 {
+			if s.cache != nil {
+				itemKey := s.libraryPreviewCacheKey([]model.Library{out[i].Library}, cardLimit, filter, includeCounts)
+				s.cache.SetJSON(ctx, itemKey, out[i], s.derivedReadCacheTTL())
+			}
 			continue
 		}
 		cards := groupMediaSeriesCards(items)
@@ -108,10 +163,10 @@ func (s *MediaService) ListLibrariesWithPreview(ctx context.Context, libraries [
 			cards = []SeriesCard{}
 		}
 		out[i].Cards = cards
-	}
-
-	if s.cache != nil {
-		s.cache.SetJSON(ctx, cacheKey, libraryPreviewCacheValue{Items: out}, time.Duration(s.mediaCacheTTLSeconds())*time.Second)
+		if s.cache != nil {
+			itemKey := s.libraryPreviewCacheKey([]model.Library{out[i].Library}, cardLimit, filter, includeCounts)
+			s.cache.SetJSON(ctx, itemKey, out[i], s.derivedReadCacheTTL())
+		}
 	}
 
 	return out, nil

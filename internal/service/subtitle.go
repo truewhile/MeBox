@@ -16,25 +16,47 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/truewhile/MeBox/internal/config"
+	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/repository"
 )
 
 // SubtitleService is the discovery + conversion entry point.
 type SubtitleService struct {
-	log  *zap.Logger
-	repo *repository.Container
-	cfg  *config.Config
+	log         *zap.Logger
+	repo        *repository.Container
+	cfg         *config.Config
+	strmResolve func(ctx context.Context, raw string) (*StrmPlayResult, error)
+
+	// 目录发现是 Emby 条目列表的热路径（每个媒体源一次 DB 查询 + 最多 5 次
+	// os.ReadDir），而字幕文件极少变化：按 media_id 做短 TTL 缓存。
+	cacheMu   sync.Mutex
+	discovery map[string]subtitleDiscoveryEntry
+}
+
+const (
+	subtitleDiscoveryTTL      = 2 * time.Minute
+	subtitleDiscoveryCacheCap = 4096
+)
+
+type subtitleDiscoveryEntry struct {
+	tracks    []SubtitleTrack
+	expiresAt time.Time
 }
 
 // NewSubtitleService is the constructor.
@@ -44,11 +66,14 @@ func NewSubtitleService(cfg *config.Config, log *zap.Logger, repo *repository.Co
 
 // SubtitleTrack describes one external subtitle file.
 type SubtitleTrack struct {
-	Lang  string `json:"lang"`
-	Label string `json:"label"`
-	Path  string `json:"path"`
-	URL   string `json:"url"`
-	Codec string `json:"codec"`
+	Lang        string `json:"lang"`
+	Label       string `json:"label"`
+	Path        string `json:"path"`
+	URL         string `json:"url"`
+	Codec       string `json:"codec"`
+	Source      string `json:"source"`
+	Delivery    string `json:"delivery"`
+	StreamIndex int    `json:"stream_index,omitempty"`
 }
 
 // extToCodec maps the file extension to the inner codec name.
@@ -69,10 +94,64 @@ func (s *SubtitleService) Discover(ctx context.Context, mediaID string) ([]Subti
 // DiscoverExternalOnly 只返回媒体旁边的外挂字幕文件，不含容器内嵌字幕轨。
 // Emby 字幕接口（/Videos/:id/Subtitles/...）用。
 func (s *SubtitleService) DiscoverExternalOnly(ctx context.Context, mediaID string) ([]SubtitleTrack, error) {
-	return s.discover(ctx, mediaID)
+	cacheKey := "external:" + mediaID
+	if tracks, ok := s.cachedDiscovery(cacheKey); ok {
+		return tracks, nil
+	}
+	tracks, err := s.discoverExternalUncached(ctx, mediaID)
+	if err != nil {
+		return nil, err
+	}
+	s.rememberDiscovery(cacheKey, tracks)
+	return tracks, nil
 }
 
 func (s *SubtitleService) discover(ctx context.Context, mediaID string) ([]SubtitleTrack, error) {
+	cacheKey := "all:" + mediaID
+	if tracks, ok := s.cachedDiscovery(cacheKey); ok {
+		return tracks, nil
+	}
+	tracks, err := s.discoverUncached(ctx, mediaID)
+	if err != nil {
+		return nil, err
+	}
+	s.rememberDiscovery(cacheKey, tracks)
+	return tracks, nil
+}
+
+func (s *SubtitleService) cachedDiscovery(mediaID string) ([]SubtitleTrack, bool) {
+	now := time.Now()
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	entry, ok := s.discovery[mediaID]
+	if !ok {
+		return nil, false
+	}
+	if now.After(entry.expiresAt) {
+		delete(s.discovery, mediaID)
+		return nil, false
+	}
+	// 返回副本，避免调用方修改缓存内容。
+	return append([]SubtitleTrack(nil), entry.tracks...), true
+}
+
+func (s *SubtitleService) rememberDiscovery(mediaID string, tracks []SubtitleTrack) {
+	now := time.Now()
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	if s.discovery == nil {
+		s.discovery = make(map[string]subtitleDiscoveryEntry)
+	}
+	if len(s.discovery) >= subtitleDiscoveryCacheCap {
+		s.discovery = make(map[string]subtitleDiscoveryEntry)
+	}
+	s.discovery[mediaID] = subtitleDiscoveryEntry{
+		tracks:    append([]SubtitleTrack(nil), tracks...),
+		expiresAt: now.Add(subtitleDiscoveryTTL),
+	}
+}
+
+func (s *SubtitleService) discoverUncached(ctx context.Context, mediaID string) ([]SubtitleTrack, error) {
 	m, err := s.repo.Media.FindByID(ctx, mediaID)
 	if err != nil {
 		return nil, err
@@ -80,8 +159,35 @@ func (s *SubtitleService) discover(ctx context.Context, mediaID string) ([]Subti
 	if m == nil {
 		return nil, errors.New("media not found")
 	}
+	tracks := discoverExternalSubtitleTracks(m)
+	embedded, err := s.discoverEmbedded(ctx, m)
+	if err != nil {
+		if s.log != nil {
+			s.log.Debug("discover embedded subtitles failed", zap.String("media_id", mediaID), zap.Error(err))
+		}
+	} else {
+		tracks = append(tracks, embedded...)
+	}
+	return tracks, nil
+}
+
+func (s *SubtitleService) discoverExternalUncached(ctx context.Context, mediaID string) ([]SubtitleTrack, error) {
+	m, err := s.repo.Media.FindByID(ctx, mediaID)
+	if err != nil {
+		return nil, err
+	}
+	if m == nil {
+		return nil, errors.New("media not found")
+	}
+	return discoverExternalSubtitleTracks(m), nil
+}
+
+func discoverExternalSubtitleTracks(m *model.Media) []SubtitleTrack {
 	dir := filepath.Dir(m.Path)
-	base := strings.TrimSuffix(filepath.Base(m.Path), filepath.Ext(m.Path))
+	bases := mediaSidecarBaseVariants(m.Path)
+	if len(bases) == 0 {
+		bases = []string{strings.TrimSuffix(filepath.Base(m.Path), filepath.Ext(m.Path))}
+	}
 
 	candidates := make([]string, 0, 16)
 	candidates = append(candidates, dir)
@@ -105,22 +211,173 @@ func (s *SubtitleService) discover(ctx context.Context, mediaID string) ([]Subti
 				continue
 			}
 			fullName := strings.TrimSuffix(e.Name(), ext)
-			if !strings.HasPrefix(strings.ToLower(fullName), strings.ToLower(base)) &&
-				c == dir {
-				// In the same directory we require a basename match;
-				// inside subs/ subdirs we accept anything.
-				continue
+			matchedBase := ""
+			if c == dir {
+				for _, base := range bases {
+					if strings.HasPrefix(strings.ToLower(fullName), strings.ToLower(base)) {
+						matchedBase = base
+						break
+					}
+				}
+				if matchedBase == "" {
+					// In the same directory we require a basename match;
+					// inside subs/ subdirs we accept anything.
+					continue
+				}
+			} else if len(bases) > 0 {
+				matchedBase = bases[0]
 			}
-			lang := detectLang(fullName, base)
+			lang := detectLang(fullName, matchedBase)
 			tracks = append(tracks, SubtitleTrack{
-				Lang:  lang,
-				Label: lang,
-				Path:  filepath.Join(c, e.Name()),
-				Codec: codec,
+				Lang:     lang,
+				Label:    lang,
+				Path:     filepath.Join(c, e.Name()),
+				Codec:    codec,
+				Source:   "external",
+				Delivery: subtitleDeliveryForCodec(codec),
 			})
 		}
 	}
-	return tracks, nil
+	return tracks
+}
+
+type embeddedSubtitleProbe struct {
+	Streams []struct {
+		Index     int    `json:"index"`
+		CodecName string `json:"codec_name"`
+		Tags      struct {
+			Language string `json:"language"`
+			Title    string `json:"title"`
+		} `json:"tags"`
+		Disposition struct {
+			Default int `json:"default"`
+			Forced  int `json:"forced"`
+		} `json:"disposition"`
+	} `json:"streams"`
+}
+
+var imageSubtitleCodecs = map[string]bool{
+	"hdmv_pgs_subtitle": true,
+	"dvd_subtitle":      true,
+	"dvb_subtitle":      true,
+	"xsub":              true,
+}
+
+func (s *SubtitleService) discoverEmbedded(ctx context.Context, media *model.Media) ([]SubtitleTrack, error) {
+	if s == nil || s.cfg == nil {
+		return nil, errors.New("subtitle probe unavailable")
+	}
+	input, err := s.resolveInput(ctx, media)
+	if err != nil {
+		return nil, err
+	}
+	bin, err := resolveLocalExecutable(s.cfg.App.FFprobePath, "ffprobe")
+	if err != nil {
+		return nil, err
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	args := []string{"-v", "error"}
+	if headers := ffmpegHeaderText(input.Headers); headers != "" {
+		args = append(args, "-headers", headers)
+	}
+	args = append(args,
+		"-select_streams", "s",
+		"-show_entries", "stream=index,codec_name:stream_tags=language,title:stream_disposition=default,forced",
+		"-of", "json", input.Source,
+	)
+	out, err := exec.CommandContext(probeCtx, bin, args...).Output() // #nosec G204 -- executable is resolved locally and arguments do not use a shell.
+	if err != nil {
+		return nil, err
+	}
+	var probe embeddedSubtitleProbe
+	if err := json.Unmarshal(out, &probe); err != nil {
+		return nil, err
+	}
+	return subtitleTracksFromProbe(probe), nil
+}
+
+// subtitleDeliveryForCodec selects the browser rendering path for a text
+// subtitle codec. ASS/SSA keep their original bytes and are rendered by
+// libass in the web player; other text formats are converted to WebVTT.
+func subtitleDeliveryForCodec(codec string) string {
+	switch strings.ToLower(strings.TrimSpace(codec)) {
+	case "ass", "ssa":
+		return "ass"
+	default:
+		return "webvtt"
+	}
+}
+
+func subtitleTracksFromProbe(probe embeddedSubtitleProbe) []SubtitleTrack {
+	tracks := make([]SubtitleTrack, 0, len(probe.Streams))
+	for _, stream := range probe.Streams {
+		codec := strings.ToLower(strings.TrimSpace(stream.CodecName))
+		lang := strings.ToLower(strings.TrimSpace(stream.Tags.Language))
+		if lang == "" {
+			lang = "und"
+		}
+		label := strings.TrimSpace(stream.Tags.Title)
+		if label == "" {
+			label = lang
+		}
+		if stream.Disposition.Forced != 0 {
+			label += "（强制）"
+		} else if stream.Disposition.Default != 0 {
+			label += "（默认）"
+		}
+		delivery := subtitleDeliveryForCodec(codec)
+		if imageSubtitleCodecs[codec] {
+			delivery = "burn"
+		}
+		sourceLabel := "（内嵌）"
+		if delivery == "burn" {
+			sourceLabel = "（内嵌·图片）"
+		}
+		tracks = append(tracks, SubtitleTrack{
+			Lang:        lang,
+			Label:       label + sourceLabel,
+			Path:        "embedded:" + strconv.Itoa(stream.Index),
+			Codec:       codec,
+			Source:      "embedded",
+			Delivery:    delivery,
+			StreamIndex: stream.Index,
+		})
+	}
+	return tracks
+}
+
+func (s *SubtitleService) SetStrmPlayTargetResolver(resolve func(context.Context, string) (*StrmPlayResult, error)) {
+	if s != nil {
+		s.strmResolve = resolve
+	}
+}
+
+func (s *SubtitleService) resolveInput(ctx context.Context, media *model.Media) (transcodeInput, error) {
+	if media == nil {
+		return transcodeInput{}, ErrMediaNotFound
+	}
+	if !isStrmMediaRow(media) {
+		if _, err := os.Stat(media.Path); err != nil {
+			return transcodeInput{}, ErrMediaNotFound
+		}
+		return transcodeInput{Source: media.Path}, nil
+	}
+	raw := strings.TrimSpace(media.STRMURL)
+	if raw == "" && strings.HasSuffix(strings.ToLower(media.Path), ".strm") {
+		raw, _ = readLocalSTRMTarget(media.Path)
+	}
+	if s.strmResolve != nil {
+		resolved, err := s.strmResolve(ctx, raw)
+		if err != nil {
+			return transcodeInput{}, err
+		}
+		return transcodeInputFromPlayResult(resolved)
+	}
+	if isHTTPPlaybackTarget(raw) {
+		return transcodeInput{Source: raw}, nil
+	}
+	return transcodeInput{}, errors.New("subtitle source unavailable")
 }
 
 // langTag matches the .zh / .zh-cn / .chs language sub-extensions.
@@ -146,13 +403,16 @@ func (s *SubtitleService) Serve(ctx context.Context, mediaID, sub string, w io.W
 	if err != nil || m == nil {
 		return errors.New("media not found")
 	}
-	abs, err := filepath.Abs(sub)
+	if strings.HasPrefix(sub, "embedded:") {
+		index, err := strconv.Atoi(strings.TrimPrefix(sub, "embedded:"))
+		if err != nil || index < 0 {
+			return errors.New("invalid embedded subtitle")
+		}
+		return s.serveEmbedded(ctx, m, index, w)
+	}
+	abs, err := readExternalSubtitlePath(m, sub)
 	if err != nil {
 		return err
-	}
-	mediaDir, _ := filepath.Abs(filepath.Dir(m.Path))
-	if !pathWithin(abs, mediaDir) {
-		return fmt.Errorf("path escape")
 	}
 
 	f, err := os.Open(abs) // #nosec G304 -- abs is constrained to the media file directory with pathWithin.
@@ -164,18 +424,43 @@ func (s *SubtitleService) Serve(ctx context.Context, mediaID, sub string, w io.W
 	if err != nil {
 		return err
 	}
+	// 非 UTF-8 的外挂字幕（UTF-16、GBK/Big5 等）必须先归一化：浏览器只能按
+	// UTF-8 解析 <track> 内容，否则整篇都会变成替换字符。
+	text := decodeSubtitleText(body)
 
 	switch strings.ToLower(filepath.Ext(abs)) {
 	case ".vtt":
-		_, err = w.Write(body)
+		_, err = io.WriteString(w, text)
 	case ".srt":
-		_, err = w.Write([]byte(srtToVTT(string(body))))
+		_, err = io.WriteString(w, srtToVTT(text))
 	case ".ass", ".ssa":
-		_, err = w.Write([]byte(assToVTT(string(body))))
+		_, err = io.WriteString(w, assToVTT(text))
 	default:
 		return errors.New("unsupported subtitle format")
 	}
 	return err
+}
+
+func (s *SubtitleService) serveEmbedded(ctx context.Context, media *model.Media, streamIndex int, w io.Writer) error {
+	input, err := s.resolveInput(ctx, media)
+	if err != nil {
+		return err
+	}
+	bin, err := resolveLocalExecutable(s.cfg.App.FFmpegPath, "ffmpeg")
+	if err != nil {
+		return err
+	}
+	args := []string{"-hide_banner", "-loglevel", "error"}
+	args = append(args, ffmpegHTTPInputArgs(input)...)
+	args = append(args, "-i", input.Source, "-map", "0:"+strconv.Itoa(streamIndex), "-f", "webvtt", "-")
+	cmd := exec.CommandContext(ctx, bin, args...) // #nosec G204 -- executable is resolved locally and arguments do not use a shell.
+	cmd.Stdout = w
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("extract embedded subtitle: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 // ServeRaw writes the subtitle file in its original format without any
@@ -190,6 +475,9 @@ func (s *SubtitleService) ServeRaw(ctx context.Context, mediaID, sub string, w i
 	if err != nil || m == nil {
 		return errors.New("media not found")
 	}
+	if strings.HasPrefix(sub, "embedded:") {
+		return errors.New("embedded subtitle is not available in raw mode")
+	}
 	abs, err := filepath.Abs(sub)
 	if err != nil {
 		return err
@@ -198,6 +486,9 @@ func (s *SubtitleService) ServeRaw(ctx context.Context, mediaID, sub string, w i
 	if !pathWithin(abs, mediaDir) {
 		return fmt.Errorf("path escape")
 	}
+	if _, ok := extToCodec[strings.ToLower(filepath.Ext(abs))]; !ok {
+		return errors.New("unsupported subtitle format")
+	}
 	f, err := os.Open(abs) // #nosec G304 -- abs is constrained to the media file directory with pathWithin.
 	if err != nil {
 		return err
@@ -205,4 +496,80 @@ func (s *SubtitleService) ServeRaw(ctx context.Context, mediaID, sub string, w i
 	defer f.Close()
 	_, err = io.Copy(w, f)
 	return err
+}
+
+// ServeASS returns an ASS/SSA stream suitable for libass-wasm. External ASS
+// files are sent unchanged; embedded ASS/SSA tracks are remuxed to ASS by
+// ffmpeg. This keeps fonts, positioning and typesetting data available to the
+// browser renderer instead of flattening the track through assToVTT first.
+func (s *SubtitleService) ServeASS(ctx context.Context, mediaID, sub string, w io.Writer) error {
+	m, err := s.repo.Media.FindByID(ctx, mediaID)
+	if err != nil || m == nil {
+		return errors.New("media not found")
+	}
+	if strings.HasPrefix(sub, "embedded:") {
+		index, err := strconv.Atoi(strings.TrimPrefix(sub, "embedded:"))
+		if err != nil || index < 0 {
+			return errors.New("invalid embedded subtitle")
+		}
+		return s.serveEmbeddedASS(ctx, m, index, w)
+	}
+	switch strings.ToLower(filepath.Ext(sub)) {
+	case ".ass", ".ssa":
+		// 外挂 ASS 同样要归一化成 UTF-8：libass 只认 UTF-8，UTF-16/GBK 的
+		// 字幕交给它会解析不到任何事件，表现为「字幕选中了却不显示」。
+		abs, err := readExternalSubtitlePath(m, sub)
+		if err != nil {
+			return err
+		}
+		f, err := os.Open(abs) // #nosec G304 -- abs is constrained to the media file directory with pathWithin.
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		body, err := io.ReadAll(f)
+		if err != nil {
+			return err
+		}
+		_, err = io.WriteString(w, decodeSubtitleText(body))
+		return err
+	default:
+		return errors.New("subtitle is not ASS/SSA")
+	}
+}
+
+// readExternalSubtitlePath 校验外挂字幕路径（必须落在媒体文件所在目录内）并返回
+// 绝对路径。Serve 与 ServeASS 共用，避免两处各自实现出现安全口径不一致。
+func readExternalSubtitlePath(m *model.Media, sub string) (string, error) {
+	abs, err := filepath.Abs(sub)
+	if err != nil {
+		return "", err
+	}
+	mediaDir, _ := filepath.Abs(filepath.Dir(m.Path))
+	if !pathWithin(abs, mediaDir) {
+		return "", fmt.Errorf("path escape")
+	}
+	return abs, nil
+}
+
+func (s *SubtitleService) serveEmbeddedASS(ctx context.Context, media *model.Media, streamIndex int, w io.Writer) error {
+	input, err := s.resolveInput(ctx, media)
+	if err != nil {
+		return err
+	}
+	bin, err := resolveLocalExecutable(s.cfg.App.FFmpegPath, "ffmpeg")
+	if err != nil {
+		return err
+	}
+	args := []string{"-hide_banner", "-loglevel", "error"}
+	args = append(args, ffmpegHTTPInputArgs(input)...)
+	args = append(args, "-i", input.Source, "-map", "0:"+strconv.Itoa(streamIndex), "-c:s", "ass", "-f", "ass", "-")
+	cmd := exec.CommandContext(ctx, bin, args...) // #nosec G204 -- executable is resolved locally and arguments do not use a shell.
+	cmd.Stdout = w
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("extract embedded ASS subtitle: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }

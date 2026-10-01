@@ -1,11 +1,18 @@
-import { useEffect, useMemo, useState, Fragment, type ReactNode } from 'react'
-import { useLocation, useParams, useSearchParams } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useState, Fragment, type ReactNode } from 'react'
+import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
+import toast from 'react-hot-toast'
 
-import { historyAPI } from '../api/history'
 import type { Media } from '../types'
 import { useAuthStore } from '../stores/auth'
-import type { SeriesCard } from '../utils/groupSeries'
+import { libraryAPI, type LibraryFacets } from '../api/library'
+import {
+  EMPTY_LIBRARY_FILTERS,
+  parseLibraryFilters,
+  withFilterParams,
+  type LibraryFilterParams,
+} from '../utils/libraryFilters'
+import { isTheatricalFeature, type SeriesCard } from '../utils/groupSeries'
 import {
   sortMediaList,
   sortSeriesList,
@@ -16,6 +23,7 @@ import { LibraryPageDialogs } from './LibraryPageDialogs'
 import { PageBackButton } from '../components/PageBackButton'
 import { MediaFavouriteButton } from '../components/MediaFavouriteButton'
 import { LibraryPageHeader } from './LibraryPageHeader'
+import { LibraryFilterBar } from './LibraryFilterBar'
 import { LibraryMediaSections } from './LibraryMediaSections'
 import { LibrarySeriesDetailSection } from './LibrarySeriesDetailSection'
 import { useLibraryData } from './useLibraryData'
@@ -29,6 +37,7 @@ export function LibraryPage() {
   const { id = '' } = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
   const location = useLocation()
+  const navigate = useNavigate()
   const role = useAuthStore((s) => s.user?.role)
   const canFavorite = usePermission('can_favorite')
   const { isFavourite, toggleFavourite } = useFavourites()
@@ -49,32 +58,108 @@ export function LibraryPage() {
     return (saved as SortOrder) || 'asc'
   })
   const [randomSeed, setRandomSeed] = useState(() => Date.now())
-  const [historyMap, setHistoryMap] = useState<Map<string, string>>(new Map())
+  const [lastNonRandomSort, setLastNonRandomSort] = useState<SortField>(sortField === 'random' ? 'release_date' : sortField)
+  const [lastNonRandomOrder, setLastNonRandomOrder] = useState<SortOrder>(sortOrder)
+  const serverSortField = sortField === 'random' ? lastNonRandomSort : sortField
+  const serverSortOrder = sortField === 'random' ? lastNonRandomOrder : sortOrder
+
+  // 剧集模式：选中某个剧集后展开详情
+  const [selectedSeries, setSelectedSeries] = useState<SeriesCard | null>(null)
+  const [selectedSeason, setSelectedSeason] = useState<number | null>(null)
+
+  // 筛选状态放在 URL：可分享、刷新保持、浏览器返回可撤销。
+  const libraryFilters = useMemo(
+    () => parseLibraryFilters(location.search),
+    [location.search],
+  )
+  const [facets, setFacets] = useState<LibraryFacets | null>(null)
+  const [loadingFacets, setLoadingFacets] = useState(true)
+  const [randomBusy, setRandomBusy] = useState(false)
 
   useEffect(() => {
-    if (sortField !== 'last_played') return
     let cancelled = false
-    historyAPI
-      .list(1000)
-      .then((historyItems) => {
-        if (cancelled) return
-        const map = new Map<string, string>()
-        for (const item of historyItems ?? []) {
-          if (item.media_id && item.watched_at) {
-            if (!map.has(item.media_id) || new Date(item.watched_at) > new Date(map.get(item.media_id)!)) {
-              map.set(item.media_id, item.watched_at)
-            }
-          }
-        }
-        setHistoryMap(map)
+    setLoadingFacets(true)
+    libraryAPI
+      .facets(id)
+      .then((data) => {
+        if (!cancelled) setFacets(data)
       })
-      .catch(() => {})
+      .catch(() => {
+        if (!cancelled) setFacets(null)
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingFacets(false)
+      })
     return () => {
       cancelled = true
     }
-  }, [sortField])
+  }, [id])
 
-  const handleSortChange = (field: SortField, order: SortOrder) => {
+  const applyFilters = (next: LibraryFilterParams) => {
+    navigate({ search: withFilterParams(location.search, next) }, { replace: true })
+  }
+
+  const resetFilters = () => {
+    navigate({ search: withFilterParams(location.search, EMPTY_LIBRARY_FILTERS) }, { replace: true })
+  }
+
+  // 「随便看看」直接进播放页：多一步详情页会削弱「随手看点什么」的意图。
+  // 接受来自 LibraryFilterBar 的有效草稿筛选（草稿与已应用不同时，面板已事先
+  // 调用 applyFilters 把草稿写入 URL，再用相同的条件发起随机请求以保证一致）。
+  const handleRandom = async (filters: LibraryFilterParams) => {
+    setRandomBusy(true)
+    try {
+      const media = await libraryAPI.random(id, filters)
+      navigate(`/play/${media.id}`)
+    } catch (err) {
+      const status = (err as { response?: { status?: number } })?.response?.status
+      toast.error(
+        status === 404 ? '没有符合当前筛选条件的媒体' : '随机播放失败，请稍后重试',
+      )
+    } finally {
+      setRandomBusy(false)
+    }
+  }
+
+  const {
+    library,
+    items,
+    seriesEpisodeItems,
+    total,
+    loading,
+    loadingMore,
+    hasMore,
+    loadMore,
+    loadAll,
+    loadingSeriesEpisodes,
+    isSeriesLibrary,
+    isSeries,
+    seriesCards,
+    loadingAllText,
+    reloadCurrentLibrary,
+  } = useLibraryData(id, selectedSeries, serverSortField, serverSortOrder, libraryFilters)
+
+  // 常规排序由服务端全局完成；只有 random 模式才在客户端洗牌。
+  const displayedItems = useMemo(() => {
+    return sortField === 'random' ? sortMediaList(items, 'random', sortOrder, randomSeed) : items
+  }, [items, sortField, sortOrder, randomSeed])
+
+  const displayedSeriesCards = useMemo(() => {
+    return sortField === 'random' ? sortSeriesList(seriesCards, 'random', sortOrder, randomSeed) : seriesCards
+  }, [seriesCards, sortField, sortOrder, randomSeed])
+
+  const handleSortChange = useCallback(async (field: SortField, order: SortOrder) => {
+    if (field === 'random') {
+      if (sortField !== 'random') {
+        setLastNonRandomSort(sortField)
+        setLastNonRandomOrder(sortOrder)
+        await loadAll()
+      }
+      setRandomSeed(Date.now())
+    } else {
+      setLastNonRandomSort(field)
+      setLastNonRandomOrder(order)
+    }
     setSortField(field)
     setSortOrder(order)
     if (id) {
@@ -83,41 +168,15 @@ export function LibraryPage() {
     }
     localStorage.setItem('mebox_lib_sort_field', field)
     localStorage.setItem('mebox_lib_sort_order', order)
-    if (field === 'random') {
-      setRandomSeed(Date.now())
-    }
-  }
+  }, [id, loadAll, sortField, sortOrder])
+
+  const handleLoadMore = useCallback(() => {
+    void loadMore()
+  }, [loadMore])
 
   const handleReshuffle = () => {
     setRandomSeed(Date.now())
   }
-
-  // 剧集模式：选中某个剧集后展开详情
-  const [selectedSeries, setSelectedSeries] = useState<SeriesCard | null>(null)
-  const [selectedSeason, setSelectedSeason] = useState<number | null>(null)
-
-  const {
-    library,
-    items,
-    seriesEpisodeItems,
-    total,
-    loading,
-    loadingSeriesEpisodes,
-    isSeriesLibrary,
-    isSeries,
-    seriesCards,
-    loadingAllText,
-    reloadCurrentLibrary,
-  } = useLibraryData(id, selectedSeries)
-
-  const sortedItems = useMemo(() => {
-    return sortMediaList(items, sortField, sortOrder, randomSeed, historyMap)
-  }, [items, sortField, sortOrder, randomSeed, historyMap])
-
-  const sortedSeriesCards = useMemo(() => {
-    return sortSeriesList(seriesCards, sortField, sortOrder, randomSeed, historyMap)
-  }, [seriesCards, sortField, sortOrder, randomSeed, historyMap])
-
   const {
     scanning,
     scanProgress,
@@ -129,19 +188,22 @@ export function LibraryPage() {
   })
 
   const {
+    resolvingSeries,
     selectedEpisodes,
     visibleEpisodes,
     selectedSeriesEpisodes,
+    selectedSeriesAllEpisodes,
     selectedSeriesMediaIDs,
     handleSeriesClick,
     clearSelectedSeries,
   } = useLibrarySeriesSelection({
+    libraryID: id,
     items,
     seriesEpisodeItems,
     isSeriesLibrary,
     isSeries,
     loading,
-    seriesCards: sortedSeriesCards,
+    seriesCards: displayedSeriesCards,
     searchParams,
     setSearchParams,
     selectedSeries,
@@ -150,6 +212,9 @@ export function LibraryPage() {
     setSelectedSeason,
     onClearSeriesState: () => setSeriesMetadataEditOpen(false),
   })
+  const selectedSeriesScrapeMedia = selectedSeriesEpisodes.find((media) => !isTheatricalFeature(media))
+    ?? selectedSeries?.rep
+    ?? null
 
   const {
     scraping,
@@ -162,20 +227,20 @@ export function LibraryPage() {
     handleSeriesProbe,
     handleSeriesNFO,
     handleSeriesOrganize,
-    handleSeriesSoftDelete,
+    handleSeriesDelete,
     movieActions,
   } = useLibraryAdminActions({
     libraryID: id,
     role,
     library,
     selectedSeries,
-    selectedSeriesEpisodes,
+    selectedSeriesEpisodes: selectedSeriesAllEpisodes,
     reloadCurrentLibrary,
     clearSelectedSeries,
     setManualMovie,
   })
 
-  const handleToggleFavourite = async (mediaID: string) => {
+  const handleToggleFavourite = useCallback(async (mediaID: string) => {
     if (!canFavorite || favouriteBusyID) return
     setFavouriteBusyID(mediaID)
     try {
@@ -183,9 +248,11 @@ export function LibraryPage() {
     } finally {
       setFavouriteBusyID('')
     }
-  }
+  }, [canFavorite, favouriteBusyID, toggleFavourite])
 
-  const cardActions = (media: Media): ReactNode => {
+  // useCallback 稳定引用：配合 MediaCard 的 memo，仅在收藏状态/操作集变化时
+  // 才让卡片重渲染。
+  const cardActions = useCallback((media: Media): ReactNode => {
     const actions: ReactNode[] = []
     if (canFavorite) {
       actions.push(
@@ -206,9 +273,11 @@ export function LibraryPage() {
     }
     if (actions.length === 0) return undefined
     return <>{actions}</>
-  }
+  }, [canFavorite, favouriteBusyID, handleToggleFavourite, isFavourite, movieActions])
 
-  if (loading) {
+  // resolvingSeries：深链目标剧集不在已加载的一页卡片里，正在按 key
+  // 单独解析。此时先显示加载态，避免先渲染整个媒体库列表再跳走。
+  if (loading || resolvingSeries) {
     return (
       <div className="flex items-center justify-center py-32">
         <motion.div animate={{ opacity: [0.4, 1, 0.4] }} transition={{ repeat: Infinity, duration: 2 }} className="flex items-center gap-3">
@@ -230,7 +299,7 @@ export function LibraryPage() {
       {!selectedSeries && (
         <LibraryPageHeader
           library={library}
-          itemCount={isSeries ? sortedSeriesCards.length : total}
+          itemCount={isSeries ? displayedSeriesCards.length : total}
           loadingAllText={loadingAllText}
           scanProgress={scanProgress}
           isAdmin={role === 'admin'}
@@ -249,12 +318,25 @@ export function LibraryPage() {
         />
       )}
 
+      <LibraryFilterBar
+        facets={facets}
+        loadingFacets={loadingFacets}
+        filters={libraryFilters}
+        onApply={applyFilters}
+        onReset={resetFilters}
+        onRandom={(f) => void handleRandom(f)}
+        randomBusy={randomBusy}
+      />
+
       <LibraryMediaSections
         isSeries={isSeries}
-        items={sortedItems}
-        seriesCards={sortedSeriesCards}
+        items={displayedItems}
+        seriesCards={displayedSeriesCards}
         selectedSeries={selectedSeries}
         loading={loading}
+        hasMore={hasMore}
+        loadingMore={loadingMore}
+        onLoadMore={handleLoadMore}
         cardActions={cardActions}
         onSeriesClick={handleSeriesClick}
       />
@@ -283,8 +365,9 @@ export function LibraryPage() {
         onProbe={handleSeriesProbe}
         onNFO={handleSeriesNFO}
         onOrganize={handleSeriesOrganize}
-        onSoftDelete={handleSeriesSoftDelete}
+        onDelete={handleSeriesDelete}
         onSeasonChange={setSelectedSeason}
+        onManualScrapeMedia={setManualMovie}
       />
 
       <LibraryPageDialogs
@@ -294,6 +377,7 @@ export function LibraryPage() {
         seriesMetadataEditOpen={seriesMetadataEditOpen}
         manualMovie={manualMovie}
         selectedSeries={selectedSeries}
+        selectedSeriesScrapeMedia={selectedSeriesScrapeMedia}
         selectedSeriesMediaIDs={selectedSeriesMediaIDs}
         libraryType={library?.type}
         scrapeEpisodeArtwork={scrapeEpisodeArtwork}

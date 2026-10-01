@@ -2,10 +2,21 @@ package service
 
 import (
 	"fmt"
+	"net/url"
+	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/truewhile/MeBox/internal/config"
 )
+
+type transcodeInput struct {
+	Source         string
+	Headers        map[string]string
+	StartSec       float64
+	SubtitleStream *int
+	Quality        *LocalHLSQuality
+}
 
 type ffmpegArgSettings struct {
 	encoder        string
@@ -18,6 +29,7 @@ type ffmpegArgSettings struct {
 	realtime       bool
 	threads        int
 	vaapiDevice    string
+	noScale        bool
 }
 
 type ffmpegVideoPlan struct {
@@ -31,16 +43,34 @@ type ffmpegVideoPlan struct {
 // encoder. The function is package-level so the unit test can pin its
 // behaviour without spawning a real ffmpeg process.
 func buildFFmpegArgs(cfg *config.Config, source, playlist, segments string) []string {
-	settings := ffmpegArgSettingsFromConfig(cfg)
-	video := ffmpegVideoPlanForSettings(settings)
+	return buildFFmpegArgsForInput(cfg, transcodeInput{Source: source}, playlist, segments)
+}
 
-	args := baseFFmpegArgs(video.preInput, settings.realtime)
-	args = appendInputAndVideoArgs(args, source, settings, video)
+func buildFFmpegArgsForInput(cfg *config.Config, input transcodeInput, playlist, segments string) []string {
+	settings := ffmpegArgSettingsFromConfig(cfg, input.Quality)
+	if settings.noScale {
+		// 原画档位不做硬件缩放的兼容处理，直接走软件编码，保持源分辨率。
+		settings.encoder = ""
+	}
+	video := ffmpegVideoPlanForSettings(settings)
+	if input.SubtitleStream != nil {
+		// Bitmap subtitles must be composited in software. Keeping CUDA/QSV/
+		// VAAPI frames here would require a download/upload filter chain that
+		// differs by driver and is considerably less portable.
+		settings.encoder = ""
+		video = ffmpegVideoPlanForSettings(settings)
+	}
+
+	// Mid-file restarts must not use -re: output -ss would otherwise crawl to the
+	// seek point at 1x wall-clock before emitting the first HLS segment.
+	realtime := settings.realtime && input.StartSec <= 0.05
+	args := baseFFmpegArgs(video.preInput, realtime)
+	args = appendInputAndVideoArgs(args, input, settings, video)
 	args = appendOutputHLSArgs(args, settings, segments, playlist)
 	return args
 }
 
-func ffmpegArgSettingsFromConfig(cfg *config.Config) ffmpegArgSettings {
+func ffmpegArgSettingsFromConfig(cfg *config.Config, quality *LocalHLSQuality) ffmpegArgSettings {
 	settings := ffmpegArgSettings{
 		bitrate:        ffmpegDefaultString(cfg.Transcoder.VideoBitrate, "1500k"),
 		maxrate:        ffmpegDefaultString(cfg.Transcoder.MaxRate, "1800k"),
@@ -55,7 +85,23 @@ func ffmpegArgSettingsFromConfig(cfg *config.Config) ffmpegArgSettings {
 	if cfg.Transcoder.HardwareAccel {
 		settings.encoder = normalizedHardwareEncoder(cfg.Transcoder.Encoder)
 	}
-	if settings.height <= 0 {
+	if quality != nil {
+		if strings.TrimSpace(quality.VideoBitrate) != "" {
+			settings.bitrate = strings.TrimSpace(quality.VideoBitrate)
+		}
+		if strings.TrimSpace(quality.MaxRate) != "" {
+			settings.maxrate = strings.TrimSpace(quality.MaxRate)
+		}
+		if strings.TrimSpace(quality.BufSize) != "" {
+			settings.bufsize = strings.TrimSpace(quality.BufSize)
+		}
+		if quality.Height > 0 {
+			settings.height = quality.Height
+		} else {
+			settings.noScale = true
+		}
+	}
+	if settings.height <= 0 && !settings.noScale {
 		settings.height = 720
 	}
 	if settings.segmentSeconds <= 0 {
@@ -94,8 +140,12 @@ func ffmpegVideoPlanForSettings(settings ffmpegArgSettings) ffmpegVideoPlan {
 			codec:    "h264_vaapi",
 		}
 	default:
+		filter := ""
+		if !settings.noScale {
+			filter = fmt.Sprintf("scale=-2:min(%d\\,ih)", settings.height)
+		}
 		return ffmpegVideoPlan{
-			filter: fmt.Sprintf("scale=-2:min(%d\\,ih)", settings.height),
+			filter: filter,
 			codec:  "libx264",
 			preset: settings.preset,
 		}
@@ -111,8 +161,33 @@ func baseFFmpegArgs(preInput string, realtime bool) []string {
 	return args
 }
 
-func appendInputAndVideoArgs(args []string, source string, settings ffmpegArgSettings, video ffmpegVideoPlan) []string {
-	args = append(args, "-i", source, "-map", "0:v:0?", "-map", "0:a:0?", "-vf", video.filter, "-c:v", video.codec)
+func appendInputAndVideoArgs(args []string, input transcodeInput, settings ffmpegArgSettings, video ffmpegVideoPlan) []string {
+	args = append(args, ffmpegHTTPInputArgs(input)...)
+	ss := ""
+	if input.StartSec > 0.05 {
+		ss = strconv.FormatFloat(input.StartSec, 'f', 3, 64)
+	}
+	// Always use input -ss (before -i). Output -ss on HTTP/WMV decodes from
+	// byte 0 up to the offset and cannot meet playlist WaitReady for deep
+	// scrubbing; CDNs with Range support jump via demuxer seek instead.
+	if ss != "" {
+		args = append(args, "-ss", ss)
+	}
+	args = append(args, "-i", input.Source)
+	if input.SubtitleStream != nil {
+		filter := fmt.Sprintf("[0:v:0][0:%d]overlay=0:0:eof_action=pass", *input.SubtitleStream)
+		if !settings.noScale {
+			filter += fmt.Sprintf(",scale=-2:min(%d\\,ih)", settings.height)
+		}
+		filter += "[v]"
+		args = append(args, "-filter_complex", filter, "-map", "[v]", "-map", "0:a:0?", "-c:v", video.codec)
+	} else {
+		args = append(args, "-map", "0:v:0?", "-map", "0:a:0?")
+		if video.filter != "" {
+			args = append(args, "-vf", video.filter)
+		}
+		args = append(args, "-c:v", video.codec)
+	}
 	if settings.threads > 0 && video.codec == "libx264" {
 		args = append(args, "-threads", strconv.Itoa(settings.threads))
 	}
@@ -163,4 +238,44 @@ func splitNonEmptyArgs(s string) []string {
 	}
 	flush()
 	return out
+}
+
+func ffmpegHTTPInputArgs(input transcodeInput) []string {
+	if !isHTTPSource(input.Source) {
+		return nil
+	}
+	args := []string{"-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"}
+	if len(input.Headers) == 0 {
+		return args
+	}
+	keys := make([]string, 0, len(input.Headers))
+	for key := range input.Headers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value := strings.TrimSpace(input.Headers[key])
+		if strings.TrimSpace(key) == "" || value == "" {
+			continue
+		}
+		lines = append(lines, key+": "+value)
+	}
+	if len(lines) == 0 {
+		return args
+	}
+	return append(args, "-headers", strings.Join(lines, "\r\n")+"\r\n")
+}
+
+func isHTTPSource(source string) bool {
+	u, err := url.Parse(strings.TrimSpace(source))
+	if err != nil || u == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(u.Scheme)) {
+	case "http", "https":
+		return true
+	default:
+		return false
+	}
 }

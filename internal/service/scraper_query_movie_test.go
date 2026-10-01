@@ -30,7 +30,7 @@ func TestScrapeQueryCandidatesUseMovieFolderForGenericFilename(t *testing.T) {
 	if len(got) == 0 {
 		t.Fatal("scrapeQueryCandidates returned no candidates")
 	}
-	if got[0] != "inception" {
+	if got[0] != "Inception" {
 		t.Fatalf("first query candidate = %q, want movie folder title; all candidates=%#v", got[0], got)
 	}
 	for _, candidate := range got {
@@ -55,7 +55,7 @@ func TestScrapeQueryCandidatesUseMovieLibraryRootWhenMountedAtMovieFolder(t *tes
 	if len(got) == 0 {
 		t.Fatal("scrapeQueryCandidates returned no candidates")
 	}
-	if got[0] != "inception" {
+	if got[0] != "Inception" {
 		t.Fatalf("first query candidate = %q, want movie library root title; all candidates=%#v", got[0], got)
 	}
 }
@@ -73,7 +73,7 @@ func TestScrapeQueryCandidatesDoNotUseMovieCollectionFolderAsTitle(t *testing.T)
 	if len(got) == 0 {
 		t.Fatal("scrapeQueryCandidates returned no candidates")
 	}
-	if got[0] != "the hunger games catching fire" {
+	if got[0] != "The Hunger Games Catching Fire" {
 		t.Fatalf("first query candidate = %q, want individual movie title; all candidates=%#v", got[0], got)
 	}
 	for _, candidate := range got {
@@ -92,7 +92,10 @@ func TestEnrichOneUsesMovieFolderWhenFilenameIsGeneric(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		if r.URL.Query().Get("query") != "inception" {
+		// Real metadata providers treat the query case-insensitively; this stub
+		// must too, otherwise it would only be pinned to the historical lowercased
+		// query spelling instead of the folder-fallback behaviour it guards.
+		if !strings.EqualFold(r.URL.Query().Get("query"), "inception") {
 			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}})
 			return
 		}
@@ -149,7 +152,7 @@ func TestEnrichOneUsesMovieFolderWhenFilenameIsGeneric(t *testing.T) {
 	if got.ScrapeStatus != "matched" || got.TMDbID != 27205 || got.Title != "Inception" {
 		t.Fatalf("generic filename scrape did not use folder title: status=%q tmdb=%d title=%q queries=%v", got.ScrapeStatus, got.TMDbID, got.Title, queries)
 	}
-	if len(queries) == 0 || queries[0] != "inception" {
+	if len(queries) == 0 || !strings.EqualFold(queries[0], "inception") {
 		t.Fatalf("first tmdb query = %q, want folder title; all queries=%v", firstQuery(queries), queries)
 	}
 }

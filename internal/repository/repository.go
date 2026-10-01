@@ -15,6 +15,8 @@ type Container struct {
 	Media          *MediaRepository
 	Series         *SeriesRepository
 	History        *HistoryRepository
+	MediaSegment   *MediaSegmentRepository
+	MediaProbe     *MediaProbeRepository
 	Favorite       *FavoriteRepository
 	Playlist       *PlaylistRepository
 	Setting        *SettingRepository
@@ -34,6 +36,7 @@ type Container struct {
 	StrmDirCache   *StrmDirCacheRepository
 	ScrapeTask     *ScrapeTaskRepository
 	EmbyMount      *EmbyMountRepository
+	Reader         *ReaderRepository
 }
 
 // New 将每个 repository 连接到单个 *gorm.DB。
@@ -45,6 +48,8 @@ func New(db *gorm.DB) *Container {
 		Media:          &MediaRepository{db: db},
 		Series:         &SeriesRepository{db: db},
 		History:        &HistoryRepository{db: db},
+		MediaSegment:   &MediaSegmentRepository{db: db},
+		MediaProbe:     &MediaProbeRepository{db: db},
 		Favorite:       &FavoriteRepository{db: db},
 		Playlist:       &PlaylistRepository{db: db},
 		Setting:        &SettingRepository{db: db},
@@ -64,5 +69,6 @@ func New(db *gorm.DB) *Container {
 		StrmDirCache:   &StrmDirCacheRepository{db: db},
 		ScrapeTask:     &ScrapeTaskRepository{db: db},
 		EmbyMount:      &EmbyMountRepository{db: db},
+		Reader:         &ReaderRepository{db: db},
 	}
 }

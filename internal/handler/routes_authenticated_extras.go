@@ -12,9 +12,10 @@ func registerAuthedUISurfaceRoutes(authed *gin.RouterGroup, svc *service.Contain
 
 	authed.GET("/danmaku/:id", getDanmakuHandler(svc))
 	authed.GET("/danmaku/config", getDanmakuConfigHandler(svc))
+	authed.PUT("/danmaku/settings", updateDanmakuSettingsHandler(svc))
 
 	authed.GET("/watch-history", historyListHandler(svc))
-	authed.GET("/watch-history/stats", historyStatsHandler(svc))
+	authed.GET("/watch-history/stats", requirePermission(svc, "can_view_history"), historyStatsHandler(svc))
 	authed.GET("/watch-history/continue", historyContinueHandler(svc))
 	authed.DELETE("/watch-history", historyDeleteHandler(svc))
 	authed.DELETE("/watch-history/:id", historyDeleteOneHandler(svc))
@@ -72,6 +73,7 @@ func registerAuthedFavoriteAndMediaActionRoutes(authed *gin.RouterGroup, svc *se
 func registerAuthedPlaybackExtraRoutes(authed *gin.RouterGroup, svc *service.Container) {
 	authed.GET("/playback/:id/info", playbackInfoHandler(svc))
 	authed.GET("/playback/:id/resume", playbackResumeHandler(svc))
+	authed.GET("/playback/:id/segments", playbackSegmentsHandler(svc))
 	authed.POST("/playback/:id/progress", playbackProgressHandler(svc))
 	authed.GET("/playback/:id/external-players", externalPlayersHandler(svc))
 	authed.GET("/playback/:id/external-url", externalURLHandler(svc))

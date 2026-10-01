@@ -61,3 +61,41 @@ jobs:
             VERSION=${{ env.RELEASE_VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to Server
+    needs: [docker]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          port: ${{ secrets.SERVER_PORT }}
+          script: |
+            set -e
+            echo "==== 开始部署 MeBox ===="
+            cd /root/dockerData/mebox
+
+            if docker compose version >/dev/null 2>&1; then
+              COMPOSE_CMD="docker compose"
+            elif command -v docker-compose >/dev/null 2>&1; then
+              COMPOSE_CMD="docker-compose"
+            else
+              echo "错误: 未找到 docker compose 或 docker-compose"
+              exit 1
+            fi
+
+            echo "正在拉取最新镜像..."
+            $COMPOSE_CMD pull
+
+            echo "正在重启服务..."
+            $COMPOSE_CMD up -d
+
+            echo "清理旧的无用镜像..."
+            docker image prune -f
+
+            echo "==== 部署完成并已启动 ===="
+

@@ -28,6 +28,8 @@ func ApplyRuntimeSettings(ctx context.Context, cfg *config.Config, repos *reposi
 }
 
 func ApplyRuntimeSetting(cfg *config.Config, key, value string) {
+	config.RuntimeMu.Lock()
+	defer config.RuntimeMu.Unlock()
 	if cfg == nil {
 		return
 	}
@@ -117,6 +119,36 @@ func ApplyRuntimeSetting(cfg *config.Config, key, value string) {
 			}
 			cfg.Cache.ImagesMaxSizeMB = n
 		}
+	case "cache.images_originals_max_size_mb":
+		if n, err := strconv.Atoi(value); err == nil {
+			if n < 0 {
+				n = 0
+			}
+			cfg.Cache.ImagesOriginalsMaxSizeMB = n
+		}
+	case "cache.images_originals_ttl_hours":
+		if n, err := strconv.Atoi(value); err == nil {
+			if n < 0 {
+				n = 0
+			}
+			cfg.Cache.ImagesOriginalsTTLHours = n
+		}
+	case "cache.memory_max_size_mb":
+		n := config.DefaultCacheMemoryMaxSizeMB
+		if value != "" {
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return
+			}
+			n = parsed
+		}
+		if n <= 0 {
+			n = config.DefaultCacheMemoryMaxSizeMB
+		}
+		if n > 4096 {
+			n = 4096
+		}
+		cfg.Cache.MemoryMaxSizeMB = n
 	}
 }
 

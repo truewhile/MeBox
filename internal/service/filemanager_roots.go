@@ -77,7 +77,11 @@ func (s *FileManagerService) allowedRoots() (map[string]string, error) {
 		}
 		addSetting("organize-source", "organize.source_dir")
 		addSetting("organize-target", "organize.target_dir")
-		addSetting("qb-savepath", "qbittorrent.savepath")
+		addSetting("downloader-savepath", "downloader.savepath")
+		// 兼容历史键名 qbittorrent.savepath：旧版本把下载器保存目录存在该键下
+		if value, err := s.repo.Setting.Get(context.Background(), "downloader.savepath"); err != nil || strings.TrimSpace(value) == "" {
+			addSetting("downloader-savepath", "qbittorrent.savepath")
+		}
 	}
 	if s.repo != nil && s.repo.Library != nil {
 		libs, err := s.repo.Library.List(context.Background())

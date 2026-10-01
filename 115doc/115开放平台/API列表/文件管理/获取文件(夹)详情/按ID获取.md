@@ -1,0 +1,114 @@
+## 按ID获取
+
+### 基本信息
+
+| 属性         | 内容                               |
+|:-----------|:---------------------------------|
+| 接口名称       | 按ID获取                            |
+| 接口版本       | v1.0                             |
+| 接口路径       | /get_info                        |
+| 请求方法       | GET                              |
+| 接口状态       | 生产环境                             |
+
+### 接口说明
+
+根据文件或文件夹ID获取详情。
+
+### 接口地址
+
+```
+https://proapi.115.com/open/folder/get_info
+```
+
+### 请求方式
+
+```
+GET
+```
+
+### 认证方式
+
+```
+Authorization: Bearer access_token
+```
+
+### 请求参数
+
+| 参数名      | 类型     | 必填 | 默认值 | 说明        | 约束/示例               |
+|:---------|:-------|:---|:----|:----------|:--------------------|
+| file_id  | string | 是  | -   | 文件或文件夹ID | 1288444975268439877 |
+
+### 请求示例
+
+```shell
+curl -G 'https://proapi.115.com/open/folder/get_info' \
+  -H 'Authorization: Bearer access_token' \
+  --data-urlencode 'file_id=1288444975268439877'
+```
+
+### 响应字段说明
+
+| 字段                    | 类型       | 描述                                      |
+|:----------------------|:---------|:----------------------------------------|
+| state                 | boolean  | 接口状态，true表示成功                          |
+| message               | string   | 异常信息                                    |
+| code                  | int      | 异常码                                     |
+| data                  | object   | 文件或文件夹详情                                |
+| data.count            | int      | 包含的文件总数                                 |
+| data.size             | string   | 文件或文件夹总大小                               |
+| data.size_byte        | int      | 文件或文件夹总大小，单位为字节                         |
+| data.folder_count     | int      | 包含的文件夹总数                                |
+| data.play_long        | int      | 视频时长；`-1` 表示正在统计，其他数值单位为秒              |
+| data.show_play_long   | int      | 是否开启展示视频时长                              |
+| data.ptime            | string   | 上传时间                                    |
+| data.utime            | string   | 修改时间                                    |
+| data.file_name        | string   | 文件或文件夹名称                                |
+| data.pick_code        | string   | 文件提取码                                   |
+| data.sha1             | string   | 文件SHA-1值                                |
+| data.file_id          | string   | 文件或文件夹ID                                |
+| data.is_mark          | string   | 是否星标                                    |
+| data.open_time        | int      | 文件或文件夹最近打开时间                            |
+| data.file_category    | string   | 文件属性：1-文件，0-文件夹                          |
+| data.paths            | object[] | 文件或文件夹所在路径                               |
+| data.paths[].file_id  | string   | 父目录ID                                   |
+| data.paths[].file_name | string   | 父目录名称                                   |
+| data.paths[].iss      | int      | 父目录共享状态标识                               |
+
+### 响应示例
+
+```json
+{
+  "state": true,
+  "message": "",
+  "code": 0,
+  "data": {
+    "count": 0,
+    "size": "",
+    "size_byte": 0,
+    "folder_count": 0,
+    "play_long": 0,
+    "show_play_long": 0,
+    "ptime": "",
+    "utime": "",
+    "file_name": "",
+    "pick_code": "",
+    "sha1": "",
+    "file_id": "",
+    "is_mark": "",
+    "open_time": 0,
+    "file_category": "",
+    "paths": []
+  }
+}
+```
+
+### 注意事项
+
+- 文件或文件夹已进入回收站或被彻底删除时，接口返回异常。
+- `user_id` 由服务端根据 access token 获取，无需传入。
+
+### 修改历史
+
+| 修改时间                         | 修改说明 |
+|:-----------------------------|:-----|
+| 2025年04月01日(周二) 00:00:00 | 创建文档 |

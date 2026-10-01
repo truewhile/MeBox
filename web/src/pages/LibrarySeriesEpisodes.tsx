@@ -1,11 +1,17 @@
 import { Link } from 'react-router-dom'
-import { Play } from 'lucide-react'
+import { Play, Search } from 'lucide-react'
 
-import { imageURL } from '../api/client'
+import { ARTWORK, imageURL } from '../api/client'
 import { ExternalPlayerButton } from '../components/ExternalPlayerButton'
 import type { Media } from '../types'
-import { seriesTitleFromPath } from '../utils/groupSeries'
+import {
+  isTheatricalFeature,
+  seasonLabel,
+  seriesTitleFromPath,
+  THEATRICAL_SEASON,
+} from '../utils/groupSeries'
 import { formatSize } from './libraryPageModel'
+import { formatEpisodeLabel, formatEpisodeNumber } from '../utils/episodeNumber'
 
 type SeasonGroup = {
   season: number
@@ -18,7 +24,9 @@ type LibrarySeriesEpisodesProps = {
   selectedSeason: number | null
   visibleEpisodes: Media[]
   playbackFrom: string
+  isAdmin?: boolean
   onSeasonChange: (season: number) => void
+  onManualScrape?: (media: Media) => void
 }
 
 export function LibrarySeriesEpisodes({
@@ -27,7 +35,9 @@ export function LibrarySeriesEpisodes({
   selectedSeason,
   visibleEpisodes,
   playbackFrom,
+  isAdmin = false,
   onSeasonChange,
+  onManualScrape,
 }: LibrarySeriesEpisodesProps) {
   if (loading) {
     return (
@@ -53,18 +63,19 @@ export function LibrarySeriesEpisodes({
                 : 'border-sand-200 bg-white text-ink-100 hover:border-brand-200 hover:text-brand-600')
             }
           >
-            {season === 0 ? '特别篇' : `第 ${season} 季`} · {episodes.length} 集
+            {seasonLabel(season)} · {episodes.length} {season === THEATRICAL_SEASON ? '部' : '集'}
           </button>
         ))}
       </div>
 
       <div>
         <h3 className="mb-3 font-display text-lg font-semibold text-ink-600">
-          {displaySeason === 0 ? '特别篇' : `第 ${displaySeason} 季`}
+          {seasonLabel(displaySeason)}
         </h3>
         <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
           {visibleEpisodes.map((ep) => {
             const displayTitle = episodeDisplayTitle(ep, visibleEpisodes)
+            const versionCount = ep.versions?.length ?? 1
             return (
               <div
                 key={ep.id}
@@ -77,20 +88,22 @@ export function LibrarySeriesEpisodes({
                   >
                     {ep.backdrop_url || ep.poster_url ? (
                       <img
-                        src={imageURL(ep.backdrop_url || ep.poster_url || '', ep.updated_at)}
+                        src={imageURL(ep.backdrop_url || ep.poster_url || '', ep.updated_at, ARTWORK.backdropStrip)}
                         alt=""
+                        loading="lazy"
+                        decoding="async"
                         className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
                         referrerPolicy="no-referrer"
                       />
                     ) : (
-                      <span className="text-brand-600 font-bold text-sm">{ep.episode_num || '—'}</span>
+                      <span className="text-brand-600 font-bold text-sm">{formatEpisodeNumber(ep) || '—'}</span>
                     )}
                     <div className="absolute inset-0 flex items-center justify-center bg-black/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
                       <Play size={15} className="fill-white text-white drop-shadow-sm" />
                     </div>
                     {ep.episode_num > 0 && (
                       <span className="absolute bottom-0 right-0 rounded-tl bg-black/75 px-1 py-0.5 text-[9px] font-bold leading-none text-white backdrop-blur-[2px]">
-                        {ep.episode_num}
+                        {formatEpisodeNumber(ep)}
                       </span>
                     )}
                   </div>
@@ -102,10 +115,24 @@ export function LibrarySeriesEpisodes({
                       {ep.duration_sec > 0
                         ? `${Math.floor(ep.duration_sec / 60)} 分钟`
                         : formatSize(ep.size_bytes)}
+                      {versionCount > 1 ? ` · ${versionCount} 版本` : ''}
                     </p>
                   </div>
                 </Link>
-                <ExternalPlayerButton mediaId={ep.id} label="外部" compact />
+                <div className="flex shrink-0 items-center gap-1">
+                  {isAdmin && onManualScrape && isTheatricalFeature(ep) && (
+                    <button
+                      type="button"
+                      onClick={() => onManualScrape(ep)}
+                      className="btn-outline !px-2 !py-1.5 text-[11px]"
+                      title="手动匹配剧场版"
+                    >
+                      <Search size={12} />
+                      匹配
+                    </button>
+                  )}
+                  <ExternalPlayerButton mediaId={ep.id} label="外部" compact />
+                </div>
               </div>
             )
           })}
@@ -127,15 +154,18 @@ function episodeDisplayTitle(ep: Media, siblings: Media[]): string {
     }
   }
 
-  if (ep.episode_num > 0) {
+  const episodeLabel = formatEpisodeLabel(ep)
+  if (episodeLabel) {
     if (!mainTitle) {
-      return `第 ${ep.episode_num} 集`
+      return episodeLabel
     }
-    const prefixRegex = new RegExp(`^(第\\s*0*${ep.episode_num}\\s*集|ep?\\.?\\s*0*${ep.episode_num}\\b)`, 'i')
+    // 标题里已经以「第 11 集 / 第 11.5 集 / ep 11」开头时直接用它，避免重复前缀。
+    const episodeNumber = formatEpisodeNumber(ep).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const prefixRegex = new RegExp(`^(第\\s*0*${episodeNumber}\\s*集|ep?\\.?\\s*0*${episodeNumber}\\b)`, 'i')
     if (prefixRegex.test(mainTitle)) {
       return mainTitle
     }
-    return `第 ${ep.episode_num} 集 · ${mainTitle}`
+    return `${episodeLabel} · ${mainTitle}`
   }
 
   return mainTitle || '未命名'

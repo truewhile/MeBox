@@ -23,9 +23,14 @@ type OpenClient struct {
 	RefreshTokenStr string
 	executor        *QueueExecutor
 
-	// tokenMu 保护令牌刷新：业务请求中途 access_token 失效时自动刷新重试，
-	// 多 goroutine（同步列表 + 下载队列）并发下只允许一次刷新进行。
-	tokenMu sync.Mutex
+	// OnTokenRefreshed 在 access_token 刷新成功后回调（参数为新令牌对），
+	// 供上层持久化新令牌使用；nil 安全，且在 tokenMu 释放后调用以避免死锁。
+	OnTokenRefreshed func(accessToken, refreshToken string)
+
+	// tokenMu 保护 AccessToken / RefreshTokenStr 的并发读写：业务请求中途
+	// access_token 失效时自动刷新重试，多 goroutine（同步列表 + 下载队列）
+	// 并发下只允许一次刷新进行。
+	tokenMu sync.RWMutex
 }
 
 // default115HTTPClient 创建带有防 405 重定向保护的 http.Client。
@@ -57,10 +62,38 @@ func NewOpenClient(appID, accessToken, refreshToken string) *OpenClient {
 	}
 }
 
-// SetAuthToken 更新认证令牌。
+// SetAuthToken 更新认证令牌（并发安全）。
 func (c *OpenClient) SetAuthToken(accessToken, refreshToken string) {
+	c.tokenMu.Lock()
+	c.setAuthTokenLocked(accessToken, refreshToken)
+	c.tokenMu.Unlock()
+}
+
+// setAuthTokenLocked 无锁更新令牌，调用方必须已持有 tokenMu 写锁
+// （tryRefreshTokenLocked 等已持锁流程内部使用，避免重入死锁）。
+func (c *OpenClient) setAuthTokenLocked(accessToken, refreshToken string) {
 	c.AccessToken = accessToken
 	c.RefreshTokenStr = refreshToken
+}
+
+// currentAccessToken 返回当前 access_token（并发安全）。
+func (c *OpenClient) currentAccessToken() string {
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	return c.AccessToken
+}
+
+// currentRefreshToken 返回当前 refresh_token（并发安全）。
+func (c *OpenClient) currentRefreshToken() string {
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	return c.RefreshTokenStr
+}
+
+// CurrentAccessToken 返回当前 access_token 快照（并发安全），
+// 供上层在无锁环境下安全读取（如 Ping 时探测令牌是否存在）。
+func (c *OpenClient) CurrentAccessToken() string {
+	return c.currentAccessToken()
 }
 
 // RespState 兼容 115 不同端点返回的 state 类型（proapi 返回布尔、passport 返回数字）。
@@ -117,6 +150,7 @@ func (c *OpenClient) doJSON(ctx context.Context, method, rawURL string, form map
 		if err != nil {
 			return nil, err
 		}
+		attemptedAccess := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
 
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
@@ -185,12 +219,20 @@ func (c *OpenClient) doJSON(ctx context.Context, method, rawURL string, form map
 		// refresh_token 刷新后重试一次。刷新失败或重试后仍失败才返回，
 		// 避免长时间同步因 token 过期而整体失败。
 		if isTokenCode(base.Code) {
-			if access && c.tryRefreshTokenLocked(ctx) {
+			if access && c.tryRefreshTokenLocked(ctx, attemptedAccess) {
 				continue
 			}
 			if access {
 				// 刷新失败（或已刷新仍失败）时返回明确错误
 				lastErr = NewOpenAPIResponseError(base.Code, base.Errno, base.Message, base.Error, "115: access_token 校验失败且刷新未成功")
+			} else {
+				// 未携带令牌的请求（登录/刷新流程）命中 token 类错误码：
+				// 必须返回显式 error，避免调用方把 (resp, nil) 当作成功处理
+				msg := base.Message
+				if msg == "" {
+					msg = base.Error
+				}
+				lastErr = fmt.Errorf("115: 认证失败(code=%d): %s", base.Code, msg)
 			}
 			return &base, lastErr
 		}
@@ -242,8 +284,11 @@ func (c *OpenClient) buildRequestWithUA(ctx context.Context, method, rawURL stri
 	if method == http.MethodPost && len(form) > 0 {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
-	if access && c.AccessToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.AccessToken)
+	if access {
+		// RLock 读取令牌，避免与刷新流程的写入产生数据竞争
+		if accessToken := c.currentAccessToken(); accessToken != "" {
+			req.Header.Set("Authorization", "Bearer "+accessToken)
+		}
 	}
 	return req, nil
 }
@@ -261,33 +306,59 @@ func (c *OpenClient) doAuthJSONWithUA(ctx context.Context, method, rawURL string
 // tryRefreshTokenLocked 并发安全地刷新 access_token；成功返回 true（调用方
 // 应使用内存中的新 token 重试原请求）。
 //
+// failedAccess 是失败请求实际携带的 token。拿到写锁后与当前 token 对比：
+// 若已被其他 goroutine 刷新过则直接复用，避免并发请求连环轮转消耗 115
+// 的一次性 refresh_token。全程持写锁读写 token 字段，无 TOCTOU 窗口。
+//
 // 对"refresh_token 本身已失效/被吊销"（IsRefreshTokenDead，如 40140114/116/119/120）
 // 这类不可恢复的错误直接放弃并清空内存 token（提示需重新授权）。
 // 对其它失败（网络瞬时抖动、刷新接口可重试错误码等）做指数退避重试几次再放弃，
 // 避免同步长任务中途 token 到期时恰好撞上一个短暂的刷新失败就整体失败。
-func (c *OpenClient) tryRefreshTokenLocked(ctx context.Context) bool {
+func (c *OpenClient) tryRefreshTokenLocked(ctx context.Context, failedAccess string) bool {
 	c.tokenMu.Lock()
-	defer c.tokenMu.Unlock()
+	// 请求发出后若其他 goroutine 已经刷新完成，直接复用新 token 重试；
+	// 不能再次轮换一次性的 refresh_token。
+	if failedAccess != "" && c.AccessToken != failedAccess {
+		c.tokenMu.Unlock()
+		return true
+	}
+	newToken, ok := c.refreshTokenWhileLocked(ctx, failedAccess)
+	c.tokenMu.Unlock()
+	// 回调必须在 tokenMu 释放后调用，避免上层在回调内访问客户端时死锁
+	if ok && newToken != nil && c.OnTokenRefreshed != nil {
+		c.OnTokenRefreshed(newToken.AccessToken, newToken.RefreshToken)
+	}
+	return ok
+}
+
+// refreshTokenWhileLocked 在已持有 tokenMu 写锁的前提下执行刷新。
+// 返回 (新令牌, 是否成功)；命中"他人已刷新"捷径时新令牌为 nil。
+func (c *OpenClient) refreshTokenWhileLocked(ctx context.Context, oldAccess string) (*TokenData, bool) {
+	if c.AccessToken != oldAccess {
+		// 其他 goroutine 刚刷新过：直接复用内存中的新 token 重试原请求
+		return nil, true
+	}
+	refreshToken := c.RefreshTokenStr
 	for attempt := 0; attempt < refreshAttempts; attempt++ {
-		token, err := c.RefreshToken(c.RefreshTokenStr)
+		token, err := c.doRefreshToken(refreshToken)
 		if err == nil {
-			c.SetAuthToken(token.AccessToken, token.RefreshToken)
-			return true
+			c.setAuthTokenLocked(token.AccessToken, token.RefreshToken)
+			return token, true
 		}
 		if IsRefreshTokenDead(err) {
-			c.SetAuthToken("", "")
-			return false
+			c.setAuthTokenLocked("", "")
+			return nil, false
 		}
 		// 可恢复失败：退避后重试。ctx 取消时立即放弃。
 		if attempt < refreshAttempts-1 {
 			select {
 			case <-ctx.Done():
-				return false
+				return nil, false
 			case <-time.After(refreshBackoff(attempt)):
 			}
 		}
 	}
-	return false
+	return nil, false
 }
 
 // refreshAttempts 是刷新 access_token 失败时的最大尝试次数（含首次）。
@@ -312,7 +383,14 @@ func isTokenCode(code int) bool {
 }
 
 // openList 解析 data 为对象或数组（StructOrArray 语义）。
+// 115 部分接口在鉴权/业务异常时会返回 data:null 或 data:{}，此时若直接
+// 反序列化会得到零值元素 + nil error，调用方会把空数据当成功处理；
+// 这里对 null/空对象显式报错。
 func openList[T any](raw json.RawMessage) ([]T, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || bytes.Equal(trimmed, []byte("{}")) {
+		return nil, fmt.Errorf("115: data 为空（%s）", string(trimmed))
+	}
 	var single T
 	if err := json.Unmarshal(raw, &single); err == nil {
 		return []T{single}, nil
@@ -324,11 +402,15 @@ func openList[T any](raw json.RawMessage) ([]T, error) {
 	return nil, fmt.Errorf("115: data 既不是对象也不是数组")
 }
 
-// openFirstList 取 data 的第一个元素。
+// openFirstList 取 data 的第一个元素；data 为空（null/空数组）时返回显式错误，
+// 避免调用方拿到 (nil, nil) 后解引用空指针。
 func openFirstList[T any](raw json.RawMessage) (*T, error) {
 	items, err := openList[T](raw)
-	if err != nil || len(items) == 0 {
+	if err != nil {
 		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("115: data 为空数组")
 	}
 	return &items[0], nil
 }

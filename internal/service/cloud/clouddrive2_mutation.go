@@ -131,10 +131,13 @@ func (p *cloudDrive2Provider) openListAPIMove(ctx context.Context, source, targe
 }
 
 func (p *cloudDrive2Provider) openListAPIPost(ctx context.Context, apiPath string, payload any, action string) error {
-	token, err := p.openListAPIToken(ctx)
-	if err != nil {
-		return err
-	}
+	_, err := doWithOpenListAPIToken(ctx, p, func(token string) (struct{}, error) {
+		return struct{}{}, p.openListAPIPostWithToken(ctx, apiPath, payload, action, token)
+	})
+	return err
+}
+
+func (p *cloudDrive2Provider) openListAPIPostWithToken(ctx context.Context, apiPath string, payload any, action, token string) error {
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.openListAPIURL(apiPath), bytes.NewReader(body))
 	if err != nil {
@@ -151,6 +154,9 @@ func (p *cloudDrive2Provider) openListAPIPost(ctx context.Context, apiPath strin
 		return decorateDAVTransportError(p.name, p.openListAPIURL(apiPath), err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return errOpenListAPITokenExpired
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("%s: api %s returned http %d", p.name, action, resp.StatusCode)
 	}
@@ -200,27 +206,43 @@ func (p *cloudDrive2Provider) PutFile(ctx context.Context, remotePath string, r 
 }
 
 // openListAPIPutFile 通过 OpenList /api/fs/form 上传（QMediaSync 同款契约：
-// PUT + multipart + File-Path 头）。
+// PUT + multipart + File-Path 头）。使用 io.Pipe + multipart.Writer 边写边发，
+// 避免把整个文件读进内存。
 func (p *cloudDrive2Provider) openListAPIPutFile(ctx context.Context, remotePath string, r io.Reader) error {
 	token, err := p.openListAPIToken(ctx)
 	if err != nil {
 		return err
 	}
 	encodedPath := openListPathEscape(remotePath)
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-	formFile, err := writer.CreateFormFile("file", path.Base(remotePath))
+
+	pr, pw := io.Pipe()
+	writer := multipart.NewWriter(pw)
+	go func() {
+		var writeErr error
+		defer func() {
+			// 读源失败必须传给 pipe 写端，让 HTTP 请求以失败收场而不是静默截断
+			if writeErr != nil {
+				_ = pw.CloseWithError(writeErr)
+				return
+			}
+			_ = pw.Close()
+		}()
+		formFile, err := writer.CreateFormFile("file", path.Base(remotePath))
+		if err != nil {
+			writeErr = err
+			return
+		}
+		if _, err := io.Copy(formFile, r); err != nil {
+			writeErr = err
+			return
+		}
+		writeErr = writer.Close()
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, p.openListAPIURL("/api/fs/form"), pr)
 	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(formFile, r); err != nil {
-		return err
-	}
-	if err := writer.Close(); err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, p.openListAPIURL("/api/fs/form"), body)
-	if err != nil {
+		// 关闭读端以释放仍在等待写入的后台 goroutine（其 Write 会立即失败返回）
+		_ = pr.Close()
 		return err
 	}
 	req.Header.Set("Authorization", token)
@@ -230,9 +252,15 @@ func (p *cloudDrive2Provider) openListAPIPutFile(ctx context.Context, remotePath
 	req.Header.Set("Overwrite", "true")
 	resp, err := p.client.Do(req)
 	if err != nil {
+		// 传输层失败（含提前断开）时 net/http 会关闭请求 body，解除后台 goroutine 阻塞
 		return decorateDAVTransportError(p.name, p.openListAPIURL("/api/fs/form"), err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		// 流式 body 无法重放，不能自动重试：清除登录 token 缓存让下次上传重新登录，
+		// 本次返回明确错误交由调用方重试
+		p.invalidateOpenListAPIToken()
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return p.openListAPIStatusError("upload", remotePath, resp.StatusCode)
 	}

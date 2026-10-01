@@ -119,6 +119,60 @@ func (c *OpenClient) GetFsListFlat(ctx context.Context, cid string, offset, limi
 	return files, resp.Count, nil
 }
 
+// FindNamedContentInParent 在父目录下查找与本地内容一致的同名文件。
+// 匹配条件：文件名完全一致、大小一致，且 SHA1 为空或与 expectedSHA1 大小写不敏感相等。
+// 同时返回该目录下全部同名文件（含未匹配的脏副本），便于上传前清理。
+// 目录过大时分页扫描，最多拉取 maxListPages 页（每页 pageSize 条）。
+func (c *OpenClient) FindNamedContentInParent(ctx context.Context, parentCID, fileName, expectedSHA1 string, expectedSize int64) (matched *RemoteFile, sameName []RemoteFile, err error) {
+	fileName = strings.TrimSpace(fileName)
+	if fileName == "" {
+		return nil, nil, nil
+	}
+	const pageSize = 200
+	const maxListPages = 20 // 最多扫描 4000 项，元数据父目录通常远小于此
+	expectedSHA1 = strings.TrimSpace(expectedSHA1)
+	offset := 0
+	for page := 0; page < maxListPages; page++ {
+		files, _, listErr := c.GetFsList(ctx, parentCID, offset, pageSize)
+		if listErr != nil {
+			return nil, sameName, listErr
+		}
+		if len(files) == 0 {
+			break
+		}
+		for i := range files {
+			f := files[i]
+			if f.Category == TypeDir {
+				continue
+			}
+			// fta=0/2 表示未上传完成，不可作为已存在副本
+			if f.Fta == "0" || f.Fta == "2" {
+				continue
+			}
+			if f.FileName != fileName {
+				continue
+			}
+			sameName = append(sameName, f)
+			if matched != nil {
+				continue
+			}
+			if f.FileSize != expectedSize {
+				continue
+			}
+			remoteSha := strings.TrimSpace(f.Sha1)
+			if remoteSha == "" || remoteSha == "-" || strings.EqualFold(remoteSha, expectedSHA1) {
+				cp := f
+				matched = &cp
+			}
+		}
+		if len(files) < pageSize {
+			break
+		}
+		offset += len(files)
+	}
+	return matched, sameName, nil
+}
+
 // GetFsDetailByCid 查询文件（夹）详情。
 func (c *OpenClient) GetFsDetailByCid(ctx context.Context, fileId string) (*RemoteFileDetail, error) {
 	params := map[string]string{"file_id": fileId}
@@ -225,6 +279,62 @@ func (c *OpenClient) GetDownloadURLWithUA(ctx context.Context, pickCode, ua stri
 	return first.URL.URL, nil
 }
 
+// downurlBatchSize 单次批量换取直链的 pick_code 数上限。官方 /open/ufile/downurl
+// 支持逗号分隔多个 pick_code，批量可大幅降低元数据下载的换链请求量；大小取
+// 保守值，减小单个违规/异常文件导致整批失败的爆炸半径。
+const downurlBatchSize = 10
+
+// GetDownloadURLsBatch 批量获取下载直链（pickcode → URL）。先查进程内缓存，
+// 仅对未命中的 pick_code 分片发起批量请求；单个分片失败时返回已解析的部分与
+// 错误，调用方对缺失项回退到逐个 GetDownloadURLWithUA。UA 语义与单个换取
+// 一致：直链绑定换取时的 UA，后续下载必须携带同一 UA。
+func (c *OpenClient) GetDownloadURLsBatch(ctx context.Context, pickCodes []string, ua string) (map[string]string, error) {
+	ua = strings.TrimSpace(ua)
+	out := make(map[string]string, len(pickCodes))
+	seen := make(map[string]struct{}, len(pickCodes))
+	missing := make([]string, 0, len(pickCodes))
+	for _, pc := range pickCodes {
+		pc = strings.TrimSpace(pc)
+		if pc == "" {
+			continue
+		}
+		if _, dup := seen[pc]; dup {
+			continue
+		}
+		seen[pc] = struct{}{}
+		if cached := GetDownloadURLCache(pc, ua); cached != "" {
+			out[pc] = cached
+			continue
+		}
+		missing = append(missing, pc)
+	}
+	for start := 0; start < len(missing); start += downurlBatchSize {
+		end := start + downurlBatchSize
+		if end > len(missing) {
+			end = len(missing)
+		}
+		chunk := missing[start:end]
+		params := map[string]string{"pick_code": strings.Join(chunk, ",")}
+		resp, err := c.doAuthJSONWithUA(ctx, "POST", ProAPIBase+"/open/ufile/downurl", params, 1, ua)
+		if err != nil {
+			return out, err
+		}
+		var data map[string]downloadURLData
+		if err := json.Unmarshal(resp.Data, &data); err != nil {
+			return out, fmt.Errorf("115: 解析下载地址失败：%w", err)
+		}
+		// 响应以文件 ID 为键，条目内的 pick_code 用于映射回请求侧
+		for _, item := range data {
+			if item.PickCode == "" || item.URL.URL == "" {
+				continue
+			}
+			SetDownloadURLCache(item.PickCode, item.URL.URL, ua)
+			out[item.PickCode] = item.URL.URL
+		}
+	}
+	return out, nil
+}
+
 // ─── 授权（设备码扫码） ──────────────────────────────────────────────────────
 
 // QrCodeScanStatus 扫码状态。
@@ -300,6 +410,11 @@ func (c *OpenClient) GetQrCode() (*QrCodeDataReturn, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 关键字段缺失时显式报错：空 uid/sign 会导致后续扫码轮询必然失败，
+	// 不能把残缺响应当成功返回给界面。
+	if code.Uid == "" || code.Sign == "" {
+		return nil, fmt.Errorf("115: 设备码响应缺少 uid/sign，无法发起扫码授权")
+	}
 	return &QrCodeDataReturn{QrCodeData: *code, CodeVerifier: codeVerifier}, nil
 }
 
@@ -352,18 +467,49 @@ func (c *OpenClient) GetToken(qrCode *QrCodeDataReturn) (*TokenData, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 空凭证绝不能 SetAuthToken 后当成功返回：界面会显示"授权成功"但账号不可用
+	if token.AccessToken == "" || token.RefreshToken == "" {
+		return nil, fmt.Errorf("115: 设备码换 token 返回空凭证（access_token/refresh_token 缺失）")
+	}
 	c.SetAuthToken(token.AccessToken, token.RefreshToken)
 	return token, nil
 }
 
 // RefreshToken 刷新访问令牌。
 func (c *OpenClient) RefreshToken(refreshToken string) (*TokenData, error) {
+	c.tokenMu.Lock()
 	if refreshToken == "" {
 		refreshToken = c.RefreshTokenStr
 	}
 	if refreshToken == "" {
+		c.tokenMu.Unlock()
 		return nil, fmt.Errorf("没有可用的 refresh_token")
 	}
+	token, err := c.doRefreshToken(refreshToken)
+	if err != nil {
+		// refresh_token 已失效时清空内存令牌（提示需重新授权）
+		if IsRefreshTokenDead(err) {
+			c.setAuthTokenLocked("", "")
+		}
+		c.tokenMu.Unlock()
+		return nil, err
+	}
+	if token.AccessToken == "" || token.RefreshToken == "" {
+		c.tokenMu.Unlock()
+		return nil, fmt.Errorf("115: 刷新返回空凭证（access_token/refresh_token 缺失）")
+	}
+	c.setAuthTokenLocked(token.AccessToken, token.RefreshToken)
+	c.tokenMu.Unlock()
+	if c.OnTokenRefreshed != nil {
+		c.OnTokenRefreshed(token.AccessToken, token.RefreshToken)
+	}
+	return token, nil
+}
+
+// doRefreshToken 调用 115 刷新接口换取新令牌，不修改客户端内存状态；
+// 拆出无状态方法供 tryRefreshTokenLocked（已持 tokenMu 写锁）复用，
+// 避免在持锁期间重入 SetAuthToken 造成死锁。
+func (c *OpenClient) doRefreshToken(refreshToken string) (*TokenData, error) {
 	params := map[string]string{"refresh_token": refreshToken}
 	resp, err := c.doJSON(context.Background(), "POST", PassportAPIBase+"/open/refreshToken", params, false, 0)
 	if err != nil && resp == nil {
@@ -373,18 +519,9 @@ func (c *OpenClient) RefreshToken(refreshToken string) (*TokenData, error) {
 		return nil, err
 	}
 	if !resp.State {
-		apiErr := NewOpenAPIResponseError(resp.Code, resp.Errno, resp.Message, resp.Error, "115 开放平台刷新访问凭证失败")
-		if IsRefreshTokenDead(apiErr) {
-			c.SetAuthToken("", "")
-		}
-		return nil, apiErr
+		return nil, NewOpenAPIResponseError(resp.Code, resp.Errno, resp.Message, resp.Error, "115 开放平台刷新访问凭证失败")
 	}
-	token, err := openFirstList[TokenData](resp.Data)
-	if err != nil {
-		return nil, err
-	}
-	c.SetAuthToken(token.AccessToken, token.RefreshToken)
-	return token, nil
+	return openFirstList[TokenData](resp.Data)
 }
 
 // ─── 用户信息 ──────────────────────────────────────────────────────────────────

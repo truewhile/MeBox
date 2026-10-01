@@ -44,30 +44,13 @@ services:
       # NAS 示例：source: /vol1/1000/Media
       # Windows Docker Desktop 示例：source: D:/Media
       # create_host_path=false 可以避免路径写错时 Docker 自动创建空文件夹。
-      - type: bind
-        source: ./media
-        target: /media
-        bind:
-          create_host_path: false
-
-      # 下载目录。需要和 qBittorrent 保存路径保持一致。
-      # NAS 示例：source: /vol1/1000/Downloads
-      # Windows Docker Desktop 示例：source: D:/Downloads
-      - type: bind
-        source: ./downloads
-        target: /downloads
-        bind:
-          create_host_path: false
-
-      # 管理面板「系统更新」需要访问 Docker 引擎。
-      # 需要一键更新 Docker 镜像时取消下一行注释。
-      # - /var/run/docker.sock:/var/run/docker.sock
+      - ./media: /media
 
     environment:
       TZ: Asia/Shanghai
 
-      PUID: "1000"
-      PGID: "1000"
+      PUID: "0"
+      PGID: "0"
 
       MEBOX_APP_HOST: 0.0.0.0
       MEBOX_APP_PORT: 8080
@@ -76,8 +59,8 @@ services:
       MEBOX_LOGGING_LEVEL: info
       MEBOX_LOGGING_FORMAT: console
       MEBOX_LOGGING_OUTPUT_PATH: /data/logs
-      MEBOX_LOGGING_MAX_SIZE_MB: "50"
-      MEBOX_LOGGING_MAX_BACKUPS: "20"
+      MEBOX_LOGGING_MAX_SIZE_MB: "20"
+      MEBOX_LOGGING_MAX_BACKUPS: "5"
       MEBOX_LOGGING_MAX_AGE_DAYS: "30"
 
       MEBOX_DATABASE_TYPE: postgres
@@ -113,8 +96,8 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "50m"
-        max-file: "10"
+        max-size: "20m"
+        max-file: "3"
 
   postgres:
     image: postgres:16-alpine
@@ -136,8 +119,8 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "50m"
-        max-file: "10"
+        max-size: "20m"
+        max-file: "3"
 
   redis:
     image: redis:7-alpine
@@ -161,5 +144,5 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "50m"
-        max-file: "10"
+        max-size: "20m"
+        max-file: "3"

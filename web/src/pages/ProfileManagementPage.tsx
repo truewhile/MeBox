@@ -154,7 +154,7 @@ export function ProfileManagementPage() {
         <div className="glass-panel py-12 text-center">
           <div className="mb-2 text-4xl">👤</div>
           <p className="font-medium text-ink-600">暂无 Profile</p>
-          <p className="text-sm text-ink-50">点击右上角"创建 Profile"开始</p>
+          <p className="text-sm text-ink-50">点击右上角「创建 Profile」开始</p>
         </div>
       )}
 

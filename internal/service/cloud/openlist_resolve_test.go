@@ -195,10 +195,43 @@ func TestOpenListResolveDoesNotFallbackToWebDAVWhenAPIRawURLFails(t *testing.T) 
 		t.Fatal(err)
 	}
 	_, err = p.Resolve(context.Background(), "/Cloud/Movie.mkv")
-	if err == nil || !strings.Contains(err.Error(), "pure 302 playback requires OpenList raw_url") {
-		t.Fatalf("resolve error = %v, want raw_url requirement", err)
+	if err == nil || !strings.Contains(err.Error(), "resolve download URL") || !strings.Contains(err.Error(), "via API failed") {
+		t.Fatalf("resolve error = %v, want API resolve failure", err)
 	}
 	if davSeen {
 		t.Fatal("openlist video resolve fell back to WebDAV after raw_url failure")
+	}
+}
+
+func TestOpenListResolveMetadataUsesAPIInsteadOfWebDAV(t *testing.T) {
+	var gotPath, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		if r.Method != http.MethodPost || r.URL.Path != "/api/fs/get" {
+			t.Fatalf("unexpected request %s %s; metadata should use API, not WebDAV", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":200,"data":{"raw_url":"https://cdn.example.test/poster.jpg?sign=1"}}`))
+	}))
+	defer srv.Close()
+
+	p, err := New(TypeOpenList, map[string]any{"server": srv.URL, "token": "alist-token"}, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// .nfo metadata file should use API, not WebDAV
+	link, err := p.Resolve(context.Background(), "/Cloud/Movie/Movie.nfo")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if gotPath != "/api/fs/get" {
+		t.Fatalf("api path = %q, want /api/fs/get (metadata should not use WebDAV)", gotPath)
+	}
+	if gotAuth != "alist-token" {
+		t.Fatalf("Authorization = %q, want token", gotAuth)
+	}
+	if link.URL != "https://cdn.example.test/poster.jpg?sign=1" {
+		t.Fatalf("url = %q", link.URL)
 	}
 }

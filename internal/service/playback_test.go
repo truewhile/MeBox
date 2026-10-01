@@ -91,3 +91,25 @@ func TestListFavouritesIncludesLocalAndRemoteIDs(t *testing.T) {
 		t.Fatalf("expected local favourite first by created_at desc, got %#v", items[0])
 	}
 }
+
+func TestPlaybackProgressCompletedThreshold(t *testing.T) {
+	tests := []struct {
+		name     string
+		position int64
+		duration int64
+		want     bool
+	}{
+		{name: "zero duration", position: 10_000, duration: 0, want: false},
+		{name: "short clip early", position: 10_000, duration: 20_000, want: false},
+		{name: "short clip near end", position: 18_000, duration: 20_000, want: true},
+		{name: "movie before final window", position: 80_000, duration: 120_000, want: false},
+		{name: "movie in final window", position: 95_000, duration: 120_000, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := playbackProgressCompleted(tt.position, tt.duration); got != tt.want {
+				t.Fatalf("playbackProgressCompleted(%d, %d) = %t, want %t", tt.position, tt.duration, got, tt.want)
+			}
+		})
+	}
+}

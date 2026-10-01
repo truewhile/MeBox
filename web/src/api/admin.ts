@@ -1,4 +1,4 @@
-import { api } from './client'
+import { api, MIGRATION_REQUEST_TIMEOUT } from './client'
 import type { AccessLog, Setting, User } from '../types'
 
 export interface DatabaseStatus {
@@ -137,8 +137,12 @@ export const adminAPI = {
 	  testDatabaseConnection: (payload: DatabaseConnectionPayload) =>
 	    api.post<PostgresTestResult>('/admin/database/test', payload).then((r) => r.data),
 
-	  migrateDatabase: (payload: DatabaseConnectionPayload) =>
-	    api.post<DatabaseMigrationResult>('/admin/database/migrate', payload).then((r) => r.data),
+  migrateDatabase: (payload: DatabaseConnectionPayload) =>
+    api
+      .post<DatabaseMigrationResult>('/admin/database/migrate', payload, {
+        timeout: MIGRATION_REQUEST_TIMEOUT,
+      })
+      .then((r) => r.data),
 
 	  saveDatabaseConfig: (payload: DatabaseConnectionPayload) =>
 	    api.post<{ message: string; type: string }>('/admin/database/save-config', payload).then((r) => r.data),

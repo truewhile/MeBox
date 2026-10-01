@@ -18,6 +18,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/truewhile/MeBox/internal/helper"
 	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/service/cloud"
 	"github.com/truewhile/MeBox/internal/service/cloud115"
@@ -25,6 +26,8 @@ import (
 
 const (
 	strmMaxTaskRetry = 3
+	// strmRecentUploadSkipWindow：上传已成功但 115 列表尚未反映时，同步扫描跳过同路径同大小再入队的宽限窗口。
+	strmRecentUploadSkipWindow = 30 * time.Minute
 )
 
 // downloadWorker 下载队列 worker：认领 → 解析直链 → 下载 → 落盘。
@@ -51,38 +54,136 @@ func (s *StrmService) downloadWorker(ctx context.Context) {
 			sleepContext(ctx, 2*time.Second)
 			continue
 		}
-		var wg sync.WaitGroup
+		// 处于 WAF 冷却的 115 任务先退回，剩余任务在派发前按账号批量换链：
+		// downurl 支持逗号分隔多个 pick_code，整批任务一次请求即可完成解析，
+		// 显著减少全局 QPS 限流下的换链请求量。
+		runnable := make([]*model.StrmDownloadTask, 0, len(tasks))
 		for i := range tasks {
+			task := &tasks[i]
+			if task.Provider == model.StrmProvider115 && s.wafCooldownLeft() > 0 {
+				s.requeueDownloadTask(task)
+				continue
+			}
+			runnable = append(runnable, task)
+		}
+		if len(runnable) == 0 {
+			continue
+		}
+		resolved := s.batchResolve115Links(ctx, runnable)
+		var wg sync.WaitGroup
+		for i := range runnable {
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				task := &tasks[i]
-				if task.Provider == model.StrmProvider115 && s.wafCooldownLeft() > 0 {
-					s.requeueDownloadTask(task)
-					return
-				}
+				task := runnable[i]
 				if !s.acquireDownloadSlot(ctx, task.Provider) {
 					s.requeueDownloadTask(task)
 					return
 				}
 				defer s.releaseDownloadSlot(task.Provider)
-				s.processDownloadTask(ctx, task)
+				// 单个任务 panic 不应拖垮整个下载 worker，且 panic 时任务
+				// 会永远停在 running：兜底走失败重试路径。
+				completed := false
+				helper.Run(s.log, "strm.downloadTask", func() {
+					defer func() {
+						if !completed {
+							s.downloadTaskFailWithRetry(task, "任务执行异常中断")
+						}
+					}()
+					s.processDownloadTask(ctx, task, resolved)
+					completed = true
+				})
 			}(i)
 		}
 		wg.Wait()
 	}
 }
 
+// dlResolveKey 构造批量换链结果 map 的键（按账号隔离，避免极端情况下不同
+// 账号的引用串扰）。
+func dlResolveKey(accountID, fileRef string) string {
+	return accountID + "|" + fileRef
+}
+
+// batchResolve115Links 在派发执行前对 115 下载任务做批量换链。官方 downurl
+// 接口支持逗号分隔多个 pick_code（文档《获取文件下载地址》），按账号把整批
+// 任务的 pickcode 合并换取，减少 QPS 限流下的换链请求量。解析结果写入
+// pickcode 直链缓存供任务执行时命中；批量失败只记日志并触发风控冷却判定，
+// 未解析成功的任务在执行时回退到逐个 Resolve，不影响任务本身。
+func (s *StrmService) batchResolve115Links(ctx context.Context, tasks []*model.StrmDownloadTask) map[string]*cloud.DirectLink {
+	byAcct := map[string][]string{}
+	seenRef := map[string]map[string]struct{}{}
+	for _, task := range tasks {
+		if task.Provider != model.StrmProvider115 {
+			continue
+		}
+		ref := strings.TrimSpace(task.RemoteRef)
+		if ref == "" {
+			continue
+		}
+		if seenRef[task.AccountID] == nil {
+			seenRef[task.AccountID] = map[string]struct{}{}
+		}
+		if _, dup := seenRef[task.AccountID][ref]; dup {
+			continue
+		}
+		seenRef[task.AccountID][ref] = struct{}{}
+		byAcct[task.AccountID] = append(byAcct[task.AccountID], ref)
+	}
+	resolved := map[string]*cloud.DirectLink{}
+	for acctID, refs := range byAcct {
+		acct, err := s.repo.StrmAccount.FindByID(ctx, acctID)
+		if err != nil || acct == nil {
+			continue
+		}
+		provider, err := s.providerFor(ctx, acct)
+		if err != nil {
+			continue
+		}
+		batch, ok := provider.(cloud.BatchResolver)
+		if !ok {
+			continue
+		}
+		links, err := batch.ResolveBatch(ctx, refs)
+		if err != nil {
+			if is115Blocked(err) {
+				s.triggerWAFCooldown()
+			}
+			s.log.Warn("batch resolve 115 download links failed; fall back to per-task resolve",
+				zap.String("account_id", acctID), zap.Int("refs", len(refs)), zap.Error(err))
+		}
+		for ref, link := range links {
+			if link == nil || link.URL == "" {
+				continue
+			}
+			resolved[dlResolveKey(acctID, ref)] = link
+		}
+	}
+	return resolved
+}
+
 // requeueDownloadTask 把已认领但未实际执行的任务退回 pending，避免长期停留在 running。
+// 退回时必须设置 NextTryAt（WAF 冷却剩余时间）：claim 只过滤 next_try_at
+// 已过期的任务，不设会让同一批任务被立刻再认领，形成 claim/requeue
+// 热循环（占用 SQLite 写锁并饿死上传队列）。
 func (s *StrmService) requeueDownloadTask(task *model.StrmDownloadTask) {
 	task.Status = model.StrmTaskPending
 	task.StartedAt = nil
+	task.NextTryAt = nil
+	if task.Provider == model.StrmProvider115 {
+		if left := s.wafCooldownLeft(); left > 0 {
+			next := time.Now().Add(left)
+			task.NextTryAt = &next
+		}
+	}
 	if err := s.repo.StrmDownload.Update(context.Background(), task); err != nil {
 		s.log.Warn("requeue strm download task failed", zap.Error(err), zap.String("id", task.ID))
 	}
 }
 
-func (s *StrmService) processDownloadTask(ctx context.Context, task *model.StrmDownloadTask) {
+// processDownloadTask 处理单个下载任务：解析直链（优先使用批量换链预取的
+// 结果，未命中时逐个 Resolve）→ 下载 → 落盘。
+func (s *StrmService) processDownloadTask(ctx context.Context, task *model.StrmDownloadTask, resolved map[string]*cloud.DirectLink) {
 	cleanPath := sanitizeLocalPath(task.LocalPath)
 	if cleanPath != "" && cleanPath != task.LocalPath {
 		task.LocalPath = cleanPath
@@ -93,8 +194,16 @@ func (s *StrmService) processDownloadTask(ctx context.Context, task *model.StrmD
 		task.Status = status
 		task.Error = message
 		task.FinishedAt = &now
-		if err := s.repo.StrmDownload.Update(context.Background(), task); err != nil {
+		// 条件化收尾：用户取消会直接把 running 改为 canceled，无条件
+		// Update 会把已取消任务覆盖回 done。
+		if ok, err := s.repo.StrmDownload.UpdateIfRunning(context.Background(), task.ID, map[string]any{
+			"status":      status,
+			"error":       message,
+			"finished_at": &now,
+		}); err != nil {
 			s.log.Warn("update strm download task failed", zap.Error(err))
+		} else if !ok {
+			s.log.Info("strm download task already closed elsewhere", zap.String("id", task.ID))
 		}
 	}
 	acct, err := s.repo.StrmAccount.FindByID(ctx, task.AccountID)
@@ -107,13 +216,16 @@ func (s *StrmService) processDownloadTask(ctx context.Context, task *model.StrmD
 		s.downloadTaskFailWithRetry(task, err.Error())
 		return
 	}
-	link, err := provider.Resolve(ctx, task.RemoteRef)
-	if err != nil {
-		if is115Blocked(err) {
-			s.triggerWAFCooldown()
+	link, ok := resolved[dlResolveKey(task.AccountID, task.RemoteRef)]
+	if !ok || link == nil || link.URL == "" {
+		link, err = provider.Resolve(ctx, task.RemoteRef)
+		if err != nil {
+			if is115Blocked(err) {
+				s.triggerWAFCooldown()
+			}
+			s.downloadTaskFailWithRetry(task, "解析下载地址失败："+err.Error())
+			return
 		}
-		s.downloadTaskFailWithRetry(task, "解析下载地址失败："+err.Error())
-		return
 	}
 	if err := downloadToFile(ctx, link, task.LocalPath, s.http); err != nil {
 		// 直链失效（403/404/410 等）：清掉缓存让下一轮重新换取
@@ -147,7 +259,19 @@ func (s *StrmService) uploadWorker(ctx context.Context) {
 			continue
 		}
 		for i := range tasks {
-			s.processUploadTask(ctx, &tasks[i])
+			t := &tasks[i]
+			// 与下载侧一致：单任务 panic 不损失 worker 线程，且兜底走
+			// 失败重试路径（否则任务永久 running）。
+			completed := false
+			helper.Run(s.log, "strm.uploadTask", func() {
+				defer func() {
+					if !completed {
+						s.uploadTaskFailWithRetry(t, "任务执行异常中断")
+					}
+				}()
+				s.processUploadTask(ctx, t)
+				completed = true
+			})
 		}
 	}
 }
@@ -158,8 +282,15 @@ func (s *StrmService) processUploadTask(ctx context.Context, task *model.StrmUpl
 		task.Status = status
 		task.Error = message
 		task.FinishedAt = &now
-		if err := s.repo.StrmUpload.Update(context.Background(), task); err != nil {
+		// 条件化收尾：与下载侧一致，防止覆盖已取消任务。
+		if ok, err := s.repo.StrmUpload.UpdateIfRunning(context.Background(), task.ID, map[string]any{
+			"status":      status,
+			"error":       message,
+			"finished_at": &now,
+		}); err != nil {
 			s.log.Warn("update strm upload task failed", zap.Error(err))
+		} else if !ok {
+			s.log.Info("strm upload task already closed elsewhere", zap.String("id", task.ID))
 		}
 	}
 	if task.Provider == model.StrmProvider115 {
@@ -203,19 +334,36 @@ func (s *StrmService) processUploadTask(ctx context.Context, task *model.StrmUpl
 }
 
 // processUpload115 115 元数据上传：task.RemotePath 存的是父目录 cid，FileName 为远端文件名。
+//
+// 幂等要点：
+//  1. 上传/重试前按父目录 + 文件名 + SHA1 探活：远端已有同内容副本则跳过上传，仅清理其它脏副本；
+//  2. 真正上传成功后把新 file_id 写回 RemoteRef，供下次同步/重试识别；
+//  3. 115 上传不保证同名覆盖，内容不同时仍先删旧再传。
 func (s *StrmService) processUpload115(ctx context.Context, task *model.StrmUploadTask) {
-	finish := func(status, message string) {
+	finish := func(status, message, remoteRef string) {
 		now := time.Now()
 		task.Status = status
 		task.Error = message
 		task.FinishedAt = &now
-		if err := s.repo.StrmUpload.Update(context.Background(), task); err != nil {
+		updates := map[string]any{
+			"status":      status,
+			"error":       message,
+			"finished_at": &now,
+		}
+		if remoteRef != "" {
+			task.RemoteRef = remoteRef
+			updates["remote_ref"] = remoteRef
+		}
+		// 条件化收尾：与下载侧一致，防止覆盖已取消任务。
+		if ok, err := s.repo.StrmUpload.UpdateIfRunning(context.Background(), task.ID, updates); err != nil {
 			s.log.Warn("update strm upload task failed", zap.Error(err))
+		} else if !ok {
+			s.log.Info("strm upload task already closed elsewhere", zap.String("id", task.ID))
 		}
 	}
 	acct, err := s.repo.StrmAccount.FindByID(ctx, task.AccountID)
 	if err != nil || acct == nil {
-		finish(model.StrmTaskFailed, "网盘账号不存在")
+		finish(model.StrmTaskFailed, "网盘账号不存在", "")
 		return
 	}
 	provider, err := s.providerFor(ctx, acct)
@@ -223,25 +371,97 @@ func (s *StrmService) processUpload115(ctx context.Context, task *model.StrmUplo
 		s.uploadTaskFailWithRetry(task, err.Error())
 		return
 	}
-	named, ok := provider.(interface {
-		PutFileNamed(ctx context.Context, parentCID, fileName string, r io.Reader) error
-	})
+	open115, ok := provider.(cloud.OpenAPI115Provider)
 	if !ok {
-		finish(model.StrmTaskFailed, "该网盘不支持元数据上传")
+		finish(model.StrmTaskFailed, "该网盘不支持元数据上传", "")
 		return
 	}
-	f, err := os.Open(task.LocalPath)
+	client := open115.OpenClient()
+
+	localSHA1, shaErr := cloud115.FileSHA1(task.LocalPath)
+	if shaErr != nil {
+		s.uploadTaskFailWithRetry(task, "计算本地 SHA1 失败："+shaErr.Error())
+		return
+	}
+	info, statErr := os.Stat(task.LocalPath)
+	if statErr != nil {
+		s.uploadTaskFailWithRetry(task, "读取本地文件失败："+statErr.Error())
+		return
+	}
+	localSize := info.Size()
+
+	// ── 探活：父目录下是否已有同名同内容副本（覆盖「上传成功但本地当失败重试」）──
+	matched, sameName, probeErr := client.FindNamedContentInParent(ctx, task.RemotePath, task.FileName, localSHA1, localSize)
+	if probeErr != nil {
+		// 探活失败不阻断上传：按原路径继续，避免列表接口抖动导致任务永久卡住
+		s.log.Warn("115 上传前探活失败，继续上传",
+			zap.String("task_id", task.ID),
+			zap.String("local_path", task.LocalPath),
+			zap.Error(probeErr))
+	} else if matched != nil && matched.FileId != "" {
+		staleIDs := collectStale115FileIDs(task.RemoteRef, sameName, matched.FileId)
+		if len(staleIDs) > 0 {
+			if err := client.DeleteFiles(ctx, task.RemotePath, staleIDs...); err != nil {
+				s.log.Warn("探活命中后清理 115 脏副本失败（已跳过上传）",
+					zap.String("task_id", task.ID),
+					zap.String("matched_id", matched.FileId),
+					zap.Error(err))
+			}
+		}
+		s.log.Info("115 元数据已存在同内容副本，跳过上传",
+			zap.String("task_id", task.ID),
+			zap.String("local_path", task.LocalPath),
+			zap.String("file_id", matched.FileId))
+		finish(model.StrmTaskDone, "", matched.FileId)
+		return
+	}
+
+	// ── 需要上传：先尽量删掉任务携带的旧副本，再真正上传 ──
+	// 删除失败时不中止——继续上传新文件，旧副本交由下次同步 cleanupBatchRedundantFiles。
+	if task.RemoteRef != "" {
+		refs := strings.Split(task.RemoteRef, ",")
+		if err := client.DeleteFiles(ctx, task.RemotePath, refs...); err != nil {
+			s.log.Warn("删除网盘旧元数据失败，跳过删除继续上传新文件",
+				zap.String("task_id", task.ID),
+				zap.String("local_path", task.LocalPath),
+				zap.Error(err))
+		}
+	}
+
+	result, err := client.Upload(ctx, task.LocalPath, task.RemotePath, "", "")
 	if err != nil {
-		s.uploadTaskFailWithRetry(task, "打开本地文件失败："+err.Error())
-		return
-	}
-	if err := named.PutFileNamed(ctx, task.RemotePath, task.FileName, f); err != nil {
-		_ = f.Close()
 		s.uploadTaskFailWithRetry(task, "上传失败："+err.Error())
 		return
 	}
-	_ = f.Close()
-	finish(model.StrmTaskDone, "")
+	newID := ""
+	if result != nil {
+		newID = strings.TrimSpace(result.FileId)
+	}
+	finish(model.StrmTaskDone, "", newID)
+}
+
+// collectStale115FileIDs 汇总待删脏副本：任务 RemoteRef + 探活所见同名文件，排除 keepID。
+func collectStale115FileIDs(remoteRef string, sameName []cloud115.RemoteFile, keepID string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" || id == keepID {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	for _, id := range strings.Split(remoteRef, ",") {
+		add(id)
+	}
+	for _, f := range sameName {
+		add(f.FileId)
+	}
+	return out
 }
 
 // downloadTaskFailWithRetry 下载失败任务按退避重试，超过上限标记 failed。
@@ -249,7 +469,19 @@ func (s *StrmService) downloadTaskFailWithRetry(task *model.StrmDownloadTask, me
 	if !retryTask(&task.RetryCount, &task.Status, &task.Error, &task.NextTryAt, &task.FinishedAt, message) {
 		return
 	}
-	_ = s.repo.StrmDownload.Update(context.Background(), task)
+	// 条件化写入：任务已被取消（DB 中不再是 running）时不得覆盖回 pending，
+	// 否则用户刚取消的任务会“复活”并自动重试。
+	if ok, err := s.repo.StrmDownload.UpdateIfRunning(context.Background(), task.ID, map[string]any{
+		"status":      task.Status,
+		"error":       task.Error,
+		"retry_count": task.RetryCount,
+		"next_try_at": task.NextTryAt,
+		"finished_at": task.FinishedAt,
+	}); err != nil {
+		s.log.Warn("fail strm download task failed", zap.Error(err), zap.String("id", task.ID))
+	} else if !ok {
+		s.log.Info("strm download task already closed elsewhere, skip retry overwrite", zap.String("id", task.ID))
+	}
 }
 
 // uploadTaskFailWithRetry 上传失败任务按退避重试，超过上限标记 failed。
@@ -257,7 +489,17 @@ func (s *StrmService) uploadTaskFailWithRetry(task *model.StrmUploadTask, messag
 	if !retryTask(&task.RetryCount, &task.Status, &task.Error, &task.NextTryAt, &task.FinishedAt, message) {
 		return
 	}
-	_ = s.repo.StrmUpload.Update(context.Background(), task)
+	if ok, err := s.repo.StrmUpload.UpdateIfRunning(context.Background(), task.ID, map[string]any{
+		"status":      task.Status,
+		"error":       task.Error,
+		"retry_count": task.RetryCount,
+		"next_try_at": task.NextTryAt,
+		"finished_at": task.FinishedAt,
+	}); err != nil {
+		s.log.Warn("fail strm upload task failed", zap.Error(err), zap.String("id", task.ID))
+	} else if !ok {
+		s.log.Info("strm upload task already closed elsewhere, skip retry overwrite", zap.String("id", task.ID))
+	}
 }
 
 // retryTask 失败状态机：重试次数不足则回 pending 并设置退避时间，否则 failed。
@@ -610,9 +852,19 @@ func (s *StrmService) ClearCanceledDownloadTasks(ctx context.Context) (int64, er
 	return s.repo.StrmDownload.ClearCanceled(ctx)
 }
 
+// ClearFailedDownloadTasks 清空全部已失败的下载记录，返回删除数量。
+func (s *StrmService) ClearFailedDownloadTasks(ctx context.Context) (int64, error) {
+	return s.repo.StrmDownload.ClearFailed(ctx)
+}
+
 // ClearCanceledUploadTasks 清空全部已取消的上传记录，返回删除数量。
 func (s *StrmService) ClearCanceledUploadTasks(ctx context.Context) (int64, error) {
 	return s.repo.StrmUpload.ClearCanceled(ctx)
+}
+
+// ClearFailedUploadTasks 清空全部已失败的上传记录，返回删除数量。
+func (s *StrmService) ClearFailedUploadTasks(ctx context.Context) (int64, error) {
+	return s.repo.StrmUpload.ClearFailed(ctx)
 }
 
 // ClearDoneUploadTasks 清空全部已完成上传记录，返回删除数量。
@@ -677,12 +929,15 @@ func (s *StrmService) wafCooldownLeft() time.Duration {
 }
 
 // is115Blocked 判断错误是否来自 115 的风控/限流（WAF 405 拦截页或限流错误码）。
+// 覆盖两层文案：HTTP 层（doJSON 的"接口触发频控/安全拦截（HTTP 405）"）与
+// 业务错误码层（OpenAPIError 的"115 接口错误（406/770004）"）。
 func is115Blocked(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "115 接口返回 http 405") ||
+		strings.Contains(msg, "115 接口触发频控/安全拦截") ||
 		strings.Contains(msg, "访问被阻断") ||
 		strings.Contains(msg, "request has been blocked") ||
 		strings.Contains(msg, "115 接口错误（770004") ||

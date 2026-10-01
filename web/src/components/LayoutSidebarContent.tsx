@@ -1,5 +1,4 @@
 import { Link } from 'react-router-dom'
-import { motion } from 'framer-motion'
 import { ArrowLeft, Menu, X } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -77,13 +76,9 @@ function LayoutSidebarHeader({
           className="h-10 w-10 shrink-0 rounded-xl object-contain shadow-sm"
         />
         {sidebarExpanded && (
-          <motion.span
-            initial={{ opacity: 0, x: -10 }}
-            animate={{ opacity: 1, x: 0 }}
-            className="font-display text-lg font-extrabold tracking-tight text-[var(--app-text)]"
-          >
+          <span className="font-display text-lg font-extrabold tracking-tight text-[var(--app-text)] animate-fade-slide-in">
             MeBox
-          </motion.span>
+          </span>
         )}
       </Link>
       <SidebarIconButton className="hidden lg:block" onClick={onToggleSidebar}>

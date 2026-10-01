@@ -23,18 +23,19 @@ func (s *ScannerService) ingestFile(ctx context.Context, lib *model.Library, roo
 		return
 	}
 
-	parsedSeason, parsedEpisode := ParseEpisode(path)
+	parsedSeason, parsedEpisode, parsedFraction := ParseEpisodeParts(path)
 	localMeta := s.readLocalScanMetadata(lib, root, path, parsedSeason, parsedEpisode)
 	media := s.buildLocalScanMedia(localScanMediaInput{
-		lib:           lib,
-		root:          root,
-		path:          path,
-		ext:           ext,
-		fileID:        fileID,
-		size:          size,
-		parsedSeason:  parsedSeason,
-		parsedEpisode: parsedEpisode,
-		localMeta:     localMeta,
+		lib:            lib,
+		root:           root,
+		path:           path,
+		ext:            ext,
+		fileID:         fileID,
+		size:           size,
+		parsedSeason:   parsedSeason,
+		parsedEpisode:  parsedEpisode,
+		parsedFraction: parsedFraction,
+		localMeta:      localMeta,
 	})
 	isNewMedia, skipUnchanged := s.localMediaScanState(localMediaScanStateInput{
 		ctx:           ctx,
@@ -93,7 +94,11 @@ func (s *ScannerService) readLocalScanMetadata(lib *model.Library, root *model.L
 	if root != nil && strings.TrimSpace(root.Path) != "" {
 		rootPath = root.Path
 	}
-	localMeta, err := ReadLocalMetadata(path, rootPath, librarySupportsSeasons(lib) || parsedSeason > 0 || parsedEpisode > 0)
+	seriesLike := librarySupportsSeasons(lib) || parsedSeason > 0 || parsedEpisode > 0
+	if mediaLooksLikeTheatricalFeature(&model.Media{Path: path}) {
+		seriesLike = false
+	}
+	localMeta, err := ReadLocalMetadata(path, rootPath, seriesLike)
 	if err != nil {
 		s.log.Warn("read local metadata failed", zap.String("path", path), zap.Error(err))
 	}
@@ -118,42 +123,88 @@ func (s *ScannerService) localMediaScanState(in localMediaScanStateInput) (bool,
 	existing, exists := in.existingMedia[in.cleanPath]
 	isNewMedia := !exists
 	if exists && in.ext != ".strm" && existing.SizeBytes == in.size && !localMetadataNeedsRefresh(existing, in.localMeta) && !localDerivedMetadataNeedsRefresh(existing, in.incoming) {
+		// Unchanged rows are skipped, but a row that never received ffprobe data
+		// still needs a backfill probe so installing ffmpeg later repairs the library.
+		s.queueProbeBackfillIfNeeded(in.path, in.ext, existing)
 		return isNewMedia, true
 	}
 	return isNewMedia, false
 }
 
+// queueProbeBackfillIfNeeded re-queues ffprobe for an unchanged media row that
+// still carries no technical metadata, reporting whether a probe was queued.
+//
+// The incremental skip above only compares file size and metadata, so a library
+// scanned while ffprobe was unavailable kept duration/resolution/codec empty
+// forever: installing ffmpeg and rescanning did nothing, and the only way out was
+// a per-item manual "探测媒体轨". Only the probe is re-queued here — the row
+// itself is not rewritten, so scraped metadata and titles stay untouched.
+func (s *ScannerService) queueProbeBackfillIfNeeded(path, ext string, existing existingLocalMedia) bool {
+	if !mediaExtensionSupportsProbe(ext) || !localMediaProbeDataMissing(existing) {
+		return false
+	}
+	// Without a resolvable ffprobe/ffmpeg every queued probe would just fail, so
+	// only queue when probing is actually possible right now.
+	if s == nil || s.probe == nil || !s.probe.Available() {
+		return false
+	}
+	if !s.queueLocalMediaProbe(path) {
+		return false
+	}
+	if s.log != nil {
+		s.log.Debug("rescan queued ffprobe backfill for media without track metadata", zap.String("path", path))
+	}
+	return true
+}
+
+// localMediaProbeDataMissing reports whether a media row has none of the fields
+// ffprobe fills in. Requiring every field to be empty keeps genuinely probed
+// media (which always yields at least a codec or a duration) out of the backfill
+// path.
+func localMediaProbeDataMissing(existing existingLocalMedia) bool {
+	return existing.DurationSec <= 0 &&
+		existing.Width <= 0 &&
+		existing.Height <= 0 &&
+		strings.TrimSpace(existing.VideoCodec) == "" &&
+		strings.TrimSpace(existing.AudioCodec) == ""
+}
+
 type localScanMediaInput struct {
-	lib           *model.Library
-	root          *model.LibraryRoot
-	path          string
-	ext           string
-	fileID        string
-	size          int64
-	parsedSeason  int
-	parsedEpisode int
-	localMeta     *LocalMetadata
+	lib            *model.Library
+	root           *model.LibraryRoot
+	path           string
+	ext            string
+	fileID         string
+	size           int64
+	parsedSeason   int
+	parsedEpisode  int
+	parsedFraction float64
+	localMeta      *LocalMetadata
 }
 
 func (s *ScannerService) buildLocalScanMedia(in localScanMediaInput) *model.Media {
 	title, year := CleanQueryWithRecognition(context.Background(), s.repo, in.path)
 	if title == "" {
-		title = strings.TrimSuffix(filepath.Base(in.path), in.ext)
+		title = mediaSidecarBase(in.path)
+		if title == "" {
+			title = strings.TrimSuffix(filepath.Base(in.path), in.ext)
+		}
 	}
 	title, year = preferISOParentScrapeIdentity(in.path, in.lib.Path, title, year)
 
 	media := &model.Media{
-		LibraryID:     in.lib.ID,
-		LibraryRootID: libraryRootID(in.root),
-		RelativePath:  localRelativePath(in.path, in.root),
-		Title:         title,
-		Year:          year,
-		Path:          in.path,
-		SizeBytes:     in.size,
-		Container:     strings.TrimPrefix(in.ext, "."),
-		FileID:        in.fileID,
-		SeasonNum:     in.parsedSeason,
-		EpisodeNum:    in.parsedEpisode,
+		LibraryID:       in.lib.ID,
+		LibraryRootID:   libraryRootID(in.root),
+		RelativePath:    localRelativePath(in.path, in.root),
+		Title:           title,
+		Year:            year,
+		Path:            in.path,
+		SizeBytes:       in.size,
+		Container:       strings.TrimPrefix(in.ext, "."),
+		FileID:          in.fileID,
+		SeasonNum:       in.parsedSeason,
+		EpisodeNum:      in.parsedEpisode,
+		EpisodeFraction: in.parsedFraction,
 	}
 	if in.ext == ".strm" {
 		media.Container = "strm"
@@ -193,7 +244,7 @@ func (s *ScannerService) writeLocalScanMedia(in localScanWriteInput) {
 		in.writeBatch.AddWithAfter(in.path, in.media, in.after)
 		return
 	}
-	if err := s.repo.Media.Upsert(in.ctx, in.media); err != nil {
+	if err := s.repo.Media.UpsertWithAliases(in.ctx, in.media, missingSTRMPathAliases(in.path)); err != nil {
 		addScanError(in.res, in.path, err)
 		s.log.Warn("upsert media failed", zap.String("path", in.path), zap.Error(err))
 		return
@@ -245,8 +296,10 @@ func (s *ScannerService) duplicateByFileID(ctx context.Context, fileID, path str
 }
 
 func (s *ScannerService) mediaPathExists(ctx context.Context, path string) bool {
+	paths := []string{path}
+	paths = append(paths, missingSTRMPathAliases(path)...)
 	var count int64
 	err := s.repo.DB.WithContext(ctx).Unscoped().Model(&model.Media{}).
-		Where("path = ?", path).Count(&count).Error
+		Where("path IN ?", paths).Count(&count).Error
 	return err == nil && count > 0
 }

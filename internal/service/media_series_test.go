@@ -50,6 +50,10 @@ func TestListRecentSeriesCardsCountsAllEpisodesInSeries(t *testing.T) {
 	if cards[0].Count != 40 {
 		t.Fatalf("recent series count = %d, want full 40 episodes", cards[0].Count)
 	}
+	expectedLastAdded := now.Add(40 * time.Minute)
+	if cards[0].LastAddedAt == nil || !cards[0].LastAddedAt.Equal(expectedLastAdded) {
+		t.Fatalf("recent series LastAddedAt = %v, want %v", cards[0].LastAddedAt, expectedLastAdded)
+	}
 }
 
 func TestMediaSeriesKeyCollapsesNestedSpecialFolders(t *testing.T) {
@@ -373,6 +377,51 @@ func TestGroupMediaSeriesCardsMergesPollutedEpisodeFoldersBySharedShowID(t *test
 	}
 }
 
+func TestGroupMediaSeriesCardsKeepsMixedTitlesInSameEpisodicDirectoryTogether(t *testing.T) {
+	items := []model.Media{
+		{
+			Base:         model.Base{ID: "main-1"},
+			LibraryID:    "anime",
+			Title:        "住在拔作岛上的我应该如何是好？",
+			Path:         `/media/影视库/动漫/拔作岛/[64bitsub][Nukitashi][01][AVC_2×FLAC].mkv.strm`,
+			SeasonNum:    1,
+			EpisodeNum:   1,
+			ScrapeStatus: "matched",
+		},
+		{
+			Base:         model.Base{ID: "main-2"},
+			LibraryID:    "anime",
+			Title:        "住在拔作岛上的我应该如何是好？",
+			Path:         `/media/影视库/动漫/拔作岛/[64bitsub][Nukitashi][02][AVC_2×FLAC].mkv.strm`,
+			SeasonNum:    1,
+			EpisodeNum:   2,
+			ScrapeStatus: "matched",
+		},
+		{
+			Base:         model.Base{ID: "special-1"},
+			LibraryID:    "anime",
+			Title:        "nukitashi",
+			Path:         `/media/影视库/动漫/拔作岛/[64bitsub][Nukitashi][CM_01][AVC_FLAC].mkv.strm`,
+			ScrapeStatus: "matched",
+		},
+		{
+			Base:         model.Base{ID: "special-2"},
+			LibraryID:    "anime",
+			Title:        "nukitashi",
+			Path:         `/media/影视库/动漫/拔作岛/[64bitsub][Nukitashi][PV_01][AVC_FLAC].mkv.strm`,
+			ScrapeStatus: "matched",
+		},
+	}
+
+	cards := groupMediaSeriesCards(items)
+	if len(cards) != 1 {
+		t.Fatalf("cards=%#v, want main episodes and specials in the same directory folded into one card", cards)
+	}
+	if cards[0].Count != 4 {
+		t.Fatalf("series count=%d, want 4 items", cards[0].Count)
+	}
+}
+
 func TestGroupMediaSeriesCardsKeepsMovieVersionsAsOneMovie(t *testing.T) {
 	items := []model.Media{
 		{
@@ -397,6 +446,42 @@ func TestGroupMediaSeriesCardsKeepsMovieVersionsAsOneMovie(t *testing.T) {
 	}
 	if cards[0].Count != 1 {
 		t.Fatalf("movie card count=%d, want 1 so versions are not shown as episodes", cards[0].Count)
+	}
+}
+
+func TestGroupMediaSeriesCardsKeepsTheatricalMovieWithTVSeries(t *testing.T) {
+	episode := model.Media{
+		Base:       model.Base{ID: "episode"},
+		LibraryID:  "anime",
+		Title:      "摇曳露营△",
+		Path:       `/media/动漫/摇曳露营△ (2018)/Season 01/摇曳露营△.S01E01.mkv`,
+		PosterURL:  "https://image.tmdb.org/t/p/w500/episode.jpg",
+		SeasonNum:  1,
+		EpisodeNum: 1,
+	}
+	theatrical := model.Media{
+		Base:        model.Base{ID: "theatrical"},
+		LibraryID:   "anime",
+		Title:       "摇曳露营△ 剧场版",
+		Path:        `/media/动漫/摇曳露营△ (2018)/摇曳露营△ 剧场版 (2022)/Eiga.Yurukyan.2022.Bluray.mkv`,
+		PosterURL:   "/media/动漫/摇曳露营△ (2018)/剧场版/poster.jpg",
+		BackdropURL: "/media/动漫/摇曳露营△ (2018)/剧场版/background.jpg",
+		Overview:    "剧场版简介",
+		TMDbID:      566466,
+	}
+
+	cards := groupMediaSeriesCards([]model.Media{episode, theatrical})
+	if len(cards) != 1 {
+		t.Fatalf("cards=%#v, want theatrical movie retained with TV series", cards)
+	}
+	if cards[0].Count != 2 {
+		t.Fatalf("series card count=%d, want TV episode plus theatrical movie", cards[0].Count)
+	}
+	if cards[0].Rep.ID != episode.ID {
+		t.Fatalf("series representative=%q, want TV episode %q", cards[0].Rep.ID, episode.ID)
+	}
+	if cards[0].Rep.Title != episode.Title {
+		t.Fatalf("series representative title=%q, want %q", cards[0].Rep.Title, episode.Title)
 	}
 }
 
@@ -443,5 +528,195 @@ func TestGroupMediaSeriesCardsBridgesReleaseFoldersByMatchedSeriesTitle(t *testi
 	cards := groupMediaSeriesCards(items)
 	if len(cards) != 1 || cards[0].Count != 2 {
 		t.Fatalf("cards=%#v, want one series bridged by matched title", cards)
+	}
+}
+
+func TestGroupMediaSeriesCardsKeepsIndependentMoviesSeparateInSharedSubdirectory(t *testing.T) {
+	// 同一分类子目录下存放多部不同标题的独立电影，不应被强制折叠成 1 部
+	items := []model.Media{
+		{LibraryID: "movies", Title: "老师2024偷窥篇", Path: `/media/小姐姐/国产/nana/老师2024偷窥篇.strm`},
+		{LibraryID: "movies", Title: "紫光灯下的肉体诱惑", Path: `/media/小姐姐/国产/nana/紫光灯下的肉体诱惑.strm`},
+		{LibraryID: "movies", Title: "修洗衣机", Path: `/media/小姐姐/国产/nana/修洗衣机.strm`},
+	}
+	cards := groupMediaSeriesCards(items)
+	if len(cards) != 3 {
+		t.Fatalf("got %d cards, want 3 independent movie cards", len(cards))
+	}
+
+	// 但同一部电影的 CD1 和 CD2 仍应正确折叠为 1 部
+	cdItems := []model.Media{
+		{LibraryID: "movies", Title: "cd1", Path: `/media/电影/指环王 (2001)/cd1.mkv`},
+		{LibraryID: "movies", Title: "cd2", Path: `/media/电影/指环王 (2001)/cd2.mkv`},
+	}
+	cdCards := groupMediaSeriesCards(cdItems)
+	if len(cdCards) != 1 {
+		t.Fatalf("got %d cards for cd1/cd2, want 1 folded movie card", len(cdCards))
+	}
+}
+
+func TestListMediaEpisodesKeepsIndependentMoviesSeparate(t *testing.T) {
+	db := newServiceTestDB(t, &model.Library{}, &model.Media{})
+	repos := repository.New(db)
+	lib := model.Library{Base: model.Base{ID: "lib-movies"}, Name: "电影", Type: "movies", Enabled: true}
+	if err := repos.DB.Create(&lib).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	m1 := model.Media{
+		Base:      model.Base{ID: "m1"},
+		LibraryID: lib.ID,
+		Title:     "老师2024偷窥篇",
+		Path:      `/media/小姐姐/国产/nana/老师2024偷窥篇.strm`,
+	}
+	m2 := model.Media{
+		Base:      model.Base{ID: "m2"},
+		LibraryID: lib.ID,
+		Title:     "紫光灯下的肉体诱惑",
+		Path:      `/media/小姐姐/国产/nana/紫光灯下的肉体诱惑.strm`,
+	}
+	m3 := model.Media{
+		Base:      model.Base{ID: "m3"},
+		LibraryID: lib.ID,
+		Title:     "修洗衣机",
+		Path:      `/media/小姐姐/国产/nana/修洗衣机.strm`,
+	}
+	if err := repos.DB.Create(&[]model.Media{m1, m2, m3}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewMediaService(&config.Config{}, zap.NewNop(), repos)
+	eps, err := svc.ListMediaEpisodes(t.Context(), "m1", MediaVisibility{IncludeNSFW: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eps) != 1 || eps[0].ID != "m1" {
+		t.Fatalf("ListMediaEpisodes got %#v, want exactly m1", eps)
+	}
+}
+
+func TestListMediaEpisodesMovieTypeSkipsFullLibraryIndex(t *testing.T) {
+	db := newServiceTestDB(t, &model.Library{}, &model.Media{})
+	repos := repository.New(db)
+	lib := model.Library{Base: model.Base{ID: "lib-movie-fast"}, Name: "电影", Type: "movie", Enabled: true}
+	if err := repos.DB.Create(&lib).Error; err != nil {
+		t.Fatal(err)
+	}
+	movie := model.Media{
+		Base:      model.Base{ID: "movie-fast"},
+		LibraryID: lib.ID,
+		Title:     "电影",
+		Path:      "/media/movies/电影/电影.mkv",
+	}
+	if err := repos.DB.Create(&movie).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewMediaService(&config.Config{}, zap.NewNop(), repos).
+		SetRuntimeCache(NewRuntimeCacheService(&config.Config{}, zap.NewNop()))
+	eps, err := svc.ListMediaEpisodes(t.Context(), movie.ID, MediaVisibility{IncludeNSFW: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eps) != 1 || eps[0].ID != movie.ID {
+		t.Fatalf("ListMediaEpisodes got %#v, want the movie itself", eps)
+	}
+	if _, ok := svc.cache.GetObject(svc.libraryRowsCacheKey(lib.ID, MediaVisibility{IncludeNSFW: true})); ok {
+		t.Fatal("movie detail should not build a full-library episode index")
+	}
+}
+
+func TestListMediaEpisodesUsesSeriesIDFastPath(t *testing.T) {
+	db := newServiceTestDB(t, &model.Library{}, &model.Media{})
+	repos := repository.New(db)
+	lib := model.Library{Base: model.Base{ID: "lib-series-fast"}, Name: "剧集", Type: "tv", Enabled: true}
+	if err := repos.DB.Create(&lib).Error; err != nil {
+		t.Fatal(err)
+	}
+	rows := []model.Media{
+		{
+			Base:       model.Base{ID: "episode-2"},
+			LibraryID:  lib.ID,
+			SeriesID:   "series-fast",
+			Title:      "示例剧",
+			Path:       "/media/tv/示例剧/Season 1/示例剧.S01E02.mkv",
+			SeasonNum:  1,
+			EpisodeNum: 2,
+		},
+		{
+			Base:       model.Base{ID: "episode-1"},
+			LibraryID:  lib.ID,
+			SeriesID:   "series-fast",
+			Title:      "示例剧",
+			Path:       "/media/tv/示例剧/Season 1/示例剧.S01E01.mkv",
+			SeasonNum:  1,
+			EpisodeNum: 1,
+		},
+		{
+			Base:      model.Base{ID: "other-series"},
+			LibraryID: lib.ID,
+			SeriesID:  "other",
+			Title:     "其他剧",
+			Path:      "/media/tv/其他剧/Season 1/其他剧.S01E01.mkv",
+		},
+	}
+	if err := repos.DB.Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewMediaService(&config.Config{}, zap.NewNop(), repos).
+		SetRuntimeCache(NewRuntimeCacheService(&config.Config{}, zap.NewNop()))
+	eps, err := svc.ListMediaEpisodes(t.Context(), "episode-1", MediaVisibility{IncludeNSFW: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eps) != 2 || eps[0].ID != "episode-1" || eps[1].ID != "episode-2" {
+		t.Fatalf("SeriesID fast path got %#v, want both episodes in order", eps)
+	}
+	if _, ok := svc.cache.GetObject(svc.libraryRowsCacheKey(lib.ID, MediaVisibility{IncludeNSFW: true})); ok {
+		t.Fatal("SeriesID detail fast path should not build a full-library episode index")
+	}
+}
+
+func TestListLibrarySeriesCardsCachesPrecomputedCards(t *testing.T) {
+	db := newServiceTestDB(t, &model.Library{}, &model.Media{})
+	repos := repository.New(db)
+	lib := model.Library{Name: "动画", Path: "/media/anime", Type: "anime", Enabled: true}
+	if err := repos.Library.Create(t.Context(), &lib); err != nil {
+		t.Fatal(err)
+	}
+	rows := []model.Media{
+		{LibraryID: lib.ID, Title: "示例动画", Path: "/media/anime/示例动画/S01E01.mkv", SeasonNum: 1, EpisodeNum: 1},
+		{LibraryID: lib.ID, Title: "示例动画", Path: "/media/anime/示例动画/S01E02.mkv", SeasonNum: 1, EpisodeNum: 2},
+	}
+	if err := repos.DB.Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewMediaService(&config.Config{}, zap.NewNop(), repos).
+		SetRuntimeCache(NewRuntimeCacheService(&config.Config{}, zap.NewNop()))
+	visibility := MediaVisibility{IncludeNSFW: true}
+	cards, total, err := svc.ListLibrarySeriesCards(t.Context(), lib.ID, visibility)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(cards) != 1 || cards[0].Count != 2 {
+		t.Fatalf("cold series cards = %#v, total = %d; want one two-episode card", cards, total)
+	}
+
+	cachedObj, ok := svc.cache.GetObject(svc.libraryRowsCacheKey(lib.ID, visibility))
+	if !ok {
+		t.Fatal("expected full library rows and precomputed cards to be cached")
+	}
+	cached, ok := cachedObj.(*libraryRowsCacheValue)
+	if !ok || cached.Cards == nil || len(cached.Cards) != 1 {
+		t.Fatalf("cached rows value = %#v, want one precomputed card", cachedObj)
+	}
+
+	cards, total, err = svc.ListLibrarySeriesCards(t.Context(), lib.ID, visibility)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(cards) != 1 || cards[0].Count != 2 {
+		t.Fatalf("warm series cards = %#v, total = %d; want cached result", cards, total)
 	}
 }

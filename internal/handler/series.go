@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -66,6 +67,11 @@ func listLibrarySeriesHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		libID := c.Param("id")
 		ctx := c.Request.Context()
+		sortSpec := parseMediaSort(c)
+		var history map[string]time.Time
+		if sortSpec.Field == "last_played" {
+			history = mediaHistoryMap(c, svc)
+		}
 		// 远程剧集库：远程 Series 映射为系列卡片。
 		if svc.EmbyRemote != nil && service.IsEmbyRemoteID(libID) {
 			mountID, remoteID, _ := service.DecodeEmbyRemoteID(libID)
@@ -74,11 +80,16 @@ func listLibrarySeriesHandler(svc *service.Container) gin.HandlerFunc {
 				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 				return
 			}
+			if !service.EmbyMountLibraryAllowed(mediaVisibilityForRequest(c, svc), mount) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+				return
+			}
 			cards, err := svc.EmbyRemote.RemoteSeriesCards(ctx, mount, acct, remoteID)
 			if err != nil {
 				writeInternalOrCanceled(c, err)
 				return
 			}
+			cards = sortRemoteSeriesCards(cards, sortSpec, history)
 			page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 			size, _ := strconv.Atoi(c.DefaultQuery("page_size", "500"))
 			if page < 1 {
@@ -113,11 +124,14 @@ func listLibrarySeriesHandler(svc *service.Container) gin.HandlerFunc {
 				return
 			}
 		}
-		items, total, err := svc.Media.ListLibrarySeriesCards(c.Request.Context(), libID, mediaVisibilityForRequest(c, svc))
+		items, total, err := svc.Media.ListLibrarySeriesCardsFiltered(
+			c.Request.Context(), libID, mediaVisibilityForRequest(c, svc), parseLibraryFilters(c),
+		)
 		if err != nil {
 			writeInternalOrCanceled(c, err)
 			return
 		}
+		items = service.SortSeriesCards(items, sortSpec.Field, sortSpec.Order, history)
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 		size, _ := strconv.Atoi(c.DefaultQuery("page_size", "500"))
 		if page < 1 {
@@ -165,6 +179,10 @@ func listLibrarySeriesEpisodesHandler(svc *service.Container) gin.HandlerFunc {
 				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 				return
 			}
+			if !service.EmbyMountLibraryAllowed(mediaVisibilityForRequest(c, svc), mount) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+				return
+			}
 			items, err := svc.EmbyRemote.RemoteEpisodes(ctx, mount, acct, remoteSeriesID)
 			if err != nil {
 				writeInternalOrCanceled(c, err)
@@ -187,7 +205,8 @@ func listLibrarySeriesEpisodesHandler(svc *service.Container) gin.HandlerFunc {
 			writeInternalOrCanceled(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
+		grouped := service.GroupEpisodeVersionsForDisplay(items)
+		c.JSON(http.StatusOK, gin.H{"items": grouped, "total": len(grouped)})
 	}
 }
 
@@ -207,6 +226,10 @@ func listMediaEpisodesHandler(svc *service.Container) gin.HandlerFunc {
 				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 				return
 			}
+			if !service.EmbyMountLibraryAllowed(mediaVisibilityForRequest(c, svc), mount) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+				return
+			}
 			items, err := svc.EmbyRemote.RemoteEpisodes(ctx, mount, acct, remoteID)
 			if err != nil {
 				writeInternalOrCanceled(c, err)
@@ -223,6 +246,7 @@ func listMediaEpisodesHandler(svc *service.Container) gin.HandlerFunc {
 			writeInternalOrCanceled(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
+		grouped := service.GroupEpisodeVersionsForDisplay(items)
+		c.JSON(http.StatusOK, gin.H{"items": grouped, "total": len(grouped)})
 	}
 }

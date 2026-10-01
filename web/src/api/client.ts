@@ -8,10 +8,15 @@ import { getActivePlayProfileId, getActivePlayProfilePinToken } from '../stores/
 export const api = axios.create({
   baseURL: '/api',
   timeout: 30000,
+  // Serialize arrays as repeated params without brackets: genre=a&genre=b
+  // instead of axios's default genre[]=a&genre[]=b which Gin's QueryArray
+  // does not recognise.
+  paramsSerializer: { indexes: null },
 })
 
 export const LONG_REQUEST_TIMEOUT = 120_000
 export const BATCH_REQUEST_TIMEOUT = 300_000
+export const MIGRATION_REQUEST_TIMEOUT = 600_000
 
 // Flag to prevent multiple simultaneous refresh attempts
 let isRefreshing = false
@@ -140,13 +145,81 @@ const profileQuery = () => {
 // streamURL returns a direct-play URL for <video src>. The JWT is added as
 // a query parameter because <video> elements cannot send Authorization
 // headers.
-export function streamURL(mediaId: string): string {
-  return `/api/stream/${encodeURIComponent(mediaId)}?${tokenQuery()}${profileQuery()}`
+//
+// proxy=true 时由服务端把网盘/STRM 直链转发为同源数据（画质与原文件一致、
+// 不转码）。VR 全景渲染需要把视频帧读进 WebGL 纹理，跨域直链会被浏览器
+// 判定为污染资源而禁止读取，因此只有这种场景才需要开启。
+export function streamURL(mediaId: string, options: { proxy?: boolean } = {}): string {
+  const proxy = options.proxy ? '&proxy=1' : ''
+  return `/api/stream/${encodeURIComponent(mediaId)}?${tokenQuery()}${profileQuery()}${proxy}`
 }
 
 // hlsURL returns the m3u8 playlist URL fed into hls.js.
-export function hlsURL(mediaId: string): string {
-  return `/api/hls/${encodeURIComponent(mediaId)}/index.m3u8?${tokenQuery()}${profileQuery()}`
+// startSec > 0 asks the server to (re)start ffmpeg from that source offset.
+export function hlsURL(mediaId: string, startSec = 0, subtitleStream?: number, quality?: string): string {
+  const safeStart = Math.max(0, Math.round(startSec * 1000) / 1000)
+  // Always send start= (including 0) so the server can tell an intentional
+  // restart-from-head apart from a missing query on a stale refresh.
+  const start = `&start=${encodeURIComponent(String(safeStart))}`
+  // Monotonic-ish client generation: newer seeks win; older in-flight playlist
+  // requests must not cancel the active ffmpeg job back to t=0.
+  const bust = `&_seek=${Date.now()}`
+  const subtitle =
+    subtitleStream !== undefined && subtitleStream >= 0
+      ? `&subtitle=${encodeURIComponent(String(subtitleStream))}`
+      : ''
+  const qualityQuery = quality ? `&quality=${encodeURIComponent(quality)}` : ''
+  return `/api/hls/${encodeURIComponent(mediaId)}/index.m3u8?${tokenQuery()}${profileQuery()}${start}${subtitle}${qualityQuery}${bust}`
+}
+
+// cloudHlsURL returns the MeBox-proxied 115 cloud HLS master playlist URL.
+// A browser cannot fetch the 115 CDN directly because its CORS policy only
+// allows https://115.com; the backend rewrites all child URLs to this
+// same-origin proxy.
+export function cloudHlsURL(mediaId: string, definition: string): string {
+  const quality = definition ? `&definition=${encodeURIComponent(definition)}` : ''
+  return `/api/cloud115/media/${encodeURIComponent(mediaId)}/master.m3u8?${tokenQuery()}${profileQuery()}${quality}&media_id=${encodeURIComponent(mediaId)}`
+}
+
+// Stop an on-demand HLS job. keepalive makes the request survive page
+// navigation/tab close, where an axios promise can be discarded by browsers.
+export function stopHLSJob(mediaId: string): void {
+  const url = `/api/hls/${encodeURIComponent(mediaId)}?${tokenQuery()}${profileQuery()}`
+  void fetch(url, {
+    method: 'DELETE',
+    credentials: 'same-origin',
+    keepalive: true,
+    cache: 'no-store',
+  }).catch(() => undefined)
+}
+
+// postPlaybackProgressKeepalive sends the final playback position without
+// relying on an axios request surviving page navigation or tab close.
+export function postPlaybackProgressKeepalive(payload: {
+  media_id: string
+  position_ms: number
+  duration_ms: number
+  session_id?: string
+  session_started_at_ms?: number
+  sequence?: number
+}): void {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const token = useAuthStore.getState().token
+  if (token) headers.Authorization = `Bearer ${token}`
+  const activeProfileId = getActivePlayProfileId()
+  if (activeProfileId) {
+    headers['X-Play-Profile-ID'] = activeProfileId
+    const pinToken = getActivePlayProfilePinToken()
+    if (pinToken) headers['X-Play-Profile-PIN-Token'] = pinToken
+  }
+  void fetch('/api/history', {
+    method: 'POST',
+    credentials: 'same-origin',
+    keepalive: true,
+    cache: 'no-store',
+    headers,
+    body: JSON.stringify(payload),
+  }).catch(() => undefined)
 }
 
 // imageURL converts a remote poster URL into a same-origin proxy URL so it
@@ -156,20 +229,55 @@ export type ImageURLOptions =
   | {
       refreshCache?: boolean
       retryFailed?: boolean
+      maxWidth?: number
+      maxHeight?: number
+      quality?: number
     }
+
+// ARTWORK is the shared set of thumbnail sizes the whole app requests.
+//
+// The server caches thumbnails per (source file, maxWidth, maxHeight, quality):
+// every extra combination is another full decode of the original image (measured
+// at 60-120ms for a 1920x1080 backdrop, up to ~800ms for a large poster) plus
+// another cache file, so do not invent sizes at the call site — pick a preset.
+// Keeping this list short is what stops a single page from triggering a dozen
+// different decodes for the same artwork.
+export const ARTWORK = {
+  /** 最小一档（160px）：卡片的模糊占位图，以及 30-40px 级别的列表缩略图。 */
+  posterTiny: { maxWidth: 160, quality: 60 },
+  /** 海报列表与卡片（2:3 容器，紧凑布局共用同一份缓存）。 */
+  posterCard: { maxWidth: 480, maxHeight: 600, quality: 80 },
+  /** 海报详情页、剧集详情页头部与首页大图。 */
+  posterDetail: { maxWidth: 560, maxHeight: 840, quality: 80 },
+  /** 剧照大图：首页 hero、影片详情页背景。 */
+  backdropHero: { maxWidth: 1920, maxHeight: 1080, quality: 80 },
+  /** 剧照小图：媒体库封面、剧集条目、搜索结果等。 */
+  backdropStrip: { maxWidth: 480, maxHeight: 320, quality: 80 },
+}
 
 export function imageURL(remote?: string, version?: string, options: ImageURLOptions = false): string {
   if (!remote) return ''
   const versionQuery = version ? `v=${encodeURIComponent(version)}` : ''
-  const retryFailed = typeof options === 'boolean' ? options : Boolean(options.retryFailed)
-  const refreshCache = typeof options === 'boolean' ? false : Boolean(options.refreshCache)
+  const opts: Exclude<ImageURLOptions, boolean> = typeof options === 'boolean' ? {} : options
+  const retryFailed = typeof options === 'boolean' ? options : Boolean(opts.retryFailed)
+  const refreshCache = typeof options === 'boolean' ? false : Boolean(opts.refreshCache)
   const retryQuery = retryFailed ? 'retry=1' : ''
   const refreshQuery = refreshCache ? 'refresh=1' : ''
-  const imageQuery = [versionQuery, retryQuery, refreshQuery].filter(Boolean).join('&')
+  const resizeQuery = [
+    positiveDimensionQuery('maxWidth', opts.maxWidth),
+    positiveDimensionQuery('maxHeight', opts.maxHeight),
+    positiveDimensionQuery('quality', opts.quality, 100),
+  ].filter(Boolean).join('&')
+  const imageQuery = [versionQuery, retryQuery, refreshQuery, resizeQuery].filter(Boolean).join('&')
   if (remote.startsWith('/api/img')) return withQuery(withoutAuthQuery(remote), imageQuery)
   if (remote.startsWith('/api/cloud/play/')) return withQuery(withoutAuthQuery(remote), imageQuery)
   if (remote.startsWith('/api/')) return withQuery(withQuery(remote, tokenQuery()), imageQuery)
   return withQuery(`/api/img?url=${encodeURIComponent(remote)}`, imageQuery)
+}
+
+function positiveDimensionQuery(name: string, value?: number, max = 10_000): string {
+  if (!Number.isFinite(value) || !value || value <= 0) return ''
+  return `${name}=${Math.min(Math.round(value), max)}`
 }
 
 function withQuery(url: string, query: string): string {

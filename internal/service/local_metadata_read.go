@@ -23,18 +23,20 @@ func ReadLocalMetadata(mediaPath, libraryRoot string, seriesLike bool) (*LocalMe
 	}
 	meta := metadataFromDoc(doc, filepath.Dir(path), false)
 	mergeArtworkMetadata(meta, mediaPath, filepath.Dir(path))
+	// A sidecar written while resolution tokens were misread as SxxExx must not
+	// reintroduce the bogus season/episode on rescan.
+	dropResolutionArtifactEpisodeIdentity(meta, mediaPath)
 	return meta, nil
 }
 
 func findMovieNFO(mediaPath, libraryRoot string) (*nfoDocument, string, error) {
 	mediaDir := filepath.Dir(mediaPath)
-	base := strings.TrimSuffix(filepath.Base(mediaPath), filepath.Ext(mediaPath))
 	adultCode := AdultCodeFromMediaPath(mediaPath)
-	names := []string{
-		base + ".nfo",
-		"movie.nfo",
-		filepath.Base(mediaDir) + ".nfo",
+	names := make([]string, 0, 8)
+	for _, base := range mediaSidecarBaseVariants(mediaPath) {
+		names = append(names, base+".nfo")
 	}
+	names = append(names, "movie.nfo", filepath.Base(mediaDir)+".nfo")
 	if adultCode != "" {
 		names = append([]string{adultCode + ".nfo", strings.ReplaceAll(adultCode, "-", "") + ".nfo"}, names...)
 	}
@@ -117,6 +119,9 @@ func readSeriesMetadata(mediaPath, libraryRoot string) (*LocalMetadata, error) {
 	} else {
 		mergeArtworkMetadata(meta, mediaPath, showBaseDir)
 	}
+	// A sidecar written while resolution tokens were misread as SxxExx must not
+	// reintroduce the bogus season/episode on rescan.
+	dropResolutionArtifactEpisodeIdentity(meta, mediaPath)
 	return meta, nil
 }
 

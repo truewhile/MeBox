@@ -1,6 +1,8 @@
 package service
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,6 +47,130 @@ func TestGroupMediaVersionsMergesEpisodeByExternalIDAcrossLibraries(t *testing.T
 	}
 	if grouped[0].Versions[0].Path != local.Path || grouped[0].Versions[1].Path != cloud.Path {
 		t.Fatalf("versions should be ordered local before cloud, got %#v", grouped[0].Versions)
+	}
+}
+
+func TestGroupEpisodeVersionsForDisplayMergesAndKeepsEpisodeOrder(t *testing.T) {
+	rows := []model.Media{
+		{Base: model.Base{ID: "ep2"}, LibraryID: "tv", Title: "Show", SeasonNum: 1, EpisodeNum: 2, TMDbID: 99, Path: "/show/s01e02.mkv"},
+		{Base: model.Base{ID: "ep1-small"}, LibraryID: "tv", Title: "Show", SeasonNum: 1, EpisodeNum: 1, TMDbID: 99, Path: "/show/s01e01.mp4", SizeBytes: 100},
+		{Base: model.Base{ID: "ep1-large"}, LibraryID: "tv", Title: "Show", SeasonNum: 1, EpisodeNum: 1, TMDbID: 99, Path: "/show/s01e01.mkv", SizeBytes: 200},
+	}
+
+	grouped := GroupEpisodeVersionsForDisplay(rows)
+	if len(grouped) != 2 {
+		t.Fatalf("grouped len = %d, want 2: %#v", len(grouped), grouped)
+	}
+	if grouped[0].EpisodeNum != 1 || len(grouped[0].Versions) != 2 {
+		t.Fatalf("episode 1 was not merged first: %#v", grouped)
+	}
+	if grouped[0].ID != "ep1-large" {
+		t.Fatalf("primary version = %q, want ep1-large", grouped[0].ID)
+	}
+	if grouped[1].EpisodeNum != 2 {
+		t.Fatalf("second item episode = %d, want 2", grouped[1].EpisodeNum)
+	}
+}
+
+func TestGroupMediaVersionsSeparatesAnimeSpecialKindsAndNumbers(t *testing.T) {
+	rows := []model.Media{
+		{
+			Base:      model.Base{ID: "movie"},
+			LibraryID: "anime",
+			Title:     "摇曳露营△",
+			Path:      "/media/动漫/摇曳露营△/摇曳露营△ 剧场版 (2022)/movie.strm",
+			TMDbID:    76075,
+		},
+		{
+			Base:      model.Base{ID: "ova-1"},
+			LibraryID: "anime",
+			Title:     "摇曳露营△",
+			Path:      "/media/动漫/摇曳露营△/OVA/Yuru Camp OVA01.strm",
+			TMDbID:    76075,
+		},
+		{
+			Base:      model.Base{ID: "ova-2"},
+			LibraryID: "anime",
+			Title:     "摇曳露营△",
+			Path:      "/media/动漫/摇曳露营△/OVA/Yuru Camp OVA02.strm",
+			TMDbID:    76075,
+		},
+		{
+			Base:      model.Base{ID: "oad-1"},
+			LibraryID: "anime",
+			Title:     "摇曳露营△",
+			Path:      "/media/动漫/摇曳露营△/OAD/Yuru Camp OAD01.strm",
+			TMDbID:    76075,
+		},
+	}
+
+	grouped := groupMediaVersions(rows)
+	if len(grouped) != 4 {
+		t.Fatalf("grouped len = %d, want theatrical, OVA01, OVA02 and OAD01 separate: %#v", len(grouped), grouped)
+	}
+	for _, item := range grouped {
+		if len(item.Versions) > 1 {
+			t.Fatalf("unrelated anime extras were merged as versions: %#v", item.Versions)
+		}
+	}
+}
+
+func TestGroupMediaVersionsKeepsBracketNumberedEpisodesSeparate(t *testing.T) {
+	// UHA-WINGS 命名：[组名][标题][01][BDRIP 1920x1080 ...].strm。
+	// 曾因 1920x1080 被解析成 S20E108，12 集全部折叠成一集的多个版本。
+	rows := make([]model.Media, 0, 12)
+	for episode := 1; episode <= 12; episode++ {
+		rows = append(rows, model.Media{
+			Base:      model.Base{ID: fmt.Sprintf("ep-%02d", episode)},
+			LibraryID: "anime",
+			Title:     "彼得·格里尔的贤者时间",
+			Path: fmt.Sprintf(
+				"/media/影视库/动漫/彼得·格里尔的贤者时间/[UHA-WINGS][Peter Grill to Kenja no Jikan][%02d][BDRIP 1920x1080 HEVC-YUV420P10 FLAC].strm",
+				episode),
+			TMDbID: 99080,
+		})
+	}
+	for i := range rows {
+		season, episode := ParseEpisode(rows[i].Path)
+		rows[i].SeasonNum = season
+		rows[i].EpisodeNum = episode
+	}
+
+	grouped := groupMediaVersions(rows)
+	if len(grouped) != 12 {
+		t.Fatalf("grouped len = %d, want 12 distinct episodes: %#v", len(grouped), grouped)
+	}
+	for _, item := range grouped {
+		if len(item.Versions) > 1 {
+			t.Fatalf("distinct episodes were folded into versions: %#v", item.Versions)
+		}
+		if item.SeasonNum != 1 || item.EpisodeNum < 1 || item.EpisodeNum > 12 {
+			t.Fatalf("unexpected episode identity s=%d e=%d", item.SeasonNum, item.EpisodeNum)
+		}
+	}
+}
+
+func TestGroupMediaVersionsMergesSameNumberedOVAEncodes(t *testing.T) {
+	rows := []model.Media{
+		{
+			Base:      model.Base{ID: "ova-1-hd"},
+			LibraryID: "anime",
+			Path:      "/media/动漫/示例/OVA/Show OVA01 1080p.mkv",
+			TMDbID:    123,
+			SizeBytes: 100,
+		},
+		{
+			Base:      model.Base{ID: "ova-1-uhd"},
+			LibraryID: "anime",
+			Path:      "/media/动漫/示例/OVA/Show OVA01 2160p.mkv",
+			TMDbID:    123,
+			SizeBytes: 200,
+		},
+	}
+
+	grouped := groupMediaVersions(rows)
+	if len(grouped) != 1 || len(grouped[0].Versions) != 2 {
+		t.Fatalf("same numbered OVA encodes should be versions: %#v", grouped)
 	}
 }
 
@@ -155,7 +281,8 @@ func TestListMediaVisibleGroupedPaginatesAfterVersionGrouping(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc := NewMediaService(&config.Config{}, zap.NewNop(), repos)
+	svc := NewMediaService(&config.Config{}, zap.NewNop(), repos).
+		SetRuntimeCache(NewRuntimeCacheService(&config.Config{}, zap.NewNop()))
 	page, total, err := svc.ListMediaVisibleGrouped(t.Context(), lib.ID, 1, 1, MediaVisibility{IncludeNSFW: true})
 	if err != nil {
 		t.Fatal(err)
@@ -168,6 +295,17 @@ func TestListMediaVisibleGroupedPaginatesAfterVersionGrouping(t *testing.T) {
 	}
 	if page[0].Media.Path != rows[0].Path {
 		t.Fatalf("primary version = %q, want %q", page[0].Media.Path, rows[0].Path)
+	}
+	cacheKey := svc.groupedItemsCacheKey(lib.ID, []string{lib.ID}, repository.MediaQueryFilter{IncludeNSFW: true})
+	if _, ok := svc.cache.GetObject(cacheKey); !ok {
+		t.Fatal("expected grouped media items to be cached after the first page request")
+	}
+	secondPage, secondTotal, err := svc.ListMediaVisibleGrouped(t.Context(), lib.ID, 2, 1, MediaVisibility{IncludeNSFW: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondTotal != total || len(secondPage) != 1 || secondPage[0].Media.Path != rows[2].Path {
+		t.Fatalf("cached second page = %#v, total = %d; want Matrix item and total %d", secondPage, secondTotal, total)
 	}
 }
 
@@ -216,5 +354,436 @@ func TestSearchMediaVisiblePageGroupedPaginatesAfterVersionGrouping(t *testing.T
 	}
 	if page[0].Media.Path != rows[0].Path {
 		t.Fatalf("primary version = %q, want %q", page[0].Media.Path, rows[0].Path)
+	}
+}
+
+func TestGroupMediaVersionsDoesNotMergeDifferentRemoteSeries(t *testing.T) {
+	// 模拟来自两个不同挂载库（如 00 新番连载 与 2018 动漫）的同名剧集《碧蓝之海》
+	season1 := model.Media{
+		Base:        model.Base{ID: EncodeEmbyRemoteID("mount-1", "156019")},
+		LibraryID:   EncodeEmbyRemoteID("mount-1", "view-1"),
+		Title:       "碧蓝之海",
+		Year:        2018,
+		LibraryName: "2018 动漫",
+	}
+	season2 := model.Media{
+		Base:        model.Base{ID: EncodeEmbyRemoteID("mount-2", "156030")},
+		LibraryID:   EncodeEmbyRemoteID("mount-2", "view-2"),
+		Title:       "碧蓝之海",
+		Year:        2024,
+		LibraryName: "00 新番连载",
+	}
+
+	grouped := groupMediaVersions([]model.Media{season1, season2})
+	if len(grouped) != 2 {
+		t.Fatalf("expected 2 separate groups for different remote series/libraries, got %d: %#v", len(grouped), grouped)
+	}
+	if grouped[0].Title != "碧蓝之海" || grouped[1].Title != "碧蓝之海" {
+		t.Fatalf("expected both titles to be '碧蓝之海'")
+	}
+}
+
+func TestGroupMediaVersionsDoesNotMergeAcrossDifferentLibrariesForMovies(t *testing.T) {
+	movieLib1 := model.Media{
+		Base:      model.Base{ID: "m-1"},
+		LibraryID: "lib-1",
+		Title:     "碧蓝之海",
+		Year:      2018,
+	}
+	movieLib2 := model.Media{
+		Base:      model.Base{ID: "m-2"},
+		LibraryID: "lib-2",
+		Title:     "碧蓝之海",
+		Year:      2018,
+	}
+
+	grouped := groupMediaVersions([]model.Media{movieLib1, movieLib2})
+	if len(grouped) != 2 {
+		t.Fatalf("expected 2 separate groups for movies in different libraries, got %d", len(grouped))
+	}
+}
+
+func TestGroupMediaVersionsMergesKeepExtStrmVariants(t *testing.T) {
+	mkv := model.Media{
+		LibraryID: "movies",
+		Title:     "竞女01",
+		Path:      "/strm/竞女01.mkv.strm",
+		SizeBytes: 500,
+		STRMURL:   "/api/strm/play/cloud115/video.mkv?pickcode=a",
+	}
+	mp4 := model.Media{
+		LibraryID: "movies",
+		Title:     "竞女01",
+		Path:      "/strm/竞女01.mp4.strm",
+		SizeBytes: 100,
+		STRMURL:   "/api/strm/play/cloud115/video.mp4?pickcode=b",
+	}
+	grouped := groupMediaVersions([]model.Media{mkv, mp4})
+	if len(grouped) != 1 {
+		t.Fatalf("grouped len = %d, want 1", len(grouped))
+	}
+	if len(grouped[0].Versions) != 2 {
+		t.Fatalf("versions len = %d, want 2", len(grouped[0].Versions))
+	}
+	if grouped[0].Path != mkv.Path {
+		t.Fatalf("primary should be larger mkv, got %q", grouped[0].Path)
+	}
+}
+
+func TestMediaVersionLabelUsesContainerAndSize(t *testing.T) {
+	label := MediaVersionLabel(model.Media{
+		Title:     "竞女01",
+		Path:      "/strm/竞女01.mkv.strm",
+		Height:    1080,
+		SizeBytes: 1024 * 1024 * 1200,
+		STRMURL:   "/api/strm/play/cloud115/video.mkv?pickcode=a",
+	})
+	if !strings.Contains(label, "1080p") || !strings.Contains(strings.ToUpper(label), "MKV") {
+		t.Fatalf("unexpected label %q", label)
+	}
+}
+
+func TestMediaPartNumberFromPath(t *testing.T) {
+	cases := []struct {
+		path string
+		want int
+		ok   bool
+	}{
+		{"/media/云下载/ipvr00192pl/fbzip.com@ipvr00192.part1.strm", 1, true},
+		{"/media/云下载/ipvr00192pl/fbzip.com@ipvr00192.part2.strm", 2, true},
+		{"/media/云下载/sivr-270/sivr-270-1.strm", 1, true},
+		{"/media/云下载/sivr-270/sivr-270-7.strm", 7, true},
+		{"/media/云下载/fc2/FC2PPV-4701981-cd2.strm", 2, true},
+		{"/media/Movies/Inception.2010.1080p.BluRay.x264.mkv", 0, false},
+		{"/media/Movies/Movie.2024.mkv", 0, false},
+	}
+	for _, tc := range cases {
+		got, ok := mediaPartNumber(tc.path)
+		if ok != tc.ok || got != tc.want {
+			t.Fatalf("mediaPartNumber(%q) = (%d, %v), want (%d, %v)", tc.path, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestGroupMediaVersionsSortsPartsAscending(t *testing.T) {
+	rows := []model.Media{
+		{
+			Base:      model.Base{ID: "p3"},
+			LibraryID: "cloud",
+			Title:     "SIVR-270",
+			Path:      "/media/云下载/sivr-270/sivr-270-3.strm",
+			Year:      2023,
+			NSFW:      true,
+			SizeBytes: 300,
+		},
+		{
+			Base:      model.Base{ID: "p1"},
+			LibraryID: "cloud",
+			Title:     "SIVR-270",
+			Path:      "/media/云下载/sivr-270/sivr-270-1.strm",
+			Year:      2023,
+			NSFW:      true,
+			SizeBytes: 100,
+		},
+		{
+			Base:      model.Base{ID: "p2"},
+			LibraryID: "cloud",
+			Title:     "SIVR-270",
+			Path:      "/media/云下载/sivr-270/sivr-270-2.strm",
+			Year:      2023,
+			NSFW:      true,
+			SizeBytes: 200,
+		},
+	}
+	grouped := groupMediaVersions(rows)
+	if len(grouped) != 1 || len(grouped[0].Versions) != 3 {
+		t.Fatalf("grouped = %#v", grouped)
+	}
+	want := []string{"p1", "p2", "p3"}
+	for i, id := range want {
+		if grouped[0].Versions[i].ID != id {
+			t.Fatalf("versions[%d] = %q, want %q (order %#v)", i, grouped[0].Versions[i].ID, id, grouped[0].Versions)
+		}
+	}
+	if grouped[0].ID != "p1" {
+		t.Fatalf("primary = %q, want p1 (first part)", grouped[0].ID)
+	}
+}
+
+func TestMediaVersionLabelFallsBackToFilenameWhenIndistinct(t *testing.T) {
+	label := MediaVersionLabel(model.Media{
+		Title:     "SIVR-270-【VR】河北彩花",
+		Path:      "/media/云下载/sivr-270/sivr-270-1.strm",
+		SizeBytes: 157,
+		STRMURL:   "/api/strm/play/cloud115/video.mp4?pickcode=a",
+	})
+	if !strings.Contains(label, "sivr-270-1") {
+		t.Fatalf("indistinct strm label should fall back to filename, got %q", label)
+	}
+	if strings.EqualFold(label, "MP4") || strings.Contains(label, "云端") {
+		t.Fatalf("should not keep generic-only label %q", label)
+	}
+}
+
+// SIVR-270 现场：一部分分片走在线刮削（MetaTube 把番号/provider 借用进
+// douban_id/thetvdb_id），另一部分只从本地 NFO 拿到标题（没有外部 ID）。
+// 按外部 ID 分组会把它们裂成两张标题完全相同的卡，必须按番号折成一张。
+func TestGroupMediaVersionsMergesAdultPartsAcrossMetadataSources(t *testing.T) {
+	online := model.Media{
+		Base:         model.Base{ID: "sivr-270-2"},
+		LibraryID:    "cloud",
+		Title:        "SIVR-270-【VR】河北彩花",
+		OriginalName: "SIVR-270",
+		Path:         "/media/云下载/sivr-270/sivr-270-2.strm",
+		Year:         2023,
+		NSFW:         true,
+		DoubanID:     "SIVR-270",
+		TheTVDBID:    "JavBus",
+		ScrapeStatus: "matched",
+		SizeBytes:    200,
+	}
+	fromNFO := model.Media{
+		Base:         model.Base{ID: "sivr-270-3"},
+		LibraryID:    "cloud",
+		Title:        "SIVR-270-【VR】河北彩花",
+		OriginalName: "SIVR-270",
+		Path:         "/media/云下载/sivr-270/sivr-270-3.strm",
+		Year:         2023,
+		NSFW:         true,
+		ScrapeStatus: "matched",
+		SizeBytes:    100,
+	}
+
+	grouped := groupMediaVersions([]model.Media{online, fromNFO})
+	if len(grouped) != 1 {
+		t.Fatalf("grouped len = %d, want 1: %#v", len(grouped), grouped)
+	}
+	if len(grouped[0].Versions) != 2 {
+		t.Fatalf("versions len = %d, want 2", len(grouped[0].Versions))
+	}
+	if grouped[0].Path != online.Path {
+		t.Fatalf("larger part should stay primary, got %q", grouped[0].Path)
+	}
+}
+
+func TestGroupMediaVersionsKeepsDifferentAdultCodesSeparate(t *testing.T) {
+	rows := []model.Media{
+		{
+			Base:      model.Base{ID: "sivr-270"},
+			LibraryID: "cloud",
+			Title:     "SIVR-270 作品",
+			Path:      "/media/云下载/sivr-270/sivr-270-1.strm",
+			Year:      2023,
+			NSFW:      true,
+		},
+		{
+			Base:      model.Base{ID: "sivr-271"},
+			LibraryID: "cloud",
+			Title:     "SIVR-271 作品",
+			Path:      "/media/云下载/sivr-271/sivr-271-1.strm",
+			Year:      2023,
+			NSFW:      true,
+		},
+	}
+	grouped := groupMediaVersions(rows)
+	if len(grouped) != 2 {
+		t.Fatalf("different adult codes must stay separate: %#v", grouped)
+	}
+}
+
+// 同一部片的两种写法：路径里的 IPVR-00192 与刮削回来的 IPVR-192 必须归一。
+func TestGroupMediaVersionsMergesAdultCodesIgnoringZeroPadding(t *testing.T) {
+	scraped := model.Media{
+		Base:         model.Base{ID: "ipvr-192-part2"},
+		LibraryID:    "cloud",
+		Title:        "IPVR-192-相沢みなみ",
+		OriginalName: "IPVR-192",
+		Path:         "/media/云下载/ipvr00192pl/scraped/part2.strm",
+		Year:         2022,
+		NSFW:         true,
+		ScrapeStatus: "matched",
+		SizeBytes:    200,
+	}
+	fromPath := model.Media{
+		Base:      model.Base{ID: "ipvr-00192-part1"},
+		LibraryID: "cloud",
+		Title:     "fbzip com@ipvr00192",
+		Path:      "/media/云下载/ipvr00192pl/fbzip.com@ipvr00192.part1.strm",
+		Year:      2022,
+		NSFW:      true,
+		SizeBytes: 100,
+	}
+	grouped := groupMediaVersions([]model.Media{scraped, fromPath})
+	if len(grouped) != 1 || len(grouped[0].Versions) != 2 {
+		t.Fatalf("zero padded code must fold into one item: %#v", grouped)
+	}
+}
+
+func TestGroupMediaVersionsMergesAdultPartsWithBorrowedMetaTubeIDs(t *testing.T) {
+	// IPVR-00192 现场：两个 part 标题、年份完全一样，但 part2 是走 MetaTube
+	// 刮削的（番号/provider 被借用进 douban_id/thetvdb_id），part1 只有本地
+	// NFO 身份、两个字段为空。旧逻辑按外部 ID 分组会裂成两张卡。
+	part1 := model.Media{
+		Base:         model.Base{ID: "ipvr-00192-part1"},
+		LibraryID:    "cloud",
+		Title:        "IPVR-00192-IPVR-192-【VR】相沢みなみ",
+		OriginalName: "IPVR-00192",
+		Path:         "/media/云下载/ipvr00192pl/fbzip.com@ipvr00192.part1.strm",
+		Year:         2022,
+		NSFW:         true,
+		ScrapeStatus: "matched",
+		SizeBytes:    100,
+	}
+	part2 := part1
+	part2.ID = "ipvr-00192-part2"
+	part2.Path = "/media/云下载/ipvr00192pl/fbzip.com@ipvr00192.part2.strm"
+	part2.DoubanID = "ipvr00192"
+	part2.TheTVDBID = "JAV321"
+	part2.SizeBytes = 200
+
+	grouped := groupMediaVersions([]model.Media{part1, part2})
+	if len(grouped) != 1 {
+		t.Fatalf("grouped len = %d, want 1: %#v", len(grouped), grouped)
+	}
+	if len(grouped[0].Versions) != 2 {
+		t.Fatalf("versions len = %d, want 2", len(grouped[0].Versions))
+	}
+	if grouped[0].Versions[0].ID != "ipvr-00192-part1" || grouped[0].Versions[1].ID != "ipvr-00192-part2" {
+		t.Fatalf("versions should be part1 then part2, got %#v", grouped[0].Versions)
+	}
+}
+
+func TestGetMediaItemListsAdultVersionsAcrossMetadataSources(t *testing.T) {
+	db := newServiceTestDB(t, &model.Library{}, &model.Media{})
+	repos := repository.New(db)
+	lib := model.Library{Name: "云下载", Path: "/media/云下载", Type: "movie", Enabled: true}
+	if err := repos.Library.Create(t.Context(), &lib); err != nil {
+		t.Fatal(err)
+	}
+	rows := []model.Media{
+		{
+			// 走 MetaTube 刮削的分片：番号/provider 被借用进 douban/thetvdb。
+			LibraryID:    lib.ID,
+			Title:        "SIVR-270-【VR】河北彩花",
+			OriginalName: "SIVR-270",
+			Path:         "/media/云下载/sivr-270/sivr-270-1.strm",
+			Year:         2023,
+			NSFW:         true,
+			DoubanID:     "SIVR-270",
+			TheTVDBID:    "JavBus",
+			ScrapeStatus: "matched",
+			SizeBytes:    200,
+		},
+		{
+			// 只有本地 NFO 身份的分片：两个外部 ID 都为空。
+			LibraryID:    lib.ID,
+			Title:        "SIVR-270-【VR】河北彩花",
+			OriginalName: "SIVR-270",
+			Path:         "/media/云下载/sivr-270/sivr-270-4.strm",
+			Year:         2023,
+			NSFW:         true,
+			ScrapeStatus: "matched",
+			SizeBytes:    100,
+		},
+	}
+	if err := db.Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewMediaService(&config.Config{}, zap.NewNop(), repos).
+		SetRuntimeCache(NewRuntimeCacheService(&config.Config{}, zap.NewNop()))
+	item, err := svc.GetMediaItem(t.Context(), rows[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item == nil || len(item.Versions) != 2 {
+		// 详情页版本列表不能只按外部 ID 收窄，否则没有 ID 的分片会消失。
+		t.Fatalf("versions = %#v, want both parts", item)
+	}
+}
+
+func TestMediaAdultGroupCodeRequiresNSFW(t *testing.T) {
+	cases := []struct {
+		name string
+		m    model.Media
+		want string
+	}{
+		{
+			name: "普通影片名里的字母+数字不当番号",
+			m:    model.Media{Title: "Spider-Man 2008 1080p", Path: "/media/Movies/Spider-Man 2008 1080p.mkv"},
+			want: "",
+		},
+		{
+			name: "未识别成人的条目即使文件名像番号也不折叠",
+			m:    model.Media{Title: "SIVR-270", Path: "/media/云下载/sivr-270/sivr-270-1.strm"},
+			want: "",
+		},
+		{
+			name: "已标记 NSFW 时按番号分组",
+			m:    model.Media{NSFW: true, Title: "sivr 270", Path: "/media/云下载/sivr-270/sivr-270-1.strm"},
+			want: "SIVR-270",
+		},
+		{
+			name: "站点前缀里带补零的番号会归一",
+			m:    model.Media{NSFW: true, Title: "fbzip com@ipvr00192", Path: "/media/云下载/ipvr00192pl/fbzip.com@ipvr00192.part1.strm"},
+			want: "IPVR-192",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mediaAdultGroupCode(tc.m); got != tc.want {
+				t.Fatalf("mediaAdultGroupCode = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// S01E11 与 S01E11.5 必须折叠成两条不同记录（既不合并，也不丢集），
+// 且 11.5 排在 11 之后、12 之前。这是「第一季分集加载不出来」那次的根因：
+// 两条同季同集的记录被折成一条，计数与返回条目对不上。
+func TestGroupEpisodeVersionsForDisplayKeepsHalfEpisodeSeparate(t *testing.T) {
+	rows := []model.Media{
+		{Base: model.Base{ID: "ep12"}, LibraryID: "anime", Title: "三月的狮子", SeasonNum: 1, EpisodeNum: 12, TMDbID: 65336, Path: "/anime/三月的狮子/3月的狮子 S01E12.mkv"},
+		{Base: model.Base{ID: "ep11"}, LibraryID: "anime", Title: "三月的狮子", SeasonNum: 1, EpisodeNum: 11, TMDbID: 65336, Path: "/anime/三月的狮子/3月的狮子 S01E11.mkv"},
+		{Base: model.Base{ID: "ep11half"}, LibraryID: "anime", Title: "三月的狮子", SeasonNum: 1, EpisodeNum: 11, EpisodeFraction: 0.5, TMDbID: 65336, Path: "/anime/三月的狮子/3月的狮子 S01E11.5.mkv"},
+	}
+
+	grouped := GroupEpisodeVersionsForDisplay(rows)
+	if len(grouped) != 3 {
+		t.Fatalf("grouped len = %d, want 3 (11 / 11.5 / 12): %#v", len(grouped), grouped)
+	}
+	wantOrder := []string{"ep11", "ep11half", "ep12"}
+	for i, want := range wantOrder {
+		if grouped[i].ID != want {
+			t.Fatalf("grouped[%d] = %q, want %q (order %#v)", i, grouped[i].ID, want, grouped)
+		}
+	}
+	for _, item := range grouped {
+		if len(item.Versions) != 0 {
+			t.Fatalf("half episode must not fold with the integral one: %#v", grouped)
+		}
+	}
+}
+
+// 版本身份键必须区分 11 与 11.5，同时保持没有小数时的历史键不变。
+func TestMediaVersionGroupKeyDistinguishesHalfEpisode(t *testing.T) {
+	base := model.Media{LibraryID: "anime", Title: "三月的狮子", SeasonNum: 1, EpisodeNum: 11}
+	plain := base
+	half := base
+	half.EpisodeFraction = 0.5
+
+	plainKey := mediaVersionGroupKey(plain)
+	halfKey := mediaVersionGroupKey(half)
+	if plainKey == "" || halfKey == "" {
+		t.Fatalf("version keys must not be empty: %q %q", plainKey, halfKey)
+	}
+	if plainKey == halfKey {
+		t.Fatalf("11 and 11.5 must have different version keys, both = %q", plainKey)
+	}
+	if !strings.HasSuffix(halfKey, "1:11.5") {
+		t.Fatalf("half episode key = %q, want suffix 1:11.5", halfKey)
+	}
+	if !strings.HasSuffix(plainKey, "1:11") {
+		t.Fatalf("plain episode key = %q, want suffix 1:11", plainKey)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -292,7 +293,11 @@ func (s *StrmService) save115OAuthToken(ctx context.Context, session *strm115Aut
 	acct.LastTestAt = &now
 	acct.LastTestResult = "授权成功"
 	acct.LastTestOK = true
-	return s.repo.StrmAccount.Update(ctx, acct)
+	if err := s.repo.StrmAccount.Update(ctx, acct); err != nil {
+		return err
+	}
+	s.invalidate115Provider(acct.ID)
+	return nil
 }
 
 func (s *StrmService) drop115AuthSession(sessionID string) {
@@ -371,8 +376,25 @@ func (s *StrmService) refresh115TokensOnce(ctx context.Context) {
 		if err != nil || cfg["access_token"] == "" || cfg["refresh_token"] == "" {
 			continue
 		}
-		client := cloud115.NewOpenClient(cfg["app_id"], cfg["access_token"], cfg["refresh_token"])
-		token, err := client.RefreshToken(cfg["refresh_token"])
+		// 临期才刷：115 refresh_token 是一次性轮转，无条件周期刷新会与
+		// 运行中任务的自动刷新互相作废对方的凭据。24h 内刷新过（含运行
+		// 中回调落库）就跳过；access_token 有效期远长于 24h。
+		if last := strings.TrimSpace(cfg["token_refreshed_at"]); last != "" {
+			if ts, perr := strconv.ParseInt(last, 10, 64); perr == nil {
+				if time.Since(time.Unix(ts, 0)) < 24*time.Hour {
+					continue
+				}
+			}
+		}
+		provider, err := s.providerFor(ctx, acct)
+		if err != nil {
+			continue
+		}
+		openProvider, ok := provider.(interface{ OpenClient() *cloud115.OpenClient })
+		if !ok || openProvider.OpenClient() == nil {
+			continue
+		}
+		token, err := openProvider.OpenClient().RefreshToken("")
 		if err != nil {
 			msg := "令牌刷新失败：" + err.Error()
 			if cloud115.IsRefreshTokenDead(err) {
@@ -395,6 +417,7 @@ func (s *StrmService) refresh115TokensOnce(ctx context.Context) {
 		}
 		cfg["access_token"] = s.crypto.Encrypt(token.AccessToken)
 		cfg["refresh_token"] = s.crypto.Encrypt(token.RefreshToken)
+		cfg["token_refreshed_at"] = strconv.FormatInt(time.Now().Unix(), 10)
 		enc, err := s.strmAccountConfigJSON(cfg, false)
 		if err != nil {
 			continue
@@ -408,6 +431,37 @@ func (s *StrmService) refresh115TokensOnce(ctx context.Context) {
 			s.log.Warn("update 115 token failed", zap.Error(err))
 		}
 	}
+}
+
+// persist115Tokens 把运行中任务自动刷新得到的新令牌加密写回账号配置，
+// 并记录刷新时间供定时刷新线程做临期判断。
+func (s *StrmService) persist115Tokens(accountID, accessToken, refreshToken string) {
+	ctx := context.Background()
+	acct, err := s.repo.StrmAccount.FindByID(ctx, accountID)
+	if err != nil || acct == nil {
+		return
+	}
+	cfg, err := s.strmAccountConfig(acct)
+	if err != nil {
+		return
+	}
+	cfg["access_token"] = s.crypto.Encrypt(accessToken)
+	cfg["refresh_token"] = s.crypto.Encrypt(refreshToken)
+	cfg["token_refreshed_at"] = strconv.FormatInt(time.Now().Unix(), 10)
+	enc, err := s.strmAccountConfigJSON(cfg, false)
+	if err != nil {
+		return
+	}
+	acct.Config = enc
+	now := time.Now()
+	acct.LastTestAt = &now
+	acct.LastTestResult = "ok"
+	acct.LastTestOK = true
+	if err := s.repo.StrmAccount.Update(ctx, acct); err != nil {
+		s.log.Warn("persist refreshed 115 token failed", zap.Error(err), zap.String("account", acct.Name))
+		return
+	}
+	s.log.Info("115 token refreshed and persisted", zap.String("account", acct.Name))
 }
 
 // sync115RelayKey 把设置里的中继密钥同步给 cloud115（启动与设置保存时调用）。

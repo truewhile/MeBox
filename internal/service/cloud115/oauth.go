@@ -317,13 +317,18 @@ func appendCallbackParams(rawURL string, params url.Values) (string, error) {
 	return callbackURL.String(), nil
 }
 
+// oauthHTTPClient 是 OAuth 授权服务专用 HTTP 客户端。http.DefaultClient 无超时，
+// 授权服务无响应时会永久阻塞授权/轮询协程，这里统一 30s 超时（ctx 仍经
+// NewRequestWithContext 传导，可提前取消）。
+var oauthHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
 func httpGetJSON(ctx context.Context, endpoint string) (map[string]any, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", DefaultUA)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

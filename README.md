@@ -7,7 +7,7 @@
 <h3 align="center">面向 NAS 与家庭影音场景的私人媒体中心</h3>
 
 <p align="center">
-  <strong>媒体库 · 刮削整理 · 网盘 STRM · Emby 协议 · 远程 Emby 挂载 · 多用户权限 · Docker 一键部署</strong>
+  <strong>媒体库 · 刮削整理 · 网盘 STRM · 兼容 Emby/Jellyfin 客户端 · 远程 Emby 挂载 · 多用户权限 · Docker 一键部署</strong>
 </p>
 
 <p align="center">
@@ -17,7 +17,8 @@
   <a href="#鸣谢">鸣谢</a> ·
   <a href="#开发构建">开发构建</a> ·
   <a href="README_EN.md">English</a> ·
-  <a href="CONTRIBUTING.md">贡献规范</a>
+  <a href="CONTRIBUTING.md">贡献规范</a> ·
+  <a href="https://t.me/MeBoxGroup">Telegram 群组</a>
 </p>
 
 <p align="center">
@@ -46,12 +47,12 @@
 | **媒体库** | 电影、电视剧、动漫、综艺、音乐与自定义库；多根目录、扫库、海报墙、继续观看 |
 | **元数据刮削** | TMDb、Bangumi、Douban、TheTVDB、Fanart 等；支持 NFO、手动匹配、刮削队列 |
 | **播放** | 网页播放器、HLS 转码、弹幕、字幕、播放配置档、观看历史与收藏 |
-| **Emby 协议** | Infuse、SenPlayer、Fileball 等客户端可直接添加本服务，使用 MeBox 账号登录 |
+| **Emby/Jellyfin 客户端兼容** | 内置完整 Emby 服务端协议实现：Infuse、SenPlayer、Fileball、Emby/Jellyfin 官方客户端等可直接把本服务当作 Emby 服务器添加，使用 MeBox 账号登录，海报墙、进度同步、多用户无缝衔接 |
 | **远程 Emby 挂载** | 将远程 Emby 媒体库挂载到本地界面统一浏览（无需单独开 Emby 客户端） |
 | **网盘与 STRM** | OpenList、CloudDrive2、115、WebDAV 等；STRM 同步、上传/下载队列、直链/302 播放 |
-| **下载与整理** | qBittorrent 接入、站点搜索与订阅、下载后自动整理、文件管理器（复制/移动/硬链/软链） |
+| **下载与整理** | 下载目录定时自动整理（智能分类、自动注册媒体库）、文件管理器（复制/移动/硬链/软链） |
 | **用户与权限** | 管理员/普通用户、有效期、成人内容开关、播放配置 PIN、细粒度操作权限 |
-| **运维能力** | 统一任务队列、回收站、存储统计、DLNA 投屏、系统设置与日志 |
+| **运维能力** | 统一任务队列、存储统计、DLNA 投屏、系统设置与日志 |
 
 ### 技术栈
 
@@ -84,6 +85,8 @@ http://服务器IP:18080
 ```
 
 默认账号：`admin` / `admin123`（首次登录后请立即修改密码）
+
+> 💡 **Emby 用户无缝切换**：MeBox 完整兼容 Emby/Jellyfin 客户端协议。手机、电视、平板上的 Infuse、SenPlayer、Fileball、Emby/Jellyfin 官方客户端，直接按「添加 Emby 服务器」填入 `http://服务器IP:18080`，用 MeBox 账号登录即可，无需改变原有使用习惯。
 
 镜像地址：
 
@@ -179,7 +182,7 @@ environment:
 
 1. **创建媒体库** → 填写 `/media/...` → 执行扫库
 2. **配置元数据源** → 系统设置中添加 TMDb、Bangumi 等 API
-3. **（可选）连接 qBittorrent** → 下载客户端设置，宿主机可用 `http://host.docker.internal:8085`
+3. **（可选）配置下载目录自动整理** → 文件管理中将下载目录设为整理源，下载完成后自动分类入库
 4. **（可选）配置网盘账号** → STRM 管理中添加 OpenList / 115 / WebDAV 等
 5. **第三方播放器** → 以 Emby 服务器添加 `http://服务器IP:18080`，使用 MeBox 账号登录
 
@@ -190,11 +193,16 @@ environment:
 **扫库或入库很慢？**  
 先确认路径映射与数据库档位。网盘扫描还受接口限速与目录规模影响；大库可考虑第二档 Redis 或第三档 OpenSearch。
 
-**qBittorrent 下载后无法整理？**  
-确认下载目录已通过 `volumes` 挂进容器，且 `MEBOX_DOWNLOAD_*` 环境变量对应正确。
+**下载目录文件没有被自动整理？**  
+确认下载目录已通过 `volumes` 挂进容器，且 `MEBOX_DOWNLOAD_*` 环境变量对应正确。MeBox 负责目录整理入库，qBittorrent 等下载器按普通软件自行部署即可。
 
 **硬链接失败（cross-device link）？**  
 硬链接要求源与目标在同一文件系统/子卷；跨盘、跨 btrfs 子卷或网盘挂载时请改用复制或软链接。
+
+**日志保留时间太短？**
+
+默认应用日志为 `20MB x 5`，容器 stdout 日志为 `20m x 3`。排障时可在 compose 中调大
+`MEBOX_LOGGING_MAX_SIZE_MB`、`MEBOX_LOGGING_MAX_BACKUPS` 与服务的 `logging.options.max-size/max-file`。
 
 **第三方播放器连不上？**  
 确认地址为 `http://IP:18080`，使用 MeBox 用户账号；反代部署需正确配置外部 URL 与 HTTPS 头。
@@ -204,6 +212,7 @@ environment:
 ## 开发构建
 
 后端通过 `go:embed` 嵌入 `web/dist`，**编译前必须先构建前端**。
+前端构建要求 Node.js `20.19+` 或 `22.12+`。
 
 ```bash
 npm --prefix web ci
@@ -215,6 +224,14 @@ npm --prefix web run dev     # http://127.0.0.1:3000
 ```
 
 CI 会在 Release 中提供 Windows / Linux / macOS 的 amd64、arm64 单文件可执行程序。
+
+Windows 本地打包：
+
+```powershell
+.\scripts\build-windows.ps1 -Version dev
+```
+
+Windows 可执行程序使用项目 Logo，不显示控制台窗口；启动后会常驻系统托盘。托盘菜单可打开 MeBox、切换开机自启、查看日志、重启或退出。
 
 ---
 
@@ -251,3 +268,18 @@ MeBox 在 [MediaStationGo](https://github.com/ShukeBta/MediaStationGo) 的基础
 ## 许可证
 
 本项目采用 [GPL-3.0](LICENSE) 许可证。
+
+---
+
+## 赞赏
+
+如果 MeBox 帮你把家庭影音折腾明白了，欢迎请作者喝杯咖啡 ☕
+
+<p align="center">
+  <img src="docs/images/donation-qr.png" width="320" alt="WhileTrue 的赞赏码" />
+</p>
+
+<p align="center">
+  <strong>Telegram 交流群</strong>：<a href="https://t.me/MeBoxGroup">https://t.me/MeBoxGroup</a><br/>
+  使用问题、功能建议、更新动态，欢迎来群里聊
+</p>

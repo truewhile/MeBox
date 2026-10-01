@@ -36,7 +36,11 @@ type StrmSyncPath struct {
 	AccountID  string `gorm:"size:36;index" json:"account_id"` // StrmAccount.ID；local 为空
 	Provider   string `gorm:"size:32" json:"provider"`         // StrmProvider*（冗余，便于列表展示）
 	RemotePath string `gorm:"size:1024" json:"remote_path"`    // 远端目录：115=目录ID，OpenList/CD2=路径，local=源目录
-	LocalPath  string `gorm:"size:1024" json:"local_path"`     // STRM/元数据本地输出目录
+	// RemoteDisplayPath 是远端目录的完整展示路径（如 /电影/剧集）。115 的
+	// RemotePath 是目录 ID，用户无法辨认，浏览选择或按 ID 反查时把人类可读
+	// 路径存到这里；路径型网盘（CD2/OpenList）与 local 留空（RemotePath 即路径）。
+	RemoteDisplayPath string `gorm:"size:1024" json:"remote_display_path"`
+	LocalPath         string `gorm:"size:1024" json:"local_path"` // STRM/元数据本地输出目录
 	// STRM 链接配置（空值继承全局 strm.* 设置）
 	StrmBaseURL     string     `gorm:"size:512" json:"strm_base_url"`                  // 覆盖 strm.base_url
 	VideoExt        string     `gorm:"size:512" json:"video_ext"`                      // 逗号分隔，覆盖 strm.video_ext
@@ -47,6 +51,9 @@ type StrmSyncPath struct {
 	DownloadMeta    bool       `gorm:"default:true" json:"download_meta"`              // 同步时下载元数据文件（nfo/图片/字幕）
 	UploadMeta      bool       `json:"upload_meta"`                                    // 同步时把本地元数据上传到远端
 	DeleteDir       bool       `json:"delete_dir"`                                     // 清理多余文件时删除空目录
+	// KeepExt=true 时为每个视频生成 name.mkv.strm / name.mp4.strm（保留全部版本）；
+	// false（默认）时同名不同扩展只择优生成一条 name.strm，避免互相覆盖与来回抖动。
+	KeepExt bool `json:"keep_ext"`
 	Cron            string     `gorm:"size:128" json:"cron"`                           // 5 段 cron 表达式（可选）
 	EnableCron      bool       `json:"enable_cron"`                                    // 是否按 Cron 定时同步
 	SyncMode        string     `gorm:"size:32;default:'incremental'" json:"sync_mode"` // 默认同步模式：incremental / full
@@ -124,6 +131,7 @@ type StrmUploadTask struct {
 	FileName   string     `gorm:"size:512" json:"file_name"`
 	LocalPath  string     `gorm:"size:1024" json:"local_path"`  // 本地源文件
 	RemotePath string     `gorm:"size:1024" json:"remote_path"` // 远端目标路径
+	RemoteRef  string     `gorm:"size:1024" json:"remote_ref"`  // 上传前：远端同名旧文件 ID（逗号分隔，覆盖前先删）；上传成功后：新文件 ID
 	Size       int64      `json:"size"`
 	Status     string     `gorm:"size:16;index" json:"status"`
 	Error      string     `gorm:"size:1024" json:"error"`

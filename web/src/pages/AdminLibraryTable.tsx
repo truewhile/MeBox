@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type DragEvent, type MouseEvent, type Reac
 import { createPortal } from 'react-dom'
 import { Folder, GripVertical, Image, MoreVertical, Plus, Power, PowerOff, RefreshCw, Save, Trash2 } from 'lucide-react'
 
+import { ARTWORK, imageURL } from '../api/client'
 import { LocalDirBrowserDialog } from '../components/LocalDirBrowserDialog'
 import type { Library, LibraryRoot } from '../types'
 import type { RootDraft } from './adminLibraryPanelModel'
@@ -27,7 +28,7 @@ export function AdminLibraryTable({ libs, ...actions }: LibraryTableProps) {
   const [browsingRoot, setBrowsingRoot] = useState<{ libraryID: string; root: LibraryRoot; initialPath?: string } | null>(null)
   const [addingRootLib, setAddingRootLib] = useState<Library | null>(null)
   const [draggingId, setDraggingId] = useState<string | null>(null)
-  const dragOverId = useRef<string | null>(null)
+  const [dragOverId, setDragOverId] = useState<string | null>(null)
 
   const handleSelectRootPath = (selectedPath: string) => {
     if (browsingRoot) {
@@ -58,7 +59,7 @@ export function AdminLibraryTable({ libs, ...actions }: LibraryTableProps) {
 
   const handleDrop = (e: DragEvent, overId: string) => {
     e.preventDefault()
-    dragOverId.current = null
+    setDragOverId(null)
     setDraggingId(null)
     if (draggingId && overId !== draggingId) {
       handleReorder(draggingId, overId)
@@ -89,19 +90,19 @@ export function AdminLibraryTable({ libs, ...actions }: LibraryTableProps) {
                 onBrowseRoot={(root) => setBrowsingRoot({ libraryID: library.id, root, initialPath: root.path })}
                 onOpenAddRoot={() => setAddingRootLib(library)}
                 dragging={draggingId === library.id}
-                dragOver={dragOverId.current === library.id}
+                dragOver={dragOverId === library.id}
                 onDragStart={(e) => {
                   e.dataTransfer.effectAllowed = 'move'
-                  dragOverId.current = null
+                  setDragOverId(null)
                   setDraggingId(library.id)
                 }}
                 onDragOver={(e) => {
                   e.preventDefault()
                   e.dataTransfer.dropEffect = 'move'
-                  if (dragOverId.current !== library.id) dragOverId.current = library.id
+                  if (dragOverId !== library.id) setDragOverId(library.id)
                 }}
                 onDragEnd={() => {
-                  dragOverId.current = null
+                  setDragOverId(null)
                   setDraggingId(null)
                 }}
                 onDrop={(e) => handleDrop(e, library.id)}
@@ -169,7 +170,19 @@ function LibraryTableRow({ library, dragging, dragOver, onDragStart, onDragOver,
       </td>
       <td className="py-2 pr-3 font-medium text-ink-600">
         <div className="flex items-center gap-2">
-          {library.cover_url && <img src={library.cover_url} alt="" className="h-10 w-8 rounded object-cover" />}
+          {library.cover_url && (
+            <img
+              src={imageURL(library.cover_url, library.updated_at, ARTWORK.backdropStrip)}
+              alt=""
+              loading="lazy"
+              decoding="async"
+              referrerPolicy="no-referrer"
+              className="h-10 w-8 rounded object-cover"
+              onError={(e) => {
+                e.currentTarget.style.visibility = 'hidden'
+              }}
+            />
+          )}
           <span>{library.name}</span>
         </div>
       </td>

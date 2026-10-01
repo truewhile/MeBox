@@ -57,6 +57,21 @@ func (r *StrmAccountRepository) Update(ctx context.Context, a *model.StrmAccount
 	})
 }
 
+// UpdateTestResult updates only connectivity-test metadata. Callers that touch
+// account credentials must not use Update with a snapshot read before Ping:
+// a 115 token refresh can persist new tokens while Ping is running, and writing
+// the stale snapshot back would revoke the freshly rotated credentials.
+func (r *StrmAccountRepository) UpdateTestResult(ctx context.Context, id string, at time.Time, result string, ok bool) error {
+	return withSQLiteBusyRetry(ctx, func() error {
+		return r.db.WithContext(ctx).Model(&model.StrmAccount{}).Where("id = ?", id).Updates(map[string]any{
+			"last_test_at":     at,
+			"last_test_result": result,
+			"last_test_ok":     ok,
+			"updated_at":       time.Now(),
+		}).Error
+	})
+}
+
 func (r *StrmAccountRepository) Delete(ctx context.Context, id string) error {
 	return withSQLiteBusyRetry(ctx, func() error {
 		return r.db.WithContext(ctx).Unscoped().Where("id = ?", id).Delete(&model.StrmAccount{}).Error
@@ -95,28 +110,30 @@ func (r *StrmSyncPathRepository) List(ctx context.Context) ([]model.StrmSyncPath
 func (r *StrmSyncPathRepository) Update(ctx context.Context, p *model.StrmSyncPath) error {
 	return withSQLiteBusyRetry(ctx, func() error {
 		return r.db.WithContext(ctx).Model(&model.StrmSyncPath{}).Where("id = ?", p.ID).Updates(map[string]any{
-			"name":              p.Name,
-			"account_id":        p.AccountID,
-			"provider":          p.Provider,
-			"remote_path":       p.RemotePath,
-			"local_path":        p.LocalPath,
-			"strm_base_url":     p.StrmBaseURL,
-			"video_ext":         p.VideoExt,
-			"meta_ext":          p.MetaExt,
-			"exclude_name":      p.ExcludeName,
-			"min_video_size_mb": p.MinVideoSizeMB,
-			"add_path":          p.AddPath,
-			"download_meta":     p.DownloadMeta,
-			"upload_meta":       p.UploadMeta,
-			"delete_dir":        p.DeleteDir,
-			"cron":              p.Cron,
-			"enable_cron":       p.EnableCron,
-			"sync_mode":         p.SyncMode,
-			"enabled":           p.Enabled,
-			"last_sync_at":      p.LastSyncAt,
-			"last_sync_status":  p.LastSyncStatus,
-			"last_sync_message": p.LastSyncMessage,
-			"updated_at":        time.Now(),
+			"name":                p.Name,
+			"account_id":          p.AccountID,
+			"provider":            p.Provider,
+			"remote_path":         p.RemotePath,
+			"remote_display_path": p.RemoteDisplayPath,
+			"local_path":          p.LocalPath,
+			"strm_base_url":       p.StrmBaseURL,
+			"video_ext":           p.VideoExt,
+			"meta_ext":            p.MetaExt,
+			"exclude_name":        p.ExcludeName,
+			"min_video_size_mb":   p.MinVideoSizeMB,
+			"add_path":            p.AddPath,
+			"download_meta":       p.DownloadMeta,
+			"upload_meta":         p.UploadMeta,
+			"delete_dir":          p.DeleteDir,
+			"keep_ext":            p.KeepExt,
+			"cron":                p.Cron,
+			"enable_cron":         p.EnableCron,
+			"sync_mode":           p.SyncMode,
+			"enabled":             p.Enabled,
+			"last_sync_at":        p.LastSyncAt,
+			"last_sync_status":    p.LastSyncStatus,
+			"last_sync_message":   p.LastSyncMessage,
+			"updated_at":          time.Now(),
 		}).Error
 	})
 }
@@ -302,6 +319,39 @@ func (r *StrmDownloadTaskRepository) Update(ctx context.Context, t *model.StrmDo
 	})
 }
 
+// UpdateIfRunning 仅当任务在 DB 中仍为 running 时写入给定字段。
+// 返回 false 表示任务已被外部改变状态（如用户取消），收尾不得覆盖。
+func (r *StrmDownloadTaskRepository) UpdateIfRunning(ctx context.Context, id string, updates map[string]any) (bool, error) {
+	var ok bool
+	err := withSQLiteBusyRetry(ctx, func() error {
+		updates["updated_at"] = time.Now()
+		res := r.db.WithContext(ctx).Model(&model.StrmDownloadTask{}).
+			Where("id = ? AND status = ?", id, model.StrmTaskRunning).Updates(updates)
+		ok = res.RowsAffected > 0
+		return res.Error
+	})
+	return ok, err
+}
+
+// ResetRunningToPending 启动自愈：进程中断遗留的 running 任务全部重置为
+// pending（清空退避时间以便立即可被认领），否则任务永久卡死且会阻塞
+// 该文件的重复下载。
+func (r *StrmDownloadTaskRepository) ResetRunningToPending(ctx context.Context) (int64, error) {
+	var n int64
+	err := withSQLiteBusyRetry(ctx, func() error {
+		res := r.db.WithContext(ctx).Model(&model.StrmDownloadTask{}).
+			Where("status = ?", model.StrmTaskRunning).
+			Updates(map[string]any{
+				"status":     model.StrmTaskPending,
+				"error":      "服务重启，任务已重置",
+				"started_at": nil,
+			})
+		n = res.RowsAffected
+		return res.Error
+	})
+	return n, err
+}
+
 func (r *StrmDownloadTaskRepository) Delete(ctx context.Context, id string) error {
 	return withSQLiteBusyRetry(ctx, func() error {
 		return r.db.WithContext(ctx).Unscoped().Where("id = ?", id).Delete(&model.StrmDownloadTask{}).Error
@@ -396,6 +446,17 @@ func (r *StrmDownloadTaskRepository) ClearCanceled(ctx context.Context) (int64, 
 	var count int64
 	err := withSQLiteBusyRetry(ctx, func() error {
 		res := r.db.WithContext(ctx).Unscoped().Where("status = ?", model.StrmTaskCanceled).Delete(&model.StrmDownloadTask{})
+		count = res.RowsAffected
+		return res.Error
+	})
+	return count, err
+}
+
+// ClearFailed 清空全部已失败下载任务。
+func (r *StrmDownloadTaskRepository) ClearFailed(ctx context.Context) (int64, error) {
+	var count int64
+	err := withSQLiteBusyRetry(ctx, func() error {
+		res := r.db.WithContext(ctx).Unscoped().Where("status = ?", model.StrmTaskFailed).Delete(&model.StrmDownloadTask{})
 		count = res.RowsAffected
 		return res.Error
 	})
@@ -609,6 +670,36 @@ func (r *StrmUploadTaskRepository) Update(ctx context.Context, t *model.StrmUplo
 	})
 }
 
+// UpdateIfRunning 仅当任务在 DB 中仍为 running 时写入给定字段。
+func (r *StrmUploadTaskRepository) UpdateIfRunning(ctx context.Context, id string, updates map[string]any) (bool, error) {
+	var ok bool
+	err := withSQLiteBusyRetry(ctx, func() error {
+		updates["updated_at"] = time.Now()
+		res := r.db.WithContext(ctx).Model(&model.StrmUploadTask{}).
+			Where("id = ? AND status = ?", id, model.StrmTaskRunning).Updates(updates)
+		ok = res.RowsAffected > 0
+		return res.Error
+	})
+	return ok, err
+}
+
+// ResetRunningToPending 启动自愈：进程中断遗留的 running 任务全部重置为 pending。
+func (r *StrmUploadTaskRepository) ResetRunningToPending(ctx context.Context) (int64, error) {
+	var n int64
+	err := withSQLiteBusyRetry(ctx, func() error {
+		res := r.db.WithContext(ctx).Model(&model.StrmUploadTask{}).
+			Where("status = ?", model.StrmTaskRunning).
+			Updates(map[string]any{
+				"status":     model.StrmTaskPending,
+				"error":      "服务重启，任务已重置",
+				"started_at": nil,
+			})
+		n = res.RowsAffected
+		return res.Error
+	})
+	return n, err
+}
+
 func (r *StrmUploadTaskRepository) Delete(ctx context.Context, id string) error {
 	return withSQLiteBusyRetry(ctx, func() error {
 		return r.db.WithContext(ctx).Unscoped().Where("id = ?", id).Delete(&model.StrmUploadTask{}).Error
@@ -709,6 +800,17 @@ func (r *StrmUploadTaskRepository) ClearCanceled(ctx context.Context) (int64, er
 	return count, err
 }
 
+// ClearFailed 清空全部已失败上传任务。
+func (r *StrmUploadTaskRepository) ClearFailed(ctx context.Context) (int64, error) {
+	var count int64
+	err := withSQLiteBusyRetry(ctx, func() error {
+		res := r.db.WithContext(ctx).Unscoped().Where("status = ?", model.StrmTaskFailed).Delete(&model.StrmUploadTask{})
+		count = res.RowsAffected
+		return res.Error
+	})
+	return count, err
+}
+
 // RetryAllFailed 把所有失败任务重置回待处理，清空错误与重试计数。
 func (r *StrmUploadTaskRepository) RetryAllFailed(ctx context.Context) (int64, error) {
 	var count int64
@@ -775,6 +877,34 @@ func (r *StrmUploadTaskRepository) GetActiveLocalPathMap(ctx context.Context, sy
 	return out, nil
 }
 
+// GetRecentDoneUploadSizeMap 返回近期已成功上传的 local_path → size。
+// 用于缩短「上传已 done 但 115 列表尚未反映」窗口内的重复入队：同路径且大小未变则跳过。
+// 同一路径存在多条 done 时取最新一条（finished_at 降序）。
+func (r *StrmUploadTaskRepository) GetRecentDoneUploadSizeMap(ctx context.Context, syncPathID string, since time.Time) (map[string]int64, error) {
+	var rows []model.StrmUploadTask
+	err := r.db.WithContext(ctx).Model(&model.StrmUploadTask{}).
+		Select("local_path", "size", "finished_at").
+		Where("sync_path_id = ? AND status = ? AND finished_at IS NOT NULL AND finished_at >= ?",
+			syncPathID, model.StrmTaskDone, since).
+		Order("finished_at DESC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]int64, len(rows))
+	for _, row := range rows {
+		if row.LocalPath == "" {
+			continue
+		}
+		// 已按 finished_at DESC；先写入的是最新，后续同路径跳过
+		if _, exists := out[row.LocalPath]; exists {
+			continue
+		}
+		out[row.LocalPath] = row.Size
+	}
+	return out, nil
+}
+
 func (r *StrmUploadTaskRepository) DeleteFinishedOlderThan(ctx context.Context, before time.Time) error {
 	return withSQLiteBusyRetry(ctx, func() error {
 		return r.db.WithContext(ctx).Unscoped().Where("status IN ? AND finished_at < ?",
@@ -813,6 +943,53 @@ func (r *StrmDirCacheRepository) Set(ctx context.Context, syncPathID, dirID, pat
 			"path":       path,
 			"updated_at": time.Now(),
 		}).Error
+	})
+}
+
+// SetBatch 批量 upsert 目录缓存（dirID → 相对路径）。单个事务内先查出已存在
+// 行再分流更新/插入，替代同步流程逐目录单条 Set，避免首次全量同步上万目录时
+// 的 SQLite 写锁竞争。同一 dirID 的重复项以 map 语义取最后一次写入。
+func (r *StrmDirCacheRepository) SetBatch(ctx context.Context, syncPathID string, paths map[string]string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	return withSQLiteBusyRetry(ctx, func() error {
+		return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			ids := make([]string, 0, len(paths))
+			for dirID := range paths {
+				ids = append(ids, dirID)
+			}
+			var existing []model.StrmDirCache
+			if err := tx.Where("sync_path_id = ? AND dir_id IN ?", syncPathID, ids).Find(&existing).Error; err != nil {
+				return err
+			}
+			existingRowID := make(map[string]string, len(existing))
+			for _, row := range existing {
+				existingRowID[row.DirID] = row.ID
+			}
+			now := time.Now()
+			var creates []model.StrmDirCache
+			for dirID, path := range paths {
+				if rowID, ok := existingRowID[dirID]; ok {
+					if err := tx.Model(&model.StrmDirCache{}).Where("id = ?", rowID).Updates(map[string]any{
+						"path":       path,
+						"updated_at": now,
+					}).Error; err != nil {
+						return err
+					}
+					continue
+				}
+				creates = append(creates, model.StrmDirCache{
+					SyncPathID: syncPathID,
+					DirID:      dirID,
+					Path:       path,
+				})
+			}
+			if len(creates) > 0 {
+				return tx.CreateInBatches(creates, 100).Error
+			}
+			return nil
+		})
 	})
 }
 

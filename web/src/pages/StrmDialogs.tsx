@@ -1,31 +1,27 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { FormEvent, useEffect, useRef, useState } from 'react'
 import toast from 'react-hot-toast'
 import {
   ArrowDown,
   ArrowUp,
   ChevronRight,
   Cloud,
-  ExternalLink,
   FolderPlus,
   HardDrive,
   Loader2,
   Plus,
   QrCode,
-  RefreshCw,
-  Search,
   Trash2,
   Tv,
   X,
 } from 'lucide-react'
 
-import QRCode from 'qrcode'
-
-import { strmAPI, type Strm115Source, type StrmRemoteEntry } from '../api/strm'
+import { strmAPI, type StrmRemoteEntry } from '../api/strm'
 import type { SettingDef } from './SettingsRow'
 import { SettingRow } from './SettingsRow'
 import type { StrmAccount, StrmSyncPath, StrmSyncPathInput, StrmProvider } from '../types/strm'
 import { STRM_PROVIDER_LABELS } from '../types/strm'
 import { apiErrorMessage } from './StrmManagePage'
+import { Strm115AuthPanel } from './strm-dialogs/Strm115AuthPanel'
 import { LocalDirBrowserDialog } from '../components/LocalDirBrowserDialog'
 import {
   defaultEmbyRemoteLines,
@@ -33,7 +29,7 @@ import {
   normalizeEmbyRemoteLines,
   type EmbyRemoteLine,
 } from '../utils/embyRemoteLines'
-import { lastPathSegment, syncLocalPathWithRemote } from '../utils/strmPaths'
+import { lastPathSegment, remoteTailNameOf, syncLocalPathWithRemote } from '../utils/strmPaths'
 
 // ─── 弹框外壳 ────────────────────────────────────────────────────────────────
 
@@ -496,309 +492,6 @@ export function StrmAccountDialog({
 // ─── 115 登录二维码（canvas 渲染；115 返回的是扫码页面链接而非图片） ───────────
 
 // QR 尺寸：物理像素 = CSS 像素（避免 canvas 被 CSS 缩放导致裁切/模糊）
-const QR_SIZE = 176
-
-function QrCanvas({ content }: { content: string }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const [error, setError] = useState('')
-
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas || !content) return
-    QRCode.toCanvas(canvas, content, {
-      width: QR_SIZE,
-      margin: 2,
-      errorCorrectionLevel: 'M',
-      color: { dark: '#1f2937', light: '#ffffff' },
-    })
-      .then(() => setError(''))
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : '二维码生成失败'))
-  }, [content])
-
-  return (
-    <div className="relative h-44 w-44 shrink-0 rounded-xl border border-gray-200 bg-white">
-      <canvas
-        ref={canvasRef}
-        width={QR_SIZE}
-        height={QR_SIZE}
-        role="img"
-        aria-label="115 授权二维码"
-        style={{ width: QR_SIZE, height: QR_SIZE }}
-      />
-      {error && (
-        <div className="absolute inset-0 grid place-items-center rounded-xl bg-gray-50 p-3 text-center text-xs text-rose-500">
-          {error}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ─── 115 开放平台授权面板 ─────────────────────────────────────────────────────
-
-type AuthSourceKey = 'built_in_appid' | 'custom_appid' | 'built_in_relay' | 'third_party_service'
-
-const AUTH_SOURCE_OPTIONS: { key: AuthSourceKey; label: string; desc: string; needsRelayKey?: boolean }[] = [
-  { key: 'built_in_appid', label: '官方应用目录', desc: '设备码扫码授权，无需回跳' },
-  { key: 'custom_appid', label: '自定义 APP ID', desc: '使用自己申请的开放平台应用' },
-  { key: 'built_in_relay', label: '中继授权', desc: 'QMediaSync / MQFamily 中继', needsRelayKey: true },
-  { key: 'third_party_service', label: '第三方服务', desc: 'MoviePilot / CloudDrive' },
-]
-
-function Strm115AuthPanel({
-  existing,
-  accountName,
-  onAuthed,
-}: {
-  existing: StrmAccount | null
-  accountName: string
-  onAuthed: (account: StrmAccount) => void
-}) {
-  const [sources, setSources] = useState<{ built_in: Strm115Source[]; relay: Strm115Source[]; third_party: Strm115Source[] } | null>(null)
-  const [relayKeyConfigured, setRelayKeyConfigured] = useState(false)
-  const [authSource, setAuthSource] = useState<AuthSourceKey>('built_in_appid')
-  const [thirdParty, setThirdParty] = useState<'moviepilot' | 'clouddrive'>('moviepilot')
-  const [relayProvider, setRelayProvider] = useState<'qmediasync' | 'mqfamily'>('qmediasync')
-  const [appID, setAppID] = useState('100195125')
-  const [appKeyword, setAppKeyword] = useState('')
-
-  const [starting, setStarting] = useState(false)
-  const [authUI, setAuthUI] = useState<{ sessionId: string; accountId: string; mode: 'qrcode' | 'url'; authUrl?: string; qrcodeUrl?: string } | null>(null)
-  const [authStatus, setAuthStatus] = useState('')
-
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const stopPolling = () => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current)
-      pollRef.current = null
-    }
-  }
-  useEffect(() => stopPolling, [])
-
-  useEffect(() => {
-    ;(async () => {
-      try {
-        const data = await strmAPI.list115Sources()
-        setSources(data)
-        const settings = await strmAPI.getSettings().catch(() => null)
-        const key = settings?.['strm.115_relay_key']
-        setRelayKeyConfigured(Boolean(key && key.trim()))
-      } catch (err) {
-        toast.error(apiErrorMessage(err))
-      }
-    })()
-  }, [])
-
-  const filteredApps = useMemo(
-    () =>
-      (sources?.built_in ?? []).filter(
-        (s) => !appKeyword || s.app_name.toLowerCase().includes(appKeyword.toLowerCase()) || s.app_id.includes(appKeyword),
-      ),
-    [appKeyword, sources],
-  )
-
-  useEffect(() => {
-    if (filteredApps.length > 0 && !filteredApps.some((source) => source.app_id === appID)) {
-      setAppID(filteredApps[0].app_id)
-    }
-  }, [appID, filteredApps])
-
-  const buildStartPayload = () => {
-    switch (authSource) {
-      case 'built_in_appid':
-        return { auth_source: 'built_in_appid', app_id: appID }
-      case 'custom_appid':
-        return { auth_source: 'custom_appid', app_id: appID }
-      case 'built_in_relay':
-        return { auth_source: 'built_in_relay', provider: relayProvider }
-      case 'third_party_service':
-        return { auth_source: 'third_party_service', provider: thirdParty }
-    }
-  }
-
-  const startAuth = async () => {
-    if (authSource === 'built_in_appid' && filteredApps.length === 0) {
-      toast.error('未找到匹配的官方应用')
-      return
-    }
-
-    setStarting(true)
-    setAuthStatus('')
-    try {
-      // 115 授权需要账号 ID：没有则先创建空凭据账号
-      let account = existing
-      if (!account) {
-        account = await strmAPI.createAccount({ name: accountName || '115 网盘', provider: 'cloud115', config: {} })
-      }
-      const result = await strmAPI.start115OAuth(account.id, buildStartPayload())
-      setAuthUI(
-        result.mode === 'qrcode'
-          ? { sessionId: result.session_id, accountId: account.id, mode: 'qrcode', qrcodeUrl: result.qrcode?.qrcode }
-          : { sessionId: result.session_id, accountId: account.id, mode: 'url', authUrl: result.auth_url },
-      )
-      stopPolling()
-      pollRef.current = setInterval(async () => {
-        try {
-          const status = await strmAPI.poll115OAuth(account.id, result.session_id)
-          setAuthStatus(status.tip)
-          if (status.status === 'confirmed') {
-            stopPolling()
-            const updated = await strmAPI.testAccount(account.id)
-            onAuthed(updated)
-          }
-          if (status.status === 'expired') {
-            stopPolling()
-            setAuthUI(null)
-            toast.error('授权已过期，请重新发起')
-          }
-        } catch {
-          /* 轮询失败等下一次 */
-        }
-      }, 3000)
-    } catch (err) {
-      toast.error(apiErrorMessage(err))
-    } finally {
-      setStarting(false)
-    }
-  }
-
-  const openAuthWindow = () => {
-    if (authUI?.mode === 'url' && authUI.authUrl) {
-      window.open(authUI.authUrl, '_blank', 'noopener')
-    }
-  }
-
-  const resetAuth = () => {
-    stopPolling()
-    setAuthUI(null)
-    setAuthStatus('')
-  }
-
-  return (
-    <div className="space-y-4 rounded-2xl bg-gray-50 p-4">
-      {existing?.has_credential && (
-        <p className="rounded-xl bg-emerald-50 px-3 py-2 text-sm text-emerald-600">
-          ✓ 该账号已授权；重新授权会替换现有令牌
-        </p>
-      )}
-
-      {!authUI && (
-        <div className="space-y-3">
-          <div className="grid grid-cols-2 gap-2">
-            {AUTH_SOURCE_OPTIONS.map((option) => {
-              const active = authSource === option.key
-              const disabled = Boolean(option.needsRelayKey && !relayKeyConfigured)
-              return (
-                <button
-                  key={option.key}
-                  type="button"
-                  disabled={disabled}
-                  onClick={() => setAuthSource(option.key)}
-                  className={
-                    'rounded-xl border-2 p-2.5 text-left transition disabled:cursor-not-allowed disabled:opacity-40 ' +
-                    (active ? 'border-brand-400 bg-brand-50' : 'border-gray-100 bg-white hover:border-gray-200')
-                  }
-                >
-                  <p className="text-sm font-bold text-ink-600">{option.label}</p>
-                  <p className="text-[11px] text-sand-500">{option.desc}</p>
-                  {disabled && <p className="text-[10px] text-rose-400">需在 STRM 设置配置共享密钥</p>}
-                </button>
-              )
-            })}
-          </div>
-
-          {authSource === 'built_in_appid' && (
-            <div className="space-y-2">
-              <Field label="选择官方应用" hint="应用目录来自 QMediaSync 内置；媒体播放器 / 飞牛 / 恒星等">
-                <div className="flex items-center gap-2">
-                  <Search size={14} className="shrink-0 text-sand-400" />
-                  <input className={inputCls} placeholder="搜索应用名称或 ID…" value={appKeyword} onChange={(e) => setAppKeyword(e.target.value)} />
-                </div>
-                <select className={inputCls} value={appID} onChange={(e) => setAppID(e.target.value)} size={5}>
-                  {filteredApps.map((source) => (
-                    <option key={source.app_id} value={source.app_id}>
-                      {source.display_name}（{source.app_id}）
-                    </option>
-                  ))}
-                </select>
-                {filteredApps.length === 0 && <p className="text-xs text-sand-500">未找到匹配的官方应用</p>}
-              </Field>
-            </div>
-          )}
-          {authSource === 'custom_appid' && (
-            <Field label="自定义 APP ID" hint="使用自己在 115 开放平台申请的应用 ID">
-              <input className={inputCls} value={appID} placeholder="100195125" onChange={(e) => setAppID(e.target.value)} />
-            </Field>
-          )}
-          {authSource === 'built_in_relay' && (
-            <Field label="中继服务">
-              <select className={inputCls} value={relayProvider} onChange={(e) => setRelayProvider(e.target.value as typeof relayProvider)}>
-                <option value="qmediasync">QMediaSync（oauth.qmediasync.cn）</option>
-                <option value="mqfamily">MQFamily（api.mqfamily.top）</option>
-              </select>
-            </Field>
-          )}
-          {authSource === 'third_party_service' && (
-            <Field label="第三方授权服务">
-              <select className={inputCls} value={thirdParty} onChange={(e) => setThirdParty(e.target.value as typeof thirdParty)}>
-                <option value="moviepilot">MoviePilot（https://movie-pilot.org）</option>
-                <option value="clouddrive">CloudDrive（redirect115.zhenyunpan.com）</option>
-              </select>
-            </Field>
-          )}
-
-          <button
-            type="button"
-            onClick={startAuth}
-            disabled={starting || (authSource === 'built_in_appid' && filteredApps.length === 0)}
-            className="neon-button disabled:opacity-50"
-          >
-            {starting ? <Loader2 size={16} className="animate-spin" /> : <QrCode size={16} />}
-            {authSource === 'built_in_appid' || authSource === 'custom_appid' ? '获取登录二维码' : '获取授权链接'}
-          </button>
-        </div>
-      )}
-
-      {authUI && (
-        <div className="space-y-3">
-          {authUI.mode === 'qrcode' && authUI.qrcodeUrl ? (
-            <div className="flex items-center gap-4">
-              <QrCanvas content={authUI.qrcodeUrl} />
-              <div className="space-y-1.5 text-sm">
-                <p className="font-medium text-ink-600">{authStatus || '等待扫码…'}</p>
-                <p className="text-xs text-sand-500">请使用 115 手机客户端扫码并确认授权，5 分钟内有效</p>
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <p className="text-sm text-ink-100">请点击下方按钮在新窗口完成授权：</p>
-              <button type="button" onClick={openAuthWindow} className="neon-button">
-                <ExternalLink size={16} />
-                打开授权页面
-              </button>
-              <p className="text-xs text-sand-500">完成后回到此页面等待自动确认（授权成功后可关闭弹窗）</p>
-            </div>
-          )}
-          <div className="flex items-center gap-2 text-sm">
-            <Loader2 size={14} className="animate-spin text-brand-500" />
-            <span className="text-ink-50">{authStatus}</span>
-          </div>
-          <button
-            type="button"
-            onClick={resetAuth}
-            className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs font-semibold text-ink-100 transition hover:bg-gray-50"
-          >
-            <RefreshCw size={14} />
-            重新发起授权
-          </button>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ─── STRM 设置 ────────────────────────────────────────────────────────────────
-
 const SETTING_DEFS: SettingDef[] = [
   { key: 'strm.base_url', label: 'STRM 链接基础地址', type: 'text', hint: '生成的 strm 文件指向的播放地址；留空依次自动使用 app.server_url，最后回退到本机地址（http://127.0.0.1:端口）。Emby 在其他设备时请配置局域网/公网地址' },
   { key: 'strm.video_ext', label: '视频扩展名', type: 'text', hint: '逗号分隔，命中即生成 .strm' },
@@ -815,6 +508,12 @@ const SETTING_DEFS: SettingDef[] = [
       { value: '2', label: '仅文件名' },
       { value: '3', label: '不带 path' },
     ],
+  },
+  {
+    key: 'strm.keep_ext',
+    label: '保留视频扩展名（多版本）',
+    type: 'toggle',
+    hint: '关闭（默认）：同名不同扩展（如 竞女01.mkv / 竞女01.mp4）择优生成一条 name.strm；开启：分别生成 name.mkv.strm / name.mp4.strm，保留全部版本供播放切换',
   },
   { key: 'strm.115_relay_key', label: '115 中继授权共享密钥', type: 'text', hint: 'QMediaSync/MQFamily 中继授权的共享 AES 密钥；不配置则中继授权不可用' },
   { key: 'strm.download_threads', label: '下载队列线程数', type: 'number', hint: '元数据下载并发数' },
@@ -880,22 +579,33 @@ export function StrmSettingsDialog({ onClose }: { onClose: () => void }) {
 
 // ─── 添加/编辑同步目录 ────────────────────────────────────────────────────────
 
+/** 推断已有配置当前实际拼在本地输出目录末尾的尾段（目录名或 115 目录 ID）。 */
+function initRemoteTail(existing: StrmSyncPath): string {
+  const cidTail = lastPathSegment(existing.remote_path)
+  const nameTail = existing.remote_display_path ? lastPathSegment(existing.remote_display_path) : ''
+  if (nameTail && lastPathSegment(existing.local_path) === nameTail) return nameTail
+  return cidTail
+}
+
 export function StrmSyncPathDialog({
   accounts,
   existing,
   onClose,
   onSaved,
+  onOpenSettings,
 }: {
   accounts: StrmAccount[]
   existing: StrmSyncPath | null
   onClose: () => void
   onSaved: () => void
+  onOpenSettings?: () => void
 }) {
   const [form, setForm] = useState<StrmSyncPathInput>(() => ({
     name: existing?.name ?? '',
     provider: existing?.provider ?? 'cloud115',
     account_id: existing?.account_id ?? '',
     remote_path: existing?.remote_path ?? '',
+    remote_display_path: existing?.remote_display_path ?? '',
     local_path: existing?.local_path ?? '',
     strm_base_url: existing?.strm_base_url ?? '',
     video_ext: existing?.video_ext ?? '',
@@ -906,6 +616,7 @@ export function StrmSyncPathDialog({
     download_meta: existing?.download_meta ?? true,
     upload_meta: existing?.upload_meta ?? false,
     delete_dir: existing?.delete_dir ?? false,
+    keep_ext: existing?.keep_ext ?? false,
     cron: existing?.cron ?? '',
     enable_cron: existing?.enable_cron ?? false,
     sync_mode: existing?.sync_mode ?? 'incremental',
@@ -914,22 +625,81 @@ export function StrmSyncPathDialog({
   const [saving, setSaving] = useState(false)
   const [browsing, setBrowsing] = useState(false)
   const [browsingLocal, setBrowsingLocal] = useState<null | 'remote_path' | 'local_path'>(null)
-  const prevRemoteTailRef = useRef(existing ? lastPathSegment(existing.remote_path) : '')
+  // 输入框显示的远端目录文本：对于 115 优先显示完整路径，若尚未反查到则显示 ID
+  const [remoteInputValue, setRemoteInputValue] = useState(
+    () => existing?.remote_display_path || existing?.remote_path || '',
+  )
+  // 反查展示路径的序号守卫：远端目录快速连续变更时丢弃过期响应
+  const resolveSeqRef = useRef(0)
+  // prevRemoteTailRef 记录当前拼在本地输出目录末尾、由本弹窗管理的尾段。
+  // 兼容两类历史数据：新版保存的 local_path 末段是目录名，旧版是目录 ID。
+  const prevRemoteTailRef = useRef(existing ? initRemoteTail(existing) : '')
+
+  useEffect(() => {
+    if (existing) return
+    strmAPI
+      .getSettings()
+      .then((settings) => {
+        const keepExt = settings['strm.keep_ext']
+        if (keepExt === 'true' || keepExt === '1') {
+          setForm((f) => ({ ...f, keep_ext: true }))
+        }
+      })
+      .catch(() => undefined)
+  }, [existing])
 
   const set = <K extends keyof StrmSyncPathInput>(key: K, value: StrmSyncPathInput[K]) =>
     setForm((f) => ({ ...f, [key]: value }))
 
-  const updateRemotePath = (remotePath: string) => {
+  const updateRemotePath = (remotePath: string, displayPath?: string) => {
+    const shown = (displayPath || remotePath).trim()
+    setRemoteInputValue(shown)
     setForm((f) => {
-      const synced = syncLocalPathWithRemote(f.local_path, remotePath, prevRemoteTailRef.current)
+      const tail = remoteTailNameOf(remotePath, displayPath)
+      const synced = syncLocalPathWithRemote(f.local_path, remotePath, prevRemoteTailRef.current, tail)
       prevRemoteTailRef.current = synced.remoteTail
-      return { ...f, remote_path: remotePath, local_path: synced.localPath }
+      return {
+        ...f,
+        remote_path: remotePath,
+        remote_display_path: displayPath ?? '',
+        local_path: synced.localPath,
+      }
     })
+  }
+
+  // 按 ID 反查完整展示路径。默认仅补展示、不改动已配置的本地输出目录；
+  // resyncTail 用于手动输入 ID 的新配置：把刚拼上的 ID 尾段替换为目录名。
+  const resolveDisplayPath = (accountId: string, remotePath: string, resyncTail = false) => {
+    const seq = ++resolveSeqRef.current
+    strmAPI
+      .resolveRemoteDirPath(accountId, remotePath)
+      .then((fullPath) => {
+        if (seq !== resolveSeqRef.current) return
+        if (fullPath) setRemoteInputValue(fullPath)
+        setForm((f) => {
+          if (f.remote_path !== remotePath) return f
+          if (resyncTail) {
+            const tail = remoteTailNameOf(remotePath, fullPath)
+            const synced = syncLocalPathWithRemote(f.local_path, remotePath, prevRemoteTailRef.current, tail)
+            prevRemoteTailRef.current = synced.remoteTail
+            return { ...f, remote_display_path: fullPath, local_path: synced.localPath }
+          }
+          // 旧配置的 local_path 末段若恰好就是目录名，把它认作受管尾段，
+          // 后续重新选择目录时才能正确替换而不是叠加
+          const tail = lastPathSegment(fullPath)
+          if (tail && prevRemoteTailRef.current !== tail && lastPathSegment(f.local_path) === tail) {
+            prevRemoteTailRef.current = tail
+          }
+          return { ...f, remote_display_path: fullPath }
+        })
+      })
+      .catch(() => undefined)
   }
 
   const commitLocalPath = (localPath: string) => {
     setForm((f) => {
-      const synced = syncLocalPathWithRemote(localPath, f.remote_path, prevRemoteTailRef.current)
+      const tail = remoteTailNameOf(f.remote_path, f.remote_display_path)
+      const synced = syncLocalPathWithRemote(localPath, f.remote_path, prevRemoteTailRef.current, tail)
       prevRemoteTailRef.current = synced.remoteTail
       return { ...f, local_path: synced.localPath }
     })
@@ -937,11 +707,30 @@ export function StrmSyncPathDialog({
 
   const isLocal = form.provider === 'local'
   const availableAccounts = accounts.filter((a) => a.provider === form.provider && a.has_credential)
+  const remoteDisplayPath = isLocal ? '' : form.remote_display_path?.trim() ?? ''
+  const remoteTail = isLocal ? '' : remoteTailNameOf(form.remote_path, remoteDisplayPath)
+
+  // 编辑旧配置时若尚未存展示路径，按 ID 反查补齐并更新输入框展示
+  useEffect(() => {
+    if (isLocal || form.provider !== 'cloud115') return
+    if (!form.account_id || !form.remote_path || form.remote_display_path) return
+    resolveDisplayPath(form.account_id, form.remote_path)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     setSaving(true)
     try {
+      if (!existing) {
+        const settings = await strmAPI.getSettings()
+        if (!settings?.['strm.base_url']?.trim()) {
+          toast.error('未填写strm地址')
+          onClose()
+          onOpenSettings?.()
+          return
+        }
+      }
       if (existing) {
         await strmAPI.updatePath(existing.id, form)
         toast.success('同步目录已更新')
@@ -978,6 +767,9 @@ export function StrmSyncPathDialog({
                 const provider = e.target.value as StrmProvider
                 set('provider', provider)
                 set('account_id', '')
+                set('remote_path', '')
+                set('remote_display_path', '')
+                setRemoteInputValue('')
               }}
             >
               <option value="cloud115">115 网盘</option>
@@ -1014,17 +806,39 @@ export function StrmSyncPathDialog({
                   isLocal
                     ? '扫描该目录下的视频生成 strm'
                     : form.provider === 'cloud115'
-                      ? '115 目录 ID（可通过浏览选择）'
+                      ? form.remote_path
+                        ? `115 目录 ID：${form.remote_path}（可通过右侧「浏览」选择更换）`
+                        : '可通过右侧「浏览」选择 115 目录，或直接粘贴目录 ID'
                       : '远端路径（可通过浏览选择）'
                 }
               >
                 <input
                   className={inputCls}
-                  value={form.remote_path}
-                  placeholder={isLocal ? 'D:\\movies' : '/'}
-                  onChange={(e) => set('remote_path', e.target.value)}
+                  value={remoteInputValue}
+                  placeholder={isLocal ? 'D:\\movies' : form.provider === 'cloud115' ? '点击右侧「浏览」选择目录' : '/'}
+                  onChange={(e) => setRemoteInputValue(e.target.value)}
                   onBlur={(e) => {
-                    if (!isLocal) updateRemotePath(e.target.value)
+                    const value = e.target.value.trim()
+                    if (isLocal) {
+                      set('remote_path', value)
+                      return
+                    }
+                    if (form.provider === 'cloud115') {
+                      if (!value) {
+                        updateRemotePath('', '')
+                        return
+                      }
+                      // 若用户直接输入/粘贴纯数字目录 ID，触发反查并自动替换为完整路径
+                      if (/^\d+$/.test(value)) {
+                        updateRemotePath(value, '')
+                        if (form.account_id) resolveDisplayPath(form.account_id, value, true)
+                        return
+                      }
+                      // 若当前展示的是完整路径且未变动，不做处理
+                      if (value === form.remote_display_path) return
+                    } else {
+                      updateRemotePath(value)
+                    }
                   }}
                 />
               </Field>
@@ -1052,8 +866,8 @@ export function StrmSyncPathDialog({
               <Field
                 label="本地输出目录"
                 hint={
-                  !isLocal && lastPathSegment(form.remote_path)
-                    ? `将自动拼接远端末级目录「${lastPathSegment(form.remote_path)}」`
+                  !isLocal && remoteTail
+                    ? `将自动拼接远端末级目录「${remoteTail}」`
                     : '生成的 .strm 与下载的元数据写到这里的对应目录结构下'
                 }
               >
@@ -1081,20 +895,6 @@ export function StrmSyncPathDialog({
         <details className="rounded-2xl border border-gray-100 bg-gray-50/50 p-3">
           <summary className="cursor-pointer text-sm font-semibold text-ink-600">高级选项</summary>
           <div className="mt-3 space-y-3">
-            <div className="grid gap-3 md:grid-cols-2">
-              <Field label="STRM 基础地址（覆盖全局）" hint="留空使用全局 STRM 设置">
-                <input className={inputCls} value={form.strm_base_url ?? ''} placeholder="http://host:port" onChange={(e) => set('strm_base_url', e.target.value)} />
-              </Field>
-              <Field label="最小视频大小(MB)" hint="0 表示继承全局设置">
-                <input
-                  className={inputCls}
-                  type="number"
-                  min={0}
-                  value={form.min_video_size_mb ?? 0}
-                  onChange={(e) => set('min_video_size_mb', Number(e.target.value))}
-                />
-              </Field>
-            </div>
             <div className="grid gap-3 md:grid-cols-3">
               <Field label="视频扩展名（覆盖全局）">
                 <input className={inputCls} value={form.video_ext ?? ''} placeholder="mkv,mp4,avi" onChange={(e) => set('video_ext', e.target.value)} />
@@ -1107,6 +907,15 @@ export function StrmSyncPathDialog({
               </Field>
             </div>
             <div className="grid gap-3 md:grid-cols-3">
+              <Field label="最小视频大小(MB)" hint="0 表示继承全局设置">
+                <input
+                  className={inputCls}
+                  type="number"
+                  min={0}
+                  value={form.min_video_size_mb ?? 0}
+                  onChange={(e) => set('min_video_size_mb', Number(e.target.value))}
+                />
+              </Field>
               <Field label="STRM 链接 path 参数">
                 <select className={inputCls} value={form.add_path ?? 1} onChange={(e) => set('add_path', Number(e.target.value))}>
                   <option value={1}>完整远端路径</option>
@@ -1120,14 +929,19 @@ export function StrmSyncPathDialog({
                   <option value="full">全量同步（全量校验）</option>
                 </select>
               </Field>
-              <Field label="定时同步 Cron" hint="5 段表达式，如 0 */6 * * *">
-                <input className={inputCls} value={form.cron ?? ''} placeholder="0 */6 * * *" onChange={(e) => set('cron', e.target.value)} />
-              </Field>
             </div>
+            <Field label="定时同步 Cron" hint="5 段表达式，如 0 */6 * * *">
+              <input className={inputCls} value={form.cron ?? ''} placeholder="0 */6 * * *" onChange={(e) => set('cron', e.target.value)} />
+            </Field>
             <div className="grid gap-2 md:grid-cols-2">
               <ToggleRow label="下载元数据" checked={form.download_meta ?? true} onChange={(v) => set('download_meta', v)} />
               <ToggleRow label="上传元数据" checked={form.upload_meta ?? false} onChange={(v) => set('upload_meta', v)} />
               <ToggleRow label="清理空目录" checked={form.delete_dir ?? false} onChange={(v) => set('delete_dir', v)} />
+              <ToggleRow
+                label="保留视频扩展名（多版本）"
+                checked={form.keep_ext ?? false}
+                onChange={(v) => set('keep_ext', v)}
+              />
               <ToggleRow label="启用定时同步" checked={form.enable_cron ?? false} onChange={(v) => set('enable_cron', v)} />
               <ToggleRow label="启用该目录" checked={form.enabled ?? true} onChange={(v) => set('enabled', v)} />
             </div>
@@ -1149,8 +963,8 @@ export function StrmSyncPathDialog({
         <StrmDirBrowserDialog
           accountId={form.account_id}
           initialDir={form.remote_path || undefined}
-          onSelect={(id) => {
-            updateRemotePath(id)
+          onSelect={(id, _name, fullPath) => {
+            updateRemotePath(id, form.provider === 'cloud115' ? fullPath : undefined)
             setBrowsing(false)
           }}
           onClose={() => setBrowsing(false)}
@@ -1189,6 +1003,12 @@ function ToggleRow({ label, checked, onChange }: { label: string; checked: boole
   )
 }
 
+/** 把浏览时经过的目录名称链拼成以 / 开头的完整展示路径。 */
+function chainFullPath(chain: { id: string; name: string }[]): string {
+  const names = chain.map((item) => item.name.trim()).filter(Boolean)
+  return names.length > 0 ? '/' + names.join('/') : ''
+}
+
 // ─── 远端目录浏览选择器 ───────────────────────────────────────────────────────
 
 function StrmDirBrowserDialog({
@@ -1199,25 +1019,33 @@ function StrmDirBrowserDialog({
 }: {
   accountId: string
   initialDir?: string
-  onSelect: (path: string) => void
+  onSelect: (id: string, name?: string, fullPath?: string) => void
   onClose: () => void
 }) {
   const [dir, setDir] = useState(initialDir ?? '')
-  const [crumbs, setCrumbs] = useState<string[]>([])
   const [entries, setEntries] = useState<StrmRemoteEntry[]>([])
   const [loading, setLoading] = useState(true)
+  // 已进入目录的名称链：面包屑按名称展示，「选择当前目录」时回传末级名称
+  const [dirChain, setDirChain] = useState<{ id: string; name: string }[]>([])
+  const dirChainRef = useRef<{ id: string; name: string }[]>([])
+  // 递增序号守卫：快速连续进入目录时丢弃过期目录响应
+  const loadSeqRef = useRef(0)
 
-  const load = async (target: string) => {
+  const load = async (target: string, nextChain?: { id: string; name: string }[]) => {
+    const seq = ++loadSeqRef.current
     setLoading(true)
     try {
       const list = await strmAPI.listRemoteDir(accountId, target)
+      if (seq !== loadSeqRef.current) return
+      if (nextChain) dirChainRef.current = nextChain
       setEntries(list)
       setDir(target)
-      setCrumbs(target ? target.split('/').filter(Boolean) : [])
+      setDirChain([...dirChainRef.current])
     } catch (err) {
+      if (seq !== loadSeqRef.current) return
       toast.error(apiErrorMessage(err))
     } finally {
-      setLoading(false)
+      if (seq === loadSeqRef.current) setLoading(false)
     }
   }
 
@@ -1226,7 +1054,13 @@ function StrmDirBrowserDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId])
 
-  const enterDir = (id: string) => load(id).catch(() => undefined)
+  const enterDir = (entry: StrmRemoteEntry) => {
+    const chain = [...dirChainRef.current]
+    const existingIdx = chain.findIndex((item) => item.id === entry.id)
+    if (existingIdx >= 0) chain.splice(existingIdx + 1)
+    else chain.push({ id: entry.id, name: entry.name })
+    load(entry.id, chain).catch(() => undefined)
+  }
 
   return (
     <div
@@ -1246,13 +1080,13 @@ function StrmDirBrowserDialog({
           </button>
         </div>
         <div className="flex items-center gap-1 border-b border-gray-100 px-6 py-2.5 text-xs text-sand-500">
-          <button type="button" className="hover:text-brand-500" onClick={() => enterDir('')}>
+          <button type="button" className="hover:text-brand-500" onClick={() => load('', [])}>
             根目录
           </button>
-          {crumbs.map((crumb, index) => (
-            <span key={crumb + index} className="flex items-center gap-1">
+          {(dirChain.length > 0 ? dirChain.map((item) => item.name) : dir.split('/').filter(Boolean)).map((label, index) => (
+            <span key={label + index} className="flex items-center gap-1">
               <ChevronRight size={12} />
-              <span>{crumb}</span>
+              <span>{label}</span>
             </span>
           ))}
           <span className="ml-2 text-ink-50">{dir || '（根目录 / 0）'}</span>
@@ -1273,8 +1107,8 @@ function StrmDirBrowserDialog({
                     key={entry.id}
                     type="button"
                     className="flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-sm transition hover:bg-gray-50"
-                    onClick={() => (entry.is_dir ? enterDir(entry.id) : undefined)}
-                    onDoubleClick={() => entry.is_dir && enterDir(entry.id)}
+                    onClick={() => (entry.is_dir ? enterDir(entry) : undefined)}
+                    onDoubleClick={() => entry.is_dir && enterDir(entry)}
                   >
                     <Icon size={16} className={entry.is_dir ? 'text-brand-400' : 'text-sand-400'} />
                     <span className="flex-1 truncate text-ink-600">{entry.name}</span>
@@ -1284,7 +1118,7 @@ function StrmDirBrowserDialog({
                         className="rounded-lg border border-brand-200 bg-brand-50 px-2.5 py-1 text-xs font-semibold text-brand-500 hover:bg-brand-100"
                         onClick={(e) => {
                           e.stopPropagation()
-                          onSelect(entry.id)
+                          onSelect(entry.id, entry.name, chainFullPath([...dirChainRef.current, { id: entry.id, name: entry.name }]))
                         }}
                       >
                         选择此目录
@@ -1300,7 +1134,12 @@ function StrmDirBrowserDialog({
         </div>
         <div className="flex items-center justify-between border-t border-gray-100 px-6 py-3">
           <span className="text-xs text-sand-500">双击进入目录，点击「选择此目录」使用该目录 ID / 路径</span>
-          <button type="button" className="neon-button" onClick={() => onSelect(dir)} disabled={loading}>
+          <button
+            type="button"
+            className="neon-button"
+            onClick={() => onSelect(dir, dirChain[dirChain.length - 1]?.name, chainFullPath(dirChain))}
+            disabled={loading}
+          >
             选择当前目录
           </button>
         </div>

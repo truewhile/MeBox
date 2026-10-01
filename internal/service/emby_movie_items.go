@@ -35,6 +35,17 @@ func (e *EmbyService) movieLibraryHasEpisodicContent(ctx context.Context, librar
 // 与 mediaItems 的区别: 后者会把剧集结构行当散装 Episode 漏出;这里改为聚合成
 // Series,从根本上消除「电影库里整部剧被拆成单集」的现象。
 func (e *EmbyService) movieLibraryItems(ctx context.Context, p ItemsParams) (map[string]any, error) {
+	cacheKey := e.embyItemsCacheKey("movie-library-items-v1", p)
+	var cached embyItemsCacheValue
+	if e.cache != nil && e.cache.GetJSON(ctx, cacheKey, &cached) {
+		e.rememberArtworkRefs(cached.Artwork)
+		return map[string]any{
+			"Items":            cached.Items,
+			"TotalRecordCount": int(cached.TotalRecordCount),
+			"StartIndex":       cached.StartIndex,
+		}, nil
+	}
+
 	libIDs := e.mergedLibraryIDs(ctx, p.ParentID)
 	apply := func(q *gorm.DB) *gorm.DB {
 		q = e.applyUserMediaVisibility(ctx, q, p.UserID)
@@ -65,7 +76,7 @@ func (e *EmbyService) movieLibraryItems(ctx context.Context, p ItemsParams) (map
 			return nil, err
 		}
 	}
-	seriesGroups := e.seriesGroupsFromMedia(episodicRows)
+	seriesGroups := e.seriesGroupsFromMedia(ctx, episodicRows)
 
 	// 真正的电影 -> Movie 项(剔除剧集结构行)。
 	movieQ := apply(e.repo.DB.WithContext(ctx).Model(&model.Media{}))
@@ -78,33 +89,72 @@ func (e *EmbyService) movieLibraryItems(ctx context.Context, p ItemsParams) (map
 	if err := movieQ.Find(&movieRows).Error; err != nil {
 		return nil, err
 	}
-	movieItems, err := e.payloadsForMedia(ctx, movieRows, p.UserID)
-	if err != nil {
-		return nil, err
-	}
+	// 先按版本去重，再参与排序。这里不立即构建 payload：大电影库可能有
+	// 数万行，而客户端一页通常只要几十条，提前构建会触发大量 NFO / 数据
+	// 查询并把响应时间浪费在用户根本看不到的条目上。
+	movieRows = e.collapseMediaVersionRows(ctx, movieRows)
 
 	// 合并: Series 卡片 + Movie 项, 统一按首播/上映日期倒序。
 	type entry struct {
-		sortAt  time.Time
-		payload map[string]any
+		sortAt time.Time
+		media  *model.Media
+		group  *embySeriesGroup
 	}
-	entries := make([]entry, 0, len(seriesGroups)+len(movieItems))
-	for _, g := range seriesGroups {
-		entries = append(entries, entry{sortAt: embySeriesReleaseSortTime(g), payload: e.seriesPayload(g)})
+	entries := make([]entry, 0, len(seriesGroups)+len(movieRows))
+	for i := range seriesGroups {
+		group := &seriesGroups[i]
+		entries = append(entries, entry{sortAt: embySeriesReleaseSortTime(*group), group: group})
 	}
-	for _, item := range movieItems {
-		entries = append(entries, entry{sortAt: embyPayloadReleaseSortTime(item), payload: item})
+	for i := range movieRows {
+		media := &movieRows[i]
+		entries = append(entries, entry{sortAt: embyMediaReleaseSortTime(*media), media: media})
 	}
 	sort.SliceStable(entries, func(i, j int) bool {
 		return entries[i].sortAt.After(entries[j].sortAt)
 	})
 	total := len(entries)
 	paged := pageSlice(entries, p.StartIndex, p.Limit)
-	items := make([]map[string]any, 0, len(paged))
+
+	pageMovies := make([]model.Media, 0, len(paged))
 	for _, en := range paged {
-		items = append(items, en.payload)
+		if en.media != nil {
+			pageMovies = append(pageMovies, *en.media)
+		}
 	}
-	return map[string]any{"Items": items, "TotalRecordCount": total, "StartIndex": p.StartIndex}, nil
+	moviePayloads, err := e.payloadsForMedia(ctx, pageMovies, p.UserID)
+	if err != nil {
+		return nil, err
+	}
+	payloadByID := make(map[string]map[string]any, len(moviePayloads))
+	for _, item := range moviePayloads {
+		if id, ok := item["Id"].(string); ok {
+			payloadByID[id] = item
+		}
+	}
+
+	items := make([]map[string]any, 0, len(paged))
+	pageGroups := make([]embySeriesGroup, 0, len(paged))
+	for _, en := range paged {
+		switch {
+		case en.group != nil:
+			pageGroups = append(pageGroups, *en.group)
+			items = append(items, e.seriesPayload(*en.group))
+		case en.media != nil:
+			if item := payloadByID[en.media.ID]; item != nil {
+				items = append(items, item)
+			}
+		}
+	}
+	out := map[string]any{"Items": items, "TotalRecordCount": total, "StartIndex": p.StartIndex}
+	if e.cache != nil {
+		e.cache.SetJSON(ctx, cacheKey, embyItemsCacheValue{
+			Items:            items,
+			TotalRecordCount: int64(total),
+			StartIndex:       p.StartIndex,
+			Artwork:          e.artworkRefsForSeriesGroups(pageGroups),
+		}, time.Duration(e.mediaCacheTTLSeconds())*time.Second)
+	}
+	return out, nil
 }
 
 // embyPayloadCreatedAt 从 item payload 里取 DateCreated(time.Time),用于合并排序。
@@ -135,10 +185,11 @@ func (e *EmbyService) libraryIsEpisodic(ctx context.Context, libraryID string) (
 	if strings.TrimSpace(libraryID) == "" {
 		return false, nil
 	}
-	if lib, err := e.repo.Library.FindByID(ctx, libraryID); err != nil {
+	// 走请求级缓存（若有），避免同一请求内对同一库重复查表。
+	if typ, ok, err := e.payloadLibraryType(ctx, libraryID); err != nil {
 		return false, err
-	} else if lib != nil {
-		return embyLibraryTypeIsEpisodic(lib.Type), nil
+	} else if ok {
+		return embyLibraryTypeIsEpisodic(typ), nil
 	}
 	var count int64
 	err := e.repo.DB.WithContext(ctx).Model(&model.Media{}).
@@ -151,11 +202,11 @@ func (e *EmbyService) mediaBelongsToEpisodicLibrary(ctx context.Context, m *mode
 	if e == nil || m == nil || strings.TrimSpace(m.LibraryID) == "" {
 		return false
 	}
-	lib, err := e.repo.Library.FindByID(ctx, m.LibraryID)
-	if err != nil || lib == nil {
+	typ, ok, err := e.payloadLibraryType(ctx, m.LibraryID)
+	if err != nil || !ok {
 		return false
 	}
-	return embyLibraryTypeIsEpisodic(lib.Type)
+	return embyLibraryTypeIsEpisodic(typ)
 }
 
 func (e *EmbyService) mediaShouldBeEpisode(ctx context.Context, m *model.Media) bool {
@@ -219,7 +270,7 @@ func embyLikelyEpisodicPathSQL() (string, []any) {
 	patterns := []string{
 		"%/season %/%", "%/season.%/%", "%/season-%/%", "%/season_%/%",
 		"%/s0%/%", "%/s1%/%", "%/s2%/%", "%/s3%/%", "%/s4%/%", "%/s5%/%", "%/s6%/%", "%/s7%/%", "%/s8%/%", "%/s9%/%",
-		"%/special/%", "%/specials/%", "%/sp/%", "%/ova/%", "%/oad/%", "%/extra/%", "%/extras/%",
+		"%/special/%", "%/specials/%", "%/sp/%", "%/ova/%", "%/ovas/%", "%/oad/%", "%/oads/%", "%/ovd/%", "%/ovds/%", "%/ona/%", "%/onas/%", "%/extra/%", "%/extras/%", "%/bonus/%", "%/bonuses/%", "%/omake/%", "%/picture drama/%", "%/ncop/%", "%/nced/%",
 		"%/电视剧/%", "%/剧集/%", "%/连续剧/%", "%/短剧/%", "%/国产剧/%", "%/国剧/%", "%/大陆剧/%", "%/华语剧/%", "%/国产电视剧/%", "%/大陆电视剧/%", "%/华语电视剧/%", "%/欧美剧/%", "%/欧美电视剧/%", "%/美剧/%", "%/英剧/%", "%/日韩剧/%", "%/日韩电视剧/%", "%/日剧/%", "%/韩剧/%", "%/港剧/%", "%/台剧/%", "%/港台剧/%", "%/泰剧/%",
 		"%/日番/%", "%/国漫/%", "%/番剧/%", "%/动漫/%", "%/特别篇/%", "%/特別篇/%", "%/番外/%", "%/特典/%",
 	}
@@ -242,7 +293,7 @@ func embyMediaPathLooksEpisodic(path string) bool {
 		return false
 	}
 	for _, marker := range []string{
-		"/season ", "/season.", "/season-", "/season_", "/special/", "/specials/", "/sp/", "/ova/", "/oad/", "/extra/", "/extras/",
+		"/season ", "/season.", "/season-", "/season_", "/special/", "/specials/", "/sp/", "/ova/", "/ovas/", "/oad/", "/oads/", "/ovd/", "/ovds/", "/ona/", "/onas/", "/extra/", "/extras/", "/bonus/", "/bonuses/", "/omake/", "/picture drama/", "/ncop/", "/nced/",
 		"/电视剧/", "/剧集/", "/连续剧/", "/短剧/", "/国产剧/", "/国剧/", "/大陆剧/", "/华语剧/", "/国产电视剧/", "/大陆电视剧/", "/华语电视剧/", "/欧美剧/", "/欧美电视剧/", "/美剧/", "/英剧/", "/日韩剧/", "/日韩电视剧/", "/日剧/", "/韩剧/", "/港剧/", "/台剧/", "/港台剧/", "/泰剧/",
 		"/日番/", "/国漫/", "/番剧/", "/动漫/", "/特别篇/", "/特別篇/", "/番外/", "/特典/",
 	} {

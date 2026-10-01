@@ -33,6 +33,10 @@ type StreamService struct {
 	log        *zap.Logger
 	repo       *repository.Container
 	transcoder *TranscoderService
+	// strmResolve 把 strm 目标解析成最终直链。注入后 /Videos/{id}/stream 能直接
+	// 302 到 CDN 地址，省掉 /api/strm/play 那一跳；未注入时保持原有的两跳行为，
+	// 因此测试与精简部署不受影响。
+	strmResolve func(ctx context.Context, raw, userAgent string) (*StrmPlayResult, error)
 }
 
 // NewStreamService is the constructor.
@@ -43,6 +47,16 @@ func NewStreamService(cfg *config.Config, log *zap.Logger, repo *repository.Cont
 		repo:       repo,
 		transcoder: transcoder,
 	}
+}
+
+// SetStrmPlayTargetResolver 注入 strm 播放目标解析器（通常为
+// StrmService.ResolvePlayTargetWithUA）。注入后播放链路会在服务端完成换链并直接
+// 302 到最终直链，避免客户端在高延迟线路上多跟随一次 302。
+func (s *StreamService) SetStrmPlayTargetResolver(resolve func(ctx context.Context, raw, userAgent string) (*StrmPlayResult, error)) *StreamService {
+	if s != nil {
+		s.strmResolve = resolve
+	}
+	return s
 }
 
 // ErrMediaNotFound is returned when the media row or its file is missing.

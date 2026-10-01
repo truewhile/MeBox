@@ -10,8 +10,24 @@ import (
 func registerAuthedUserAndLicenseRoutes(authed *gin.RouterGroup, svc *service.Container) {
 	authed.GET("/me", meHandler(svc))
 	authed.PATCH("/me", updateProfileHandler(svc))
+	authed.GET("/me/pinned-libraries", getPinnedLibrariesHandler(svc))
+	authed.PUT("/me/pinned-libraries", setPinnedLibrariesHandler(svc))
+	authed.GET("/me/library-tags", getLibraryTagsHandler(svc))
+	authed.PUT("/me/library-tags", setLibraryTagsHandler(svc))
 	authed.POST("/me/password", changePasswordHandler(svc))
 	authed.POST("/me/logout", logoutHandler(svc))
+	authed.GET("/me/temporary-password", temporaryPasswordHandler(svc))
+	authed.POST("/me/temporary-password", temporaryPasswordHandler(svc))
+
+	// 设备管理：路由挂在 /me 下，用户 ID 一律取自会话，天然只能管自己的设备。
+	authed.GET("/me/devices", myDevicesHandler(svc))
+	authed.POST("/me/devices/kick-all", myKickAllDevicesHandler(svc))
+	authed.POST("/me/devices/:deviceID/kick", myKickDeviceHandler(svc))
+
+	// Telegram 通知绑定：一次性码 + Bot /bind <code>。
+	authed.GET("/me/telegram", getTelegramStatusHandler(svc))
+	authed.POST("/me/telegram/bind-code", startTelegramBindHandler(svc))
+	authed.DELETE("/me/telegram", unbindTelegramHandler(svc))
 
 	authed.GET("/auth/permissions", getMyPermissionsHandler(svc))
 }
@@ -32,6 +48,8 @@ func registerAuthedLibraryRoutes(authed *gin.RouterGroup, svc *service.Container
 	authed.POST("/libraries/:id/scrape", middleware.AdminRequired(), scrapeLibraryHandler(svc))
 
 	authed.GET("/libraries/:id/media", listMediaHandler(svc))
+	authed.GET("/libraries/:id/facets", libraryFacetsHandler(svc))
+	authed.GET("/libraries/:id/random", libraryRandomHandler(svc))
 	authed.GET("/libraries/:id/series", listLibrarySeriesHandler(svc))
 	authed.GET("/libraries/:id/series/episodes", listLibrarySeriesEpisodesHandler(svc))
 	authed.GET("/libraries/:id/seasons", listSeasonsHandler(svc))
@@ -40,6 +58,8 @@ func registerAuthedLibraryRoutes(authed *gin.RouterGroup, svc *service.Container
 func registerAuthedMediaRoutes(authed *gin.RouterGroup, svc *service.Container) {
 	authed.GET("/media/:id", getMediaHandler(svc))
 	authed.GET("/media/:id/episodes", listMediaEpisodesHandler(svc))
+	authed.GET("/media/:id/playback", mediaPlaybackInfoHandler(svc))
+	authed.POST("/media/:id/transcode", mediaTranscodeHandler(svc))
 	authed.GET("/media", searchMediaHandler(svc))
 	authed.PATCH("/media/:id/metadata", middleware.AdminRequired(), updateMediaMetadataHandler(svc))
 	authed.POST("/media/:id/scrape", middleware.AdminRequired(), scrapeOneHandler(svc))
@@ -48,10 +68,9 @@ func registerAuthedMediaRoutes(authed *gin.RouterGroup, svc *service.Container) 
 	authed.POST("/media/scrape/apply", middleware.AdminRequired(), manualScrapeApplyBatchHandler(svc))
 	authed.POST("/media/:id/probe", middleware.AdminRequired(), reprobeHandler(svc))
 	authed.DELETE("/media/:id", middleware.AdminRequired(), deleteMediaHandler(svc))
-	authed.POST("/media/:id/restore", middleware.AdminRequired(), restoreMediaHandler(svc))
-	authed.DELETE("/media/:id/purge", middleware.AdminRequired(), purgeMediaHandler(svc))
 	authed.GET("/media/:id/subtitles", listSubtitlesHandler(svc))
 	authed.GET("/subtitles/:id", serveSubtitleHandler(svc))
+	authed.GET("/subtitles/:id/ass", serveASSSubtitleHandler(svc))
 	authed.POST("/media/:id/nfo", middleware.AdminRequired(), exportNFOHandler(svc))
 	authed.POST("/libraries/:id/nfo", middleware.AdminRequired(), exportLibraryNFOHandler(svc))
 }
@@ -62,6 +81,10 @@ func registerAuthedPlaybackAndProxyRoutes(authed *gin.RouterGroup, svc *service.
 	authed.GET("/hls/:id/index.m3u8", hlsPlaylistHandler(svc))
 	authed.GET("/hls/:id/:seg", hlsSegmentHandler(svc))
 	authed.DELETE("/hls/:id", stopTranscodeHandler(svc))
+	authed.GET("/cloud115/media/:id/master.m3u8", cloud115HLSMasterHandler(svc))
+	authed.HEAD("/cloud115/media/:id/master.m3u8", cloud115HLSMasterHandler(svc))
+	authed.GET("/cloud115/hls/:session/:key", cloud115HLSSessionHandler(svc))
+	authed.HEAD("/cloud115/hls/:session/:key", cloud115HLSSessionHandler(svc))
 
 	authed.GET("/img", imageProxyHandler(svc))
 }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetState
 import toast from 'react-hot-toast'
 
 import { mediaAPI, type ManualScrapeCandidate } from '../api/library'
+import { useEpisodeArtworkPreference } from '../hooks/useEpisodeArtworkPreference'
 import type { Media } from '../types'
 import {
   candidateKey,
@@ -103,7 +104,7 @@ export function useManualScrapeDialogState({
 function useManualScrapeFormState() {
   const [query, setQuery] = useState('')
   const [selectedProviders, setSelectedProviders] = useState<string[]>([])
-  const [includeEpisodeArtwork, setIncludeEpisodeArtwork] = useState(false)
+  const [includeEpisodeArtwork, setIncludeEpisodeArtwork] = useEpisodeArtworkPreference()
   const [searching, setSearching] = useState(false)
   const [applyingKey, setApplyingKey] = useState('')
   const [items, setItems] = useState<ManualScrapeCandidate[]>([])

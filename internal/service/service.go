@@ -10,11 +10,14 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/truewhile/MeBox/internal/config"
+	"github.com/truewhile/MeBox/internal/helper"
 	"github.com/truewhile/MeBox/internal/repository"
+	"github.com/truewhile/MeBox/internal/service/reader"
 )
 
 // Container 持有在启动时初始化的每个服务。Handler 接收指向它的指针并选择相关字段。
 type Container struct {
+	Version          string
 	Cfg              *config.Config
 	Log              *zap.Logger
 	Repo             *repository.Container
@@ -33,6 +36,8 @@ type Container struct {
 	Fanart           *FanartProvider
 	Scraper          *ScraperService
 	Playback         *PlaybackService
+	Segments         *MediaSegmentService
+	MediaProbe       *MediaProbeService
 	ImageProxy       *ImageProxy
 	Watcher          *WatcherService
 	Subtitle         *SubtitleService
@@ -57,11 +62,16 @@ type Container struct {
 	Token            *TokenService
 	ApiConfig        *ApiConfigService
 	Device           *DeviceService
+	Telegram         *TelegramService
+	TelegramExpiry   *TelegramExpiryWatcher
+	Discovery        *MediaDiscoveryService
 	Cache            *RuntimeCacheService
 	Sessions         *SessionTrackerService
 	RecognitionWords *RecognitionWordsService
 	Danmaku          *DanmakuService
 	Strm             *StrmService
+	Cloud115         *Cloud115PlaybackService
+	Reader           *reader.ReaderService
 	Database         *DatabaseAdminService
 	FFTools          *FFmpegToolsService
 
@@ -95,13 +105,19 @@ func (c *Container) Boot() {
 	if err := c.APIConfig.SeedDefaults(c.stopCtx); err != nil {
 		c.Log.Warn("api config seed failed", zap.Error(err))
 	}
-	go c.warmMediaSearchIndex(c.stopCtx)
+	helper.Go(c.Log, "service.warmMediaSearchIndex", func() { c.warmMediaSearchIndex(c.stopCtx) })
 
 	// 启动调度器定时任务
 	c.Scheduler.Start(c.stopCtx)
 
-	// 远程 Emby 挂载兼容迁移：旧账号无挂载时自动全量挂载
+	// Telegram 通知轮询（未启用或未配置 Token 时直接返回）
+	if c.Telegram != nil {
+		c.Telegram.Start(c.stopCtx)
+	}
+
+	// 远程 Emby 挂载兼容迁移：清理已删账号的残留挂载；旧账号无挂载时自动全量挂载
 	if c.EmbyRemote != nil {
+		c.EmbyRemote.CleanupOrphanMounts(c.stopCtx)
 		c.EmbyRemote.AutoSeedMounts(c.stopCtx)
 	}
 
@@ -118,7 +134,7 @@ func (c *Container) Boot() {
 	// Mgo 保号规则巡检：默认关闭，由管理员通过 Telegram Bot 命令开启。
 	// 每天触发一次评估；规则里的窗口可随机，不固定。
 	if c.Device != nil {
-		go c.runInactivitySweeper(c.stopCtx)
+		helper.Go(c.Log, "service.inactivitySweeper", func() { c.runInactivitySweeper(c.stopCtx) })
 	}
 }
 

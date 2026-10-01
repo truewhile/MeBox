@@ -1,5 +1,5 @@
 import { FormEvent, useState } from 'react'
-import { Folder, Plus, Trash2 } from 'lucide-react'
+import { Folder, Loader2, Plus, Trash2 } from 'lucide-react'
 
 import { LocalDirBrowserDialog } from '../components/LocalDirBrowserDialog'
 import type { RootDraft } from './adminLibraryPanelModel'
@@ -10,6 +10,7 @@ type CreateFormProps = {
   coverURL: string
   roots: RootDraft[]
   createPerSubfolder: boolean
+  creating: boolean
   onNameChange: (value: string) => void
   onTypeChange: (value: string) => void
   onCoverURLChange: (value: string) => void
@@ -26,6 +27,7 @@ export function AdminLibraryCreateForm({
   coverURL,
   roots,
   createPerSubfolder,
+  creating,
   onNameChange,
   onTypeChange,
   onCoverURLChange,
@@ -108,8 +110,9 @@ export function AdminLibraryCreateForm({
             批处理模式：仅取上方第一个路径作为父级目录，会为其中每个子文件夹分别创建媒体库，可自选类型用于整体推断。
           </p>
         )}
-        <button type="submit" className="neon-button md:col-span-4">
-          {createPerSubfolder ? '按目录批量创建' : '新建 / 追加路径'}
+        <button type="submit" className="neon-button md:col-span-4 disabled:opacity-50" disabled={creating}>
+          {creating && <Loader2 size={16} className="animate-spin" />}
+          {creating ? '创建中…' : createPerSubfolder ? '按目录批量创建' : '新建 / 追加路径'}
         </button>
       </form>
 

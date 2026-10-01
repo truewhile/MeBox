@@ -19,13 +19,16 @@ import (
 	"github.com/truewhile/MeBox/web"
 )
 
-func buildRouter(cfg *config.Config, logger *zap.Logger, svc *service.Container) *gin.Engine {
+func buildRouter(cfg *config.Config, logger *zap.Logger, embyCompatLogger *zap.Logger, svc *service.Container) *gin.Engine {
 	if !cfg.App.Debug {
 		gin.SetMode(gin.ReleaseMode)
 	}
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(middleware.RequestLogger(logger))
+	r.Use(middleware.EmbyCompatLogger(embyCompatLogger, func(path string) bool {
+		return !isFrontendLibraryRoute(path) && handler.IsEmbyPath(path)
+	}))
 	if !cfg.App.Debug && len(cfg.App.CORSOrigins) == 0 {
 		logger.Warn("CORS: no origins configured in production — CORS headers will be omitted (same-origin enforced). Set app.cors_origins for cross-origin access.")
 	}
@@ -53,11 +56,19 @@ func buildRouter(cfg *config.Config, logger *zap.Logger, svc *service.Container)
 // comes from root, which is either the compiled-in SPA or an on-disk web dir.
 func serveSPA(r *gin.Engine, root fs.FS) {
 	assets := r.Group("/assets")
+	assets.Use(middleware.GzipStatic())
 	assets.Use(func(c *gin.Context) {
 		c.Header("Cache-Control", "public, max-age=31536000, immutable")
 		c.Next()
 	})
 	assets.GET("/*filepath", serveFSDir(root, "assets"))
+	fonts := r.Group("/fonts")
+	fonts.Use(middleware.GzipStatic())
+	fonts.Use(func(c *gin.Context) {
+		c.Header("Cache-Control", "public, max-age=86400")
+		c.Next()
+	})
+	fonts.GET("/*filepath", serveFSDir(root, "fonts"))
 	brand := r.Group("/brand")
 	brand.Use(func(c *gin.Context) {
 		setNoCacheHeaders(c)
@@ -69,7 +80,10 @@ func serveSPA(r *gin.Engine, root fs.FS) {
 		r.GET(rootFile, serveFSFile(root, name))
 		r.HEAD(rootFile, serveFSFile(root, name))
 	}
-	r.NoRoute(func(c *gin.Context) {
+	r.NoRoute(middleware.GzipStatic(), func(c *gin.Context) {
+		if handler.TryHandleEmbyNormalizedRoute(c, r) {
+			return
+		}
 		path := c.Request.URL.Path
 		if shouldBypassSPAFallback(path) {
 			c.Status(http.StatusNotFound)

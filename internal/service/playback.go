@@ -41,24 +41,62 @@ func (p *PlaybackService) SetEmbyRemote(remote *EmbyRemoteService) *PlaybackServ
 
 // ─── History ────────────────────────────────────────────────────────────────
 
-// RecordProgress upserts the resume position for a (user, media) pair. A
-// position within 30 seconds of the duration auto-flags the item as
-// completed so the home page can hide it from "Continue Watching".
+// ProgressUpdate is a playback-progress report. SessionID, SessionStartedAtMs
+// and Sequence are optional for compatibility with legacy callers.
+type ProgressUpdate struct {
+	UserID             string
+	MediaID            string
+	PositionMs         int64
+	DurationMs         int64
+	SessionID          string
+	SessionStartedAtMs int64
+	Sequence           int64
+}
+
+// RecordProgress records an unversioned progress report. It is retained for
+// older callers that do not provide playback-session metadata.
 func (p *PlaybackService) RecordProgress(ctx context.Context, userID, mediaID string, position, duration int64) error {
-	if userID == "" || mediaID == "" {
-		return errors.New("missing user or media")
-	}
-	dur := p.resolvePlaybackDuration(ctx, userID, mediaID, duration)
-	completed := dur > 0 && position >= dur-30_000
-	h := &model.PlaybackHistory{
+	return p.RecordProgressUpdate(ctx, ProgressUpdate{
 		UserID:     userID,
 		MediaID:    mediaID,
 		PositionMs: position,
-		DurationMs: dur,
-		WatchedAt:  time.Now(),
-		Completed:  completed,
+		DurationMs: duration,
+	})
+}
+
+// RecordProgressUpdate upserts the resume position for a (user, media) pair.
+// When session metadata is present, stale reports are ignored so a delayed
+// request cannot overwrite a newer position or completion state.
+func (p *PlaybackService) RecordProgressUpdate(ctx context.Context, update ProgressUpdate) error {
+	if update.UserID == "" || update.MediaID == "" {
+		return errors.New("missing user or media")
 	}
-	return p.repo.History.Upsert(ctx, h)
+	dur := p.resolvePlaybackDuration(ctx, update.UserID, update.MediaID, update.DurationMs)
+	h := &model.PlaybackHistory{
+		UserID:             update.UserID,
+		MediaID:            update.MediaID,
+		PositionMs:         update.PositionMs,
+		DurationMs:         dur,
+		WatchedAt:          time.Now(),
+		Completed:          playbackProgressCompleted(update.PositionMs, dur),
+		SessionID:          update.SessionID,
+		SessionStartedAtMs: update.SessionStartedAtMs,
+		Sequence:           update.Sequence,
+	}
+	return p.repo.History.UpsertProgress(ctx, h)
+}
+
+// playbackProgressCompleted deliberately requires a positive position. For
+// very short clips the 90% threshold avoids marking a zero-second sample as
+// finished; otherwise the last 30 seconds are treated as completed.
+func playbackProgressCompleted(position, duration int64) bool {
+	if position <= 0 || duration <= 0 {
+		return false
+	}
+	if duration <= 30_000 {
+		return position*10 >= duration*9
+	}
+	return position >= duration-30_000
 }
 
 // GetProgress returns the saved resume row for one media item, or nil when absent.
@@ -159,7 +197,20 @@ func (p *PlaybackService) RecentHistory(ctx context.Context, userID string, limi
 
 // ToggleFavourite flips the favourite flag and reports the new state.
 func (p *PlaybackService) ToggleFavourite(ctx context.Context, userID, mediaID string) (bool, error) {
-	return p.repo.Favorite.Toggle(ctx, userID, mediaID)
+	current, err := IsUserFavorite(ctx, p.repo, userID, mediaID)
+	if err != nil {
+		return false, err
+	}
+	next := !current
+	if err := p.SetFavourite(ctx, userID, mediaID, next); err != nil {
+		return false, err
+	}
+	return next, nil
+}
+
+// SetFavourite sets favourite state for a media item.
+func (p *PlaybackService) SetFavourite(ctx context.Context, userID, mediaID string, favorite bool) error {
+	return SyncUserFavorite(ctx, p.repo, p.remote, userID, mediaID, favorite)
 }
 
 // ListFavourites returns every favourited media for a user.
@@ -212,6 +263,23 @@ func (p *PlaybackService) ListFavourites(ctx context.Context, userID string) ([]
 		}
 	}
 	return out, nil
+}
+
+// ListFavouriteIDs returns the user's favourite media IDs without hydrating
+// remote Emby items. Heart-icon state only needs the IDs; fetching each remote
+// detail on every library open adds a few hundred milliseconds.
+func (p *PlaybackService) ListFavouriteIDs(ctx context.Context, userID string) ([]string, error) {
+	favs, err := p.repo.Favorite.ListByUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(favs))
+	for _, fav := range favs {
+		if fav.MediaID != "" {
+			ids = append(ids, fav.MediaID)
+		}
+	}
+	return ids, nil
 }
 
 // ─── Playlists ──────────────────────────────────────────────────────────────
@@ -278,10 +346,29 @@ func (p *PlaybackService) GetPlaylist(ctx context.Context, playlistID string) (*
 	return &PlaylistDetail{Playlist: pl, Items: ordered}, nil
 }
 
+// ErrPlaylistForbidden 表示当前用户无权操作目标播放列表。
+var ErrPlaylistForbidden = errors.New("forbidden")
+
+// EnsurePlaylistOwner 校验播放列表属主；admin 可操作任意列表。
+// 非存在的列表返回 gorm.ErrRecordNotFound。
+func (p *PlaybackService) EnsurePlaylistOwner(ctx context.Context, playlistID, userID string, isAdmin bool) error {
+	var pl model.Playlist
+	if err := p.repo.DB.WithContext(ctx).Select("user_id").Where("id = ?", playlistID).First(&pl).Error; err != nil {
+		return err
+	}
+	if pl.UserID != userID && !isAdmin {
+		return ErrPlaylistForbidden
+	}
+	return nil
+}
+
 // AddToPlaylist appends a media item to the end of a playlist.
-func (p *PlaybackService) AddToPlaylist(ctx context.Context, playlistID, mediaID string) error {
+func (p *PlaybackService) AddToPlaylist(ctx context.Context, playlistID, userID, mediaID string, isAdmin bool) error {
+	if err := p.EnsurePlaylistOwner(ctx, playlistID, userID, isAdmin); err != nil {
+		return err
+	}
 	var count int64
-	if err := p.repo.DB.Model(&model.PlaylistItem{}).
+	if err := p.repo.DB.WithContext(ctx).Model(&model.PlaylistItem{}).
 		Where("playlist_id = ?", playlistID).Count(&count).Error; err != nil {
 		return err
 	}
@@ -294,14 +381,20 @@ func (p *PlaybackService) AddToPlaylist(ctx context.Context, playlistID, mediaID
 }
 
 // RemoveFromPlaylist 物理删除播放列表项（幂等）。
-func (p *PlaybackService) RemoveFromPlaylist(ctx context.Context, playlistID, mediaID string) error {
+func (p *PlaybackService) RemoveFromPlaylist(ctx context.Context, playlistID, userID, mediaID string, isAdmin bool) error {
+	if err := p.EnsurePlaylistOwner(ctx, playlistID, userID, isAdmin); err != nil {
+		return err
+	}
 	return p.repo.DB.WithContext(ctx).Unscoped().
 		Where("playlist_id = ? AND media_id = ?", playlistID, mediaID).
 		Delete(&model.PlaylistItem{}).Error
 }
 
 // DeletePlaylist 物理删除播放列表及其全部条目。
-func (p *PlaybackService) DeletePlaylist(ctx context.Context, playlistID string) error {
+func (p *PlaybackService) DeletePlaylist(ctx context.Context, playlistID, userID string, isAdmin bool) error {
+	if err := p.EnsurePlaylistOwner(ctx, playlistID, userID, isAdmin); err != nil {
+		return err
+	}
 	if err := p.repo.DB.WithContext(ctx).Unscoped().Where("playlist_id = ?", playlistID).
 		Delete(&model.PlaylistItem{}).Error; err != nil {
 		return err

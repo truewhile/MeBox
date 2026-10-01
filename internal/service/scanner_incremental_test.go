@@ -114,11 +114,11 @@ func TestScanLibraryUsesISOParentFolderForScrapeIdentity(t *testing.T) {
 	if err := repos.DB.First(&media).Error; err != nil {
 		t.Fatal(err)
 	}
-	if media.Title != "dune part two" || media.Year != 2024 || media.ScrapeStatus != "pending" {
+	if media.Title != "Dune Part Two" || media.Year != 2024 || media.ScrapeStatus != "pending" {
 		t.Fatalf("ISO scrape identity = title=%q year=%d status=%q", media.Title, media.Year, media.ScrapeStatus)
 	}
 	candidates := scrapeQueryCandidates(&media, &lib)
-	if len(candidates) == 0 || candidates[0] != "dune part two" {
+	if len(candidates) == 0 || candidates[0] != "Dune Part Two" {
 		t.Fatalf("ISO scrape candidates = %#v", candidates)
 	}
 }
@@ -161,7 +161,7 @@ func TestScanLibraryRepairsPreviouslyUnmatchedGenericISO(t *testing.T) {
 	if err := repos.DB.First(&media, "id = ?", legacy.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if media.Title != "dune part two" || media.Year != 2024 || media.ScrapeStatus != "pending" {
+	if media.Title != "Dune Part Two" || media.Year != 2024 || media.ScrapeStatus != "pending" {
 		t.Fatalf("repaired ISO = title=%q year=%d status=%q", media.Title, media.Year, media.ScrapeStatus)
 	}
 }

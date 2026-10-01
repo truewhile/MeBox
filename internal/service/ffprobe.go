@@ -27,7 +27,18 @@ type FFprobeService struct {
 	log     *zap.Logger
 	mu      sync.RWMutex
 	limiter chan struct{}
+
+	// availMu guards the short-lived availability cache used by Available().
+	availMu        sync.Mutex
+	availCheckedAt time.Time
+	availValue     bool
 }
+
+// ffprobeAvailabilityTTL bounds how long an Available() result is reused.
+// Resolving a binary stats up to a couple dozen candidate paths, and the scanner
+// consults availability per root while deciding whether to queue backfill
+// probes. A short TTL keeps a freshly installed ffmpeg visible within seconds.
+const ffprobeAvailabilityTTL = 30 * time.Second
 
 // NewFFprobeService is the constructor.
 func NewFFprobeService(cfg *config.Config, log *zap.Logger) *FFprobeService {
@@ -52,6 +63,29 @@ func (f *FFprobeService) SetMaxConcurrent(n int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.limiter = make(chan struct{}, normalizeFFprobeMaxConcurrent(n))
+}
+
+// Available reports whether a probe can actually run right now: either an
+// ffprobe binary or the ffmpeg fallback must be resolvable. The scan path uses
+// this to decide whether re-queueing probes for media that still lack technical
+// metadata is worth doing — without a binary every probe would just fail.
+func (f *FFprobeService) Available() bool {
+	if f == nil || f.cfg == nil {
+		return false
+	}
+	f.availMu.Lock()
+	defer f.availMu.Unlock()
+	if !f.availCheckedAt.IsZero() && time.Since(f.availCheckedAt) < ffprobeAvailabilityTTL {
+		return f.availValue
+	}
+	available := true
+	if _, err := resolveLocalExecutable(f.cfg.App.FFprobePath, "ffprobe"); err != nil {
+		_, ffmpegErr := resolveLocalExecutable(f.cfg.App.FFmpegPath, "ffmpeg")
+		available = ffmpegErr == nil
+	}
+	f.availValue = available
+	f.availCheckedAt = time.Now()
+	return available
 }
 
 // ProbeResult is the subset of ffprobe output consumed by the scanner.

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -136,6 +137,47 @@ func TestRefreshTokenDead(t *testing.T) {
 	}
 	if c.AccessToken != "" {
 		t.Fatalf("dead token should clear access token")
+	}
+}
+
+func TestConcurrentTokenFailuresShareOneRefresh(t *testing.T) {
+	var mu sync.Mutex
+	refreshCalls := 0
+	mockAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/open/refreshToken" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		mu.Lock()
+		refreshCalls++
+		mu.Unlock()
+		time.Sleep(50 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"state":true,"data":{"access_token":"at-new","refresh_token":"rt-new","expires_in":7200}}`))
+	})
+
+	client := NewOpenClient("100195129", "at-old", "rt-old")
+	var wg sync.WaitGroup
+	results := make(chan bool, 2)
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- client.tryRefreshTokenLocked(context.Background(), "at-old")
+		}()
+	}
+	wg.Wait()
+	close(results)
+	for ok := range results {
+		if !ok {
+			t.Fatal("concurrent refresh should reuse the refreshed token")
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if refreshCalls != 1 {
+		t.Fatalf("refresh calls = %d, want 1", refreshCalls)
+	}
+	if client.CurrentAccessToken() != "at-new" {
+		t.Fatalf("access token = %q, want at-new", client.CurrentAccessToken())
 	}
 }
 
@@ -470,5 +512,67 @@ func TestFsListRefreshContinue(t *testing.T) {
 	}
 	if len(files) != 1 {
 		t.Fatalf("want 1 file, got %d", len(files))
+	}
+}
+
+// TestGetDownloadURLsBatch 验证批量换链：多个 pick_code 合并为一次逗号分隔
+// 请求；响应按文件 ID 为键、以条目内 pick_code 映射回请求侧；已缓存的
+// pick_code 不再发起请求；缺失项（空 URL）不出现在结果中。
+func TestGetDownloadURLsBatch(t *testing.T) {
+	var mu sync.Mutex
+	var requests []string
+	mockAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/open/ufile/downurl" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		pc := r.PostFormValue("pick_code")
+		mu.Lock()
+		requests = append(requests, pc)
+		mu.Unlock()
+		w.Write([]byte(`{"state":true,"data":{
+			"111":{"pick_code":"batch-pc-a","url":{"url":"https://cdn/a.mkv"}},
+			"222":{"pick_code":"batch-pc-b","url":{"url":"https://cdn/b.jpg"}},
+			"333":{"pick_code":"batch-pc-empty","url":{"url":""}}}}`))
+	})
+	t.Cleanup(func() {
+		ClearDownloadURLCache("batch-pc-a")
+		ClearDownloadURLCache("batch-pc-b")
+		ClearDownloadURLCache("batch-pc-empty")
+	})
+
+	c := NewOpenClient("100195125", "at1", "rt1")
+	urls, err := c.GetDownloadURLsBatch(context.Background(),
+		[]string{"batch-pc-a", "batch-pc-b", "batch-pc-empty", "", "batch-pc-a"}, "")
+	if err != nil {
+		t.Fatalf("batch downurl: %v", err)
+	}
+	if urls["batch-pc-a"] != "https://cdn/a.mkv" || urls["batch-pc-b"] != "https://cdn/b.jpg" {
+		t.Fatalf("bad urls: %#v", urls)
+	}
+	if _, ok := urls["batch-pc-empty"]; ok {
+		t.Fatalf("empty-url entry should be absent: %#v", urls)
+	}
+	if _, ok := urls[""]; ok {
+		t.Fatalf("empty pickcode should be absent: %#v", urls)
+	}
+	mu.Lock()
+	if len(requests) != 1 || requests[0] != "batch-pc-a,batch-pc-b,batch-pc-empty" {
+		mu.Unlock()
+		t.Fatalf("unexpected downurl requests: %v", requests)
+	}
+	mu.Unlock()
+
+	// 第二次调用全部命中缓存：不再发任何请求
+	urls2, err := c.GetDownloadURLsBatch(context.Background(), []string{"batch-pc-a", "batch-pc-b"}, "")
+	if err != nil {
+		t.Fatalf("cached batch downurl: %v", err)
+	}
+	if urls2["batch-pc-a"] != "https://cdn/a.mkv" {
+		t.Fatalf("cached url lost: %#v", urls2)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requests) != 1 {
+		t.Fatalf("cache hit should not issue requests, got %v", requests)
 	}
 }

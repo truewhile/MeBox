@@ -1,23 +1,8 @@
 package model
 
-// APIConfig stores third-party data-source configuration. The api_key
-// column is encrypted with AES-GCM (see internal/service/crypto.go) so an
-// SQLite leak does not expose third-party credentials.
-//
-// Provider values mirror the original Python project:
-//
-//	tmdb        — themoviedb.org
-//	bangumi     — bgm.tv
-//	thetvdb     — thetvdb.com
-//	fanart      — fanart.tv
-//	douban      — douban.com (cookie)
-//	openai      — OpenAI / DeepSeek / Qwen / Ollama (compatible)
-type APIConfig struct {
-	Base
-	Provider    string `gorm:"uniqueIndex;size:32;not null" json:"provider"`
-	APIKey      string `gorm:"type:text" json:"-"` // ciphertext (never serialised)
-	BaseURL     string `gorm:"size:512" json:"base_url,omitempty"`
-	Extra       string `gorm:"type:text" json:"extra,omitempty"` // free-form JSON
-	Enabled     bool   `gorm:"default:true" json:"enabled"`
-	Description string `gorm:"size:255" json:"description,omitempty"`
-}
+// NOTE: 原 APIConfig（provider varchar(32) / api_key text）与 api_config.go
+// 里的 ApiConfig（provider varchar(64) / api_key varchar(512)）映射到同一张
+// api_configs 表，AutoMigrate 每次启动互相改列；且 api_key 被收窄成
+// varchar(512) 后，成人区/豆瓣等存的长 AES-GCM Cookie 密文一旦入库，下次
+// 启动迁移即失败、服务无法启动。两者已合并为 api_config.go 中唯一的
+// APIConfig 结构体（字段取并集），此处不再定义重复模型。

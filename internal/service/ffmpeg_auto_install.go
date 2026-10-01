@@ -180,18 +180,20 @@ func downloadFFmpegArchive(ctx context.Context, log *zap.Logger, urls []string, 
 	var lastErr error
 	for i, u := range urls {
 		if i > 0 && log != nil {
-			log.Warn("ffmpeg 主下载源不可用，切换备用源", zap.String("url", u))
+			log.Warn("ffmpeg 主下载源不可用，切换备用源", zap.String("url", redactSensitiveURL(u)))
 		}
 		if err := downloadFFmpegFile(ctx, log, u, dest); err != nil {
 			lastErr = err
 			if log != nil {
-				log.Warn("ffmpeg 下载失败", zap.String("url", u), zap.Error(err))
+				log.Warn("ffmpeg 下载失败",
+					zap.String("url", redactSensitiveURL(u)),
+					zap.Error(redactSensitiveError(err)))
 			}
 			continue
 		}
 		return nil
 	}
-	return fmt.Errorf("所有下载源均失败：%v", lastErr)
+	return redactSensitiveError(fmt.Errorf("所有下载源均失败：%v", lastErr))
 }
 
 // downloadFFmpegFile 下载单个归档文件（最多 10 分钟，限制大小上限）。
@@ -221,10 +223,12 @@ func downloadFFmpegFile(ctx context.Context, log *zap.Logger, url, dest string) 
 		return err
 	}
 	if n > 500<<20 {
-		return fmt.Errorf("归档文件过大（>500MB）: %s", url)
+		return fmt.Errorf("归档文件过大（>500MB）: %s", redactSensitiveURL(url))
 	}
 	if log != nil {
-		log.Info("ffmpeg 归档下载完成", zap.String("url", url), zap.Int64("bytes", n))
+		log.Info("ffmpeg 归档下载完成",
+			zap.String("url", redactSensitiveURL(url)),
+			zap.Int64("bytes", n))
 	}
 	return nil
 }

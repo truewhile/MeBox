@@ -3,6 +3,7 @@ package service
 
 import (
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/truewhile/MeBox/internal/config"
 	"github.com/truewhile/MeBox/internal/model"
@@ -11,10 +12,12 @@ import (
 
 // MediaService offers high-level CRUD over libraries and media items.
 type MediaService struct {
-	cfg   *config.Config
-	log   *zap.Logger
-	repo  *repository.Container
-	cache *RuntimeCacheService
+	cfg                *config.Config
+	log                *zap.Logger
+	repo               *repository.Container
+	cache              *RuntimeCacheService
+	groupedMediaFlight singleflight.Group
+	libraryRowsFlight  singleflight.Group
 }
 
 type MediaVisibility struct {

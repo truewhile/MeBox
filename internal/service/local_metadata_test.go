@@ -4,7 +4,51 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/truewhile/MeBox/internal/model"
 )
+
+func TestReadLocalMetadataDropsResolutionArtifactEpisode(t *testing.T) {
+	// 刮削曾把分辨率 1920x1080 误读成 S20E108 并回写进边车 NFO；
+	// 重扫时必须忽略这个伪季集号，否则旧文件会把错误身份灌回 DB。
+	root := t.TempDir()
+	showDir := filepath.Join(root, "彼得·格里尔的贤者时间")
+	if err := os.MkdirAll(showDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mediaPath := filepath.Join(showDir,
+		"[UHA-WINGS][Peter Grill to Kenja no Jikan][01][BDRIP 1920x1080 HEVC-YUV420P10 FLAC].strm")
+	if err := os.WriteFile(mediaPath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nfoPath(mediaPath), []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<episodedetails>
+  <title>第 108 集</title>
+  <showtitle>彼得·格里尔的贤者时间</showtitle>
+  <season>20</season>
+  <episode>108</episode>
+  <tmdbid>99080</tmdbid>
+</episodedetails>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadLocalMetadata(mediaPath, root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("metadata is nil")
+	}
+	if got.SeasonNum != 0 || got.EpisodeNum != 0 {
+		t.Fatalf("resolution artifact season/episode not dropped: s=%d e=%d", got.SeasonNum, got.EpisodeNum)
+	}
+	if got.EpisodeTitle != "" {
+		t.Fatalf("generated episode title not dropped: %q", got.EpisodeTitle)
+	}
+	if got.Title != "彼得·格里尔的贤者时间" {
+		t.Fatalf("series title = %q, want 彼得·格里尔的贤者时间", got.Title)
+	}
+}
 
 func TestReadLocalMovieMetadata(t *testing.T) {
 	dir := t.TempDir()
@@ -194,8 +238,8 @@ func TestReadLocalVarietyMetadataUsesLocalArtwork(t *testing.T) {
 	if got.PosterURL != showPoster {
 		t.Fatalf("PosterURL = %q, want show poster %q, not episode thumb %q", got.PosterURL, showPoster, episodeThumb)
 	}
-	if got.BackdropURL != backdrop {
-		t.Fatalf("BackdropURL = %q, want %q", got.BackdropURL, backdrop)
+	if got.BackdropURL != episodeThumb {
+		t.Fatalf("BackdropURL = %q, want episode thumb %q, not series backdrop %q", got.BackdropURL, episodeThumb, backdrop)
 	}
 }
 
@@ -373,5 +417,69 @@ func TestReadLocalMetadataArtworkFallbackOnGarbageShowNFO(t *testing.T) {
 	}
 	if got.BackdropURL != backdrop {
 		t.Fatalf("expected episode artwork fallback, got %+v", got)
+	}
+}
+
+func TestReadLocalMetadataFindsLegacyImgPoster(t *testing.T) {
+	root := t.TempDir()
+	mediaPath := filepath.Join(root, "Jigokuraku.S01E14.mkv.strm")
+	poster := filepath.Join(root, "Jigokuraku.S01E14-poster.img")
+	if err := os.WriteFile(mediaPath, []byte("https://example.test/video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(poster, testJPEG, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadLocalMetadata(mediaPath, root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.PosterURL != poster {
+		t.Fatalf("PosterURL = %q, want legacy .img poster %q", got.PosterURL, poster)
+	}
+}
+
+// tvshow.nfo 里 scraper 写的 <season>-1</season>（整剧级"不适用"哨兵）不能覆盖
+// 文件名解析出的季号：一旦覆盖，该集会被写成 -1，网页端按 seasonLabel(-1) 显示成
+// 「剧场版」，Emby 端也只能落进特别篇。S00Exx 这类特别篇命名应保留第 0 季。
+func TestApplyLocalEpisodeMetadataIgnoresNegativeSeasonSentinel(t *testing.T) {
+	cases := []struct {
+		name        string
+		parsed      model.Media
+		local       LocalMetadata
+		wantSeason  int
+		wantEpisode int
+	}{
+		{
+			name:        "show level sentinel keeps parsed season",
+			parsed:      model.Media{SeasonNum: 2, EpisodeNum: 5},
+			local:       LocalMetadata{SeasonNum: -1, EpisodeNum: 5, HasNFO: true},
+			wantSeason:  2,
+			wantEpisode: 5,
+		},
+		{
+			name:        "special naming keeps season zero",
+			parsed:      model.Media{SeasonNum: 0, EpisodeNum: 11},
+			local:       LocalMetadata{SeasonNum: -1, EpisodeNum: 11, HasNFO: true},
+			wantSeason:  0,
+			wantEpisode: 11,
+		},
+		{
+			name:        "positive episode season still applies",
+			parsed:      model.Media{SeasonNum: 0, EpisodeNum: 11},
+			local:       LocalMetadata{SeasonNum: 1, EpisodeNum: 11, HasNFO: true},
+			wantSeason:  1,
+			wantEpisode: 11,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			media := tc.parsed
+			local := tc.local
+			applyLocalMetadata(&media, &local)
+			if media.SeasonNum != tc.wantSeason || media.EpisodeNum != tc.wantEpisode {
+				t.Fatalf("season/episode = %d/%d, want %d/%d", media.SeasonNum, media.EpisodeNum, tc.wantSeason, tc.wantEpisode)
+			}
+		})
 	}
 }

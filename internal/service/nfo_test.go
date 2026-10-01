@@ -100,3 +100,51 @@ func TestWriteMediaNFOAdultTitleWithCode(t *testing.T) {
 		t.Fatalf("expected originaltitle with code, got:\n%s", text)
 	}
 }
+
+func TestWriteMediaNFORoundTripsExternalUniqueIDs(t *testing.T) {
+	root := t.TempDir()
+	mediaPath := filepath.Join(root, "云下载", "sivr-270", "sivr-270-1.strm")
+	if err := os.MkdirAll(filepath.Dir(mediaPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mediaPath, []byte("strm"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dst, err := WriteMediaNFO(&model.Media{
+		Title:        "SIVR-270-河北彩花",
+		OriginalName: "SIVR-270",
+		Path:         mediaPath,
+		Year:         2023,
+		NSFW:         true,
+		DoubanID:     "SIVR-270",
+		TheTVDBID:    "JavBus",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	// 成人条目把番号/provider 借用存在 douban/thetvdb 两列；sidecar 必须把它们
+	// 带回来，否则「在线刮削 → 写 NFO → 重扫读 NFO」之后同一部片会被按不同
+	// 分组键拆成多张卡。
+	for _, want := range []string{
+		`<uniqueid type="douban">SIVR-270</uniqueid>`,
+		`<uniqueid type="thetvdb">JavBus</uniqueid>`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("sidecar missing %s, got:\n%s", want, text)
+		}
+	}
+
+	meta, err := ReadLocalMetadata(mediaPath, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta == nil || meta.DoubanID != "SIVR-270" || meta.TheTVDBID != "JavBus" {
+		t.Fatalf("external ids did not round trip: %#v", meta)
+	}
+}

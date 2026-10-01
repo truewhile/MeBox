@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"go.uber.org/zap"
@@ -48,9 +49,13 @@ type movieNFO struct {
 	Poster   string   `xml:"thumb,omitempty"`
 	Fanart   string   `xml:"fanart,omitempty"`
 	TMDb     int      `xml:"tmdbid,omitempty"`
-	Genre    []string `xml:"genre,omitempty"`
-	Country  []string `xml:"country,omitempty"`
-	Language []string `xml:"language,omitempty"`
+	// UniqueIDs 让 sidecar 能把 MeBox 自己用的外部 ID 原样带回来。缺了它，
+	// 「在线刮削 → 写 NFO → 重扫读 NFO」会丢掉 douban/thetvdb（成人条目借用
+	// 这两个字段存番号/provider），同一部片的两条来源就会算出不同的版本键。
+	UniqueIDs []nfoUniqueID `xml:"uniqueid,omitempty"`
+	Genre     []string      `xml:"genre,omitempty"`
+	Country   []string      `xml:"country,omitempty"`
+	Language  []string      `xml:"language,omitempty"`
 }
 
 type episodeNFO struct {
@@ -71,7 +76,10 @@ type episodeNFO struct {
 }
 
 // ExportOne writes a movie.nfo file next to the media file. Existing files
-// are overwritten so a re-scrape always reflects the latest metadata.
+// are overwritten so a re-scrape always reflects the latest metadata. When the
+// folder already holds a sidecar the reader would pick (movie.nfo /
+// <dirname>.nfo), that file is updated in place instead of adding a second,
+// divergent NFO.
 func (s *NFOService) ExportOne(ctx context.Context, mediaID string) (string, error) {
 	m, err := s.repo.Media.FindByID(ctx, mediaID)
 	if err != nil {
@@ -115,7 +123,10 @@ func (s *NFOService) ExportLibrary(ctx context.Context, libraryID string) (int, 
 
 func nfoPath(media string) string {
 	dir := filepath.Dir(media)
-	base := strings.TrimSuffix(filepath.Base(media), filepath.Ext(media))
+	base := mediaSidecarBase(media)
+	if base == "" {
+		base = strings.TrimSuffix(filepath.Base(media), filepath.Ext(media))
+	}
 	return filepath.Join(dir, fmt.Sprintf("%s.nfo", base))
 }
 
@@ -131,7 +142,9 @@ func WriteMediaNFO(m *model.Media) (string, error) {
 	if m.SeasonNum > 0 || m.EpisodeNum > 0 {
 		title := strings.TrimSpace(m.EpisodeTitle)
 		if title == "" && m.EpisodeNum > 0 {
-			title = fmt.Sprintf("第 %d 集", m.EpisodeNum)
+			// 兜底标题也要带上小数：S01E11.5 导出成「第 11.5 集」，
+			// 否则回写 NFO 后重新入库会把半集写成普通的第 11 集。
+			title = fmt.Sprintf("第 %s 集", FormatEpisodeNumber(m.EpisodeNum, m.EpisodeFraction))
 		}
 		if title == "" {
 			title = strings.TrimSpace(m.Title)
@@ -164,17 +177,18 @@ func WriteMediaNFO(m *model.Media) (string, error) {
 			}
 		}
 		doc = movieNFO{
-			Title:    title,
-			Original: original,
-			Year:     m.Year,
-			Plot:     m.Overview,
-			Rating:   m.Rating,
-			Poster:   m.PosterURL,
-			Fanart:   m.BackdropURL,
-			TMDb:     m.TMDbID,
-			Genre:    splitNFOList(m.Genres),
-			Country:  splitNFOList(m.Countries),
-			Language: splitNFOList(m.Languages),
+			Title:     title,
+			Original:  original,
+			Year:      m.Year,
+			Plot:      m.Overview,
+			Rating:    m.Rating,
+			Poster:    m.PosterURL,
+			Fanart:    m.BackdropURL,
+			TMDb:      m.TMDbID,
+			UniqueIDs: nfoExternalUniqueIDs(m),
+			Genre:     splitNFOList(m.Genres),
+			Country:   splitNFOList(m.Countries),
+			Language:  splitNFOList(m.Languages),
 		}
 	}
 	out, err := xml.MarshalIndent(doc, "", "  ")
@@ -182,10 +196,47 @@ func WriteMediaNFO(m *model.Media) (string, error) {
 		return "", err
 	}
 	dst := nfoPath(resolveMappedDestinationPath(m.Path))
+	if m.SeasonNum <= 0 && m.EpisodeNum <= 0 {
+		dst = nfoExportTarget(dst)
+	}
 	if err := os.WriteFile(dst, []byte(xml.Header+string(out)+"\n"), 0o644); err != nil { // #nosec G306 -- NFO sidecars must remain readable by media players.
 		return "", err
 	}
 	return dst, nil
+}
+
+// nfoExportTarget picks the file an export should write for a movie.
+//
+// Besides the canonical "<base>.nfo", the reader (findMovieNFO) also accepts
+// movie.nfo and "<dirname>.nfo". Writing the canonical name into a folder that
+// already carries one of those left two divergent NFOs for the same movie, and
+// because the reader prefers the canonical one the pre-existing file quietly went
+// stale. Reuse whichever file the reader would already have picked, in the same
+// precedence order, so an export updates the existing sidecar in place.
+//
+// Episodes are deliberately excluded by the caller: for an episode the
+// alternatives are series-level files, and writing episode metadata there would
+// corrupt the series identity.
+func nfoExportTarget(canonical string) string {
+	dir := filepath.Dir(canonical)
+	candidates := []string{
+		filepath.Base(canonical),
+		"movie.nfo",
+		filepath.Base(dir) + ".nfo",
+	}
+	for _, name := range candidates {
+		if name == "" || name == "." {
+			continue
+		}
+		candidate := filepath.Join(dir, name)
+		if candidate == canonical {
+			continue
+		}
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return canonical
 }
 
 func splitNFOList(value string) []string {
@@ -196,6 +247,30 @@ func splitNFOList(value string) []string {
 		if part != "" {
 			out = append(out, part)
 		}
+	}
+	return out
+}
+
+// nfoExternalUniqueIDs 把 MeBox 使用的外部 ID 写进 sidecar，供自己重扫时读回
+// （metadataFromDoc 会按 type 还原成 bangumi/douban/thetvdb 字段）。
+// TMDb 走 <tmdbid>，单集 NFO 不写唯一 ID：单集 ID 属于单集，写进整剧身份会把
+// 同一部剧拆成多张卡（见 mergeEpisodeMetadata 的约束说明）。
+func nfoExternalUniqueIDs(m *model.Media) []nfoUniqueID {
+	if m == nil {
+		return nil
+	}
+	out := make([]nfoUniqueID, 0, 3)
+	if m.BangumiID > 0 {
+		out = append(out, nfoUniqueID{Type: "bangumi", Value: strconv.Itoa(m.BangumiID)})
+	}
+	if id := strings.TrimSpace(m.DoubanID); id != "" {
+		out = append(out, nfoUniqueID{Type: "douban", Value: id})
+	}
+	if id := strings.TrimSpace(m.TheTVDBID); id != "" {
+		out = append(out, nfoUniqueID{Type: "thetvdb", Value: id})
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

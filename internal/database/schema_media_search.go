@@ -9,7 +9,7 @@ const mediaSearchIndexSchemaVersion = 2
 
 func ensureMediaSearchIndex(db *gorm.DB) error {
 	if err := ensureMediaSearchMetaTable(db); err != nil {
-		return nil
+		return err // meta 表创建失败必须上抛，不能静默掩盖
 	}
 	version := currentMediaSearchIndexVersion(db)
 	if version != mediaSearchIndexSchemaVersion {

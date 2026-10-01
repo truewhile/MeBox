@@ -48,7 +48,7 @@ func (p *openAPI115Provider) Ping(ctx context.Context) error {
 	if strings.TrimSpace(p.c.AppID) == "" {
 		return fmt.Errorf("115: 缺少开放平台应用 ID，请重新授权")
 	}
-	if strings.TrimSpace(p.c.AccessToken) == "" {
+	if strings.TrimSpace(p.c.CurrentAccessToken()) == "" {
 		return fmt.Errorf("115: 缺少访问令牌，请重新授权")
 	}
 	_, _, err := p.c.GetFsList(ctx, "0", 0, 1)
@@ -56,8 +56,9 @@ func (p *openAPI115Provider) Ping(ctx context.Context) error {
 }
 
 func (p *openAPI115Provider) List(ctx context.Context, dirID string) ([]FileEntry, error) {
-	// 115 开放平台列表接口按 offset/limit 分页，这里循环取完整个目录
-	const pageSize = 100
+	// 115 开放平台列表接口按 offset/limit 分页，这里循环取完整个目录；
+	// limit 上限 1150（官方文档《获取文件列表》），取上限减少大目录翻页次数
+	const pageSize = 1150
 	var out []FileEntry
 	for offset := 0; ; offset += pageSize {
 		files, _, err := p.c.GetFsList(ctx, dirID, offset, pageSize)
@@ -70,8 +71,9 @@ func (p *openAPI115Provider) List(ctx context.Context, dirID string) ([]FileEntr
 				Name:     f.FileName,
 				IsDir:    f.Category == cloud115.TypeDir,
 				Size:     f.FileSize,
-				MTime:    f.Utime,
+				MTime:    f.ModifiedAt(),
 				PickCode: f.PickCode,
+				Sha1:     f.Sha1,
 			})
 		}
 		if len(files) < pageSize {
@@ -105,35 +107,57 @@ func (p *openAPI115Provider) ResolveWithUA(ctx context.Context, fileRef, ua stri
 	return &DirectLink{URL: url, Proxy: false, Headers: map[string]string{"User-Agent": bound}}, nil
 }
 
+// ResolveBatch 批量换取直链（downurl 支持逗号分隔多 pick_code，一次请求覆盖
+// 整批下载任务的换链）。返回 pickcode → 直链，未解析成功的引用不在结果中；
+// err 非 nil 表示批量过程部分/全部失败，调用方对缺失项回退到逐个 Resolve。
+// 下载队列统一使用默认 UA，与单个换取的防盗链绑定语义一致。
+func (p *openAPI115Provider) ResolveBatch(ctx context.Context, fileRefs []string) (map[string]*DirectLink, error) {
+	urls, err := p.c.GetDownloadURLsBatch(ctx, fileRefs, "")
+	out := make(map[string]*DirectLink, len(urls))
+	for pc, u := range urls {
+		out[pc] = &DirectLink{URL: u, Proxy: false, Headers: map[string]string{"User-Agent": cloud115.DefaultUA}}
+	}
+	return out, err
+}
+
 // OpenClient 暴露底层客户端（token 刷新用）。
 func (p *openAPI115Provider) OpenClient() *cloud115.OpenClient { return p.c }
 
+// PutLocalFile 直接上传本地文件，避免通过 io.Reader 复制临时文件产生的磁盘开销与并发重命名碰撞。
+func (p *openAPI115Provider) PutLocalFile(ctx context.Context, parentCID, localPath string) error {
+	_, err := p.c.Upload(ctx, localPath, parentCID, "", "")
+	return err
+}
+
 // PutFileNamed 把本地元数据上传到 115 指定父目录（parentCID 为父目录 cid）。
-// io.Reader 无法携带文件名，因此走独立的 named 上传接口。将内容落为临时文件后
-// 重命名为目标文件名，再交给 115 上传（/open/upload/init 的 file_name 取真实文件名）。
+// 为防止多并发上传线程在同一临时目录下发生同名文件（如 poster.jpg）碰撞覆盖与误删，
+// 为每个上传任务分配专属临时子目录。
 func (p *openAPI115Provider) PutFileNamed(ctx context.Context, parentCID, fileName string, r io.Reader) error {
-	tmp, err := os.CreateTemp("", "mebox-upload-*")
+	tmpDir, err := os.MkdirTemp("", "mebox-upload-*")
+	if err != nil {
+		return fmt.Errorf("115: 创建临时目录失败：%w", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(tmpDir)
+	}()
+
+	safeName := filepath.Base(fileName)
+	if safeName == "" || safeName == "." {
+		safeName = "file"
+	}
+	tmpPath := filepath.Join(tmpDir, safeName)
+	dst, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return fmt.Errorf("115: 创建临时文件失败：%w", err)
 	}
-	tmpPath := tmp.Name()
-	defer func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
-	}()
-	if _, err := io.Copy(tmp, r); err != nil {
+	if _, err := io.Copy(dst, r); err != nil {
+		_ = dst.Close()
 		return fmt.Errorf("115: 写入临时文件失败：%w", err)
 	}
-	if err := tmp.Close(); err != nil {
+	if err := dst.Close(); err != nil {
 		return fmt.Errorf("115: 关闭临时文件失败：%w", err)
 	}
-	// 重命名为目标文件名，保证上传到 115 后保留原始文件名
-	if fileName != "" && fileName != filepath.Base(tmpPath) {
-		namedPath := filepath.Join(filepath.Dir(tmpPath), fileName)
-		if err := os.Rename(tmpPath, namedPath); err == nil {
-			tmpPath = namedPath
-		}
-	}
+
 	_, err = p.c.Upload(ctx, tmpPath, parentCID, "", "")
 	if err != nil {
 		return err

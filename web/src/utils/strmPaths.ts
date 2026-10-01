@@ -6,6 +6,23 @@ export function lastPathSegment(path: string): string {
   return parts[parts.length - 1] ?? ''
 }
 
+/**
+ * 取远端末级目录的展示/拼接名。115 等以 ID 作为 remote_path 的网盘
+ * 传入浏览时拿到的目录名 tailName，避免把数字 ID 拼进本地路径。
+ */
+export function resolveRemoteTailName(remotePath: string, tailName?: string): string {
+  const name = tailName?.trim()
+  if (name) return name
+  return lastPathSegment(remotePath)
+}
+
+/** 优先取展示路径（115 浏览/反查得到）的末级目录名，否则取远端路径末段。 */
+export function remoteTailNameOf(remotePath: string, displayPath?: string): string {
+  const trimmed = displayPath?.trim()
+  if (trimmed) return lastPathSegment(trimmed)
+  return lastPathSegment(remotePath)
+}
+
 function pathSeparator(path: string): '/' | '\\' {
   return path.includes('\\') ? '\\' : '/'
 }
@@ -30,13 +47,14 @@ function stripRemoteTail(localPath: string, prevRemoteTail: string): string {
   return trimmed
 }
 
-/** 将远端最后一级目录名拼到本地输出目录末尾；远端变更时替换旧尾段。 */
+/** 将远端最后一级目录名拼到本地输出目录末尾；远端变更时替换旧尾段。tailName 为浏览时拿到的目录名。 */
 export function syncLocalPathWithRemote(
   localPath: string,
   remotePath: string,
   prevRemoteTail = '',
+  tailName?: string,
 ): { localPath: string; remoteTail: string } {
-  const remoteTail = lastPathSegment(remotePath)
+  const remoteTail = resolveRemoteTailName(remotePath, tailName)
   const base = stripRemoteTail(localPath, prevRemoteTail)
   if (!remoteTail) {
     return { localPath: base || localPath.trim(), remoteTail: '' }

@@ -7,17 +7,29 @@ export interface SubtitleTrack {
   path: string
   url: string
   codec: string
+  source: 'external' | 'embedded'
+  delivery: 'webvtt' | 'ass' | 'burn'
+  stream_index?: number
 }
 
 export const subtitlesAPI = {
-  list: (mediaId: string) =>
+  list: (mediaId: string, includeEmbedded = false) =>
     api
-      .get<{ tracks: SubtitleTrack[] | null }>(`/media/${mediaId}/subtitles`)
+      .get<{ tracks: SubtitleTrack[] | null }>(`/media/${mediaId}/subtitles`, {
+        params: includeEmbedded ? { include_embedded: 'true' } : undefined,
+      })
       .then((r) => r.data.tracks ?? []),
 
   url: (mediaId: string, path: string) => {
     const token = useAuthStore.getState().token ?? ''
     return `/api/subtitles/${encodeURIComponent(mediaId)}?path=${encodeURIComponent(
+      path,
+    )}&token=${encodeURIComponent(token)}`
+  },
+
+  assUrl: (mediaId: string, path: string) => {
+    const token = useAuthStore.getState().token ?? ''
+    return `/api/subtitles/${encodeURIComponent(mediaId)}/ass?path=${encodeURIComponent(
       path,
     )}&token=${encodeURIComponent(token)}`
   },

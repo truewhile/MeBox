@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/truewhile/MeBox/internal/config"
+	"github.com/truewhile/MeBox/internal/helper"
 	"github.com/truewhile/MeBox/internal/repository"
 )
 
@@ -132,7 +133,7 @@ func (s *SystemUpdateService) Apply(ctx context.Context) (SystemUpdateStatus, er
 	s.last = &status
 	s.mu.Unlock()
 
-	go s.runUpdate(context.Background(), status, task)
+	helper.Go(s.log, "system.update", func() { s.runUpdate(context.Background(), status, task) })
 	return status, nil
 }
 

@@ -39,6 +39,9 @@ export const scraperAPI = {
   clearCanceled: () =>
     api.post<{ deleted: number }>('/admin/scraper/queue/clear-canceled').then((r) => r.data),
 
+  clearFailed: () =>
+    api.post<{ deleted: number }>('/admin/scraper/queue/clear-failed').then((r) => r.data),
+
   retryFailed: () =>
     api.post<{ retried: number }>('/admin/scraper/queue/retry-failed').then((r) => r.data),
 

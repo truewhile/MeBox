@@ -21,8 +21,8 @@ func TestFileSHA1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// sha1("hello") = aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d
-	if sum != "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d" {
+	// sha1("hello") = aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d，115 要求大写
+	if sum != "AAF4C61DDCC5E8A2DABEDE0F3B482CD9AEA9434D" {
 		t.Errorf("unexpected sha1: %s", sum)
 	}
 }
@@ -39,7 +39,7 @@ func TestFileSHA1Partial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sum != "0ec09ef9836da03f1add21e3ef607627e687e790" {
+	if sum != "0EC09EF9836DA03F1ADD21E3EF607627E687E790" {
 		t.Errorf("unexpected partial sha1: %s", sum)
 	}
 }
@@ -59,7 +59,7 @@ func TestFileSHA1PartialSmallerThanWindow(t *testing.T) {
 		t.Fatalf("compute partial sha1 for small file should not fail: %v", err)
 	}
 	// 应等于整个文件（6 字节）的 sha1
-	if sum != "1f8ac10f23c5b5bc1167bda84b833e5c057a77d2" {
+	if sum != "1F8AC10F23C5B5BC1167BDA84B833E5C057A77D2" {
 		t.Errorf("unexpected partial sha1: %s", sum)
 	}
 }

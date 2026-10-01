@@ -81,7 +81,12 @@ func Test115OpenAPIListPaginates(t *testing.T) {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
 		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-		count := 100
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if limit <= 0 {
+			limit = 100
+		}
+		// 首页返回满页，之后返回 1 条：驱动按 offset/limit 翻页直到短页
+		count := limit
 		if offset > 0 {
 			count = 1
 		}
@@ -97,11 +102,12 @@ func Test115OpenAPIListPaginates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(entries) != 101 {
-		t.Fatalf("entries = %d, want 101", len(entries))
+	// List 使用文档上限 limit=1150：首页 1150 条 + 短页 1 条
+	if len(entries) != 1151 {
+		t.Fatalf("entries = %d, want 1151", len(entries))
 	}
-	if entries[100].ID != "100" || entries[100].PickCode != "pick100" {
-		t.Fatalf("last entry wrong: %#v", entries[100])
+	if entries[1150].ID != "1150" || entries[1150].PickCode != "pick1150" {
+		t.Fatalf("last entry wrong: %#v", entries[1150])
 	}
 }
 

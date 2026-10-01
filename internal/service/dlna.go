@@ -36,6 +36,10 @@ type DLNAService struct {
 	cachedAt time.Time
 }
 
+// dlnaHTTPClient 是 DLNA 专用 HTTP 客户端：SSDP 描述拉取与 SOAP 投递
+// 都应快速失败，不占用全局 DefaultClient，也不无限悬挂。
+var dlnaHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
 // NewDLNAService is the constructor.
 func NewDLNAService(log *zap.Logger) *DLNAService {
 	return &DLNAService{log: log}
@@ -153,7 +157,7 @@ func (d *DLNAService) fetchDescription(ctx context.Context, location string) (*D
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := dlnaHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +271,7 @@ func (d *DLNAService) soap(ctx context.Context, controlURL, action, envelope str
 	req.Header.Set("Content-Type", `text/xml; charset="utf-8"`)
 	req.Header.Set("SOAPAction",
 		fmt.Sprintf(`"urn:schemas-upnp-org:service:AVTransport:1#%s"`, action))
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := dlnaHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}

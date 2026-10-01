@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -219,24 +220,50 @@ func (o *OrganizerService) replaceVersions(ctx context.Context, src string, exis
 		o.log.Warn("organize replace sidecar artwork failed",
 			zap.String("from", src), zap.String("to", dst), zap.Error(err))
 	}
-	// New file is safely staged; the transfer succeeded so it is now safe to
-	// supersede the existing lower-res versions.
-	for _, e := range existing {
-		if nfo := nfoPath(e); nfo != "" {
-			_ = os.Remove(nfo)
+	// New file is safely staged. 先把现有 dst 改名为备份、rename stage→dst
+	// 成功后，才删除旧版本：此前顺序是先删旧版本再 rename，一旦 rename
+	// 失败（Windows 下 dst 被播放器/杀软占用很常见），cleanup 会删掉
+	// stage——旧版本已删、move 模式下源已不在、新文件也删，数据彻底丢失。
+	var backup string
+	if _, err := os.Stat(dst); err == nil {
+		backup = dst + ".replacing-" + randomSuffix()
+		if err := os.Rename(dst, backup); err != nil {
+			cleanup()
+			return fmt.Errorf("备份现有文件失败（可能被其他程序占用）：%w", err)
 		}
-		if err := os.Remove(e); err != nil && !os.IsNotExist(err) {
-			o.log.Warn("organize replace remove existing failed",
-				zap.String("path", e), zap.Error(err))
+	}
+	if err := os.Rename(stage, dst); err != nil {
+		if backup != "" {
+			if rbErr := os.Rename(backup, dst); rbErr != nil {
+				o.log.Error("organize replace restore backup failed",
+					zap.String("backup", backup), zap.Error(rbErr))
+			}
+		}
+		cleanup()
+		return err
+	}
+	// 新文件已就位，现在才删除被取代的旧版本。dst 路径此时已是新文件，
+	// 文件级删除必须跳过（DB 行仍按原语义清理）。
+	for _, e := range existing {
+		if e != dst {
+			if nfo := nfoPath(e); nfo != "" {
+				_ = os.Remove(nfo)
+			}
+			if err := os.Remove(e); err != nil && !os.IsNotExist(err) {
+				o.log.Warn("organize replace remove existing failed",
+					zap.String("path", e), zap.Error(err))
+			}
 		}
 		if o.repo != nil && o.repo.DB != nil {
 			_ = o.repo.DB.WithContext(ctx).Unscoped().Where("path = ?", e).Delete(&model.Media{}).Error
 		}
 	}
-	// Move staged file + sidecars into the final path.
-	if err := os.Rename(stage, dst); err != nil {
-		cleanup()
-		return err
+	if backup != "" {
+		// 备份文件即被取代的旧 dst 内容，新文件已成功落位后移除。
+		if err := os.Remove(backup); err != nil && !os.IsNotExist(err) {
+			o.log.Warn("organize replace remove backup failed",
+				zap.String("path", backup), zap.Error(err))
+		}
 	}
 	moveSidecarRename(nfoPath(stage), nfoPath(dst))
 	moveStagedArtwork(stage, dst)
@@ -251,16 +278,21 @@ func randomSuffix() string {
 // moveStagedArtwork renames artwork sidecars staged alongside `stage` into
 // their final names next to `dst`.
 func moveStagedArtwork(stage, dst string) {
-	stageBase := strings.TrimSuffix(filepath.Base(stage), filepath.Ext(stage))
-	dstBase := strings.TrimSuffix(filepath.Base(dst), filepath.Ext(dst))
+	stageBases := mediaSidecarBaseVariants(stage)
+	dstBase := mediaSidecarBase(dst)
+	if dstBase == "" {
+		dstBase = strings.TrimSuffix(filepath.Base(dst), filepath.Ext(dst))
+	}
 	stageDir := filepath.Dir(stage)
-	for _, suffix := range artworkSidecarSuffixes {
-		for _, ext := range artworkSidecarExtensions {
-			srcPath := filepath.Join(stageDir, stageBase+suffix+ext)
-			if _, err := os.Stat(srcPath); err != nil {
-				continue
+	for _, stageBase := range stageBases {
+		for _, suffix := range artworkSidecarSuffixes {
+			for _, ext := range artworkSidecarExtensions {
+				srcPath := filepath.Join(stageDir, stageBase+suffix+ext)
+				if _, err := os.Stat(srcPath); err != nil {
+					continue
+				}
+				_ = os.Rename(srcPath, filepath.Join(stageDir, dstBase+suffix+ext))
 			}
-			_ = os.Rename(srcPath, filepath.Join(stageDir, dstBase+suffix+ext))
 		}
 	}
 }
@@ -279,12 +311,13 @@ func moveSidecarRename(from, to string) {
 // removeStagedArtwork removes artwork sidecars that were staged alongside
 // `stage`, used when a replace fails and its staged outputs must be cleaned up.
 func removeStagedArtwork(stage string) {
-	stageBase := strings.TrimSuffix(filepath.Base(stage), filepath.Ext(stage))
+	stageBases := mediaSidecarBaseVariants(stage)
 	stageDir := filepath.Dir(stage)
-	for _, suffix := range artworkSidecarSuffixes {
-		for _, ext := range artworkSidecarExtensions {
-			path := filepath.Join(stageDir, stageBase+suffix+ext)
-			_ = os.Remove(path)
+	for _, stageBase := range stageBases {
+		for _, suffix := range artworkSidecarSuffixes {
+			for _, ext := range artworkSidecarExtensions {
+				_ = os.Remove(filepath.Join(stageDir, stageBase+suffix+ext))
+			}
 		}
 	}
 }

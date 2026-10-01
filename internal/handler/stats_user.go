@@ -14,9 +14,14 @@ import (
 )
 
 // statsUserHandler returns a watch-time summary for one user.
+// 观看统计是隐私数据：仅允许本人或管理员查询。
 func statsUserHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		uid := c.Param("id")
+		if !statsCallerAllowed(c, uid) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+			return
+		}
 		var watched int64
 		_ = svc.Repo.DB.Model(&model.PlaybackHistory{}).
 			Where("user_id = ?", uid).
@@ -35,8 +40,14 @@ func statsUserHandler(svc *service.Container) gin.HandlerFunc {
 }
 
 // statsTopUsersHandler returns the most active users by play count.
+// 全员排行含用户名与精确时长，仅管理员可查。
 func statsTopUsersHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		role, _ := c.Get(middleware.CtxUserRole)
+		if role != "admin" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+			return
+		}
 		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
 		if limit <= 0 || limit > 50 {
 			limit = 10
@@ -108,4 +119,14 @@ func statsPlayHandler(svc *service.Container) gin.HandlerFunc {
 		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	}
+}
+
+// statsCallerAllowed 判断当前调用者是否允许查看 uid 的观看统计。
+func statsCallerAllowed(c *gin.Context, uid string) bool {
+	role, _ := c.Get(middleware.CtxUserRole)
+	if role == "admin" {
+		return true
+	}
+	caller, _ := c.Get(middleware.CtxUserID)
+	return toString(caller) == uid
 }

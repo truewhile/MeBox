@@ -1,7 +1,10 @@
+import { useEffect } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
+import { prefetchCommonRouteChunks } from '../appRoutes'
 import { useAuthStore } from '../stores/auth'
 import { usePlayProfileStore } from '../stores/playProfile'
+import { useReaderSettingsStore } from '../stores/readerSettings'
 import {
   LayoutHeader,
   LayoutSidebars,
@@ -37,8 +40,16 @@ function isMediaView(pathname: string, search: string): boolean {
 export function Layout() {
   const navigate = useNavigate()
   const location = useLocation()
+
+  // 登录后的外壳挂载即开始空闲预取常用页面的路由 chunk，
+  // 让首次点击进入各页面时不出现"加载中…"等 chunk 下载。
+  useEffect(() => {
+    prefetchCommonRouteChunks()
+  }, [])
+
   const user = useAuthStore((s) => s.user)
   const logout = useAuthStore((s) => s.logout)
+  const homeMode = useReaderSettingsStore((s) => s.homeMode)
   const activeProfileId = usePlayProfileStore((s) => s.activeProfileId)
   const setActiveProfile = usePlayProfileStore((s) => s.setActiveProfile)
   const theme = useThemeMode()
@@ -52,7 +63,9 @@ export function Layout() {
   const showSidebar = !isMediaView(location.pathname, location.search)
   const hideSearch = location.pathname.startsWith('/settings')
   const isPlayPage = isPlayerRoute(location.pathname)
-  const showMobileBottomNav = shouldShowMobileBottomNav(location.pathname)
+  // 阅读模式：首页切到阅读后，影视那一套壳（媒体搜索、账号菜单、底部导航）都不该出现
+  const readingMode = homeMode === 'reading' && location.pathname === '/'
+  const showMobileBottomNav = shouldShowMobileBottomNav(location.pathname) && !readingMode
 
   return (
     <div className="flex h-[100dvh] min-h-0 w-full overflow-hidden bg-[var(--app-bg)] text-[var(--app-text)] font-body select-none">
@@ -75,10 +88,17 @@ export function Layout() {
             onLogout={closeProfileAndLogout}
             showSidebar={showSidebar}
             hideSearch={hideSearch}
+            readingMode={readingMode}
+            showReaderToggle={location.pathname === '/'}
             pathname={location.pathname}
           />
         )}
-        <LayoutWorkspace routeKey={location.pathname} showMobileBottomNav={showMobileBottomNav} />
+        <LayoutWorkspace
+          routeKey={location.pathname}
+          scrollKey={`${location.pathname}${location.search}`}
+          userKey={user?.id}
+          showMobileBottomNav={showMobileBottomNav}
+        />
         {showMobileBottomNav && (
           <MobileBottomNav onOpenMenu={() => sidebar.setIsMobileDrawerOpen(true)} />
         )}

@@ -1,0 +1,308 @@
+{
+  "name": "doc",
+  "path": "/doc/",
+  "children": [
+    {
+      "name": "115开放平台",
+      "path": "/doc/115开放平台/",
+      "children": [
+        {
+          "name": "简介",
+          "path": "/doc/115开放平台/简介/",
+          "children": [
+            {
+              "name": "概述.md",
+              "path": "/doc/115开放平台/简介/概述.md",
+              "type": "file"
+            },
+            {
+              "name": "更新记录.md",
+              "path": "/doc/115开放平台/简介/更新记录.md",
+              "type": "file"
+            }
+          ],
+          "type": "directory"
+        },
+        {
+          "name": "接入指南",
+          "path": "/doc/115开放平台/接入指南/",
+          "children": [
+            {
+              "name": "接入流程.md",
+              "path": "/doc/115开放平台/接入指南/接入流程.md",
+              "type": "file"
+            },
+            {
+              "name": "开发须知.md",
+              "path": "/doc/115开放平台/接入指南/开发须知.md",
+              "type": "file"
+            },
+            {
+              "name": "授权错误码.md",
+              "path": "/doc/115开放平台/接入指南/授权错误码.md",
+              "type": "file"
+            },
+            {
+              "name": "接入授权",
+              "path": "/doc/115开放平台/接入指南/接入授权/",
+              "children": [
+                {
+                  "name": "手机扫码授权PKCE模式",
+                  "path": "/doc/115开放平台/接入指南/接入授权/手机扫码授权PKCE模式/",
+                  "children": [
+                    {
+                      "name": "获取设备码和二维码内容.md",
+                      "path": "/doc/115开放平台/接入指南/接入授权/手机扫码授权PKCE模式/获取设备码和二维码内容.md",
+                      "type": "file"
+                    },
+                    {
+                      "name": "轮询二维码状态.md",
+                      "path": "/doc/115开放平台/接入指南/接入授权/手机扫码授权PKCE模式/轮询二维码状态.md",
+                      "type": "file"
+                    },
+                    {
+                      "name": "获取access_token.md",
+                      "path": "/doc/115开放平台/接入指南/接入授权/手机扫码授权PKCE模式/获取access_token.md",
+                      "type": "file"
+                    }
+                  ],
+                  "type": "directory"
+                },
+                {
+                  "name": "授权码模式",
+                  "path": "/doc/115开放平台/接入指南/接入授权/授权码模式/",
+                  "children": [
+                    {
+                      "name": "请求授权.md",
+                      "path": "/doc/115开放平台/接入指南/接入授权/授权码模式/请求授权.md",
+                      "type": "file"
+                    },
+                    {
+                      "name": "用授权码换取access_token.md",
+                      "path": "/doc/115开放平台/接入指南/接入授权/授权码模式/用授权码换取access_token.md",
+                      "type": "file"
+                    }
+                  ],
+                  "type": "directory"
+                },
+                {
+                  "name": "刷新access_token.md",
+                  "path": "/doc/115开放平台/接入指南/接入授权/刷新access_token.md",
+                  "type": "file"
+                }
+              ],
+              "type": "directory"
+            }
+          ],
+          "type": "directory"
+        },
+        {
+          "name": "API列表",
+          "path": "/doc/115开放平台/API列表/",
+          "children": [
+            {
+              "name": "开发者商业价值转化：推广产品得收益.md",
+              "path": "/doc/115开放平台/API列表/开发者商业价值转化：推广产品得收益.md",
+              "type": "file"
+            },
+            {
+              "name": "用户管理",
+              "path": "/doc/115开放平台/API列表/用户管理/",
+              "children": [
+                {
+                  "name": "用户信息.md",
+                  "path": "/doc/115开放平台/API列表/用户管理/用户信息.md",
+                  "type": "file"
+                }
+              ],
+              "type": "directory"
+            },
+            {
+              "name": "文件管理",
+              "path": "/doc/115开放平台/API列表/文件管理/",
+              "children": [
+                {
+                  "name": "文件上传",
+                  "path": "/doc/115开放平台/API列表/文件管理/文件上传/",
+                  "children": [
+                    {
+                      "name": "上传流程.md",
+                      "path": "/doc/115开放平台/API列表/文件管理/文件上传/上传流程.md",
+                      "type": "file"
+                    },
+                    {
+                      "name": "获取上传凭证.md",
+                      "path": "/doc/115开放平台/API列表/文件管理/文件上传/获取上传凭证.md",
+                      "type": "file"
+                    },
+                    {
+                      "name": "文件上传.md",
+                      "path": "/doc/115开放平台/API列表/文件管理/文件上传/文件上传.md",
+                      "type": "file"
+                    },
+                    {
+                      "name": "断点续传.md",
+                      "path": "/doc/115开放平台/API列表/文件管理/文件上传/断点续传.md",
+                      "type": "file"
+                    }
+                  ],
+                  "type": "directory"
+                },
+                {
+                  "name": "新建文件夹.md",
+                  "path": "/doc/115开放平台/API列表/文件管理/新建文件夹.md",
+                  "type": "file"
+                },
+                {
+                  "name": "获取文件列表.md",
+                  "path": "/doc/115开放平台/API列表/文件管理/获取文件列表.md",
+                  "type": "file"
+                },
+                {
+                  "name": "获取文件(夹)详情",
+                  "path": "/doc/115开放平台/API列表/文件管理/获取文件(夹)详情/",
+                  "children": [
+                    {
+                      "name": "按ID获取.md",
+                      "path": "/doc/115开放平台/API列表/文件管理/获取文件(夹)详情/按ID获取.md",
+                      "type": "file"
+                    },
+                    {
+                      "name": "按路径获取.md",
+                      "path": "/doc/115开放平台/API列表/文件管理/获取文件(夹)详情/按路径获取.md",
+                      "type": "file"
+                    }
+                  ],
+                  "type": "directory"
+                },
+                {
+                  "name": "文件搜索.md",
+                  "path": "/doc/115开放平台/API列表/文件管理/文件搜索.md",
+                  "type": "file"
+                },
+                {
+                  "name": "文件复制.md",
+                  "path": "/doc/115开放平台/API列表/文件管理/文件复制.md",
+                  "type": "file"
+                },
+                {
+                  "name": "文件移动.md",
+                  "path": "/doc/115开放平台/API列表/文件管理/文件移动.md",
+                  "type": "file"
+                },
+                {
+                  "name": "获取文件下载地址.md",
+                  "path": "/doc/115开放平台/API列表/文件管理/获取文件下载地址.md",
+                  "type": "file"
+                },
+                {
+                  "name": "文件(夹)更新.md",
+                  "path": "/doc/115开放平台/API列表/文件管理/文件(夹)更新.md",
+                  "type": "file"
+                },
+                {
+                  "name": "删除文件.md",
+                  "path": "/doc/115开放平台/API列表/文件管理/删除文件.md",
+                  "type": "file"
+                },
+                {
+                  "name": "回收站列表.md",
+                  "path": "/doc/115开放平台/API列表/文件管理/回收站列表.md",
+                  "type": "file"
+                },
+                {
+                  "name": "回收站还原.md",
+                  "path": "/doc/115开放平台/API列表/文件管理/回收站还原.md",
+                  "type": "file"
+                },
+                {
+                  "name": "删除或清空回收站.md",
+                  "path": "/doc/115开放平台/API列表/文件管理/删除或清空回收站.md",
+                  "type": "file"
+                }
+              ],
+              "type": "directory"
+            },
+            {
+              "name": "视频播放",
+              "path": "/doc/115开放平台/API列表/视频播放/",
+              "children": [
+                {
+                  "name": "记忆视频播放进度.md",
+                  "path": "/doc/115开放平台/API列表/视频播放/记忆视频播放进度.md",
+                  "type": "file"
+                },
+                {
+                  "name": "视频字幕列表.md",
+                  "path": "/doc/115开放平台/API列表/视频播放/视频字幕列表.md",
+                  "type": "file"
+                },
+                {
+                  "name": "获取视频播放进度.md",
+                  "path": "/doc/115开放平台/API列表/视频播放/获取视频播放进度.md",
+                  "type": "file"
+                },
+                {
+                  "name": "获取视频在线播放地址.md",
+                  "path": "/doc/115开放平台/API列表/视频播放/获取视频在线播放地址.md",
+                  "type": "file"
+                },
+                {
+                  "name": "提交视频转码.md",
+                  "path": "/doc/115开放平台/API列表/视频播放/提交视频转码.md",
+                  "type": "file"
+                }
+              ],
+              "type": "directory"
+            },
+            {
+              "name": "云下载",
+              "path": "/doc/115开放平台/API列表/云下载/",
+              "children": [
+                {
+                  "name": "解析BT种子.md",
+                  "path": "/doc/115开放平台/API列表/云下载/解析BT种子.md",
+                  "type": "file"
+                },
+                {
+                  "name": "获取用户云下载任务列表.md",
+                  "path": "/doc/115开放平台/API列表/云下载/获取用户云下载任务列表.md",
+                  "type": "file"
+                },
+                {
+                  "name": "获取云下载配额信息.md",
+                  "path": "/doc/115开放平台/API列表/云下载/获取云下载配额信息.md",
+                  "type": "file"
+                },
+                {
+                  "name": "清空云下载任务.md",
+                  "path": "/doc/115开放平台/API列表/云下载/清空云下载任务.md",
+                  "type": "file"
+                },
+                {
+                  "name": "添加云下载链接任务.md",
+                  "path": "/doc/115开放平台/API列表/云下载/添加云下载链接任务.md",
+                  "type": "file"
+                },
+                {
+                  "name": "删除用户云下载任务.md",
+                  "path": "/doc/115开放平台/API列表/云下载/删除用户云下载任务.md",
+                  "type": "file"
+                },
+                {
+                  "name": "添加云下载BT任务.md",
+                  "path": "/doc/115开放平台/API列表/云下载/添加云下载BT任务.md",
+                  "type": "file"
+                }
+              ],
+              "type": "directory"
+            }
+          ],
+          "type": "directory"
+        }
+      ],
+      "type": "directory"
+    }
+  ],
+  "type": "directory"
+}

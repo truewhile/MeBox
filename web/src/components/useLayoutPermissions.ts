@@ -5,7 +5,6 @@ import type { User } from '../types'
 
 export function useLayoutPermissions(user: User | null | undefined) {
   const permissions = usePermissionStore((state) => state.permissions)
-  const isSuper = usePermissionStore((state) => state.isSuper)
   const isPermissionLoading = usePermissionStore((state) => state.isLoading)
   const fetchPermissions = usePermissionStore((state) => state.fetchPermissions)
 
@@ -17,8 +16,8 @@ export function useLayoutPermissions(user: User | null | undefined) {
 
   const isAdmin = user?.role === 'admin'
   const can = useCallback(
-    (key: string) => isAdmin || isSuper || (permissions ?? {})[key] === true,
-    [isAdmin, isSuper, permissions],
+    (key: string) => isAdmin || (permissions ?? {})[key] === true,
+    [isAdmin, permissions],
   )
 
   return { can, isAdmin }

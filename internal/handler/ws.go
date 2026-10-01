@@ -9,6 +9,8 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -21,10 +23,21 @@ import (
 var wsUpgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	// Allow any origin: the AuthRequired middleware already validated the
-	// JWT before we got here, and we never serve sensitive cross-domain
-	// state through the socket.
-	CheckOrigin: func(_ *http.Request) bool { return true },
+	// 同源校验：浏览器跨站页面虽读不到 ?token=，但可能借 cookie 通道
+	// （extractToken 接受 msgo_access_token cookie）发起跨站 WebSocket
+	// 劫持。放行同源与非浏览器客户端（不发 Origin 头的 App/脚本），
+	// 拒绝跨站 Origin。
+	CheckOrigin: func(r *http.Request) bool {
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if origin == "" {
+			return true
+		}
+		u, err := url.Parse(origin)
+		if err != nil || u.Host == "" {
+			return false
+		}
+		return strings.EqualFold(u.Host, r.Host)
+	},
 }
 
 func wsHandler(svc *service.Container) gin.HandlerFunc {

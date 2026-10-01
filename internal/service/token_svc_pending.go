@@ -7,6 +7,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/truewhile/MeBox/internal/helper"
 	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/repository"
 )
@@ -26,11 +27,14 @@ func (s *TokenService) storeRefreshTokenBestEffort(userID, tokenHash string, exp
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		done <- s.storeRefreshToken(ctx, &model.RefreshToken{
-			UserID:    userID,
-			TokenHash: tokenHash,
-			ExpiresAt: expiresAt,
+		err := helper.Recover(s.log, "token.storeRefreshToken", func() error {
+			return s.storeRefreshToken(ctx, &model.RefreshToken{
+				UserID:    userID,
+				TokenHash: tokenHash,
+				ExpiresAt: expiresAt,
+			})
 		})
+		done <- err
 	}()
 	select {
 	case err := <-done:

@@ -8,9 +8,7 @@
 //	organize_source   opt-in        — organize the configured staging folder.
 //	transcode_cleanup every 24 h   — purge HLS transcode artefacts
 //	                                  older than 24 h.
-//	recycle_purge     every 24 h   — empty the recycle bin of rows
-//	                                  soft-deleted more than 30 days
-//	                                  ago.
+//	segment_prewarm   every 6 h    — fill IntroDB skip segments for queryable media.
 //
 // Each job runs at most once at a time (an in-flight run blocks the
 // next tick). All work happens on a long-lived background context so
@@ -25,6 +23,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/truewhile/MeBox/internal/helper"
 	"github.com/truewhile/MeBox/internal/repository"
 )
 
@@ -38,10 +37,13 @@ type SchedulerService struct {
 	organizePipeline *OrganizePipelineService
 	hub              *Hub
 	tasks            *TaskTrackerService
+	expiryWatcher    *TelegramExpiryWatcher
 	cacheDir         string
 	now              func() time.Time
 
-	imagesMaxSizeMBProvider func() int
+	imagesPolicyProvider func() ImageCachePolicy
+
+	segments *MediaSegmentService
 
 	mu     sync.Mutex
 	stopCh chan struct{}
@@ -61,15 +63,27 @@ func (s *SchedulerService) SetOrganizePipeline(pipeline *OrganizePipelineService
 	s.organizePipeline = pipeline
 }
 
-func (s *SchedulerService) SetImagesMaxSizeMBProvider(fn func() int) {
-	s.imagesMaxSizeMBProvider = fn
+// SetExpiryWatcher 注入账号到期巡检。未注入时（例如测试）该任务不注册。
+func (s *SchedulerService) SetExpiryWatcher(watcher *TelegramExpiryWatcher) {
+	s.expiryWatcher = watcher
 }
 
-func (s *SchedulerService) imagesMaxSizeMB() int {
-	if s.imagesMaxSizeMBProvider != nil {
-		return s.imagesMaxSizeMBProvider()
+// ImageCachePolicy 是一次图片缓存清理要用的策略（全部为 0 表示不做任何清理）。
+type ImageCachePolicy struct {
+	TotalBytes     int64
+	OriginalsBytes int64
+	OriginalsAge   time.Duration
+}
+
+func (s *SchedulerService) SetImageCachePolicyProvider(fn func() ImageCachePolicy) {
+	s.imagesPolicyProvider = fn
+}
+
+func (s *SchedulerService) imageCachePolicy() ImageCachePolicy {
+	if s.imagesPolicyProvider != nil {
+		return s.imagesPolicyProvider()
 	}
-	return 0
+	return ImageCachePolicy{}
 }
 
 // scheduledJob is one recurring task.
@@ -129,25 +143,36 @@ func (s *SchedulerService) Start(ctx context.Context) {
 			run:      s.jobCleanTranscodeCache,
 		},
 		{
-			name:     "recycle_purge",
-			interval: 24 * time.Hour,
-			run:      s.jobPurgeRecycleBin,
-		},
-		{
 			name:     "image_cache_cleanup",
 			interval: 1 * time.Hour,
 			run:      s.jobCleanImageCache,
 		},
 	}
+	// 片头预热只在注入了 Segments 时注册，避免测试跑无转外网任务。
+	if s.segments != nil {
+		s.jobs = append(s.jobs, &scheduledJob{
+			name:     "segment_prewarm",
+			interval: segmentPrewarmJobInterval,
+			run:      s.jobSegmentPrewarm,
+		})
+	}
+	// 到期提醒只在配置了巡检器时注册，避免测试与未启用通知的部署跑空转任务。
+	if s.expiryWatcher != nil {
+		s.jobs = append(s.jobs, &scheduledJob{
+			name:     "telegram_expiry_warning",
+			interval: 24 * time.Hour,
+			run:      s.jobTelegramExpiryWarning,
+		})
+	}
 	for _, j := range s.jobs {
 		initialDelay := 15 * time.Second
-		if j.name == "library_scan" || j.name == "organize_source" {
-			// 重启后不立即整库重扫/整理下载目录：更新窗口恰是登录高峰，
+		if j.name == "library_scan" || j.name == "organize_source" || j.name == "segment_prewarm" {
+			// 重启后不立即整库重扫/整理/预热：更新窗口恰是登录高峰，
 			// 15 秒即全量 walk + ffprobe 曾把 CPU/磁盘打满导致无法登录。
 			// 首轮等满一个完整周期再跑，平时节奏不变。
 			initialDelay = j.interval
 		}
-		go s.loopWithInitialDelay(ctx, j, initialDelay)
+		helper.Go(s.log, "scheduler.loop."+j.name, func() { s.loopWithInitialDelay(ctx, j, initialDelay) })
 	}
 }
 

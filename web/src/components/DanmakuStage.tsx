@@ -28,10 +28,14 @@ type DanmakuStageProps = {
   search?: string | null
   /** Explicit danmaku library chosen by the user; null = auto-resolve. */
   episodeId?: number | string | null
+  /** Counter or token changed to trigger refetch even when search stays identical. */
+  searchTrigger?: number
   /** Called after each fetch attempt (success or error) finishes with metadata. */
   onLoaded?: (info: DanmakuLoadedInfo | null) => void
   /** Called when multiple anime matched and the user must pick one. */
   onCandidates?: (candidates: DanmakuAnime[]) => void
+  /** Called after a successful load with other libraries for the same episode. */
+  onAlternatives?: (alternatives: DanmakuAnime[]) => void
 }
 
 // Average of the engine's durationRange (ms). Used to compute how far a
@@ -50,8 +54,10 @@ export function DanmakuStage({
   area = 1,
   search = null,
   episodeId = null,
+  searchTrigger = 0,
   onLoaded,
   onCandidates,
+  onAlternatives,
 }: DanmakuStageProps) {
   const holderRef = useRef<HTMLDivElement>(null)
   const managerRef = useRef<Manager<Comment> | null>(null)
@@ -140,10 +146,13 @@ export function DanmakuStage({
         if (res.candidates && res.candidates.length > 0) {
           // 多番剧命中：交回播放器展示候选让用户选择（disambiguation）。
           comments = []
+          onAlternatives?.([])
           onCandidates?.(res.candidates)
           return
         }
         if (res.enabled) {
+          // 弹幕已自动加载；若同一集还有其它来源，一并交回播放器供随时切换。
+          onAlternatives?.(res.alternatives ?? [])
           comments = parseDanmaku(res.raw || '', res.source_type)
             .filter((c) => Number.isFinite(c.time) && c.time >= 0)
             .sort((a, b) => a.time - b.time)
@@ -155,9 +164,11 @@ export function DanmakuStage({
             matchMode: res.match_mode,
             totalCount: comments.length,
             sourceType: res.source_type,
+            mergedSources: res.merged_sources ?? 0,
           }
         } else {
           comments = []
+          onAlternatives?.([])
           loadedInfo = {
             totalCount: 0,
           }
@@ -252,8 +263,8 @@ export function DanmakuStage({
       manager.unmount()
       managerRef.current = null
     }
-    // search / episodeId 变化时重新拉取弹幕（含媒体/开关切换）。
-  }, [media, videoRef, enabled, search, episodeId, onLoaded, onCandidates])
+    // search / episodeId / searchTrigger 变化时重新拉取弹幕（含媒体/开关切换）。
+  }, [media, videoRef, enabled, search, episodeId, searchTrigger, onLoaded, onCandidates, onAlternatives])
 
   // Live renderer knobs: opacity / area / font size without recreating the
   // engine. font size additionally rescales currently visible comments.

@@ -69,6 +69,49 @@ func TestScanLibraryUsesLocalMetadata(t *testing.T) {
 	}
 }
 
+func TestScanAnimeTheatricalFolderUsesMovieNFO(t *testing.T) {
+	root := t.TempDir()
+	showDir := filepath.Join(root, "摇曳露营△ (2018)")
+	movieDir := filepath.Join(showDir, "摇曳露营△ 剧场版 (2022)")
+	if err := os.MkdirAll(movieDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(showDir, "tvshow.nfo"), []byte(
+		`<tvshow><title>错误的剧集标题</title><tmdbid>76075</tmdbid><year>2018</year></tvshow>`,
+	), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mediaPath := filepath.Join(movieDir, "Eiga.Yurukyan.2022.Bluray.mkv")
+	if err := os.WriteFile(mediaPath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nfoPath(mediaPath), []byte(
+		`<movie><title>摇曳露营△ 剧场版</title><tmdbid>566466</tmdbid><year>2022</year></movie>`,
+	), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db := newServiceTestDB(t, &model.Library{}, &model.Media{}, &model.Setting{})
+	repos := repository.New(db)
+	lib := model.Library{Name: "动漫", Path: root, Type: "anime", Enabled: true}
+	if err := repos.Library.Create(t.Context(), &lib); err != nil {
+		t.Fatal(err)
+	}
+
+	scanner := NewScannerService(&config.Config{}, zap.NewNop(), repos, NewHub(zap.NewNop()), nil, nil)
+	if _, err := scanner.ScanLibrary(t.Context(), lib.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var media model.Media
+	if err := db.First(&media, "path = ?", mediaPath).Error; err != nil {
+		t.Fatal(err)
+	}
+	if media.Title != "摇曳露营△ 剧场版" || media.TMDbID != 566466 || media.Year != 2022 {
+		t.Fatalf("theatrical movie metadata = title %q tmdb %d year %d", media.Title, media.TMDbID, media.Year)
+	}
+}
+
 func TestScanLibraryDoesNotMarkArtworkOnlyAsMatched(t *testing.T) {
 	root := t.TempDir()
 	mediaPath := filepath.Join(root, "SSIS-001-CD1.mp4")
@@ -220,8 +263,76 @@ func TestScanLibraryRefreshesStaleNoMatchDerivedMetadata(t *testing.T) {
 	if err := db.First(&media, "path = ?", mediaPath).Error; err != nil {
 		t.Fatal(err)
 	}
-	if media.Title != "hntv spring festival gala" || media.SeasonNum != 1 || media.EpisodeNum != 202 || media.ScrapeStatus != "pending" {
+	if media.Title != "Hntv Spring Festival Gala" || media.SeasonNum != 1 || media.EpisodeNum != 202 || media.ScrapeStatus != "pending" {
 		t.Fatalf("stale no_match row was not refreshed: title=%q s=%d e=%d status=%q", media.Title, media.SeasonNum, media.EpisodeNum, media.ScrapeStatus)
+	}
+}
+
+func TestScanLibraryPrefersEpisodeArtworkOverSeriesFanart(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		episodeArt string
+	}{
+		{name: "thumb suffix", episodeArt: "Show - S01E01-thumb.jpg"},
+		{name: "video stem", episodeArt: "Show - S01E01.jpg"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			seasonDir := filepath.Join(root, "Show", "Season 01")
+			if err := os.MkdirAll(seasonDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			mediaPath := filepath.Join(seasonDir, "Show - S01E01.mkv")
+			if err := os.WriteFile(mediaPath, []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(nfoPath(mediaPath), []byte(
+				`<episodedetails><title>第一集</title><season>1</season><episode>1</episode></episodedetails>`,
+			), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			episodeArt := filepath.Join(seasonDir, tc.episodeArt)
+			if err := os.WriteFile(episodeArt, []byte("episode still"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			seriesFanart := filepath.Join(root, "Show", "fanart.jpg")
+			if err := os.WriteFile(seriesFanart, []byte("series backdrop"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			db := newServiceTestDB(t, &model.Library{}, &model.Media{}, &model.Setting{})
+			repos := repository.New(db)
+			lib := model.Library{Name: "TV", Path: root, Type: "tv", Enabled: true}
+			if err := repos.Library.Create(t.Context(), &lib); err != nil {
+				t.Fatal(err)
+			}
+			existing := model.Media{
+				LibraryID:    lib.ID,
+				Title:        "Show",
+				Path:         mediaPath,
+				SizeBytes:    1,
+				SeasonNum:    1,
+				EpisodeNum:   1,
+				BackdropURL:  "https://image.example/episode-still.jpg",
+				ScrapeStatus: "matched",
+			}
+			if err := repos.DB.Create(&existing).Error; err != nil {
+				t.Fatal(err)
+			}
+
+			scanner := NewScannerService(&config.Config{}, zap.NewNop(), repos, NewHub(zap.NewNop()), nil, nil)
+			if _, err := scanner.ScanLibrary(t.Context(), lib.ID); err != nil {
+				t.Fatal(err)
+			}
+
+			var media model.Media
+			if err := db.First(&media, "id = ?", existing.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if media.BackdropURL != episodeArt {
+				t.Fatalf("backdrop_url = %q, want episode artwork %q (series fanart %q must not win)", media.BackdropURL, episodeArt, seriesFanart)
+			}
+		})
 	}
 }
 

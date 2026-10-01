@@ -45,6 +45,9 @@ type FileEntry struct {
 	MTime int64  `json:"mtime,omitempty"`
 	// PickCode is 115-specific; other providers use ID directly.
 	PickCode string `json:"pick_code,omitempty"`
+	// Sha1 is 115-specific content hash（大写 hex，目录/未完成文件可能为空或占位符）。
+	// 其他网盘不提供，留空时调用方退回大小比对。用于元数据"是否同一文件"的精确判定。
+	Sha1 string `json:"sha1,omitempty"`
 }
 
 // DirectLink is a resolved playback target.
@@ -70,6 +73,15 @@ type Provider interface {
 	// Resolve turns a provider-native file reference (id or pickcode) into a
 	// short-lived direct download link suitable for 302 playback.
 	Resolve(ctx context.Context, fileRef string) (*DirectLink, error)
+}
+
+// BatchResolver is implemented by providers that can resolve several file
+// references in fewer API calls（115 的 downurl 接口支持逗号分隔多个 pick_code，
+// 批量换取可显著降低下载队列的换链请求量）。返回以原始引用为键的直链 map；
+// 解析失败的引用不在结果中，err 汇报批量机制本身的失败，调用方应据此对缺失
+// 项回退到逐个 Resolve。
+type BatchResolver interface {
+	ResolveBatch(ctx context.Context, fileRefs []string) (map[string]*DirectLink, error)
 }
 
 // MutableProvider is implemented by cloud bridges that support safe folder

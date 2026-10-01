@@ -7,7 +7,7 @@
 <h3 align="center">A self-hosted media center for NAS and home theater</h3>
 
 <p align="center">
-  <strong>Libraries · Metadata · Cloud STRM · Emby protocol · Remote Emby mounts · Multi-user · Docker-first</strong>
+  <strong>Libraries · Metadata · Cloud STRM · Emby/Jellyfin client compatible · Remote Emby mounts · Multi-user · Docker-first</strong>
 </p>
 
 <p align="center">
@@ -16,7 +16,8 @@
   <a href="#quick-start">Quick Start</a> ·
   <a href="#deployment-tiers">Deployment</a> ·
   <a href="#acknowledgements">Acknowledgements</a> ·
-  <a href="#development">Development</a>
+  <a href="#development">Development</a> ·
+  <a href="https://t.me/MeBoxGroup">Telegram</a>
 </p>
 
 <p align="center">
@@ -45,12 +46,12 @@ In practice, MeBox gives you:
 | **Libraries** | Movies, TV, anime, variety, music, custom libraries; multi-root scanning; poster wall; continue watching |
 | **Metadata** | TMDb, Bangumi, Douban, TheTVDB, Fanart, NFO import, manual matching, scrape queue |
 | **Playback** | Web player, HLS transcoding, danmaku, subtitles, play profiles, history and favourites |
-| **Emby protocol** | Add MeBox in Infuse, SenPlayer, Fileball, etc. and sign in with MeBox accounts |
+| **Emby/Jellyfin client compatible** | Full Emby server protocol implementation: Infuse, SenPlayer, Fileball, and official Emby/Jellyfin clients can add MeBox as an Emby server and sign in with MeBox accounts — poster walls, watch progress, and multi-user work out of the box |
 | **Remote Emby mounts** | Browse remote Emby libraries inside MeBox without a separate Emby client |
 | **Cloud & STRM** | OpenList, CloudDrive2, 115, WebDAV; STRM sync; upload/download queues; direct or 302 playback |
-| **Downloads & organize** | qBittorrent, site search/subscriptions, post-download organization, file manager |
+| **Downloads & organize** | Scheduled download-folder organization (smart classification, auto library registration), file manager (copy/move/hardlink/symlink) |
 | **Users & permissions** | Admin/regular users, expiry, NSFW toggle, play-profile PIN, granular permissions |
-| **Operations** | Unified task queue, recycle bin, storage stats, DLNA casting, settings and logs |
+| **Operations** | Unified task queue, storage stats, DLNA casting, settings and logs |
 
 ### Tech stack
 
@@ -83,6 +84,8 @@ http://SERVER_IP:18080
 ```
 
 Default login: `admin` / `admin123` — change the password immediately.
+
+> 💡 **Seamless for Emby users**: MeBox fully implements the Emby/Jellyfin client protocol. Infuse, SenPlayer, Fileball, and official Emby/Jellyfin apps on phones, TVs, and tablets can add it as an Emby server at `http://SERVER_IP:18080` and sign in with MeBox accounts — no change to your existing workflow.
 
 Image:
 
@@ -159,7 +162,7 @@ environment:
 
 1. Create a library with a container path such as `/media/Movies`, then scan
 2. Add metadata providers (TMDb, Bangumi, etc.) in system settings
-3. Optionally connect qBittorrent (`http://host.docker.internal:8085` when qB runs on the host)
+3. Optionally set up download-folder auto-organization under file management so finished downloads land in the right library
 4. Optionally configure cloud accounts under STRM management
 5. Add the server in Emby-compatible players at `http://SERVER_IP:18080` using MeBox credentials
 
@@ -170,8 +173,8 @@ environment:
 **Library scan is slow**  
 Check path mapping and DB tier. Cloud scans also depend on API limits and folder size.
 
-**qBittorrent downloads are not organized**  
-Ensure the download directory is mounted into the container and env vars match.
+**Downloaded files are not organized**  
+Ensure the download directory is mounted into the container and env vars match. MeBox handles folder organization; run qBittorrent or any downloader yourself as a regular app.
 
 **Hardlink fails with cross-device link**  
 Hardlinks require the same filesystem/subvolume; use copy or symlink across disks or cloud mounts.
@@ -195,6 +198,14 @@ npm --prefix web run dev
 ```
 
 Release builds ship single-file binaries for Windows, Linux, and macOS on amd64 and arm64.
+
+Build the Windows executable locally:
+
+```powershell
+.\scripts\build-windows.ps1 -Version dev
+```
+
+The Windows executable uses the project logo and runs without a console window. It stays in the notification area, with menu actions for opening MeBox, toggling auto-start, viewing logs, restarting, and exiting.
 
 ---
 
@@ -227,3 +238,18 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md) before ope
 ## License
 
 This project is licensed under [GPL-3.0](LICENSE).
+
+---
+
+## Support & Donate
+
+If MeBox makes your home theater life easier, feel free to buy the maintainer a coffee ☕
+
+<p align="center">
+  <img src="docs/images/donation-qr.png" width="320" alt="WhileTrue donation QR" />
+</p>
+
+<p align="center">
+  <strong>Telegram group</strong>: <a href="https://t.me/MeBoxGroup">https://t.me/MeBoxGroup</a><br/>
+  Questions, feature requests, and release news — come chat with us
+</p>

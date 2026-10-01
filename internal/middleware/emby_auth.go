@@ -51,6 +51,19 @@ func EmbyAuthRequired(secret string) gin.HandlerFunc {
 			return
 		}
 
+		// 用途限定令牌（如 external_play，签发给外链播放器且绑定单一
+		// media）只允许走 /api/stream|/hls|/cloud/play，绝不能作为全功能
+		// 凭据访问 Emby 兼容面；否则外链 URL 一旦泄漏，持有者可获得
+		// 该用户最长 24h 的全部 Emby API 权限。
+		if strings.TrimSpace(claims.Purpose) != "" {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"Code":    40101,
+				"Message": "Invalid token",
+			})
+			c.Abort()
+			return
+		}
+
 		c.Set(EmbyCtxUserID, claims.UserID)
 		c.Set(CtxUserID, claims.UserID)
 		c.Set(CtxUserRole, claims.Role)

@@ -1,11 +1,12 @@
 import { FormEvent } from 'react'
-import { Plus, Save } from 'lucide-react'
+import { Loader2, Plus, Save } from 'lucide-react'
 
 type AdminUsersFormProps = {
   usersCount: number
   maxUsers: number
   maxUsersDraft: string
   savingLimit: boolean
+  creating: boolean
   username: string
   password: string
   userLimitReached: boolean
@@ -21,6 +22,7 @@ export function AdminUsersForm({
   maxUsers,
   maxUsersDraft,
   savingLimit,
+  creating,
   username,
   password,
   userLimitReached,
@@ -91,9 +93,13 @@ export function AdminUsersForm({
         onChange={(e) => onPasswordChange(e.target.value)}
         disabled={userLimitReached}
       />
-      <button type="submit" className="neon-button inline-flex items-center justify-center gap-2" disabled={userLimitReached}>
-        <Plus size={16} />
-        添加用户
+      <button
+        type="submit"
+        className="neon-button inline-flex items-center justify-center gap-2 disabled:opacity-50"
+        disabled={userLimitReached || creating}
+      >
+        {creating ? <Loader2 size={16} className="animate-spin" /> : <Plus size={16} />}
+        {creating ? '添加中…' : '添加用户'}
       </button>
     </form>
   )

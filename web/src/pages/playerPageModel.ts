@@ -8,13 +8,18 @@ const directVideoCodecs = ['h264', 'avc', 'avc1']
 const directAudioCodecs = ['aac', 'mp3', 'opus']
 
 /**
- * 判断媒体是否为远程直链或挂载直连流媒体（STRM 或 Emby 远程挂载）。
- * 这类媒体服务端 302 重定向到直链或进行原生流中继，本地不具备原始文件，
- * 无法也不应该进行 ffmpeg 转码，恒走直连播放。
+ * 远程 Emby 挂载：本地没有原始文件，网页端只能直连，不能转码。
  */
 export function isDirectStreamMedia(media?: Media | null): boolean {
   if (!media) return false
-  if (isRemoteEmbyID(media.id)) return true
+  return isRemoteEmbyID(media.id)
+}
+
+/**
+ * STRM / 云盘直链：默认仍走直连；浏览器解不了时再回退 HLS 转码。
+ */
+export function isStrmMedia(media?: Media | null): boolean {
+  if (!media) return false
   const container = (media.container ?? '').toLowerCase()
   return container.includes('strm') || String(media.strm_url ?? '').trim() !== ''
 }
@@ -24,8 +29,8 @@ export function pickPlayerMode(media: Media): PlayerMode {
 }
 
 export function needsTranscodeForBrowser(media: Media): boolean {
-  // Emby 远程挂载与 .strm 媒体一样，均为直连流，无法进行本地转码，恒走 direct play。
-  if (isDirectStreamMedia(media)) return false
+  // Emby 远程挂载无法本地转码。STRM 先直连，失败后再由播放器切 HLS。
+  if (isDirectStreamMedia(media) || isStrmMedia(media)) return false
 
   const container = (media.container ?? '').toLowerCase()
   const videoCodec = (media.video_codec ?? '').toLowerCase()

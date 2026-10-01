@@ -1,13 +1,10 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Link } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import toast from 'react-hot-toast'
 import {
   AlertCircle,
   Ban,
   CheckCircle2,
   Clock,
-  Copy,
-  ExternalLink,
   Eye,
   Film,
   Image as ImageIcon,
@@ -22,10 +19,13 @@ import {
   X,
 } from 'lucide-react'
 
-import { imageURL } from '../api/client'
+import { ARTWORK, imageURL } from '../api/client'
 import { scraperAPI } from '../api/scraper'
 import type { ScrapeQueueSnapshot, ScrapeTask, ScrapeTaskStatus } from '../types/scraper'
 import { apiErrorMessage, formatTime, taskStatusMeta } from './StrmManagePage'
+import { ScrapeDetailModal } from './scraper-queue/ScrapeDetailModal'
+import { PROVIDER_LABELS } from './scraper-queue/scrapeLabels'
+import { copyToClipboard, useTaskSelection } from './queue-shared'
 
 const FILTERS: { key: 'all' | ScrapeTaskStatus; label: string; icon: typeof Clock; color: string }[] = [
   { key: 'all', label: '全部', icon: Sparkles, color: 'text-ink-600' },
@@ -36,26 +36,11 @@ const FILTERS: { key: 'all' | ScrapeTaskStatus; label: string; icon: typeof Cloc
   { key: 'canceled', label: '已取消', icon: Ban, color: 'text-amber-500' },
 ]
 
-const PROVIDER_LABELS: Record<string, string> = {
-  tmdb: 'TheMovieDB',
-  douban: '豆瓣 Douban',
-  bangumi: 'Bangumi 番组计划',
-  thetvdb: 'TheTVDB',
-  metatube: 'MetaTube',
-}
-
 const TYPE_ICONS: Record<string, ReactNode> = {
   movie: <Film size={14} className="text-blue-500" />,
   tv: <Tv size={14} className="text-purple-500" />,
   anime: <Layers size={14} className="text-emerald-500" />,
   adult: <Film size={14} className="text-rose-500" />,
-}
-
-const TYPE_LABELS: Record<string, string> = {
-  movie: '电影',
-  tv: '剧集',
-  anime: '动漫',
-  adult: 'Adult',
 }
 
 const PAGE_SIZE = 50
@@ -70,15 +55,22 @@ export function ScraperQueuePage({ embedded = false }: { embedded?: boolean }) {
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [batchBusy, setBatchBusy] = useState(false)
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const { selectedIds, setSelectedIds, reset: clearSelection, toggleRow: toggleSelectRow, toggleAll: toggleAllIds } = useTaskSelection()
   const [detailTask, setDetailTask] = useState<ScrapeTask | null>(null)
+  // 轮询/翻页/切筛选并发时用递增序号丢弃过期响应
+  const refreshSeqRef = useRef(0)
+  const [pollFailures, setPollFailures] = useState(0)
 
   const refresh = useCallback(
     async (showLoading = false) => {
       if (showLoading) setIsRefreshing(true)
+      const seq = ++refreshSeqRef.current
       try {
         const status = filter === 'all' ? undefined : filter
         const data = await scraperAPI.queue(status, page, PAGE_SIZE)
+        // 序号不符说明已有更新的请求发出（翻页/切筛选/轮询并发），丢弃旧响应
+        if (seq !== refreshSeqRef.current) return
+        setPollFailures(0)
         const tp = Math.max(1, Math.ceil((data.total ?? data.tasks.length) / PAGE_SIZE))
         if (page > tp) {
           setPage(tp)
@@ -87,7 +79,8 @@ export function ScraperQueuePage({ embedded = false }: { embedded?: boolean }) {
         setTotalPages(tp)
         setSnapshot(data)
       } catch {
-        /* keep existing */
+        // 保留旧数据；连续失败 ≥3 次时页头徽标切换为「连接失败，重试中」
+        if (seq === refreshSeqRef.current) setPollFailures((n) => n + 1)
       } finally {
         setLoading(false)
         if (showLoading) setIsRefreshing(false)
@@ -103,19 +96,17 @@ export function ScraperQueuePage({ embedded = false }: { embedded?: boolean }) {
   useEffect(() => {
     if (!autoRefresh) return
     const timer = setInterval(() => {
+      if (document.hidden) return
       refresh().catch(() => undefined)
     }, 3000)
     return () => clearInterval(timer)
   }, [autoRefresh, refresh])
 
   useEffect(() => {
-    setSelectedIds(new Set())
-  }, [filter, page])
+    clearSelection()
+  }, [filter, page, clearSelection])
 
-  const copyText = (text: string, label: string) => {
-    navigator.clipboard.writeText(text)
-    toast.success(`已复制${label}`)
-  }
+  const copyText = copyToClipboard
 
   // Row actions
   const cancelTask = async (task: ScrapeTask) => {
@@ -206,9 +197,8 @@ export function ScraperQueuePage({ embedded = false }: { embedded?: boolean }) {
   }
 
   // Filter and search
-  const tasks = snapshot?.tasks ?? []
   const filteredTasks = useMemo(() => {
-    let list = tasks
+    let list = snapshot?.tasks ?? []
     if (filter !== 'all') {
       list = list.filter((t) => t.status === filter)
     }
@@ -224,30 +214,20 @@ export function ScraperQueuePage({ embedded = false }: { embedded?: boolean }) {
       )
     }
     return list
-  }, [tasks, filter, search])
+  }, [snapshot?.tasks, filter, search])
 
   const counts = snapshot?.counts
-  const activeTaskCount = (counts?.pending ?? 0) + (counts?.running ?? 0)
+  const pendingCount = counts?.pending ?? 0
+  const runningCount = counts?.running ?? 0
+  const activeTaskCount = pendingCount + runningCount
+  const doneCount = counts?.done ?? 0
   const failedCount = counts?.failed ?? 0
+  const canceledCount = counts?.canceled ?? 0
+  const finishedCount = doneCount + failedCount + canceledCount
   const allCurrentChecked =
     filteredTasks.length > 0 && filteredTasks.every((t) => selectedIds.has(t.id))
 
-  const toggleSelectAll = () => {
-    if (allCurrentChecked) {
-      setSelectedIds(new Set())
-    } else {
-      setSelectedIds(new Set(filteredTasks.map((t) => t.id)))
-    }
-  }
-
-  const toggleSelectRow = (id: string) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
+  const toggleSelectAll = () => toggleAllIds(filteredTasks.map((t) => t.id))
 
   return (
     <div className="space-y-6">
@@ -260,12 +240,18 @@ export function ScraperQueuePage({ embedded = false }: { embedded?: boolean }) {
           <div>
             <div className="flex items-center gap-2">
               <h1 className="font-display text-2xl font-bold text-ink-600 sm:text-3xl">刮削队列</h1>
-              {autoRefresh && (
-                <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300/40 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-600">
-                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
-                  实时同步
-                </span>
-              )}
+              {autoRefresh &&
+                (pollFailures >= 3 ? (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-rose-300/40 bg-rose-500/10 px-2 py-0.5 text-[11px] font-semibold text-rose-600">
+                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-rose-500" />
+                    连接失败，重试中
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300/40 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-600">
+                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+                    实时同步
+                  </span>
+                ))}
             </div>
             <p className="text-xs text-sand-500 mt-0.5">
               媒体元数据在线识别与海报/剧照下载进度（TMDb / 豆瓣 / Bangumi / TheTVDB）
@@ -450,7 +436,7 @@ export function ScraperQueuePage({ embedded = false }: { embedded?: boolean }) {
           )}
         </div>
 
-        {selectedIds.size > 0 && (
+        {selectedIds.size > 0 ? (
           <div className="flex flex-wrap items-center gap-2 rounded-xl border border-brand-500/30 bg-primary-400/10 px-3 py-2 text-xs animate-in fade-in zoom-in-95">
             <span className="font-bold text-brand-500">已选中 {selectedIds.size} 项</span>
             <div className="h-3.5 w-px bg-brand-300/40 mx-1" />
@@ -489,6 +475,193 @@ export function ScraperQueuePage({ embedded = false }: { embedded?: boolean }) {
             >
               <X size={13} />
             </button>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            {/* 当前状态专属快捷批量按钮 */}
+            {filter === 'all' && (
+              <>
+                {failedCount > 0 && (
+                  <button
+                    type="button"
+                    disabled={batchBusy}
+                    onClick={() => runGlobalBatch(() => scraperAPI.retryFailed(), '确定重新入队所有失败任务？')}
+                    className="inline-flex items-center gap-1 rounded-xl border border-brand-500/40 bg-white px-3 py-1.5 text-xs font-semibold text-brand-500 hover:bg-brand-50 disabled:opacity-50"
+                  >
+                    <RefreshCw size={12} />
+                    全部重试 ({failedCount})
+                  </button>
+                )}
+                {activeTaskCount > 0 && (
+                  <button
+                    type="button"
+                    disabled={batchBusy}
+                    onClick={() => runGlobalBatch(() => scraperAPI.cancelPending(), '确定取消所有排队及进行中的刮削任务？')}
+                    className="inline-flex items-center gap-1 rounded-xl border border-amber-300 bg-white px-3 py-1.5 text-xs font-semibold text-amber-600 hover:bg-amber-50 disabled:opacity-50"
+                  >
+                    <Ban size={12} />
+                    全部取消 ({activeTaskCount})
+                  </button>
+                )}
+                {finishedCount > 0 && (
+                  <button
+                    type="button"
+                    disabled={batchBusy}
+                    onClick={() => runGlobalBatch(() => scraperAPI.clearFinished(), '确定清空所有已完成、失败及取消的历史记录？')}
+                    className="inline-flex items-center gap-1 rounded-xl border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 disabled:opacity-50"
+                  >
+                    <Trash2 size={12} />
+                    全部删除 ({finishedCount})
+                  </button>
+                )}
+              </>
+            )}
+
+            {(filter === 'pending' || filter === 'running') && (
+              <button
+                type="button"
+                disabled={batchBusy || activeTaskCount === 0}
+                onClick={() => runGlobalBatch(() => scraperAPI.cancelPending(), '确定取消所有排队及进行中的刮削任务？')}
+                className="inline-flex items-center gap-1 rounded-xl border border-amber-300 bg-white px-3 py-1.5 text-xs font-semibold text-amber-600 hover:bg-amber-50 disabled:opacity-50"
+              >
+                <Ban size={12} />
+                全部取消{activeTaskCount > 0 ? ` (${activeTaskCount})` : ''}
+              </button>
+            )}
+
+            {filter === 'done' && (
+              <button
+                type="button"
+                disabled={batchBusy || doneCount === 0}
+                onClick={() => runGlobalBatch(() => scraperAPI.clearDone(), '确定清空所有已匹配完成的记录？')}
+                className="inline-flex items-center gap-1 rounded-xl border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 disabled:opacity-50"
+              >
+                <Trash2 size={12} />
+                全部删除{doneCount > 0 ? ` (${doneCount})` : ''}
+              </button>
+            )}
+
+            {filter === 'failed' && (
+              <>
+                <button
+                  type="button"
+                  disabled={batchBusy || failedCount === 0}
+                  onClick={() => runGlobalBatch(() => scraperAPI.retryFailed(), '确定重新入队所有失败任务？')}
+                  className="inline-flex items-center gap-1 rounded-xl border border-brand-500/40 bg-white px-3 py-1.5 text-xs font-semibold text-brand-500 hover:bg-brand-50 disabled:opacity-50"
+                >
+                  <RefreshCw size={12} />
+                  全部重试{failedCount > 0 ? ` (${failedCount})` : ''}
+                </button>
+                <button
+                  type="button"
+                  disabled={batchBusy || failedCount === 0}
+                  onClick={() => runGlobalBatch(() => scraperAPI.clearFailed(), '确定清空所有失败记录？')}
+                  className="inline-flex items-center gap-1 rounded-xl border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 disabled:opacity-50"
+                >
+                  <Trash2 size={12} />
+                  全部删除{failedCount > 0 ? ` (${failedCount})` : ''}
+                </button>
+              </>
+            )}
+
+            {filter === 'canceled' && (
+              <button
+                type="button"
+                disabled={batchBusy || canceledCount === 0}
+                onClick={() => runGlobalBatch(() => scraperAPI.clearCanceled(), '确定清空所有已取消的任务记录？')}
+                className="inline-flex items-center gap-1 rounded-xl border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 disabled:opacity-50"
+              >
+                <Trash2 size={12} />
+                全部删除{canceledCount > 0 ? ` (${canceledCount})` : ''}
+              </button>
+            )}
+
+            {/* 下拉批量操作菜单：随时可做任意全局操作 */}
+            <details className="relative inline-block">
+              <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 py-1.5 text-xs font-semibold text-ink-100 shadow-sm transition hover:border-gray-300 hover:bg-gray-50 [&::-webkit-details-marker]:hidden">
+                <Trash2 size={12} className="text-sand-500" />
+                <span>批量清理</span>
+              </summary>
+              <div className="absolute right-0 top-9 z-30 min-w-44 rounded-xl border border-gray-200 bg-white p-1.5 shadow-xl backdrop-blur">
+                {failedCount > 0 && (
+                  <button
+                    type="button"
+                    disabled={batchBusy}
+                    onClick={(e) => {
+                      e.currentTarget.closest('details')?.removeAttribute('open')
+                      runGlobalBatch(() => scraperAPI.retryFailed(), '确定重新入队所有失败任务？')
+                    }}
+                    className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-brand-500 hover:bg-brand-50"
+                  >
+                    <RefreshCw size={13} />
+                    <span>重试所有失败 ({failedCount})</span>
+                  </button>
+                )}
+                {activeTaskCount > 0 && (
+                  <button
+                    type="button"
+                    disabled={batchBusy}
+                    onClick={(e) => {
+                      e.currentTarget.closest('details')?.removeAttribute('open')
+                      runGlobalBatch(() => scraperAPI.cancelPending(), '确定取消所有排队及进行中的刮削任务？')
+                    }}
+                    className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-amber-600 hover:bg-amber-50"
+                  >
+                    <Ban size={13} />
+                    <span>取消所有进行中 ({activeTaskCount})</span>
+                  </button>
+                )}
+                <div className="my-1 border-t border-gray-100" />
+                <button
+                  type="button"
+                  disabled={batchBusy}
+                  onClick={(e) => {
+                    e.currentTarget.closest('details')?.removeAttribute('open')
+                    runGlobalBatch(() => scraperAPI.clearDone(), '确定清空所有已匹配完成的记录？')
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-ink-100 hover:bg-gray-50"
+                >
+                  <CheckCircle2 size={13} className="text-emerald-500" />
+                  <span>清空已完成记录 ({doneCount})</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={batchBusy}
+                  onClick={(e) => {
+                    e.currentTarget.closest('details')?.removeAttribute('open')
+                    runGlobalBatch(() => scraperAPI.clearFailed(), '确定清空所有失败的记录？')
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-rose-500 hover:bg-rose-50"
+                >
+                  <AlertCircle size={13} />
+                  <span>清空失败记录 ({failedCount})</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={batchBusy}
+                  onClick={(e) => {
+                    e.currentTarget.closest('details')?.removeAttribute('open')
+                    runGlobalBatch(() => scraperAPI.clearCanceled(), '确定清空所有已取消的任务记录？')
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-ink-100 hover:bg-gray-50"
+                >
+                  <Ban size={13} className="text-amber-500" />
+                  <span>清空已取消记录 ({canceledCount})</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={batchBusy}
+                  onClick={(e) => {
+                    e.currentTarget.closest('details')?.removeAttribute('open')
+                    runGlobalBatch(() => scraperAPI.clearFinished(), '确定清空所有已完成、失败及取消的历史记录？')
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs font-medium text-rose-500 hover:bg-rose-50"
+                >
+                  <Trash2 size={13} />
+                  <span>清空全部历史记录 ({finishedCount})</span>
+                </button>
+              </div>
+            </details>
           </div>
         )}
       </div>
@@ -583,7 +756,7 @@ export function ScraperQueuePage({ embedded = false }: { embedded?: boolean }) {
                           <div className="flex items-center gap-2">
                             {task.poster_url ? (
                               <img
-                                src={imageURL(task.poster_url)}
+                                src={imageURL(task.poster_url, undefined, ARTWORK.posterTiny)}
                                 alt=""
                                 className="h-10 w-7 rounded object-cover border border-gray-200 shrink-0"
                                 onError={(e) => {
@@ -755,219 +928,6 @@ export function ScraperQueuePage({ embedded = false }: { embedded?: boolean }) {
           onCopy={copyText}
         />
       )}
-    </div>
-  )
-}
-
-function ScrapeDetailModal({
-  task,
-  onClose,
-  onRetry,
-  onCancel,
-  onDelete,
-  onCopy,
-}: {
-  task: ScrapeTask
-  onClose: () => void
-  onRetry: (t: ScrapeTask) => void
-  onCancel: (t: ScrapeTask) => void
-  onDelete: (t: ScrapeTask) => void
-  onCopy: (text: string, label: string) => void
-}) {
-  const status = taskStatusMeta(task.status)
-
-  return (
-    <div
-      className="fixed inset-0 z-[110] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-xl rounded-3xl border border-gray-200 bg-white shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
-          <div className="flex items-center gap-2">
-            <Sparkles size={16} className="text-brand-500" />
-            <h3 className="font-display text-base font-bold text-ink-600">刮削任务详情</h3>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-xl p-1 text-gray-400 hover:bg-gray-100 hover:text-ink-600 transition"
-          >
-            <X size={18} />
-          </button>
-        </div>
-
-        <div className="space-y-4 p-6 max-h-[70vh] overflow-y-auto text-xs">
-          {/* Matched Poster / Info Banner */}
-          {task.matched_title ? (
-            <div className="flex gap-4 rounded-2xl border border-brand-500/20 bg-primary-400/5 p-4">
-              {task.poster_url && (
-                <img
-                  src={imageURL(task.poster_url)}
-                  alt=""
-                  className="h-28 w-20 rounded-xl object-cover border border-brand-500/30 shadow-md shrink-0"
-                />
-              )}
-              <div className="space-y-1.5 min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="rounded bg-brand-500 px-2 py-0.5 text-[10px] font-bold text-white uppercase">
-                    已匹配
-                  </span>
-                  {task.provider && (
-                    <span className="rounded border border-gray-200 bg-white px-2 py-0.5 text-[10px] font-semibold text-ink-600">
-                      {PROVIDER_LABELS[task.provider] ?? task.provider}
-                    </span>
-                  )}
-                </div>
-                <h4 className="font-display text-base font-extrabold text-ink-600 truncate">
-                  {task.matched_title}
-                </h4>
-                <div className="flex items-center gap-3 text-sand-500 text-[11px]">
-                  {task.matched_year > 0 && <span>年份：{task.matched_year}</span>}
-                  <span>类型：{TYPE_LABELS[task.media_type] ?? task.media_type}</span>
-                </div>
-                {task.media_id && (
-                  <Link
-                    to={`/media/${task.media_id}`}
-                    target="_blank"
-                    className="inline-flex items-center gap-1 text-brand-500 font-semibold hover:underline pt-1"
-                  >
-                    <span>在媒体详情中查看</span>
-                    <ExternalLink size={11} />
-                  </Link>
-                )}
-              </div>
-            </div>
-          ) : null}
-
-          {/* Media Info Box */}
-          <div className="rounded-2xl border border-gray-100 bg-gray-50/70 p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-sand-500 font-medium">原始媒体标题</span>
-              <span className="font-bold text-ink-600 select-all">{task.media_title}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sand-500 font-medium">所属媒体库</span>
-              <span className="font-medium text-ink-100">{task.library_name}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sand-500 font-medium">媒体库类型</span>
-              <span className="font-medium text-ink-100">
-                {TYPE_LABELS[task.media_type] ?? task.media_type}
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sand-500 font-medium">当前状态</span>
-              <span
-                className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold ${status.cls}`}
-              >
-                {task.status === 'done' ? '已匹配' : task.status === 'failed' ? '未匹配' : status.label}
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sand-500 font-medium">剧照/海报刮削</span>
-              <span className="font-medium text-ink-100">
-                {task.episode_images ? '开启' : '关闭'}
-              </span>
-            </div>
-          </div>
-
-          {/* File path */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-sand-500 font-medium">
-              <span>磁盘文件路径</span>
-              <button
-                type="button"
-                onClick={() => onCopy(task.media_path, '文件路径')}
-                className="inline-flex items-center gap-1 text-brand-500 hover:underline"
-              >
-                <Copy size={11} /> 复制
-              </button>
-            </div>
-            <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-3 font-mono text-[11px] text-ink-600 break-all select-all">
-              {task.media_path}
-            </div>
-          </div>
-
-          {/* Error Message Box */}
-          {task.error && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between text-rose-500 font-medium">
-                <span className="flex items-center gap-1">
-                  <AlertCircle size={13} /> 刮削未匹配 / 异常详情
-                </span>
-                <button
-                  type="button"
-                  onClick={() => onCopy(task.error, '错误日志')}
-                  className="inline-flex items-center gap-1 text-rose-500 hover:underline"
-                >
-                  <Copy size={11} /> 复制日志
-                </button>
-              </div>
-              <div className="rounded-xl border border-rose-200 bg-rose-50/60 p-3 font-mono text-[11px] text-rose-700 break-all select-all whitespace-pre-wrap">
-                {task.error}
-              </div>
-            </div>
-          )}
-
-          {/* Timeline */}
-          <div className="grid grid-cols-2 gap-3 pt-2 text-[11px] text-sand-500 border-t border-gray-100">
-            <div>入队时间：{formatTime(task.created_at)}</div>
-            {task.started_at && <div>开始刮削：{formatTime(task.started_at)}</div>}
-            {task.finished_at && <div>完成时间：{formatTime(task.finished_at)}</div>}
-          </div>
-        </div>
-
-        {/* Footer Actions */}
-        <div className="flex items-center justify-between border-t border-gray-100 px-6 py-4 bg-gray-50/50">
-          <div>
-            {(task.status === 'done' ||
-              task.status === 'failed' ||
-              task.status === 'canceled') && (
-              <button
-                type="button"
-                onClick={() => onDelete(task)}
-                className="inline-flex items-center gap-1 rounded-xl border border-rose-200 bg-white px-3 py-2 text-xs font-semibold text-rose-500 hover:bg-rose-50 transition"
-              >
-                <Trash2 size={13} />
-                删除记录
-              </button>
-            )}
-          </div>
-
-          <div className="flex items-center gap-2">
-            {(task.status === 'pending' || task.status === 'running') && (
-              <button
-                type="button"
-                onClick={() => onCancel(task)}
-                className="inline-flex items-center gap-1 rounded-xl border border-amber-200 bg-white px-4 py-2 text-xs font-semibold text-amber-600 hover:bg-amber-50 transition"
-              >
-                <Ban size={13} />
-                取消任务
-              </button>
-            )}
-
-            <button
-              type="button"
-              onClick={() => onRetry(task)}
-              className="neon-button !py-2 !px-4 text-xs font-semibold"
-            >
-              <RefreshCw size={13} />
-              重新刮削
-            </button>
-
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-xl border border-gray-200 bg-white px-4 py-2 text-xs font-semibold text-ink-100 hover:bg-gray-50 transition"
-            >
-              关闭
-            </button>
-          </div>
-        </div>
-      </div>
     </div>
   )
 }

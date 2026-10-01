@@ -50,28 +50,43 @@ func copyModelTables(src, target *gorm.DB, batchSize int) (map[string]int64, int
 		if modelType.Kind() != reflect.Ptr {
 			return tableCounts, totalCopied, fmt.Errorf("model %T is not a pointer", m)
 		}
-		sliceType := reflect.SliceOf(modelType.Elem())
-		slicePtr := reflect.New(sliceType)
-		if err := src.Unscoped().Find(slicePtr.Interface()).Error; err != nil {
-			return tableCounts, totalCopied, fmt.Errorf("read sqlite table %s: %w", table, err)
-		}
-		filtered := slicePtr.Elem()
+		var primaryKeySet map[string]struct{}
 		if targetCount > 0 {
-			primaryKeySet, err := targetPrimaryKeySet(target, table, primaryColumns)
+			primaryKeySet, err = targetPrimaryKeySet(target, table, primaryColumns)
 			if err != nil {
 				return tableCounts, totalCopied, err
 			}
-			filtered = filterRowsMissingInTarget(target, table, primaryColumns, filtered, primaryKeySet)
 		}
-		if filtered.Len() == 0 {
-			continue
+		// 分页流式读取：此前整表一次性 Find 进内存，media 表几十万行、
+		// 每行含 overview/genres 等长文本时可达数百 MB，迁移过程有 OOM
+		// 风险。源库在迁移期间是静态的，offset 分页安全。
+		const readBatch = 1000
+		copiedForTable := int64(0)
+		for offset := 0; ; offset += readBatch {
+			batchPtr := reflect.New(reflect.SliceOf(modelType.Elem()))
+			if err := src.Unscoped().Limit(readBatch).Offset(offset).Find(batchPtr.Interface()).Error; err != nil {
+				return tableCounts, totalCopied, fmt.Errorf("read sqlite table %s: %w", table, err)
+			}
+			batch := batchPtr.Elem()
+			if batch.Len() == 0 {
+				break
+			}
+			filtered := batch
+			if primaryKeySet != nil {
+				filtered = filterRowsMissingInTarget(target, table, primaryColumns, batch, primaryKeySet)
+			}
+			if filtered.Len() > 0 {
+				filteredPtr := reflect.New(filtered.Type())
+				filteredPtr.Elem().Set(filtered)
+				if err := target.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(filteredPtr.Interface(), batchSize).Error; err != nil {
+					return tableCounts, totalCopied, fmt.Errorf("copy sqlite table %s: %w", table, err)
+				}
+				copiedForTable += int64(filtered.Len())
+			}
+			if batch.Len() < readBatch {
+				break
+			}
 		}
-		filteredPtr := reflect.New(filtered.Type())
-		filteredPtr.Elem().Set(filtered)
-		if err := target.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(filteredPtr.Interface(), batchSize).Error; err != nil {
-			return tableCounts, totalCopied, fmt.Errorf("copy sqlite table %s: %w", table, err)
-		}
-		copiedForTable := int64(filtered.Len())
 		tableCounts[table] = copiedForTable
 		totalCopied += copiedForTable
 	}

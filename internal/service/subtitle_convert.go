@@ -27,6 +27,7 @@ func srtToVTT(body string) string {
 func assToVTT(body string) string {
 	out := strings.Builder{}
 	out.WriteString("WEBVTT\n\n")
+	seen := make(map[string]struct{})
 	for i, line := range strings.Split(body, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "Dialogue:") {
@@ -36,11 +37,22 @@ func assToVTT(body string) string {
 		if len(parts) < 10 {
 			continue
 		}
+		start := normaliseTimecode(parts[1])
+		end := normaliseTimecode(parts[2])
+		text := stripASSTags(parts[9])
+		if text == "" {
+			continue
+		}
+		key := start + "\x00" + end + "\x00" + text
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
 		fmt.Fprintf(&out, "%d\n%s --> %s\n%s\n\n",
 			i,
-			normaliseTimecode(parts[1]),
-			normaliseTimecode(parts[2]),
-			stripASSTags(parts[9]),
+			start,
+			end,
+			text,
 		)
 	}
 	return out.String()
@@ -86,5 +98,9 @@ func normaliseTimecode(t string) string {
 var assTag = regexp.MustCompile(`\{[^}]*\}`)
 
 func stripASSTags(s string) string {
-	return assTag.ReplaceAllString(s, "")
+	s = assTag.ReplaceAllString(s, "")
+	s = strings.ReplaceAll(s, `\N`, "\n")
+	s = strings.ReplaceAll(s, `\n`, "\n")
+	s = strings.ReplaceAll(s, `\h`, "\u00a0")
+	return strings.TrimSpace(s)
 }

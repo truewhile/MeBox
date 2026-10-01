@@ -2,6 +2,74 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── 自托管 Web 字体（OFL 许可，latin 子集，public/fonts/）──
+   取代原先 fonts.googleapis.com 的渲染阻塞外链：自托管服务常部署在
+   无法访问 Google 的网络，外链会拖住首屏渲染直到超时。 */
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url('/fonts/geist-300.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/geist-400.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/geist-500.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/geist-600.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/fonts/geist-700.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/jetbrainsmono-400.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/jetbrainsmono-500.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/jetbrainsmono-600.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 html, body, #root { height: 100%; }
 
 :root {
@@ -204,6 +272,14 @@ body {
 }
 .scrollbar-hide::-webkit-scrollbar { display: none; }
 
+/* ── 播放器底部动作面板的高度上限 ──
+   手机上按视口高度算（86%），老浏览器不认识 dvh 时退回 vh，避免面板
+   在 flex 容器里被内容撑出屏幕。 */
+.player-sheet-height {
+  max-height: 86vh;
+  max-height: 86dvh;
+}
+
 /* ─── Reduced Motion ─── */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
@@ -349,4 +425,44 @@ video::cue(*) {
     0 1px 3px rgba(0, 0, 0, 0.95),
     0 0 8px rgba(0, 0, 0, 0.8),
     0 0 16px rgba(0, 0, 0, 0.6) !important;
+}
+
+
+/* ── Entrance animations (replaces framer-motion on the critical shell) ── */
+@keyframes overlay-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes drawer-in { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+@keyframes page-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes accordion-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes fade-slide-in { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes menu-in { from { opacity: 0; transform: translateY(10px) scale(0.95); } to { opacity: 1; transform: translateY(0) scale(1); } }
+
+.animate-overlay-in { animation: overlay-in 0.15s ease-out both; }
+.animate-drawer-in { animation: drawer-in 0.22s ease-out both; }
+/* 播放完成后不能保留 transform，否则长页面会成为 fixed 弹框的包含块。 */
+.animate-page-in { animation: page-in 0.25s ease-out backwards; }
+.animate-accordion-in { animation: accordion-in 0.18s ease-out both; }
+.animate-fade-slide-in { animation: fade-slide-in 0.2s ease-out both; }
+.animate-menu-in { animation: menu-in 0.15s ease-out both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-overlay-in,
+  .animate-drawer-in,
+  .animate-page-in,
+  .animate-accordion-in,
+  .animate-fade-slide-in,
+  .animate-menu-in { animation: none !important; }
+}
+
+
+@keyframes pulse-soft { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+@keyframes hero-in { from { opacity: 0; transform: scale(1.08); } to { opacity: 0.38; transform: scale(1.02); } }
+@keyframes title-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.animate-pulse-soft { animation: pulse-soft 1.5s ease-in-out infinite; }
+.animate-hero-in { animation: hero-in 0.8s ease-out both; }
+.animate-title-in { animation: title-in 0.3s ease-out both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse-soft,
+  .animate-hero-in,
+  .animate-title-in { animation: none !important; }
 }

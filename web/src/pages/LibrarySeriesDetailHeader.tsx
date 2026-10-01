@@ -2,15 +2,15 @@ import { isRemoteEmbyID } from '../utils/remoteEmby'
 import { Link } from 'react-router-dom'
 import { ArrowLeft, Database, FileText, Film, FolderInput, Pencil, Play, Search, Sparkles, Trash2 } from 'lucide-react'
 
-import { imageURL } from '../api/client'
+import { ARTWORK, imageURL } from '../api/client'
 import { ExternalPlayerButton } from '../components/ExternalPlayerButton'
 import { MediaFavouriteButton } from '../components/MediaFavouriteButton'
 import type { Media } from '../types'
-import { seriesTitle, type SeriesCard } from '../utils/groupSeries'
+import { isTheatricalFeature, seriesTitle, type SeriesCard } from '../utils/groupSeries'
+import { episodeNumberValue } from '../utils/episodeNumber'
 
 type LibrarySeriesDetailHeaderProps = {
   series: SeriesCard
-  visibleEpisodes: Media[]
   allEpisodes: Media[]
   playbackFrom: string
   isAdmin: boolean
@@ -26,12 +26,11 @@ type LibrarySeriesDetailHeaderProps = {
   onProbe: () => void
   onNFO: () => void
   onOrganize: () => void
-  onSoftDelete: () => void
+  onDelete: () => void
 }
 
 export function LibrarySeriesDetailHeader({
   series,
-  visibleEpisodes,
   allEpisodes,
   playbackFrom,
   isAdmin,
@@ -47,9 +46,11 @@ export function LibrarySeriesDetailHeader({
   onProbe,
   onNFO,
   onOrganize,
-  onSoftDelete,
+  onDelete,
 }: LibrarySeriesDetailHeaderProps) {
-  const firstEpisode = firstPlayableEpisode(visibleEpisodes.length > 0 ? visibleEpisodes : allEpisodes)
+  const tvEpisodes = allEpisodes.filter((media) => !isTheatricalFeature(media))
+  const theatricalCount = allEpisodes.length - tvEpisodes.length
+  const firstEpisode = firstPlayableEpisode(tvEpisodes)
 
   return (
     <>
@@ -61,15 +62,19 @@ export function LibrarySeriesDetailHeader({
         <h2 className="truncate font-display text-2xl font-bold text-ink-600">
           {seriesTitle(series.rep)}
         </h2>
-        <span className="text-sm text-sand-500">共 {series.count} 集</span>
+        <span className="text-sm text-sand-500">
+          共 {tvEpisodes.length} 集{theatricalCount > 0 ? ` · ${theatricalCount} 部剧场版` : ''}
+        </span>
       </div>
 
       <div className="flex flex-col gap-6 sm:flex-row">
         <div className="w-40 shrink-0 overflow-hidden rounded-xl bg-sand-200 shadow-card">
           {series.rep.poster_url ? (
             <img
-              src={imageURL(series.rep.poster_url, series.rep.updated_at)}
+              src={imageURL(series.rep.poster_url, series.rep.updated_at, ARTWORK.posterDetail)}
               alt={series.rep.title}
+              loading="lazy"
+              decoding="async"
               className="aspect-[2/3] w-full object-cover"
               referrerPolicy="no-referrer"
             />
@@ -113,7 +118,7 @@ export function LibrarySeriesDetailHeader({
                 </button>
                 <button onClick={onManualScrape} disabled={!!seriesToolBusy} className="btn-outline px-3.5 py-2 text-xs gap-1.5">
                   <Search size={13} className="text-[#c9954a]" />
-                  <span>手动匹配整剧</span>
+                  <span>{theatricalCount > 0 ? '手动匹配 TV 版' : '手动匹配整剧'}</span>
                 </button>
                 <button onClick={onMetadataEdit} disabled={!!seriesToolBusy} className="btn-outline px-3.5 py-2 text-xs gap-1.5">
                   <Pencil size={13} />
@@ -131,9 +136,9 @@ export function LibrarySeriesDetailHeader({
                   <FolderInput size={13} />
                   <span>{seriesToolBusy === 'organize' ? '整理中…' : '整理当前合集'}</span>
                 </button>
-                <button onClick={onSoftDelete} disabled={!!seriesToolBusy} className="btn-outline px-3.5 py-2 text-xs gap-1.5 !border-red-100 !text-red-500 hover:!border-red-200 hover:!bg-red-50">
+                <button onClick={onDelete} disabled={!!seriesToolBusy} className="btn-outline px-3.5 py-2 text-xs gap-1.5 !border-red-100 !text-red-500 hover:!border-red-200 hover:!bg-red-50">
                   <Trash2 size={13} />
-                  <span>{seriesToolBusy === 'delete' ? '处理中…' : '移入回收站'}</span>
+                  <span>{seriesToolBusy === 'delete' ? '处理中…' : '删除'}</span>
                 </button>
               </div>
             </div>
@@ -148,7 +153,7 @@ function firstPlayableEpisode(episodes: Media[]): Media | null {
   const sorted = [...episodes]
   sorted.sort((a, b) =>
     (a.season_num || 0) - (b.season_num || 0)
-    || (a.episode_num || 0) - (b.episode_num || 0),
+    || episodeNumberValue(a) - episodeNumberValue(b),
   )
   return sorted[0] ?? null
 }

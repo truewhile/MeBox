@@ -9,6 +9,7 @@ import {
   MediaDetailMainContent,
   MediaDetailMissing,
 } from './MediaDetailPageSections'
+import { LibrarySeriesEpisodes } from './LibrarySeriesEpisodes'
 import { useMediaDetailPageState } from './useMediaDetailPageState'
 
 export function MediaDetailPage() {
@@ -31,6 +32,7 @@ export function MediaDetailPage() {
         media={media}
         isAdmin={role === 'admin'}
         favourite={detail.favourite}
+        playTargetId={media.id || detail.firstPlayableEpisode?.id}
         scrapeEpisodeArtwork={detail.scrapeEpisodeArtwork}
         onToggleFavourite={detail.toggleFavourite}
         onScrapeEpisodeArtworkChange={detail.setScrapeEpisodeArtwork}
@@ -40,8 +42,23 @@ export function MediaDetailPage() {
         onOrganize={() => detail.setOrganizeOpen(true)}
         onProbe={detail.reprobe}
         onExportNFO={detail.exportNFO}
-        onSoftDelete={detail.softDelete}
+        onDelete={detail.deleteMedia}
       />
+
+      {detail.hasEpisodes && (
+        <div className="relative z-10 px-6 pb-8 sm:px-10 space-y-6">
+          <div className="divider border-gray-200/60" />
+          <LibrarySeriesEpisodes
+            loading={detail.loadingEpisodes}
+            selectedEpisodes={detail.seasonGroups}
+            selectedSeason={detail.selectedSeason}
+            visibleEpisodes={detail.visibleEpisodes}
+            playbackFrom={`/media/${media.id}`}
+            onSeasonChange={detail.setSelectedSeason}
+          />
+        </div>
+      )}
+
       <MediaDetailDialogs
         media={media}
         manualScrapeOpen={detail.manualScrapeOpen}

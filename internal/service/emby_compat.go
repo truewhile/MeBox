@@ -18,8 +18,10 @@ import (
 	"time"
 
 	"github.com/truewhile/MeBox/internal/config"
+	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/repository"
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 )
 
 // 用一个固定的 ServerId 字符串。Emby 客户端会缓存这个 id，第一次见到
@@ -60,6 +62,24 @@ type EmbyService struct {
 
 	libraryCoverMu    sync.Mutex
 	libraryCoverCache map[string]embyArtworkCacheEntry
+
+	peopleMu    sync.RWMutex
+	peopleCache map[string]embyPeopleCacheEntry
+
+	// latestFlight collapses the homepage stampede: clients request Latest
+	// for every library at once, and a shared expiry used to rebuild each
+	// library in parallel.
+	latestFlight  singleflight.Group
+	latestRefresh sync.Map
+
+	tmdb          *TMDbProvider
+	adult         *AdultProvider
+	personImageMu sync.RWMutex
+	personImages  map[string]string
+
+	// discovery 提供 NextUp / Similar / Genres 的候选集。它只选候选，
+	// DTO 形状仍由本服务统一产出，避免同一部剧在不同接口上长得不一样。
+	discovery *MediaDiscoveryService
 }
 
 // NewEmbyService is the constructor.
@@ -71,6 +91,43 @@ func NewEmbyService(cfg *config.Config, log *zap.Logger, repo *repository.Contai
 func (e *EmbyService) SetEmbyRemote(remote *EmbyRemoteService) *EmbyService {
 	if e != nil {
 		e.remote = remote
+	}
+	return e
+}
+
+// SetDiscovery 注入发现类查询服务（NextUp / Similar / Genres）。
+func (e *EmbyService) SetDiscovery(discovery *MediaDiscoveryService) *EmbyService {
+	if e != nil {
+		e.discovery = discovery
+	}
+	return e
+}
+
+// discoveryService 返回发现服务；未注入时按需构造，保证 Emby 接口在任何
+// 组装顺序下都不会因为缺少注入而返回空结果。
+func (e *EmbyService) discoveryService() *MediaDiscoveryService {
+	if e == nil {
+		return nil
+	}
+	if e.discovery == nil {
+		e.discovery = NewMediaDiscoveryService(e.log, e.repo)
+	}
+	return e.discovery
+}
+
+// SetTMDbProvider wires the TMDb client used for detail-time cast/crew lookup.
+func (e *EmbyService) SetTMDbProvider(tmdb *TMDbProvider) *EmbyService {
+	if e != nil {
+		e.tmdb = tmdb
+	}
+	return e
+}
+
+// SetAdultProvider wires the on-demand adult-metadata provider used when a
+// detail request needs cast/crew not stored in the database.
+func (e *EmbyService) SetAdultProvider(adult *AdultProvider) *EmbyService {
+	if e != nil {
+		e.adult = adult
 	}
 	return e
 }
@@ -108,19 +165,37 @@ type ItemsParams struct {
 	SortOrder        string
 	Limit            int
 	StartIndex       int
+	// SeasonIndex 对应客户端的 Season / SeasonIndex 查询参数（季序号，0 为特别篇）。
+	// nil 表示不按季过滤；非 nil 时只返回该季的剧集。客户端普遍用季序号而不是
+	// 虚拟季 ID 请求剧集，缺了它 /Shows/{id}/Episodes?Season=N 会返回整部剧。
+	SeasonIndex *int
 }
 
 const (
 	embyVirtualSeriesPrefix = "msgo-series-"
 	embyVirtualSeasonPrefix = "msgo-season-"
 	embyVirtualCacheTTL     = 10 * time.Minute
+	embyPeopleCacheTTL      = 6 * time.Hour
+	embyPeopleEmptyCacheTTL = 15 * time.Minute
 	embyVisibilityCacheTTL  = 30 * time.Second
 	embySeriesGroupingLimit = maxMediaSearchLimit
+	// Virtual artwork used to be wiped entirely once the in-memory map crossed
+	// a few thousand entries. A homepage refresh asks Latest for every library
+	// at once, so that wipe dropped the series the client was about to paint.
+	// Caps are sized for that fan-out; overflow evicts the oldest entries only.
+	embyVirtualSeriesCap  = 8000
+	embyVirtualSeasonCap  = 16000
+	embyVirtualArtworkCap = 24000
+	// Clients that already cached the 1x1 placeholder treat a stable tag as
+	// immutable. Virtual ids are the ones that served that placeholder, so
+	// only those tags get a suffix that forces a refetch.
+	embyVirtualPrimaryTagSuffix  = "-p2"
+	embyVirtualBackdropTagSuffix = "-bd2"
 )
 
 var (
-	embySeasonDirRE    = regexp.MustCompile(`(?i)^(season[\s._-]*\d+|s\d+|specials?|sp|ova|oad|extra|extras|第\s*[0-9一二三四五六七八九十百零两]+\s*季|特别篇|特別篇|番外|特典)$`)
-	embySeasonSuffixRE = regexp.MustCompile(`(?i)(?:[\s._-]+(?:season[\s._-]*\d+|s\d+|第\s*[0-9一二三四五六七八九十百零两]+\s*季|specials?|sp|ova|oad|extra|extras|特别篇|特別篇|番外|特典)|\s*第\s*[0-9一二三四五六七八九十百零两]+\s*季)\s*$`)
+	embySeasonDirRE    = regexp.MustCompile(`(?i)^(season[\s._-]*\d+|s\d+|specials?|sp|ovas?|oads?|ovds?|onas?|extras?|bonus(?:es)?|omake|picture[\s._-]*drama|ncop|nced|第\s*[0-9一二三四五六七八九十百零两]+\s*季|特别篇|特別篇|番外|特典|画像特典)$`)
+	embySeasonSuffixRE = regexp.MustCompile(`(?i)(?:[\s._-]+(?:season[\s._-]*\d+|s\d+|第\s*[0-9一二三四五六七八九十百零两]+\s*季|specials?|sp|ovas?|oads?|ovds?|onas?|extras?|bonus(?:es)?|omake|picture[\s._-]*drama|ncop|nced|特别篇|特別篇|番外|特典|画像特典)|\s*第\s*[0-9一二三四五六七八九十百零两]+\s*季)\s*$`)
 	embyYearSuffixRE   = regexp.MustCompile(`\s*[\(（\[]\d{4}[\)）\]]\s*$`)
 	embyEpisodeTitleRE = regexp.MustCompile(`(?i)\s*[-_ ]*s\d{1,2}e\d{1,3}.*$`)
 )
@@ -128,6 +203,13 @@ var (
 type embyVisibilityCacheEntry struct {
 	visibility MediaVisibility
 	expiresAt  time.Time
+}
+
+// embyPeopleCacheEntry avoids re-statting/decoding the same NFO for every
+// list refresh. TV clients commonly request the same posters/items repeatedly.
+type embyPeopleCacheEntry struct {
+	people    []map[string]any
+	expiresAt time.Time
 }
 
 // Items paginates media in Emby's hierarchy. Episodic libraries are exposed as
@@ -148,9 +230,19 @@ func (e *EmbyService) Items(ctx context.Context, p ItemsParams) (map[string]any,
 	if e.remote != nil {
 		// 远程目录浏览：ParentId 带远程前缀 → 完整转发给远程 Emby 承接分页。
 		if IsEmbyRemoteID(p.ParentID) {
+			if containsEmbyFilter(p.Filters, "IsFavorite") {
+				return e.favoriteItems(ctx, p)
+			}
+			// 继续观看必须走 MeBox 本地 PlaybackHistory，不能转发到远程共用账号。
+			if containsEmbyFilter(p.Filters, "IsResumable") {
+				return e.resumableItems(ctx, p)
+			}
 			mountID, _, _ := DecodeEmbyRemoteID(p.ParentID)
 			mount, acct, _ := e.remote.ResolveMount(ctx, mountID)
 			if mount == nil || acct == nil {
+				return emptyItemsEnvelope(p.StartIndex), nil
+			}
+			if !EmbyMountLibraryAllowed(e.mediaVisibility(ctx, p.UserID), mount) {
 				return emptyItemsEnvelope(p.StartIndex), nil
 			}
 			out, err := e.remote.RemoteItems(ctx, mount, acct, p)
@@ -170,6 +262,9 @@ func (e *EmbyService) Items(ctx context.Context, p ItemsParams) (map[string]any,
 
 	if containsEmbyFilter(p.Filters, "IsResumable") {
 		return e.resumableItems(ctx, p)
+	}
+	if containsEmbyFilter(p.Filters, "IsFavorite") {
+		return e.favoriteItems(ctx, p)
 	}
 
 	if len(p.IDs) > 0 {
@@ -258,53 +353,99 @@ func (e *EmbyService) aggregatedSearch(ctx context.Context, p ItemsParams) (map[
 	if err != nil {
 		return nil, err
 	}
-	type remoteResult struct {
-		items []any
+	type remoteReply struct {
+		acct     *model.StrmAccount
+		envelope map[string]any
 	}
 	mounts, aerr := e.remote.ListMounts(ctx)
-	results := make([]remoteResult, 0, len(mounts))
+	replies := make([]*remoteReply, 0, len(mounts))
 	if aerr == nil {
+		type mountSearchJob struct {
+			idx   int
+			mount *model.EmbyMount
+			acct  *model.StrmAccount
+		}
+		jobs := make([]*mountSearchJob, 0, len(mounts))
 		for i := range mounts {
 			m := mounts[i]
 			if !m.Enabled {
+				continue
+			}
+			if !EmbyMountLibraryAllowed(e.mediaVisibility(ctx, p.UserID), &m) {
 				continue
 			}
 			acct := e.remote.AccountByID(ctx, m.AccountID)
 			if acct == nil {
 				continue
 			}
-			// 按挂载逐个搜索：搜索结果归属明确（伪装 ID 正确），也天然只搜已
-			// 挂载的媒体库。
-			searchParams := p
-			searchParams.ParentID = "" // RemoteSearchMount 内部设 ParentId
-			remote, rerr := e.remote.RemoteSearchMount(ctx, &m, acct, p)
-			if rerr != nil {
-				if e.log != nil {
-					e.log.Warn("remote emby search failed",
-						zap.String("account", acct.Name), zap.Error(rerr))
+			// idx 使用 jobs 内的序号（而非 mounts 下标）：fetched 按
+			// len(jobs) 分配，必须与 jobs 下标对齐，否则越界 panic。
+			jobs = append(jobs, &mountSearchJob{idx: len(jobs), mount: &mounts[i], acct: acct})
+		}
+		// 并发搜索各挂载（限并发 + 单挂载超时）：串行时每挂载最多
+		// 15s×线路数，多挂载下首屏延迟被成倍放大。结果按挂载顺序合并。
+		sem := make(chan struct{}, 4)
+		var wg sync.WaitGroup
+		fetched := make([]*remoteReply, len(jobs))
+		for _, job := range jobs {
+			wg.Add(1)
+			go func(job *mountSearchJob) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				sctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+				defer cancel()
+				sp := p
+				// 远程只取首页：此前每个远程各自按 StartIndex 分页，拼接后
+				// 又被 sliceSearchItems 再切一次——分页被二次偏移，远程结果
+				// 首屏不可见、翻页错位。合并后由 sliceSearchItems 单点分页。
+				sp.StartIndex = 0
+				sp.ParentID = "" // RemoteSearchMount 内部设 ParentId
+				remote, rerr := e.remote.RemoteSearchMount(sctx, job.mount, job.acct, sp)
+				if rerr != nil {
+					if e.log != nil {
+						e.log.Warn("remote emby search failed",
+							zap.String("account", job.acct.Name), zap.Error(rerr))
+					}
+					return
 				}
-				continue
-			}
-			if err := e.mergeRemoteUserData(ctx, p.UserID, remote); err != nil {
-				return nil, err
-			}
-			if raw, ok := remote["Items"].([]any); ok {
-				results = append(results, remoteResult{items: raw})
-			} else if rawMap, ok := remote["Items"].([]map[string]any); ok {
-				converted := make([]any, 0, len(rawMap))
-				for _, m := range rawMap {
-					converted = append(converted, any(m))
-				}
-				results = append(results, remoteResult{items: converted})
+				fetched[job.idx] = &remoteReply{acct: job.acct, envelope: remote}
+			}(job)
+		}
+		wg.Wait()
+		for _, r := range fetched {
+			if r != nil {
+				replies = append(replies, r)
 			}
 		}
 	}
-	items := make([]any, 0, len(localItemsAsAny(local))+len(results)*p.Limit)
+	items := make([]any, 0, len(localItemsAsAny(local))+len(replies)*p.Limit)
 	items = append(items, localItemsAsAny(local)...)
-	for _, res := range results {
-		items = append(items, res.items...)
+	for _, reply := range replies {
+		if err := e.mergeRemoteUserData(ctx, p.UserID, reply.envelope); err != nil {
+			return nil, err
+		}
+		items = append(items, remoteItemsAsAny(reply.envelope)...)
 	}
 	return sliceSearchItems(items, p), nil
+}
+
+// remoteItemsAsAny 提取远程载荷的 Items 列表（兼容 []any 与 []map 形态）。
+func remoteItemsAsAny(envelope map[string]any) []any {
+	if envelope == nil {
+		return nil
+	}
+	if raw, ok := envelope["Items"].([]any); ok {
+		return raw
+	}
+	if rawMap, ok := envelope["Items"].([]map[string]any); ok {
+		converted := make([]any, 0, len(rawMap))
+		for _, m := range rawMap {
+			converted = append(converted, any(m))
+		}
+		return converted
+	}
+	return nil
 }
 
 func localItemsAsAny(envelope map[string]any) []any {

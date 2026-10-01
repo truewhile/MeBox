@@ -33,7 +33,7 @@ var (
 )
 
 // GetByProvider 获取指定提供者的 API 配置。
-func (s *ApiConfigService) GetByProvider(ctx context.Context, provider string) (*model.ApiConfig, error) {
+func (s *ApiConfigService) GetByProvider(ctx context.Context, provider string) (*model.APIConfig, error) {
 	cfg, err := s.repo.ApiConfig.FindByProvider(ctx, provider)
 	if err != nil {
 		return nil, err
@@ -49,7 +49,7 @@ func (s *ApiConfigService) GetByProvider(ctx context.Context, provider string) (
 }
 
 // List 返回所有 API 配置。
-func (s *ApiConfigService) List(ctx context.Context) ([]model.ApiConfig, error) {
+func (s *ApiConfigService) List(ctx context.Context) ([]model.APIConfig, error) {
 	configs, err := s.repo.ApiConfig.List(ctx)
 	if err != nil {
 		return nil, err
@@ -69,7 +69,7 @@ func (s *ApiConfigService) GetProviders() []model.ApiProvider {
 }
 
 // Upsert 创建或更新 API 配置，自动加密敏感字段。
-func (s *ApiConfigService) Upsert(ctx context.Context, provider string, apiKey, baseURL, extra string, enabled bool) (*model.ApiConfig, error) {
+func (s *ApiConfigService) Upsert(ctx context.Context, provider string, apiKey, baseURL, extra string, enabled bool) (*model.APIConfig, error) {
 	// 验证提供者是否有效
 	if !s.isValidProvider(provider) {
 		return nil, ErrInvalidProvider
@@ -81,7 +81,7 @@ func (s *ApiConfigService) Upsert(ctx context.Context, provider string, apiKey, 
 		encryptedKey = s.crypto.Encrypt(apiKey)
 	}
 
-	cfg := &model.ApiConfig{
+	cfg := &model.APIConfig{
 		Provider:    provider,
 		APIKey:      encryptedKey,
 		BaseURL:     baseURL,
@@ -112,7 +112,7 @@ func (s *ApiConfigService) Update(ctx context.Context, provider string, apiKey, 
 		encryptedKey = s.crypto.Encrypt(apiKey)
 	}
 
-	cfg := &model.ApiConfig{
+	cfg := &model.APIConfig{
 		Provider: provider,
 		APIKey:   encryptedKey,
 		BaseURL:  baseURL,

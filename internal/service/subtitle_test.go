@@ -2,8 +2,12 @@ package service
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/glebarez/sqlite"
@@ -46,6 +50,76 @@ func TestSubtitleDiscoverNoTracksReturnsEmptySlice(t *testing.T) {
 	}
 }
 
+func TestDiscoverExternalOnlyDoesNotResolveOrProbeCloudMedia(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.Library{}, &model.Media{}); err != nil {
+		t.Fatal(err)
+	}
+
+	media := model.Media{
+		Title:   "Cloud Media",
+		Path:    "cloud://115/example/video.mkv",
+		STRMURL: "cloud://115/example/video.mkv",
+	}
+	if err := db.Create(&media).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewSubtitleService(&config.Config{}, zap.NewNop(), repository.New(db))
+	resolveCalls := 0
+	svc.SetStrmPlayTargetResolver(func(context.Context, string) (*StrmPlayResult, error) {
+		resolveCalls++
+		return nil, errors.New("resolver must not be called")
+	})
+
+	tracks, err := svc.DiscoverExternalOnly(t.Context(), media.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolveCalls != 0 {
+		t.Fatalf("STRM resolver called %d times, want 0", resolveCalls)
+	}
+	if len(tracks) != 0 {
+		t.Fatalf("len(tracks) = %d, want 0", len(tracks))
+	}
+}
+
+func TestEmbeddedSubtitleProbeClassifiesTextAndBitmapTracks(t *testing.T) {
+	var probe embeddedSubtitleProbe
+	raw := []byte(`{"streams":[
+		{"index":2,"codec_name":"ass","tags":{"language":"chi","title":"中文"},"disposition":{"default":1}},
+		{"index":4,"codec_name":"hdmv_pgs_subtitle","tags":{"language":"eng"},"disposition":{"forced":1}}
+	]}`)
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		t.Fatal(err)
+	}
+	tracks := subtitleTracksFromProbe(probe)
+	if len(tracks) != 2 {
+		t.Fatalf("len(tracks) = %d, want 2", len(tracks))
+	}
+	if tracks[0].Delivery != "ass" || tracks[0].Path != "embedded:2" {
+		t.Fatalf("text track = %#v", tracks[0])
+	}
+	if tracks[1].Delivery != "burn" || tracks[1].StreamIndex != 4 {
+		t.Fatalf("bitmap track = %#v", tracks[1])
+	}
+}
+
+func TestSubtitleDeliveryClassifiesASSForLibass(t *testing.T) {
+	if got := subtitleDeliveryForCodec("ass"); got != "ass" {
+		t.Fatalf("ass delivery = %q, want ass", got)
+	}
+	if got := subtitleDeliveryForCodec("ssa"); got != "ass" {
+		t.Fatalf("ssa delivery = %q, want ass", got)
+	}
+	if got := subtitleDeliveryForCodec("subrip"); got != "webvtt" {
+		t.Fatalf("subrip delivery = %q, want webvtt", got)
+	}
+}
+
 func TestNormaliseTimecode(t *testing.T) {
 	cases := map[string]string{
 		"0:00:01":       "00:00:01",
@@ -59,6 +133,25 @@ func TestNormaliseTimecode(t *testing.T) {
 		if got := normaliseTimecode(in); got != want {
 			t.Errorf("normaliseTimecode(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestAssToVTTDeduplicatesDialogueAndNormalisesLineBreaks(t *testing.T) {
+	body := strings.Join([]string{
+		`Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\an2}第一行\N第二行`,
+		`Dialogue: 1,0:00:01.00,0:00:02.00,Copy,,0,0,0,,{\bord2}第一行\N第二行`,
+		`Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,{\i1}`,
+	}, "\n")
+
+	got := assToVTT(body)
+	if strings.Count(got, "第一行\n第二行") != 1 {
+		t.Fatalf("duplicate ASS dialogue was not collapsed:\n%s", got)
+	}
+	if strings.Contains(got, `\N`) || strings.Contains(got, `\an2`) {
+		t.Fatalf("ASS control sequences leaked into WebVTT:\n%s", got)
+	}
+	if strings.Contains(got, "00:00:03.000 --> 00:00:04.000") {
+		t.Fatalf("empty styled dialogue should be omitted:\n%s", got)
 	}
 }
 
@@ -94,5 +187,18 @@ func TestSubtitleServeRawWritesSourceBytes(t *testing.T) {
 	// ServeRaw must NOT convert ASS->VTT; it returns the exact source bytes.
 	if got := buf.String(); got != raw {
 		t.Fatalf("ServeRaw returned %q, want raw %q", got, raw)
+	}
+
+	buf.Reset()
+	if err := svc.ServeASS(t.Context(), media.ID, subPath, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if got := buf.String(); got != raw {
+		t.Fatalf("ServeASS returned %q, want raw ASS %q", got, raw)
+	}
+
+	buf.Reset()
+	if err := svc.ServeRaw(t.Context(), media.ID, videoPath, &buf); err == nil {
+		t.Fatal("ServeRaw accepted a non-subtitle file")
 	}
 }

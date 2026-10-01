@@ -131,20 +131,39 @@ func DecodeAllowedLibraryIDs(raw string) []string {
 	return out
 }
 
+// LibraryIDAllowed reports whether libraryID is permitted by the allow-list.
+// An empty AllowedLibraryIDs means unrestricted access.
+func LibraryIDAllowed(visibility MediaVisibility, libraryID string) bool {
+	if len(visibility.AllowedLibraryIDs) == 0 {
+		return true
+	}
+	for _, id := range visibility.AllowedLibraryIDs {
+		if id == libraryID {
+			return true
+		}
+	}
+	return false
+}
+
+// EmbyMountLibraryID is the web/Emby library id for a mounted remote view.
+func EmbyMountLibraryID(mount *model.EmbyMount) string {
+	if mount == nil {
+		return ""
+	}
+	return EncodeEmbyRemoteID(mount.ID, mount.RemoteViewID)
+}
+
+// EmbyMountLibraryAllowed reports whether a mounted Emby library is allowed for
+// the given visibility policy.
+func EmbyMountLibraryAllowed(visibility MediaVisibility, mount *model.EmbyMount) bool {
+	return LibraryIDAllowed(visibility, EmbyMountLibraryID(mount))
+}
+
 // LibraryVisibleForUser applies profile library limits and adult-directory
 // hiding to a library card/folder.
 func LibraryVisibleForUser(ctx context.Context, repo *repository.Container, lib model.Library, visibility MediaVisibility) bool {
-	if len(visibility.AllowedLibraryIDs) > 0 {
-		found := false
-		for _, id := range visibility.AllowedLibraryIDs {
-			if id == lib.ID {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
+	if !LibraryIDAllowed(visibility, lib.ID) {
+		return false
 	}
 	if visibility.IncludeNSFW {
 		return true

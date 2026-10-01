@@ -9,19 +9,37 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/truewhile/MeBox/internal/config"
+	"github.com/truewhile/MeBox/internal/middleware"
 	"github.com/truewhile/MeBox/internal/service"
 )
 
 // Register attaches every API route to the engine.
 func Register(r *gin.Engine, cfg *config.Config, log *zap.Logger, svc *service.Container) {
 	api := r.Group("/api")
+	api.Use(middleware.GzipAPI())
 	{
 		api.GET("/health", healthCheck)
+		api.HEAD("/health", healthCheck)
 		api.GET("/version", versionInfo)
 		api.GET("/public/ui-config", publicUIConfigHandler(svc))
 
 		// STRM 播放端点：strm 文件内容指向这里，Emby/Infuse 直接请求（无 JWT）。
 		api.GET("/strm/play/:provider/:file", strmPlayHandler(svc))
+		api.HEAD("/strm/play/:provider/:file", strmPlayHandler(svc))
+		// 阅读媒体代理：音频流/漫画图片，鉴权靠 HMAC 签名（audio/img 元素带不了 JWT）。
+		api.GET("/reader/media", readerMediaProxyHandler(svc))
+		// 本地书籍内嵌资源（EPUB 图片）：同样靠 HMAC 签名鉴权。
+		api.GET("/reader/local/asset", readerLocalAssetHandler(svc))
+		// 本地有声书音频流：同样靠 HMAC 签名鉴权，服务端处理 Range。
+		api.GET("/reader/local/audio", readerLocalAudioHandler(svc))
+		api.HEAD("/reader/local/audio", readerLocalAudioHandler(svc))
+		// 需要转码的音轨（WMA 等浏览器解不了的格式）：签名鉴权 + 服务端 ffmpeg 转码。
+		api.GET("/reader/audio/transcode", readerAudioTranscodeHandler(svc))
+		api.HEAD("/reader/audio/transcode", readerAudioTranscodeHandler(svc))
+		// 阅读书源浏览器页面与资源代理：java.startBrowserAwait 承载的页面填进
+		// <iframe src>，同样带不了 JWT，鉴权靠绑定待办 ID 的 HMAC 签名。
+		api.GET("/reader/browser/page", readerBrowserPageHandler(svc))
+		api.GET("/reader/browser/asset", readerBrowserAssetHandler(svc))
 		// 115 中继/CloudDrive 授权回跳（authorization_id 会话 + 共享密钥校验）
 		api.POST("/strm/oauth/callback", strm115OAuthCallbackHandler(svc))
 		api.GET("/strm/oauth/callback", strm115OAuthCallbackHandler(svc))

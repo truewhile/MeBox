@@ -6,6 +6,11 @@
 //	1x02          / 01x02
 //	EP02 / E02
 //	第2集         / 第02集
+//	[01]          / [001]（字幕组方括号集号，如 [UHA-WINGS][…][01][BDRIP]）
+//
+// The "1x02" pattern only matches when it is not embedded in a larger number,
+// so pixel dimensions such as 1920x1080 / 3840x2160 are never mistaken for
+// season×episode (the old pattern read those as S20E108 / S40E216).
 //
 // For bare episode markers such as "EP02", the parser also looks at parent
 // folders like "Season 02" / "S02" / "第2季" before falling back to season 1.
@@ -14,6 +19,7 @@
 package service
 
 import (
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -22,36 +28,67 @@ import (
 )
 
 var (
-	patSEnE          = regexp.MustCompile(`(?i)s(\d{1,2})e(\d{1,3})`)
-	patSEnERange     = regexp.MustCompile(`(?i)s(\d{1,2})e(\d{1,3})\s*[-~–—]\s*(?:s(\d{1,2}))?e?(\d{1,3})(?:[^0-9]|$)`)
-	patDanglingSE    = regexp.MustCompile(`(?i)(?:^|[\s._-])s\d{1,2}e(?:[\s._-]|$)`)
-	patNxE           = regexp.MustCompile(`(\d{1,2})x(\d{1,3})`)
-	patEP            = regexp.MustCompile(`(?i)(?:^|[^a-z])(?:e|ep)\.?\s*(\d{1,3})(?:[^0-9]|$)`)
-	patCN            = regexp.MustCompile(`第\s*([0-9一二三四五六七八九十百零两]+)\s*[集话話期]`)
-	patCNRange       = regexp.MustCompile(`第\s*([0-9一二三四五六七八九十百零两]+)\s*[-~–—]\s*([0-9一二三四五六七八九十百零两]+)\s*[集话話期]`)
-	patDashEpisode   = regexp.MustCompile(`[\s._-][-–—]\s*(\d{1,3})(?:\s*(?:v\d+)?)?(?:\s*[\[\(._-]|$)`)
-	patSeasonFolder  = regexp.MustCompile(`(?i)(?:^|[^a-z])(?:s|season)\.?\s*(\d{1,2})(?:[^0-9]|$)|第\s*([0-9一二三四五六七八九十百零两]+)\s*季`)
-	patSeasonOnly    = regexp.MustCompile(`(?i)(?:^|[\s._-])(?:s|season)\.?\s*\d{1,2}(?:[\s._-]|$)`)
-	patBareEpisode   = regexp.MustCompile(`^(?:第\s*)?0?(\d{1,3})(?:\s*(?:v\d+)?)?$`)
-	patSpecialSeason = regexp.MustCompile(`(?i)^(?:s0+|season[\s._-]*0+|special[\s._-]*episodes?|specials?|sp|ovas?|oads?|extras?|bonus(?:es)?|omake|番外篇?|特别篇|特別篇|特典|外传|外傳|总集篇|總集篇)$`)
+	patSEnE = regexp.MustCompile(`(?i)s(\d{1,2})e(\d{1,3})`)
+	// patSEnEFraction 捕获 S01E11.5 这类「半集」写法的小数位：只在 SxxEyy 后
+	// 紧跟一个点加一位数字时成立；解析时还要确认该数字后面不是另一个数字，
+	// 否则 S01E11.1080p 的分辨率会被误读成小数集号。
+	patSEnEFraction = regexp.MustCompile(`(?i)s(\d{1,2})e(\d{1,3})\.(\d)`)
+	patSEnERange    = regexp.MustCompile(`(?i)s(\d{1,2})e(\d{1,3})\s*[-~–—]\s*(?:s(\d{1,2}))?e?(\d{1,3})(?:[^0-9]|$)`)
+	patDanglingSE   = regexp.MustCompile(`(?i)(?:^|[\s._-])s\d{1,2}e(?:[\s._-]|$)`)
+	// patNxE 匹配 1x02 这类季集写法的捕获组，同时用于从标题里剔除季集残留
+	// （ReplaceAllString），因此本身不带边界守卫。解析时改用 patNxEGuarded，
+	// 避免 "1920x1080" 被从中间匹配出 "20x108" 而误判成 S20E108。
+	patNxE        = regexp.MustCompile(`(\d{1,2})x(\d{1,3})`)
+	patNxEGuarded = regexp.MustCompile(`(?:^|[^0-9])(\d{1,2})x(\d{1,3})(?:[^0-9]|$)`)
+	// patBracketEpisode 匹配字幕组常见的纯数字方括号集号，如 [01] / [012]。
+	// 限定 1-3 位，避免把 [2024] 这类年份当成集号；含字母的 [NCOP]/[1080p]
+	// 自然不匹配。
+	patBracketEpisode    = regexp.MustCompile(`\[0*(\d{1,3})\]`)
+	patEP                = regexp.MustCompile(`(?i)(?:^|[^a-z])(?:e|ep)\.?\s*(\d{1,3})(?:[^0-9]|$)`)
+	patSpecialEpisode    = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:ova|oad|ovd|ona|sp|special(?:[\s._-]*episode)?|extra|bonus|omake)[\s._-]*0*(\d{1,3})(?:[^0-9]|$)`)
+	patCN                = regexp.MustCompile(`第\s*([0-9一二三四五六七八九十百零两]+)\s*[集话話期]`)
+	patCNRange           = regexp.MustCompile(`第\s*([0-9一二三四五六七八九十百零两]+)\s*[-~–—]\s*([0-9一二三四五六七八九十百零两]+)\s*[集话話期]`)
+	patDashEpisode       = regexp.MustCompile(`[\s._-][-–—]\s*(\d{1,3})(?:\s*(?:v\d+)?)?(?:\s*[\[\(._-]|$)`)
+	patSeasonFolder      = regexp.MustCompile(`(?i)(?:^|[^a-z])(?:s|season)\.?\s*(\d{1,2})(?:[^0-9]|$)|第\s*([0-9一二三四五六七八九十百零两]+)\s*季`)
+	patSeasonOnly        = regexp.MustCompile(`(?i)(?:^|[\s._-])(?:s|season)\.?\s*\d{1,2}(?:[\s._-]|$)`)
+	patBareEpisode       = regexp.MustCompile(`^(?:第\s*)?0?(\d{1,3})(?:\s*(?:v\d+)?)?$`)
+	patSpecialSeason     = regexp.MustCompile(`(?i)^(?:s0+|season[\s._-]*0+|special[\s._-]*episodes?|specials?|sp|ovas?|oads?|ovds?|onas?|extras?|bonus(?:es)?|omake|picture[\s._-]*drama|ncop|nced|番外篇?|特别篇|特別篇|特典|外传|外傳|总集篇|總集篇|画像特典)$`)
+	patSeasonEpisodeZero = regexp.MustCompile(`(?i)s0*([1-9]\d?)e0+(?:[^0-9]|$)`)
 	// patCNSeason 匹配中文季/部标记，支持阿拉伯数字与中文数字（如「第二季」「第2部」）。
 	patCNSeason = regexp.MustCompile(`第\s*[0-9一二三四五六七八九十百零两]+\s*[季部]`)
+	// patResolutionDims 匹配 1920x1080 / 3840×2160 这类像素尺寸。
+	patResolutionDims = regexp.MustCompile(`(?i)(\d{3,4})\s*[x×]\s*(\d{3,4})`)
 )
 
 // ParseEpisode tries to extract (season, episode) from an arbitrary filename.
 // Returns (0, 0) when nothing recognisable is found.
 func ParseEpisode(path string) (season, episode int) {
-	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	name := mediaSidecarBase(path)
+	if name == "" {
+		name = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	}
 
 	if m := patSEnE.FindStringSubmatch(name); len(m) == 3 {
 		season = mustAtoi(m[1])
 		episode = mustAtoi(m[2])
 		return
 	}
-	if m := patNxE.FindStringSubmatch(name); len(m) == 3 {
+	if m := patNxEGuarded.FindStringSubmatch(name); len(m) == 3 {
 		season = mustAtoi(m[1])
 		episode = mustAtoi(m[2])
 		return
+	}
+	if m := patBracketEpisode.FindStringSubmatch(name); len(m) == 2 {
+		var found bool
+		season, found = seasonFromParents(path)
+		if !found {
+			season = 1
+		}
+		episode = mustAtoi(m[1])
+		return
+	}
+	if m := patSpecialEpisode.FindStringSubmatch(name); len(m) >= 2 {
+		return 0, mustAtoi(m[1])
 	}
 	if m := patEP.FindStringSubmatch(name); len(m) >= 2 {
 		var found bool
@@ -90,13 +127,179 @@ func ParseEpisode(path string) (season, episode int) {
 	return 0, 0
 }
 
+// ParseEpisodeParts 在 ParseEpisode 的基础上返回集号的小数部分：
+// S01E11.5 → (1, 11, 0.5)。小数部分用来把「半集」和同季的整集区分开
+// （折叠/身份键、排序、网页端显示集号都带上它），解析不出来时为 0。
+func ParseEpisodeParts(path string) (season, episode int, fraction float64) {
+	name := mediaSidecarBase(path)
+	if name == "" {
+		name = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	}
+	if m := patSEnE.FindStringSubmatch(name); len(m) == 3 {
+		return mustAtoi(m[1]), mustAtoi(m[2]), episodeFractionFromName(name)
+	}
+	season, episode = ParseEpisode(path)
+	return season, episode, 0
+}
+
+// episodeFractionFromName 从 "S01E11.5" 这类名字里取出小数部分（0.5）。
+// 只在 SxxEyy 后紧跟「点 + 一位数字」、且该数字之后不是数字时才成立，
+// 否则 S01E11.1080p / S01E05.10bit 会被读成小数集号。
+func episodeFractionFromName(name string) float64 {
+	lower := strings.ToLower(name)
+	m := patSEnEFraction.FindStringSubmatchIndex(lower)
+	if len(m) != 8 {
+		return 0
+	}
+	digitsStart, digitsEnd := m[6], m[7]
+	if digitsStart < 0 || digitsEnd <= digitsStart {
+		return 0
+	}
+	if digitsEnd < len(lower) && lower[digitsEnd] >= '0' && lower[digitsEnd] <= '9' {
+		return 0
+	}
+	value, err := strconv.ParseFloat("0."+lower[digitsStart:digitsEnd], 64)
+	if err != nil || value <= 0 || value >= 1 {
+		return 0
+	}
+	return value
+}
+
+// episodeFractionSuffix 把小数部分渲染成身份/显示后缀：0.5 → ".5"，无小数 → ""。
+// 折叠键用它拼接，所以没有小数的集（绝大多数）产生的键与历史完全一致。
+func episodeFractionSuffix(fraction float64) string {
+	if fraction <= 0 || fraction >= 1 {
+		return ""
+	}
+	formatted := strconv.FormatFloat(fraction, 'f', -1, 64)
+	if !strings.HasPrefix(formatted, "0.") {
+		return ""
+	}
+	return formatted[1:]
+}
+
+// FormatEpisodeNumber 把整数集号与小数部分拼成显示集号：11 → "11"，11.5 → "11.5"。
+func FormatEpisodeNumber(episode int, fraction float64) string {
+	return strconv.Itoa(episode) + episodeFractionSuffix(fraction)
+}
+
+// resolutionEpisodeArtifact returns the bogus (season, episode) pair the legacy
+// `(\d{1,2})x(\d{1,3})` pattern would extract from a WxH pixel-dimension token
+// in path — e.g. 1920x1080 -> (20, 108), 3840x2160 -> (40, 216). Reports ok=false
+// when the name carries no such token.
+//
+// MeBox used to persist these pairs into sidecar NFOs, so on rescan the NFO
+// would inject the wrong identity back even after the parser was fixed.
+func resolutionEpisodeArtifact(path string) (season, episode int, ok bool) {
+	name := mediaSidecarBase(path)
+	if name == "" {
+		return 0, 0, false
+	}
+	dims := patResolutionDims.FindStringSubmatch(name)
+	if len(dims) < 3 {
+		return 0, 0, false
+	}
+	m := patNxE.FindStringSubmatch(dims[1] + "x" + dims[2])
+	if len(m) != 3 {
+		return 0, 0, false
+	}
+	return mustAtoi(m[1]), mustAtoi(m[2]), true
+}
+
+// dropResolutionArtifactEpisodeIdentity clears a season/episode pair (and the
+// episode title generated from it) that only exists because a resolution token
+// was once mistaken for an SxxExx marker.
+func dropResolutionArtifactEpisodeIdentity(meta *LocalMetadata, mediaPath string) {
+	if meta == nil {
+		return
+	}
+	season, episode, ok := resolutionEpisodeArtifact(mediaPath)
+	if !ok || meta.SeasonNum != season || meta.EpisodeNum != episode {
+		return
+	}
+	// 只有当文件名本身也无法权威地解析出同一季集号时才判定为伪集号。
+	// 例如 Show.S20E108.1920x1080.mkv 的 S20E108 是真实标记，必须保留。
+	if parsedSeason, parsedEpisode := ParseEpisode(mediaPath); parsedEpisode > 0 &&
+		parsedSeason == meta.SeasonNum && parsedEpisode == meta.EpisodeNum {
+		return
+	}
+	meta.SeasonNum = 0
+	meta.EpisodeNum = 0
+	if isGeneratedEpisodeTitle(meta.EpisodeTitle, episode) {
+		meta.EpisodeTitle = ""
+	}
+}
+
+// isGeneratedEpisodeTitle reports whether title is the default "第 N 集" /
+// "Episode N" form auto-written from an episode number rather than a real name.
+func isGeneratedEpisodeTitle(title string, episode int) bool {
+	title = strings.TrimSpace(title)
+	if title == "" || episode <= 0 {
+		return false
+	}
+	for _, candidate := range []string{
+		fmt.Sprintf("第 %d 集", episode),
+		fmt.Sprintf("第%d集", episode),
+		fmt.Sprintf("第 %d 话", episode),
+		fmt.Sprintf("第%d话", episode),
+		fmt.Sprintf("第 %d 話", episode),
+		fmt.Sprintf("第%d話", episode),
+		fmt.Sprintf("Episode %d", episode),
+		fmt.Sprintf("EP%d", episode),
+	} {
+		if strings.EqualFold(title, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+// onlineEpisodeIdentityFromPath converts the common anime SxxE00 convention
+// to provider-style specials. For example, S01E00 becomes S00E01 and S02E00
+// becomes S00E02. Normal episodes retain their parsed identity.
+func onlineEpisodeIdentityFromPath(path string) (season, episode int) {
+	season, episode = ParseEpisode(path)
+	if episode != 0 {
+		return season, episode
+	}
+	name := mediaSidecarBase(path)
+	if name == "" {
+		name = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	}
+	if m := patSeasonEpisodeZero.FindStringSubmatch(name); len(m) == 2 {
+		specialEpisode := mustAtoi(m[1])
+		if specialEpisode > 0 {
+			return 0, specialEpisode
+		}
+	}
+	return season, episode
+}
+
+// onlineEpisodeFractionFromPath 返回按在线身份规则得到的集号小数部分：
+// S01E11.5 → 0.5。只有在线身份未被重映射（SxxE00 特别篇那种改写）时才给出，
+// 避免把重映射后的特别篇又带上原季的小数。
+func onlineEpisodeFractionFromPath(path string) float64 {
+	season, episode, fraction := ParseEpisodeParts(path)
+	if fraction <= 0 || episode <= 0 {
+		return 0
+	}
+	onlineSeason, onlineEpisode := onlineEpisodeIdentityFromPath(path)
+	if onlineSeason != season || onlineEpisode != episode {
+		return 0
+	}
+	return fraction
+}
+
 type episodeRef struct {
 	Season  int
 	Episode int
 }
 
 func episodeRefsFromTitle(path string) []episodeRef {
-	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	name := mediaSidecarBase(path)
+	if name == "" {
+		name = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	}
 	if refs := parseSEpisodeRange(name); len(refs) > 0 {
 		return refs
 	}

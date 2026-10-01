@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Clock, Play, Trash2 } from 'lucide-react'
+import { BarChart3, Clock, Play, Trash2 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 import { historyAPI } from '../api/history'
-import { imageURL } from '../api/client'
+import { ARTWORK, imageURL } from '../api/client'
 import { confirmAction } from '../components/confirmAction'
 import { isRemoteEmbyID } from '../utils/remoteEmby'
 import type { HistoryItem, Media } from '../types'
@@ -29,6 +29,10 @@ export function WatchHistoryPage() {
     historyAPI
       .list(200)
       .then(setItems)
+      .catch((err: unknown) => {
+        const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '加载观看历史失败'
+        toast.error(msg)
+      })
       .finally(() => setLoading(false))
   }
 
@@ -41,6 +45,9 @@ export function WatchHistoryPage() {
       await historyAPI.remove(id)
       setItems((prev) => prev.filter((item) => item.id !== id))
       toast.success('已移除观看历史')
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '移除观看历史失败'
+      toast.error(msg)
     } finally {
       setBusy('')
     }
@@ -54,6 +61,9 @@ export function WatchHistoryPage() {
       await historyAPI.clear(undefined, status)
       setItems((prev) => prev.filter((item) => status === 'completed' ? !item.completed : item.completed))
       toast.success(`已清除${label}记录`)
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? `清除${label}记录失败`
+      toast.error(msg)
     } finally {
       setBusy('')
     }
@@ -67,6 +77,13 @@ export function WatchHistoryPage() {
           <h1 className="font-display text-3xl font-bold text-ink-600">观看历史</h1>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <Link
+            to="/history/stats"
+            className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-bold text-gray-600 shadow-sm transition hover:border-brand-300 hover:text-brand-600"
+          >
+            <BarChart3 size={14} />
+            观看统计
+          </Link>
           <button
             onClick={() => clearByStatus('incomplete')}
             disabled={busy !== '' || items.every((item) => item.completed)}
@@ -107,7 +124,7 @@ export function WatchHistoryPage() {
               <div className="h-16 w-12 shrink-0 overflow-hidden rounded-lg bg-surface-900">
                 {m.poster_url ? (
                   <img
-                    src={imageURL(m.poster_url, m.updated_at)}
+                    src={imageURL(m.poster_url, m.updated_at, ARTWORK.posterCard)}
                     alt={m.title}
                     className="h-full w-full object-cover"
                     referrerPolicy="no-referrer"
@@ -117,6 +134,7 @@ export function WatchHistoryPage() {
               <div className="min-w-0 flex-1 space-y-1">
                 <Link
                   to={`/media/${m.id}`}
+                  state={{ from: '/history' }}
                   className="block truncate font-medium text-ink-600 transition hover:text-brand-500"
                 >
                   {m.title}
@@ -140,6 +158,7 @@ export function WatchHistoryPage() {
               <div className="flex w-full items-center gap-2 sm:w-auto sm:shrink-0">
                 <Link
                   to={`/play/${m.id}`}
+                  state={{ from: '/history' }}
                   className="neon-button !px-3 !py-1 !text-xs"
                 >
                   <Play size={12} /> 继续

@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"encoding/base64"
 	"image"
 	"image/color"
 	"image/draw"
@@ -44,10 +45,10 @@ func TestCropAdultCoverPosterWideLandscape(t *testing.T) {
 	if croppedWidth <= 0 || croppedWidth >= 800 {
 		t.Fatalf("unexpected cropped width: %d", croppedWidth)
 	}
-	// Verify aspect ratio is roughly standard portrait (~0.68 - 0.73)
+	// MetaTube's default primary-image ratio is 2:3.
 	ratio := float64(croppedWidth) / float64(croppedHeight)
-	if ratio < 0.65 || ratio > 0.75 {
-		t.Fatalf("expected portrait ratio ~0.71, got %f (%dx%d)", ratio, croppedWidth, croppedHeight)
+	if ratio < 0.65 || ratio > 0.68 {
+		t.Fatalf("expected portrait ratio ~0.667, got %f (%dx%d)", ratio, croppedWidth, croppedHeight)
 	}
 
 	// Verify the cropped image contains the right side color (blue), not the left side color (red)
@@ -55,6 +56,51 @@ func TestCropAdultCoverPosterWideLandscape(t *testing.T) {
 	r, _, b, _ := midPixel.RGBA()
 	if b < r {
 		t.Fatalf("expected right side image content (dominant blue), got r=%d b=%d", r, b)
+	}
+}
+
+func TestCropAdultCoverPosterDecodesWebP(t *testing.T) {
+	wideWebP, err := base64.StdEncoding.DecodeString("UklGRjwAAABXRUJQVlA4IDAAAADQAQCdASoJAAYAAUAmJaACdLoB+AADsAD+8ut//NgVzXPv9//S4P0uD9Lg/9KQAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	croppedBytes, ctype, err := CropAdultCoverPoster(wideWebP)
+	if err != nil {
+		t.Fatalf("crop WebP: %v", err)
+	}
+	if ctype != "image/jpeg" {
+		t.Fatalf("cropped WebP type = %q, want image/jpeg", ctype)
+	}
+	cropped, _, err := image.Decode(bytes.NewReader(croppedBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := float64(cropped.Bounds().Dx()) / float64(cropped.Bounds().Dy()); got < 0.65 || got > 0.68 {
+		t.Fatalf("cropped WebP ratio = %.3f, want 2:3", got)
+	}
+}
+
+func TestCropAdultCoverPosterCentersDetectedFace(t *testing.T) {
+	originalDetector := findPrimaryFaceAxisRatio
+	findPrimaryFaceAxisRatio = func(image.Image, float64, bool) (float64, bool) {
+		return 0.25, true
+	}
+	defer func() {
+		findPrimaryFaceAxisRatio = originalDetector
+	}()
+
+	origBytes := createTestImage(900, 600, color.RGBA{R: 255, A: 255}, color.RGBA{B: 255, A: 255})
+	croppedBytes, _, err := CropAdultCoverPoster(origBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	croppedImg, _, err := image.Decode(bytes.NewReader(croppedBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _, b, _ := croppedImg.At(croppedImg.Bounds().Dx()/2, croppedImg.Bounds().Dy()/2).RGBA()
+	if r <= b {
+		t.Fatalf("face-positioned crop did not follow detected left-side axis: r=%d b=%d", r, b)
 	}
 }
 

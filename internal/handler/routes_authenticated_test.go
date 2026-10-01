@@ -25,6 +25,10 @@ func TestAuthenticatedRouteSurfacesAreRegistered(t *testing.T) {
 
 	for _, want := range []string{
 		"GET /api/me",
+		"GET /api/me/pinned-libraries",
+		"PUT /api/me/pinned-libraries",
+		"GET /api/me/library-tags",
+		"PUT /api/me/library-tags",
 		"GET /api/auth/permissions",
 		"GET /api/libraries",
 		"GET /api/media",
@@ -32,6 +36,7 @@ func TestAuthenticatedRouteSurfacesAreRegistered(t *testing.T) {
 		"GET /api/storage",
 		"GET /api/watch-history",
 		"GET /api/playback/:id/info",
+		"GET /api/playback/:id/segments",
 	} {
 		if !routes[want] {
 			t.Fatalf("%s route is not registered", want)

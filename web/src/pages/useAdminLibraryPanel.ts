@@ -3,6 +3,7 @@ import toast from 'react-hot-toast'
 
 import { libraryAPI } from '../api/library'
 import type { Library, LibraryRoot } from '../types'
+import { invalidateLibraries } from '../utils/libraryCache'
 import { confirmAction } from '../components/confirmAction'
 import { apiErrorMessage, createRootPayload, displayLibraryRootName, displayLibraryRootPath, emptyRootDraft, rootDraftKey, type RootDraft } from './adminLibraryPanelModel'
 
@@ -18,10 +19,14 @@ export function useAdminLibraryPanel() {
 
 function useAdminLibraryList() {
   const [libs, setLibs] = useState<Library[]>([])
-  const refresh = () =>
-    libraryAPI
+  const refresh = () => {
+    // 后台任何库变更都会走到这里；顺带清掉前台会话缓存，
+    // 避免返回首页/媒体库页后 30 秒 TTL 内还显示旧列表。
+    invalidateLibraries()
+    return libraryAPI
       .list({ includeHidden: true })
       .then((libs) => setLibs(libs.filter((l) => !l.is_remote_emby)))  // 远程挂载库只读，不在后台管理列表内
+  }
 
   useEffect(() => {
     refresh().catch(() => undefined)
@@ -36,9 +41,13 @@ function useCreateLibraryForm(refresh: () => Promise<void>) {
   const [type, setType] = useState('movie')
   const [coverURL, setCoverURL] = useState('')
   const [createPerSubfolder, setCreatePerSubfolder] = useState(false)
+  // 提交中标记：防止重复点击创建出多个媒体库
+  const [creating, setCreating] = useState(false)
 
   const handleCreate = async (e: FormEvent) => {
     e.preventDefault()
+    if (creating) return
+    setCreating(true)
     try {
       if (createPerSubfolder) {
         const parentPath = roots[0]?.path?.trim()
@@ -61,10 +70,12 @@ function useCreateLibraryForm(refresh: () => Promise<void>) {
       setRoots([emptyRootDraft()])
       setCoverURL('')
       setCreatePerSubfolder(false)
-      await refresh()
     } catch (err: unknown) {
       toast.error(apiErrorMessage(err, '创建失败'))
+    } finally {
+      setCreating(false)
     }
+    await refresh().catch(() => undefined)
   }
 
   const updateRoot = (index: number, patch: Partial<RootDraft>) => {
@@ -77,6 +88,7 @@ function useCreateLibraryForm(refresh: () => Promise<void>) {
     coverURL,
     roots,
     createPerSubfolder,
+    creating,
     setName,
     setType,
     setCoverURL,
@@ -163,12 +175,12 @@ function useEditableLibraryRootActions(refresh: () => Promise<void>, drafts: Edi
 function useLibraryActions(refresh: () => Promise<void>) {
   const scanLibrary = async (library: Library) => {
     const result = await libraryAPI.scan(library.id)
-    if (result.queued) toast.success('云盘扫描已加入后台队列，会自动入库')
-    else toast.success(`扫描完成，新增 ${result.added}，更新 ${result.updated ?? 0}`)
+    if (result.queued) toast.success(result.message || '媒体库扫描已加入后台队列，会自动入库')
+    else toast.success(`扫描完成，新增 ${result.added ?? 0}，更新 ${result.updated ?? 0}`)
   }
 
   const toggleCarouselLibrary = async (library: Library) => {
-    const next = !Boolean(library.carousel_enabled)
+    const next = !library.carousel_enabled
     await libraryAPI.update(library.id, { carousel_enabled: next })
     toast.success(next ? `「${library.name}」已加入首页轮播` : `「${library.name}」已移出首页轮播`)
     await refresh()

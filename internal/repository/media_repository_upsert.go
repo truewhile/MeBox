@@ -3,12 +3,25 @@ package repository
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 
 	"gorm.io/gorm"
 
 	"github.com/truewhile/MeBox/internal/model"
 )
+
+// MediaUpsertItem carries a media row and optional sibling paths from an
+// earlier keep_ext naming mode. An alias is only used when the exact new path
+// does not exist in the database; in that case the existing row is migrated to
+// the new path so scraped metadata survives renames such as:
+//
+//	foo.strm -> foo.mkv.strm
+//	foo.mkv.strm -> foo.strm
+type MediaUpsertItem struct {
+	Media      *model.Media
+	AliasPaths []string
+}
 
 // Upsert inserts or updates a media row keyed by Path (unique index).
 //
@@ -22,43 +35,163 @@ import (
 //     显式写入）。这两个问题都让 EnrichLibrary(WHERE scrape_status='pending')
 //     永远捞不到数据。
 func (r *MediaRepository) Upsert(ctx context.Context, m *model.Media) error {
-	return withSQLiteBusyRetry(ctx, func() error {
-		return r.upsert(ctx, m)
-	})
+	return r.UpsertWithAliases(ctx, m, nil)
 }
 
-func (r *MediaRepository) upsert(ctx context.Context, m *model.Media) error {
-	existing, created, err := r.findOrCreateMediaByPath(ctx, m)
+// UpsertWithAliases is Upsert with explicit, filesystem-verified STRM sibling
+// aliases. It preserves the old row's ID, CreatedAt and scraped metadata while
+// moving it to the current path.
+func (r *MediaRepository) UpsertWithAliases(ctx context.Context, m *model.Media, aliasPaths []string) error {
+	return r.UpsertBatchWithAliases(ctx, []MediaUpsertItem{{Media: m, AliasPaths: aliasPaths}})
+}
+
+// UpsertBatch 在单个事务里逐条执行 Upsert：扫描一批只提交（fsync）一次，
+// 而不是每条一个隐式事务。任一条目落库失败不影响批内已成功的条目——
+// 事务回滚后由调用方退回逐条 Upsert 兜底。
+//
+// OpenSearch 索引同步（HTTP，4s 超时）必须在事务提交之后统一执行：放在
+// 事务内会把 SQLite 写锁挂起在网络 IO 上，且批内用非事务连接回读只能
+// 拿到提交前的旧版本数据，把陈旧内容写进索引。
+func (r *MediaRepository) UpsertBatch(ctx context.Context, items []*model.Media) error {
+	mapped := make([]MediaUpsertItem, 0, len(items))
+	for _, item := range items {
+		if item != nil {
+			mapped = append(mapped, MediaUpsertItem{Media: item})
+		}
+	}
+	return r.UpsertBatchWithAliases(ctx, mapped)
+}
+
+// UpsertBatchWithAliases runs alias-aware upserts in one transaction.
+func (r *MediaRepository) UpsertBatchWithAliases(ctx context.Context, items []MediaUpsertItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+	indexIDs := make([]string, 0, len(items))
+	err := withSQLiteBusyRetry(ctx, func() error {
+		indexIDs = indexIDs[:0]
+		return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			for _, item := range items {
+				if item.Media == nil {
+					continue
+				}
+				id, err := r.upsertWithDB(ctx, tx, item.Media, item.AliasPaths)
+				if err != nil {
+					return err
+				}
+				if id != "" {
+					indexIDs = append(indexIDs, id)
+				}
+			}
+			return nil
+		})
+	})
 	if err != nil {
 		return err
 	}
+	r.indexByIDBestEffort(ctx, indexIDs)
+	return nil
+}
+
+// indexByIDBestEffort 在事务提交后按 ID 回读最新行并同步搜索索引。
+func (r *MediaRepository) indexByIDBestEffort(ctx context.Context, ids []string) {
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if fresh, err := r.FindByID(ctx, id); err == nil && fresh != nil {
+			r.indexMediaBestEffort(ctx, *fresh)
+		}
+	}
+}
+
+// upsertWithDB 落库（新建、更新或从旧路径迁移），返回需要重建索引的媒体 ID。
+func (r *MediaRepository) upsertWithDB(ctx context.Context, db *gorm.DB, m *model.Media, aliasPaths []string) (string, error) {
+	existing, created, adopted, err := r.findOrCreateMediaByPath(ctx, db, m, aliasPaths)
+	if err != nil {
+		return "", err
+	}
 	if created {
-		r.indexMediaBestEffort(ctx, *m)
-		return nil
+		return m.ID, nil
 	}
 
 	updates := mediaUpsertUpdates(existing, *m)
-	return r.applyMediaUpsertUpdates(ctx, m, existing, updates)
+	if adopted {
+		updates["path"] = m.Path
+		if existing.DeletedAt.Valid {
+			updates["deleted_at"] = nil
+		}
+	}
+	if len(updates) == 0 {
+		*m = existing
+		return "", nil
+	}
+	if err := db.WithContext(ctx).Unscoped().Model(&model.Media{}).
+		Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
+		return "", err
+	}
+	// 回写 ID / 不可变字段，让 caller 拿到完整的现有行。
+	if adopted {
+		existing.Path = m.Path
+		existing.DeletedAt = gorm.DeletedAt{}
+	}
+	*m = existing
+	return existing.ID, nil
 }
 
-func (r *MediaRepository) findOrCreateMediaByPath(ctx context.Context, m *model.Media) (model.Media, bool, error) {
+func (r *MediaRepository) findOrCreateMediaByPath(ctx context.Context, db *gorm.DB, m *model.Media, aliasPaths []string) (model.Media, bool, bool, error) {
 	var existing model.Media
-	err := r.db.WithContext(ctx).Unscoped().Where("path = ?", m.Path).First(&existing).Error
+	err := db.WithContext(ctx).Unscoped().Where("path = ?", m.Path).First(&existing).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
+		if alias, aliasErr := r.findMediaByAlias(ctx, db, m.Path, aliasPaths); aliasErr == nil {
+			return alias, false, true, nil
+		} else if !errors.Is(aliasErr, gorm.ErrRecordNotFound) {
+			return model.Media{}, false, false, aliasErr
+		}
 		// 新行：保证 scrape_status 走 GORM default:pending（即留空让数据库填）。
 		if m.ScrapeStatus == "" {
 			m.ScrapeStatus = "pending"
 		}
-		if createErr := r.db.WithContext(ctx).Create(m).Error; createErr == nil {
-			return *m, true, nil
-		} else if retryErr := r.db.WithContext(ctx).Unscoped().Where("path = ?", m.Path).First(&existing).Error; retryErr != nil {
-			return model.Media{}, false, createErr
+		if createErr := db.WithContext(ctx).Create(m).Error; createErr == nil {
+			return *m, true, false, nil
+		} else if retryErr := db.WithContext(ctx).Unscoped().Where("path = ?", m.Path).First(&existing).Error; retryErr != nil {
+			return model.Media{}, false, false, createErr
+		} else {
+			// 并发插入竞态：重查已命中既有行，直接走更新分支。
+			return existing, false, false, nil
 		}
 	}
 	if err != nil {
-		return model.Media{}, false, err
+		return model.Media{}, false, false, err
 	}
-	return existing, false, nil
+	return existing, false, false, nil
+}
+
+func (r *MediaRepository) findMediaByAlias(ctx context.Context, db *gorm.DB, currentPath string, aliasPaths []string) (model.Media, error) {
+	aliases := make([]string, 0, len(aliasPaths))
+	seen := make(map[string]struct{}, len(aliasPaths))
+	for _, alias := range aliasPaths {
+		alias = filepath.Clean(strings.TrimSpace(alias))
+		if alias == "" || alias == "." || alias == filepath.Clean(currentPath) {
+			continue
+		}
+		if _, ok := seen[alias]; ok {
+			continue
+		}
+		seen[alias] = struct{}{}
+		aliases = append(aliases, alias)
+	}
+	if len(aliases) == 0 {
+		return model.Media{}, gorm.ErrRecordNotFound
+	}
+	var existing model.Media
+	err := db.WithContext(ctx).Unscoped().
+		Where("path IN ?", aliases).
+		Order("CASE WHEN scrape_status = 'matched' THEN 0 ELSE 1 END ASC, " +
+			"CASE WHEN COALESCE(poster_url, '') <> '' OR COALESCE(overview, '') <> '' THEN 0 ELSE 1 END ASC, " +
+			"CASE WHEN deleted_at IS NULL THEN 0 ELSE 1 END ASC, updated_at DESC, created_at DESC").
+		First(&existing).Error
+	return existing, err
 }
 
 func mediaUpsertUpdates(existing, incoming model.Media) map[string]any {
@@ -199,6 +332,11 @@ func addMediaPlacementUpdates(updates map[string]any, existing, incoming model.M
 	if episodeChanged {
 		updates["episode_num"] = incoming.EpisodeNum
 	}
+	// 半集的小数部分独立于整数集号比较：S01E11.5 重命名/新增/删除时都要落库，
+	// 否则「11」与「11.5」会被当成同一集折叠。
+	if existing.EpisodeFraction != incoming.EpisodeFraction {
+		updates["episode_fraction"] = incoming.EpisodeFraction
+	}
 	if strings.TrimSpace(existing.ScrapeStatus) == "no_match" && incoming.ScrapeStatus != "matched" && (seasonChanged || episodeChanged) {
 		updates["scrape_status"] = "pending"
 	}
@@ -235,24 +373,6 @@ func setNonEmptyMediaString(updates map[string]any, key, current, next string) {
 	if next != "" {
 		setIfChanged(updates, key, current, next)
 	}
-}
-
-func (r *MediaRepository) applyMediaUpsertUpdates(ctx context.Context, m *model.Media, existing model.Media, updates map[string]any) error {
-	if len(updates) == 0 {
-		*m = existing
-		return nil
-	}
-	if err := r.db.WithContext(ctx).Unscoped().Model(&model.Media{}).
-		Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
-		return err
-	}
-	// 回写 ID / 不可变字段，让 caller 拿到完整的现有行。
-	*m = existing
-	if fresh, err := r.FindByID(ctx, existing.ID); err == nil && fresh != nil {
-		*m = *fresh
-		r.indexMediaBestEffort(ctx, *fresh)
-	}
-	return nil
 }
 
 func setIfChanged[T comparable](updates map[string]any, key string, current, next T) {

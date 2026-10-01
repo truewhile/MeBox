@@ -6,23 +6,37 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
 
 // ServeHLSPlaylist makes sure a transcode is running and writes the m3u8.
 // We block (with a 30s timeout) until the playlist file shows up.
+//
+// Optional query `start` (seconds) restarts ffmpeg from that source offset so
+// the web player can scrub the full timeline without waiting for a full
+// head-to-tail transcode.
 func (s *StreamService) ServeHLSPlaylist(w http.ResponseWriter, r *http.Request, mediaID string) error {
 	// 「客户端直连解码」模式下宿主机不提供转码，HLS 一律拒绝，
 	// 迫使播放器走 direct play 本地解码。
 	if s.directPlayOnly(r.Context()) {
 		return ErrTranscodeDisabled
 	}
-	if _, err := s.transcoder.EnsureJob(r.Context(), mediaID); err != nil {
+	startSec := parseHLSStartSec(r)
+	seekGen := parseHLSSeekGen(r)
+	subtitleStream := parseHLSSubtitleStream(r)
+	quality := parseHLSQuality(r)
+	if _, err := s.transcoder.EnsureJobFromSubtitleQuality(r.Context(), mediaID, startSec, seekGen, subtitleStream, quality); err != nil {
 		return err
 	}
 	s.transcoder.TouchJob(mediaID)
-	if !s.transcoder.WaitReady(r.Context(), mediaID, 30*time.Second) {
+	readyTimeout := 45 * time.Second
+	if startSec > 0.05 {
+		// Mid-file HTTP seeks (esp. WMV) need longer before the first segment appears.
+		readyTimeout = 120 * time.Second
+	}
+	if !s.transcoder.WaitReady(r.Context(), mediaID, readyTimeout) {
 		return errors.New("hls playlist not ready")
 	}
 	playlist := s.transcoder.PlaylistPath(mediaID)
@@ -48,8 +62,73 @@ func (s *StreamService) ServeHLSPlaylist(w http.ResponseWriter, r *http.Request,
 	return nil
 }
 
+func parseHLSSubtitleStream(r *http.Request) int {
+	if r == nil {
+		return -1
+	}
+	raw := strings.TrimSpace(r.URL.Query().Get("subtitle"))
+	if raw == "" {
+		return -1
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v < 0 {
+		return -1
+	}
+	return v
+}
+
+func parseHLSQuality(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	quality := strings.TrimSpace(r.URL.Query().Get("quality"))
+	if quality == "" {
+		return ""
+	}
+	if _, ok := LocalHLSQualityByID(quality); !ok {
+		return ""
+	}
+	return quality
+}
+
+func parseHLSStartSec(r *http.Request) float64 {
+	if r == nil {
+		return 0
+	}
+	raw := strings.TrimSpace(r.URL.Query().Get("start"))
+	if raw == "" {
+		return 0
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || v < 0 {
+		return 0
+	}
+	return v
+}
+
+func parseHLSSeekGen(r *http.Request) int64 {
+	if r == nil {
+		return 0
+	}
+	raw := strings.TrimSpace(r.URL.Query().Get("_seek"))
+	if raw == "" {
+		return 0
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || v < 0 {
+		return 0
+	}
+	return v
+}
+
 func appendQueryToHLSSegments(playlist, rawQuery string) string {
 	if strings.TrimSpace(rawQuery) == "" {
+		return playlist
+	}
+	// Segment fetches do not need start=, but must keep _seek as a cache-busting
+	// generation because every transcode restart reuses seg_00000.ts names.
+	q := filterHLSSegmentQuery(rawQuery)
+	if q == "" {
 		return playlist
 	}
 	lines := strings.SplitAfter(playlist, "\n")
@@ -65,10 +144,30 @@ func appendQueryToHLSSegments(playlist, rawQuery string) string {
 			} else if strings.HasSuffix(line, "\n") {
 				lineEnding = "\n"
 			}
-			lines[i] = strings.TrimRight(line, "\r\n") + "?" + rawQuery + lineEnding
+			lines[i] = strings.TrimRight(line, "\r\n") + "?" + q + lineEnding
 		}
 	}
 	return strings.Join(lines, "")
+}
+
+func filterHLSSegmentQuery(rawQuery string) string {
+	parts := strings.Split(rawQuery, "&")
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		key := part
+		if i := strings.IndexByte(part, '='); i >= 0 {
+			key = part[:i]
+		}
+		switch strings.ToLower(key) {
+		case "start":
+			continue
+		}
+		kept = append(kept, part)
+	}
+	return strings.Join(kept, "&")
 }
 
 // ServeHLSSegment writes a single .ts segment from the on-disk cache.

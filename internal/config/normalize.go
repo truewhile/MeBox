@@ -47,11 +47,20 @@ func (c *Config) normalize() error {
 	if c.Cache.ImagesMaxSizeMB < 0 {
 		c.Cache.ImagesMaxSizeMB = 0
 	}
+	if c.Cache.ImagesOriginalsMaxSizeMB < 0 {
+		c.Cache.ImagesOriginalsMaxSizeMB = 0
+	}
+	if c.Cache.ImagesOriginalsTTLHours < 0 {
+		c.Cache.ImagesOriginalsTTLHours = 0
+	}
+	if c.Cache.MemoryMaxSizeMB <= 0 {
+		c.Cache.MemoryMaxSizeMB = DefaultCacheMemoryMaxSizeMB
+	}
 	if c.Cache.RedisPrefix == "" {
 		c.Cache.RedisPrefix = "mebox"
 	}
 	if c.Cache.MediaTTLSeconds < 1 {
-		c.Cache.MediaTTLSeconds = 15
+		c.Cache.MediaTTLSeconds = 90
 	}
 	c.Search.Backend = strings.ToLower(strings.TrimSpace(c.Search.Backend))
 	if c.Search.Index == "" {
@@ -68,8 +77,14 @@ func (c *Config) normalize() error {
 				return fmt.Errorf("generate jwt secret: %w", err)
 			}
 			c.Secrets.JWTSecret = hex.EncodeToString(buf)
-			_ = os.MkdirAll(c.App.DataDir, 0o750)
-			_ = os.WriteFile(path, []byte(c.Secrets.JWTSecret), 0o600)
+			// 持久化失败（DataDir 只读/权限异常）会导致每次重启重新生成
+			// 密钥、全部会话静默失效、多实例各持不同 secret——必须让
+			// 操作员感知。
+			if mkErr := os.MkdirAll(c.App.DataDir, 0o750); mkErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: persist jwt secret failed (mkdir): %v\n", mkErr)
+			} else if wErr := os.WriteFile(path, []byte(c.Secrets.JWTSecret), 0o600); wErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: persist jwt secret failed (write): %v\n", wErr)
+			}
 		}
 	}
 	return nil

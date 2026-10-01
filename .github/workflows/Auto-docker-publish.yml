@@ -1,122 +1,78 @@
-name: AuTo Docker Image
+name: Build & Publish
 
-
+# 版本策略（version 分支托管，main 零污染）：
+# - VERSION 文件单独存放在 version 分支，CI 构建时读取并自增写回 version 分支，
+#   main 分支不再出现任何 CI 提交，本地推送永不与远程冲突。
+# - push 到 main：版本号自动 patch+1，发布 latest + 版本镜像、GitHub Release、
+#   多平台单文件二进制，并部署服务器。
+# - push tag v*：正式发版，版本号取 tag 名（不 bump version 分支），其余同上。
+# - 手动触发：版本号在 version 分支当前值上自增，等同 push main 全量发布。
+# 查看当前版本号：git show origin/version:VERSION
 on:
   push:
     branches: [main]
+    tags: ['v*']
 
-  # 保留手动触发作为备选
   workflow_dispatch:
-    inputs:
-      version_type:
-        description: '版本递增类型'
-        required: true
-        default: 'patch'
-        type: choice
-        options:
-          - patch    # 0.0.x
-          - minor    # 0.x.0
-          - major    # x.0.0
 
 permissions:
-  contents: write  # 需要写入权限来更新版本文件
+  contents: write  # 读写 version 分支、发布 Release 与上传二进制需要
   packages: write
 
 jobs:
-  version-and-publish:
+  build-image:
     runs-on: ubuntu-latest
     outputs:
-      new_version: ${{ steps.bump_version.outputs.new_version }}
-      tag: ${{ steps.bump_version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # 获取完整历史以便版本计算
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      # 1. 获取或初始化版本号
-      - name: Get current version
-        id: get_version
+      # 1. 解析版本号：tag 触发取 tag 名（去掉 v 前缀）；其余场景读 version 分支并 patch+1
+      - name: Resolve version
+        id: version
         run: |
-          # 从文件读取版本号，或使用默认值
-          if [ -f VERSION ]; then
-            CURRENT_VERSION=$(cat VERSION)
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
           else
-            CURRENT_VERSION="0.0.0"
-            echo $CURRENT_VERSION > VERSION
+            git fetch origin version
+            BASE=$(git show FETCH_HEAD:VERSION 2>/dev/null || echo "0.0.0")
+            MAJOR=$(echo "$BASE" | cut -d. -f1)
+            MINOR=$(echo "$BASE" | cut -d. -f2)
+            PATCH=$(echo "$BASE" | cut -d. -f3)
+            VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
           fi
-          echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
-          
-          # 分离版本组成部分
-          MAJOR=$(echo $CURRENT_VERSION | cut -d. -f1)
-          MINOR=$(echo $CURRENT_VERSION | cut -d. -f2)
-          PATCH=$(echo $CURRENT_VERSION | cut -d. -f3)
-          echo "major=$MAJOR" >> $GITHUB_OUTPUT
-          echo "minor=$MINOR" >> $GITHUB_OUTPUT
-          echo "patch=$PATCH" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=mebox-v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "new_version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-      # 2. 计算新版本号
-      - name: Bump version
-        id: bump_version
+      # 2. 把新版本号写回 version 分支（clone 单分支写入，冲突时 rebase 重试）
+      #    tag 触发的正式发版版本号来自 tag 本身，跳过自增。
+      - name: Bump version branch
+        if: github.ref_type != 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          MAJOR=${{ steps.get_version.outputs.major }}
-          MINOR=${{ steps.get_version.outputs.minor }}
-          PATCH=${{ steps.get_version.outputs.patch }}
-          
-          # 手动触发时根据选择递增
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TYPE="${{ github.event.inputs.version_type }}"
-            if [ "$TYPE" = "major" ]; then
-              MAJOR=$((MAJOR + 1))
-              MINOR=0
-              PATCH=0
-            elif [ "$TYPE" = "minor" ]; then
-              MINOR=$((MINOR + 1))
-              PATCH=0
-            else  # patch
-              PATCH=$((PATCH + 1))
-            fi
-          else
-            # 自动触发时默认 patch 递增
-            PATCH=$((PATCH + 1))
-          fi
-          
-          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
-          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
-          echo "tag=MeBox-v${NEW_VERSION}" >> $GITHUB_OUTPUT
-          echo "tag=mebox-v${NEW_VERSION}" >> $GITHUB_OUTPUT
-
-      # 3. 更新 VERSION 文件
-      - name: Update version file
-        run: |
-          echo "${{ steps.bump_version.outputs.new_version }}" > VERSION
-          
-          # 如果存在 go.mod，也更新其中的版本（可选）
-          # if [ -f go.mod ]; then
-          #   sed -i "s/^version .*/version ${{ steps.bump_version.outputs.new_version }}/" go.mod
-          # fi
-
-      # 4. 提交版本变更
-      - name: Commit version bump
-        run: |
+          REPO="https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          git clone --depth 1 --branch version "$REPO" "$RUNNER_TEMP/version-branch"
+          cd "$RUNNER_TEMP/version-branch"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add VERSION
-          git commit -m "chore: bump version to ${{ steps.bump_version.outputs.new_version }} [skip ci]"
-          git push
+          echo "${{ steps.version.outputs.new_version }}" > VERSION
+          git commit -am "chore: bump version to ${{ steps.version.outputs.new_version }}"
+          ok=0
+          for i in 1 2 3 4 5; do
+            if git push origin version; then ok=1; break; fi
+            git pull --rebase origin version || true
+            sleep 5
+          done
+          [ "$ok" = "1" ] || { echo "::error::version 分支推送冲突，重试 5 次仍失败"; exit 1; }
 
-      # 5. 创建 Git Tag
-      - name: Create and push tag
-        run: |
-          TAG="${{ steps.bump_version.outputs.tag }}"
-          git tag $TAG
-          git push origin $TAG
-
-      # 6. 设置 Docker QEMU 和 Buildx
+      # 3. 设置 Docker QEMU 和 Buildx
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
-      # 7. 登录 GHCR
+      # 3. 登录 GHCR
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -124,7 +80,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 8. 提取镜像元数据
+      # 4. 提取镜像元数据
       - name: Extract image metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -132,10 +88,9 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/mebox
           tags: |
             type=raw,value=latest
-            type=raw,value=${{ steps.bump_version.outputs.tag }}
-            type=raw,value=${{ steps.bump_version.outputs.new_version }}
+            type=raw,value=${{ steps.version.outputs.version }}
 
-      # 9. 构建并推送
+      # 5. 构建并推送
       - name: Build & push
         uses: docker/build-push-action@v6
         with:
@@ -147,19 +102,20 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ steps.bump_version.outputs.new_version }}
+            VERSION=${{ steps.version.outputs.release_tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
   # 单文件可执行构建：把前端打包进二进制（go:embed），交叉编译 Windows /
   # Linux / macOS 的 amd64 / arm64 产物，作为 GitHub Release 附件发布。
   build-frontend:
+    needs: [build-image]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version-file: '.nvmrc'
           cache: 'npm'
           cache-dependency-path: web/package-lock.json
       - name: Install
@@ -178,7 +134,7 @@ jobs:
   # 先创建（幂等）空的 GitHub Release，供后续 build-binaries 并行上传附件，
   # 也避免矩阵各 job 并发 upload 时 release 尚不存在而互相竞争。
   publish-create-release:
-    needs: [version-and-publish]
+    needs: [build-image]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -187,17 +143,21 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ needs.version-and-publish.outputs.tag }}
+          RELEASE_TAG: ${{ needs.build-image.outputs.release_tag }}
         run: |
           set -eux
-          # tag 已由 version-and-publish 推送；若 release 已存在则忽略（--verify-tag 幂等）
+          # tag push 时 tag 已存在；手动触发时基于当前 main 创建 tag（幂等）
+          if ! git rev-parse "$RELEASE_TAG" >/dev/null 2>&1; then
+            git tag "$RELEASE_TAG"
+            git push origin "$RELEASE_TAG"
+          fi
           gh release create "$RELEASE_TAG" \
-            --title "MeBox ${{ needs.version-and-publish.outputs.new_version }}" \
-            --notes "自动化发布 ${{ needs.version-and-publish.outputs.new_version }}" \
+            --title "MeBox ${{ needs.build-image.outputs.version }}" \
+            --notes "自动化发布 ${{ needs.build-image.outputs.version }}" \
             --verify-tag --latest || true
 
   build-binaries:
-    needs: [version-and-publish, build-frontend, publish-create-release]
+    needs: [build-image, build-frontend, publish-create-release]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -236,8 +196,12 @@ jobs:
           path: web/dist
       - name: Build binary
         run: |
+          LDFLAGS="-s -w -X main.version=${{ needs.build-image.outputs.release_tag }}"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            LDFLAGS="$LDFLAGS -H=windowsgui"
+          fi
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            go build -trimpath -ldflags="-s -w -X main.version=${{ needs.version-and-publish.outputs.tag }}" \
+            go build -trimpath -ldflags="$LDFLAGS" \
             -o "dist/mebox-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./cmd/server
       - name: Package
         run: |
@@ -252,7 +216,7 @@ jobs:
       - name: Upload to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ needs.version-and-publish.outputs.tag }}
+          RELEASE_TAG: ${{ needs.build-image.outputs.release_tag }}
         run: |
           set -eux
           PKG="mebox_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
@@ -264,3 +228,41 @@ jobs:
           if [ -f "$TAR" ]; then
             for i in 1 2 3; do gh release upload "$RELEASE_TAG" "$TAR" --clobber && break || sleep 5; done
           fi
+
+  deploy:
+    name: Deploy to Server
+    needs: [build-image]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          port: ${{ secrets.SERVER_PORT }}
+          script: |
+            set -e
+            echo "==== 开始部署 MeBox ===="
+            cd /root/dockerData/mebox
+
+            # 判断 compose 命令版本兼容性（docker compose 或 docker-compose）
+            if docker compose version >/dev/null 2>&1; then
+              COMPOSE_CMD="docker compose"
+            elif command -v docker-compose >/dev/null 2>&1; then
+              COMPOSE_CMD="docker-compose"
+            else
+              echo "错误: 未找到 docker compose 或 docker-compose"
+              exit 1
+            fi
+
+            echo "正在拉取最新镜像..."
+            $COMPOSE_CMD pull
+
+            echo "正在重启服务..."
+            $COMPOSE_CMD up -d
+
+            echo "清理旧的无用镜像..."
+            docker image prune -f
+
+            echo "==== 部署完成并已启动 ===="

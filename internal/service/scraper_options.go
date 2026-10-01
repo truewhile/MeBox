@@ -7,6 +7,8 @@ type ScrapeOptions struct {
 	EpisodeArtwork      *bool
 	DeferEpisodeDetails bool
 	ForceRematch        bool
+	RebuildIdentity     bool
+	resultProvider      *string
 }
 
 func (o ScrapeOptions) episodeArtworkEnabled() bool {
@@ -16,4 +18,10 @@ func (o ScrapeOptions) episodeArtworkEnabled() bool {
 func skipEpisodeArtworkOptions(retryNoMatch bool) ScrapeOptions {
 	episodeArtwork := false
 	return ScrapeOptions{RetryNoMatch: retryNoMatch, EpisodeArtwork: &episodeArtwork}
+}
+
+func (o ScrapeOptions) recordProvider(provider string) {
+	if o.resultProvider != nil {
+		*o.resultProvider = provider
+	}
 }

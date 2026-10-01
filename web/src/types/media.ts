@@ -28,6 +28,8 @@ export interface Media {
   release_date?: string
   season_num: number
   episode_num: number
+  /** 集号的小数部分（S01E11.5 → 0.5）；没有小数时缺省。 */
+  episode_fraction?: number
   scrape_status: string
   tmdb_id: number
   bangumi_id: number

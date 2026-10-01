@@ -24,6 +24,9 @@ func (e *EmbyService) PlaybackInfo(ctx context.Context, mediaID, userID string) 
 		if err != nil {
 			return nil, ErrEmbyRemoteNotFound
 		}
+		if !EmbyMountLibraryAllowed(e.mediaVisibility(ctx, userID), mount) {
+			return nil, ErrEmbyRemoteNotFound
+		}
 		out, err := e.remote.RemotePlaybackInfo(ctx, mount, acct, remoteID, userID)
 		if err != nil {
 			return nil, err
@@ -34,7 +37,7 @@ func (e *EmbyService) PlaybackInfo(ctx context.Context, mediaID, userID string) 
 		if err := e.mergeRemoteUserData(ctx, userID, out); err != nil {
 			return nil, err
 		}
-		out["PlaySessionId"] = fmt.Sprintf("remote-%s-%d", mountID, time.Now().Unix())
+		out["PlaySessionId"] = fmt.Sprintf("remote-%s-%d", mountID, time.Now().UnixMilli())
 		return out, nil
 	}
 	m, err := e.playableMedia(ctx, mediaID, userID)
@@ -43,7 +46,7 @@ func (e *EmbyService) PlaybackInfo(ctx context.Context, mediaID, userID string) 
 	}
 	return map[string]any{
 		"MediaSources":  e.mediaSourcesForItem(ctx, m, false, e.directPlayOnly(ctx)),
-		"PlaySessionId": fmt.Sprintf("%s-%d", m.ID, time.Now().Unix()),
+		"PlaySessionId": fmt.Sprintf("%s-%d", m.ID, time.Now().UnixMilli()),
 	}, nil
 }
 
@@ -318,7 +321,7 @@ func (e *EmbyService) mediaSource(ctx context.Context, m *model.Media, asEmbedde
 func (e *EmbyService) baseMediaSource(ctx context.Context, m *model.Media, container string, isCloud bool, playURL string, directOnly bool) map[string]any {
 	return map[string]any{
 		"Id":                    m.ID,
-		"Name":                  m.Title,
+		"Name":                  MediaVersionLabel(*m),
 		"Path":                  embyMediaSourcePath(m),
 		"Container":             container,
 		"Size":                  m.SizeBytes,

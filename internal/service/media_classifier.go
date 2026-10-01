@@ -62,7 +62,7 @@ func classifyMediaCategory(input mediaClassifyInput, categories map[string]strin
 	isWesternByCategory := containsAnyText(categoryText, "欧美剧", "欧美电视剧", "美剧", "英剧", "欧美电影", "外语电影")
 	isWestern := isWesternByMetadata || (!hasRegionMetadata && isWesternByCategory)
 	isUSAnime := hasAny(countries, "US")
-	hasAnimeText := containsAnyText(contentText, "动画", "动漫", "番剧", "年番", "国漫", "日番", "韩漫", "美漫", "bangumi", "anime", "b-global", "ani-one", "crunchyroll")
+	hasAnimeText := containsAnyText(contentText, "动画", "动漫", "番剧", "年番", "国漫", "日番", "韩漫", "美漫", "bangumi", "anime", "b-global", "ani-one", "crunchyroll", "剧场版", "劇場版", "动画电影", "動畫電影")
 	hasVarietyText := containsAnyText(contentText, "综艺", "真人秀", "脱口秀", "晚会", "春晚", "gala", "festival gala", "reality", "talk show")
 	hasDocumentaryText := containsAnyText(contentText, "纪录", "纪录片", "documentary", "docu", "national geographic", "natgeo")
 	hasConcertText := containsAnyText(contentText, "演唱会", "音乐会", "concert", "live concert")
@@ -191,21 +191,21 @@ func normalizeMediaType(mediaType, title, category string) string {
 		return "adult"
 	case containsAnyText(raw, "综艺", "真人秀"):
 		return "variety"
-	case (containsAnyText(raw, "国漫", "日漫", "日番", "韩漫", "美漫", "欧美动漫", "其他动漫", "动漫", "动画") || classifierAnimeRE.MatchString(raw)) && !containsAnyText(raw, "动画电影"):
-		return "anime"
-	case containsAnyText(raw, "电视剧", "剧集", "连续剧", "短剧", "国产剧", "国剧", "大陆剧", "华语剧", "国产电视剧", "大陆电视剧", "华语电视剧", "欧美剧", "欧美电视剧", "美剧", "英剧", "日韩剧", "日韩电视剧", "日剧", "韩剧", "港剧", "台剧", "港台剧", "泰剧") || classifierTVRE.MatchString(raw):
-		return "tv"
-	case containsAnyText(raw, "电影", "演唱会") || classifierMovieRE.MatchString(raw):
-		return "movie"
-	}
-	text := strings.ToLower(title + " " + category)
-	switch {
-	case strings.Contains(text, "adult") || strings.Contains(text, "nsfw") || strings.Contains(text, "成人") || strings.Contains(text, "番号") || strings.Contains(text, "jav") || strings.Contains(text, "9kg") || classifierJAVCodeRE.MatchString(strings.ToUpper(title+" "+category)):
-		return "adult"
-	case containsAnyText(text, "综艺", "真人秀", "脱口秀", "晚会", "春晚", "gala", "festival gala", "reality", "talk show"):
-		return "variety"
-	case strings.Contains(text, "电影") || classifierMovieRE.MatchString(text):
-		return "movie"
+		case (containsAnyText(raw, "国漫", "日漫", "日番", "韩漫", "美漫", "欧美动漫", "其他动漫", "动漫", "动画") || classifierAnimeRE.MatchString(raw)) && !containsAnyText(raw, "动画电影", "剧场版", "劇場版"):
+			return "anime"
+		case containsAnyText(raw, "电视剧", "剧集", "连续剧", "短剧", "国产剧", "国剧", "大陆剧", "华语剧", "国产电视剧", "大陆电视剧", "华语电视剧", "欧美剧", "欧美电视剧", "美剧", "英剧", "日韩剧", "日韩电视剧", "日剧", "韩剧", "港剧", "台剧", "港台剧", "泰剧") || classifierTVRE.MatchString(raw):
+			return "tv"
+		case containsAnyText(raw, "电影", "演唱会", "剧场版", "劇場版") || classifierMovieRE.MatchString(raw):
+			return "movie"
+		}
+		text := strings.ToLower(title + " " + category)
+		switch {
+		case strings.Contains(text, "adult") || strings.Contains(text, "nsfw") || strings.Contains(text, "成人") || strings.Contains(text, "番号") || strings.Contains(text, "jav") || strings.Contains(text, "9kg") || classifierJAVCodeRE.MatchString(strings.ToUpper(title+" "+category)):
+			return "adult"
+		case containsAnyText(text, "综艺", "真人秀", "脱口秀", "晚会", "春晚", "gala", "festival gala", "reality", "talk show"):
+			return "variety"
+		case containsAnyText(text, "电影", "剧场版", "劇場版") || classifierMovieRE.MatchString(text):
+			return "movie"
 	case classifierAnimeRE.MatchString(text) || strings.Contains(text, "动漫") || strings.Contains(text, "动画"):
 		return "anime"
 	case strings.Contains(text, "variety") || strings.Contains(text, "综艺") || strings.Contains(text, "真人秀"):

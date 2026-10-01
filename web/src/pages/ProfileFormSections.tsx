@@ -155,6 +155,7 @@ export function ProfileLibraryAccessField({
             }
           >
             {library.name}
+            {library.is_remote_emby ? ' · Emby' : ''}
           </button>
         ))}
         {libraries.length === 0 && (

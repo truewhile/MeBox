@@ -124,10 +124,11 @@ func isEmbyLineFailoverError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
+	// 注意：认证类错误（重认证失败 / 缺少凭据）不在此排除——401 后清空
+	// 内存 token 重认证失败时应继续按线路故障转移，其他线路可能存有
+	// 自己的 token。仅“登录失败”（密码错误）是账号级问题，无需换线。
 	if strings.Contains(msg, "登录失败") ||
-		strings.Contains(msg, "未返回 accesstoken") ||
-		strings.Contains(msg, "缺少 emby 凭据") ||
-		strings.Contains(msg, "认证重试失败") {
+		strings.Contains(msg, "未返回 accesstoken") {
 		return false
 	}
 	var urlErr *url.Error
@@ -147,20 +148,13 @@ func (r *EmbyRemoteService) persistActiveLine(ctx context.Context, acct *model.S
 	if acct == nil || cfg == nil || lineIndex < 0 || lineIndex >= len(cfg.Lines) {
 		return nil
 	}
-	raw := map[string]string{}
-	if strings.TrimSpace(acct.Config) != "" {
-		_ = json.Unmarshal([]byte(acct.Config), &raw)
-	}
-	raw["active_line"] = strconv.Itoa(lineIndex)
-	raw["url"] = cfg.Lines[lineIndex].URL
-	data, err := json.Marshal(raw)
-	if err != nil {
-		return err
-	}
-	acct.Config = string(data)
+	err := r.updateAccountConfig(ctx, acct, func(raw map[string]string) {
+		raw["active_line"] = strconv.Itoa(lineIndex)
+		raw["url"] = cfg.Lines[lineIndex].URL
+	})
 	cfg.ActiveLine = lineIndex
 	cfg.BaseURL = normalizeEmbyRemoteURL(cfg.Lines[lineIndex].URL)
-	return r.repo.StrmAccount.Update(ctx, acct)
+	return err
 }
 
 func (r *EmbyRemoteService) adoptWorkingLine(ctx context.Context, acct *model.StrmAccount, cfg *EmbyRemoteConfig, lineIndex int) {

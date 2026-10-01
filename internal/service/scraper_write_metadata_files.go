@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -38,44 +39,97 @@ func (s *ScraperService) writeMediaArtworkFilesAfterScrape(ctx context.Context, 
 	if dir == "" || dir == "." {
 		return
 	}
-	// Scope sidecar names by the media file's base name (e.g. A.mp4 -> A-poster.jpg)
-	// so that multiple movies sharing one directory (A.mp4 + B.mp4) never clash.
-	base := strings.TrimSuffix(filepath.Base(refreshed.Path), filepath.Ext(refreshed.Path))
+	// Scope sidecar names by the shared media stem (e.g. A.mkv.strm / A.mp4.strm -> A-poster.jpg)
+	// so multi-version files in one folder share artwork and never diverge by container.
+	base := mediaSidecarBase(refreshed.Path)
 	if base == "" || base == "." {
 		return
 	}
-	isAdult := IsAdultMediaPathOrMetadata(refreshed.Path, refreshed.LibraryID, refreshed.NSFW) || IsAdultArtworkURL(refreshed.PosterURL)
+	isAdult := shouldCropAdultPoster(refreshed, lib)
+	artworkUpdates := map[string]any{}
+	shouldPersistLocalArtworkURL := func(raw string) bool {
+		return isAdult || !isHTTPish(raw)
+	}
 	if refreshed.PosterURL != "" {
-		s.downloadArtworkToPathWithOptions(ctx, dir, base+"-poster", refreshed.PosterURL, isAdult)
+		if dst := s.downloadArtworkToPathWithOptions(ctx, dir, base+"-poster", refreshed.PosterURL, isAdult); dst != "" {
+			if shouldPersistLocalArtworkURL(refreshed.PosterURL) {
+				artworkUpdates["poster_url"] = filepath.Join(filepath.Dir(refreshed.Path), filepath.Base(dst))
+			}
+		}
 	}
 	if refreshed.BackdropURL != "" {
-		s.downloadArtworkToPathWithOptions(ctx, dir, base+"-backdrop", refreshed.BackdropURL, false)
+		if dst := s.downloadArtworkToPathWithOptions(ctx, dir, base+"-backdrop", refreshed.BackdropURL, false); dst != "" {
+			if shouldPersistLocalArtworkURL(refreshed.BackdropURL) {
+				artworkUpdates["backdrop_url"] = filepath.Join(filepath.Dir(refreshed.Path), filepath.Base(dst))
+			}
+		}
 	} else if isAdult && refreshed.PosterURL != "" {
 		// 番号海报原图为完整封套横图，在无独立背景图时直接作为背景图写出
-		s.downloadArtworkToPathWithOptions(ctx, dir, base+"-backdrop", refreshed.PosterURL, false)
+		if dst := s.downloadArtworkToPathWithOptions(ctx, dir, base+"-backdrop", refreshed.PosterURL, false); dst != "" {
+			artworkUpdates["backdrop_url"] = filepath.Join(filepath.Dir(refreshed.Path), filepath.Base(dst))
+		}
+	}
+	if len(artworkUpdates) > 0 {
+		if err := s.repo.DB.WithContext(ctx).Model(&model.Media{}).
+			Where("id = ?", refreshed.ID).Updates(artworkUpdates).Error; err != nil {
+			s.log.Warn("save local scraped artwork paths failed", zap.String("media_id", refreshed.ID), zap.Error(err))
+		}
 	}
 }
 
-func (s *ScraperService) downloadArtworkToPath(ctx context.Context, dir, name, raw string) {
-	s.downloadArtworkToPathWithOptions(ctx, dir, name, raw, false)
+func (s *ScraperService) downloadArtworkToPath(ctx context.Context, dir, name, raw string) string {
+	return s.downloadArtworkToPathWithOptions(ctx, dir, name, raw, false)
+}
+
+// shouldCropAdultPoster keeps adult-cover handling independent of which
+// metadata provider won. A code-numbered title may match TMDb first, so the
+// provider's NSFW flag or artwork host alone is not sufficient.
+func shouldCropAdultPoster(media *model.Media, lib *model.Library) bool {
+	if media == nil {
+		return false
+	}
+	mediaType := ""
+	if lib != nil {
+		mediaType = lib.Type
+	}
+	return IsAdultMediaPathOrMetadata(media.Path, mediaType, media.NSFW) ||
+		IsAdultArtworkURL(media.PosterURL)
 }
 
 // downloadArtworkToPathWithOptions fetches an artwork URL via the image proxy cache and
 // writes it under dir/<name>.<ext>. For adult posters, it crops the right half of the cover.
-func (s *ScraperService) downloadArtworkToPathWithOptions(ctx context.Context, dir, name, raw string, cropAdultPoster bool) {
-	if !isHTTPish(raw) {
-		return
+func (s *ScraperService) downloadArtworkToPathWithOptions(ctx context.Context, dir, name, raw string, cropAdultPoster bool) string {
+	var (
+		data  []byte
+		ctype string
+		err   error
+	)
+	switch {
+	case isHTTPish(raw):
+		data, ctype, err = s.images.Fetch(ctx, raw)
+	case isLocalImagePath(raw):
+		data, err = os.ReadFile(sanitizeLocalPath(resolveMappedDestinationPath(raw)))
+		if err == nil {
+			ctype = detectContentType(data)
+		}
+	default:
+		return ""
 	}
-	data, ctype, err := s.images.Fetch(ctx, raw)
 	if err != nil || len(data) == 0 {
 		s.log.Warn("scrape artwork download failed",
 			zap.String("name", name),
-			zap.String("url", raw),
-			zap.Error(err))
-		return
+			zap.String("url", redactSensitiveURL(raw)),
+			zap.Error(redactSensitiveError(err)))
+		return ""
 	}
 	if !isImageContentType(ctype) || isTransparentPlaceholderData(data) {
-		return
+		return ""
+	}
+	// Upstreams sometimes report non-standard values such as image/jpg.
+	// Use the decoded bytes as the source of truth so sidecars receive a
+	// standard extension instead of the legacy .img fallback.
+	if detected := detectContentType(data); isImageContentType(detected) {
+		ctype = detected
 	}
 	if cropAdultPoster {
 		if cropped, croppedType, err := CropAdultCoverPoster(data); err == nil && len(cropped) > 0 {
@@ -83,7 +137,7 @@ func (s *ScraperService) downloadArtworkToPathWithOptions(ctx context.Context, d
 			ctype = croppedType
 		}
 	}
-	s.writeArtworkDataToPath(dir, name, ctype, data)
+	return s.writeArtworkDataToPath(dir, name, ctype, data)
 }
 
 // writeArtworkDataToPath writes in-memory artwork bytes to dir/<name>.<ext>
@@ -99,6 +153,13 @@ func (s *ScraperService) writeArtworkDataToPath(dir, name, ctype string, data []
 		return ""
 	}
 	dst := filepath.Join(dir, name+imageExtForContentType(ctype))
+	// 内容与现有文件完全一致时不重写：重写会刷新源文件 mtime，而缩略图缓存键
+	// 包含源文件大小与 mtime，一次「内容没变」的重新刮削会让该条目所有尺寸的
+	// 缩略图一并作废，下次浏览全部重新解码。
+	if artworkFileUnchanged(dst, data) {
+		s.log.Debug("scrape artwork unchanged", zap.String("dst", dst))
+		return dst
+	}
 	tmp, err := os.CreateTemp(dir, "img-*.tmp")
 	if err != nil {
 		s.log.Warn("scrape artwork temp create failed", zap.String("dir", dir), zap.Error(err))
@@ -110,14 +171,47 @@ func (s *ScraperService) writeArtworkDataToPath(dir, name, ctype string, data []
 		s.log.Warn("scrape artwork write failed", zap.String("dst", dst), zap.Error(err))
 		return ""
 	}
-	_ = tmp.Close()
-	if err := os.Rename(tmp.Name(), dst); err != nil {
+	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmp.Name())
-		s.log.Warn("scrape artwork rename failed", zap.String("dst", dst), zap.Error(err))
+		s.log.Warn("scrape artwork close failed", zap.String("dst", dst), zap.Error(err))
+		return ""
+	}
+
+	// On Windows os.Rename does not replace dst. Serialize remove+rename so two
+	// concurrent scrapes cannot leave the previous uncropped DVD cover behind.
+	s.artworkWriteMu.Lock()
+	err = os.Remove(dst)
+	if err == nil || os.IsNotExist(err) {
+		err = os.Rename(tmp.Name(), dst)
+	}
+	s.artworkWriteMu.Unlock()
+	if err != nil {
+		_ = os.Remove(tmp.Name())
+		s.log.Warn("scrape artwork replace failed", zap.String("dst", dst), zap.Error(err))
 		return ""
 	}
 	s.log.Debug("scrape artwork written", zap.String("dst", dst))
 	return dst
+}
+
+// artworkFileUnchanged 报告 path 是否已经就是 data 这些字节。
+//
+// 刮削在刷新海报地址时会无条件重写 sidecar 图片，即使下载回来的字节一模一样。
+// 缩略图缓存键包含源文件的大小与 mtime，因此这种无谓的重写会让该条目所有尺寸
+// 的缩略图一起失效；保持一致时直接复用原文件可以保住 mtime。
+func artworkFileUnchanged(path string, data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() || info.Size() != int64(len(data)) {
+		return false
+	}
+	existing, err := os.ReadFile(path) // #nosec G304 -- path is built from a sanitized media directory.
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(existing, data)
 }
 
 // imageExtForContentType maps a detected image MIME type to a file extension.
@@ -125,7 +219,7 @@ func (s *ScraperService) writeArtworkDataToPath(dir, name, ctype string, data []
 // extension that could confuse media players.
 func imageExtForContentType(ctype string) string {
 	switch strings.ToLower(strings.TrimSpace(strings.Split(ctype, ";")[0])) {
-	case "image/jpeg", "image/pjpeg":
+	case "image/jpeg", "image/jpg", "image/pjpeg":
 		return ".jpg"
 	case "image/png", "image/x-png":
 		return ".png"

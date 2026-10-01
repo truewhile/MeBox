@@ -52,6 +52,40 @@ func (r *ScrapeTaskRepository) FindActiveByMediaID(ctx context.Context, mediaID 
 	return &t, err
 }
 
+// FindActiveByMediaIDs 批量查询仍处于 pending/running 的任务媒体 ID 集合，
+// 供整库入队时去重（防止同一媒体被重复入队并被并发双刮）。
+func (r *ScrapeTaskRepository) FindActiveByMediaIDs(ctx context.Context, mediaIDs []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(mediaIDs))
+	if len(mediaIDs) == 0 {
+		return out, nil
+	}
+	var rows []model.ScrapeTask
+	err := r.db.WithContext(ctx).
+		Select("media_id").
+		Where("media_id IN ? AND status IN ?", mediaIDs, []string{model.ScrapeTaskPending, model.ScrapeTaskRunning}).
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.MediaID] = true
+	}
+	return out, nil
+}
+
+// ResetRunningToPending 启动自愈：进程中断遗留的 running 任务重置为 pending，
+// 否则任务永久卡死（ClaimPending 只认 pending，重试按钮也拒绝 running）。
+func (r *ScrapeTaskRepository) ResetRunningToPending(ctx context.Context) (int64, error) {
+	res := r.db.WithContext(ctx).Model(&model.ScrapeTask{}).
+		Where("status = ?", model.ScrapeTaskRunning).
+		Updates(map[string]any{
+			"status":     model.ScrapeTaskPending,
+			"error":      "服务重启，任务已重置",
+			"started_at": nil,
+		})
+	return res.RowsAffected, res.Error
+}
+
 func (r *ScrapeTaskRepository) List(ctx context.Context, status string, page, pageSize int) ([]model.ScrapeTask, int64, error) {
 	if page < 1 {
 		page = 1
@@ -230,6 +264,16 @@ func (r *ScrapeTaskRepository) ClearCanceled(ctx context.Context) (int64, error)
 	var count int64
 	err := withSQLiteBusyRetry(ctx, func() error {
 		res := r.db.WithContext(ctx).Unscoped().Where("status = ?", model.ScrapeTaskCanceled).Delete(&model.ScrapeTask{})
+		count = res.RowsAffected
+		return res.Error
+	})
+	return count, err
+}
+
+func (r *ScrapeTaskRepository) ClearFailed(ctx context.Context) (int64, error) {
+	var count int64
+	err := withSQLiteBusyRetry(ctx, func() error {
+		res := r.db.WithContext(ctx).Unscoped().Where("status = ?", model.ScrapeTaskFailed).Delete(&model.ScrapeTask{})
 		count = res.RowsAffected
 		return res.Error
 	})

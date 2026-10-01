@@ -2,7 +2,10 @@ package service
 
 import (
 	"fmt"
+	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/truewhile/MeBox/internal/model"
@@ -44,6 +47,11 @@ func paginateMediaItems(items []MediaItem, page, pageSize int) []MediaItem {
 	return items[start:end]
 }
 
+// PaginateMediaItems 导出分页辅助函数。
+func PaginateMediaItems(items []MediaItem, page, pageSize int) []MediaItem {
+	return paginateMediaItems(items, page, pageSize)
+}
+
 func firstMediaItems(items []MediaItem, limit int) []MediaItem {
 	if len(items) == 0 {
 		return nil
@@ -60,39 +68,42 @@ func firstMediaItems(items []MediaItem, limit int) []MediaItem {
 	return items[:limit]
 }
 
+// FirstMediaItems 导出截取前 N 项辅助函数。
+func FirstMediaItems(items []MediaItem, limit int) []MediaItem {
+	return firstMediaItems(items, limit)
+}
+
 func groupMediaVersions(items []model.Media) []MediaItem {
 	if len(items) == 0 {
 		return nil
 	}
+	// 同一番号只要有一个分片被刮削标记为成人内容，就认定整部片都是成人条目：
+	// 未刮削的分片（nsfw=false）也按番号折叠。否则「一个分片刮削成功、其余仍
+	// pending」时，已刮削的走番号分组、其余落到标题分组，整部片被拆成两张卡。
+	adultCodes := adultCodesVouchedByNSFW(items)
 	type group struct {
-		key     string
-		primary model.Media
-		rows    []model.Media
+		key  string
+		rows []model.Media
 	}
 	groups := make([]group, 0, len(items))
 	byKey := make(map[string]int, len(items))
 	for _, item := range items {
-		key := mediaVersionGroupKey(item)
+		key := mediaVersionGroupKeyWithAdultVouch(item, adultCodes)
 		if key == "" {
-			groups = append(groups, group{primary: item, rows: []model.Media{item}})
+			groups = append(groups, group{rows: []model.Media{item}})
 			continue
 		}
 		if idx, ok := byKey[key]; ok {
 			groups[idx].rows = append(groups[idx].rows, item)
-			if betterMediaVersion(item, groups[idx].primary) {
-				groups[idx].primary = item
-			}
 			continue
 		}
 		byKey[key] = len(groups)
-		groups = append(groups, group{key: key, primary: item, rows: []model.Media{item}})
+		groups = append(groups, group{key: key, rows: []model.Media{item}})
 	}
 	out := make([]MediaItem, 0, len(groups))
 	for _, g := range groups {
-		sort.SliceStable(g.rows, func(i, j int) bool {
-			return betterMediaVersion(g.rows[i], g.rows[j])
-		})
-		item := MediaItem{Media: g.primary}
+		sortMediaVersionsForDisplay(g.rows)
+		item := MediaItem{Media: g.rows[0]}
 		if len(g.rows) > 1 {
 			item.Versions = g.rows
 		}
@@ -104,17 +115,118 @@ func groupMediaVersions(items []model.Media) []MediaItem {
 	return out
 }
 
-func mediaVersionGroupKey(m model.Media) string {
-	if m.SeasonNum > 0 || m.EpisodeNum > 0 {
+// GroupMediaVersions 导出多版本分组函数。
+func GroupMediaVersions(items []model.Media) []MediaItem {
+	return groupMediaVersions(items)
+}
+
+// GroupEpisodeVersionsForDisplay folds encoding/container variants into one
+// episode while preserving season/episode ordering for episode-list APIs.
+func GroupEpisodeVersionsForDisplay(items []model.Media) []MediaItem {
+	grouped := groupMediaVersions(items)
+	if grouped == nil {
+		return []MediaItem{}
+	}
+	sort.SliceStable(grouped, func(i, j int) bool {
+		if grouped[i].SeasonNum != grouped[j].SeasonNum {
+			return grouped[i].SeasonNum < grouped[j].SeasonNum
+		}
+		if grouped[i].EpisodeNum != grouped[j].EpisodeNum {
+			return grouped[i].EpisodeNum < grouped[j].EpisodeNum
+		}
+		if grouped[i].EpisodeFraction != grouped[j].EpisodeFraction {
+			return grouped[i].EpisodeFraction < grouped[j].EpisodeFraction
+		}
+		return grouped[i].CreatedAt.Before(grouped[j].CreatedAt)
+	})
+	return grouped
+}
+
+// mediaVersionLibraryKey 返回版本身份里使用的库标识。
+func mediaVersionLibraryKey(m model.Media) string {
+	libKey := strings.ToLower(strings.TrimSpace(m.LibraryID))
+	if libKey == "" {
+		libKey = strings.ToLower(strings.TrimSpace(m.DisplayLibraryID))
+	}
+	return libKey
+}
+
+// adultCodesVouchedByNSFW 收集「已被刮削确认为成人内容」的番号。
+func adultCodesVouchedByNSFW(items []model.Media) map[string]bool {
+	codes := map[string]bool{}
+	for _, item := range items {
+		if !item.NSFW {
+			continue
+		}
+		if code := canonicalAdultGroupCode(AdultCodeFromMediaPath(item.Path)); code != "" {
+			codes[code] = true
+			continue
+		}
+		if code := mediaAdultGroupCode(item); code != "" {
+			codes[code] = true
+		}
+	}
+	return codes
+}
+
+// mediaVersionGroupKeyWithAdultVouch 是版本身份的统一入口：番号已被同组分片
+// 确认时优先按番号折叠，否则沿用 mediaVersionGroupKey 的原判定。
+func mediaVersionGroupKeyWithAdultVouch(m model.Media, vouched map[string]bool) string {
+	if key := adultVouchedGroupKey(m, vouched); key != "" {
+		return key
+	}
+	return mediaVersionGroupKey(m)
+}
+
+// adultVouchedGroupKey 在番号已被同组分片确认时，返回番号分组键；
+// 其余情况返回空串，表示沿用 mediaVersionGroupKey 的原判定。
+func adultVouchedGroupKey(m model.Media, vouched map[string]bool) string {
+	if len(vouched) == 0 || m.NSFW {
+		return ""
+	}
+	code := canonicalAdultGroupCode(AdultCodeFromMediaPath(m.Path))
+	if code == "" || !vouched[code] {
+		return ""
+	}
+	libKey := mediaVersionLibraryKey(m)
+	if libKey == "" {
+		libKey = "_"
+	}
+	return fmt.Sprintf("adult:%s:%s", libKey, code)
+}
+
+func mediaVersionGroupKey(m model.Media) string { // 远程 Emby 挂载条目保持独立，不与其它远程条目或本地条目折叠合并。
+	if IsEmbyRemoteID(m.ID) {
+		return fmt.Sprintf("embyremote:%s", m.ID)
+	}
+
+	libKey := mediaVersionLibraryKey(m)
+	specialKind := mediaSpecialKind(m.Path)
+	season, episode := m.SeasonNum, m.EpisodeNum
+	fraction := m.EpisodeFraction
+	if specialKind != "" && specialKind != mediaSpecialTheatrical && episode <= 0 {
+		if parsedSeason, parsedEpisode, parsedFraction := ParseEpisodeParts(m.Path); parsedEpisode > 0 {
+			season, episode, fraction = parsedSeason, parsedEpisode, parsedFraction
+		}
+	}
+	// 集号后缀：S01E11.5 记成 "11.5"，没有小数的集后缀为空，
+	// 因此绝大多数条目的版本身份键与历史完全一致。
+	episodeTag := fmt.Sprintf("%d:%d%s", season, episode, episodeFractionSuffix(fraction))
+
+	if season > 0 || episode > 0 {
+		kind := specialKind
+		if kind == "" {
+			kind = "episode"
+		}
 		switch {
 		case m.TMDbID > 0:
-			return fmt.Sprintf("episode:tmdb:%d:%d:%d", m.TMDbID, m.SeasonNum, m.EpisodeNum)
+			return fmt.Sprintf("episode:%s:tmdb:%d:%s", kind, m.TMDbID, episodeTag)
 		case m.BangumiID > 0:
-			return fmt.Sprintf("episode:bangumi:%d:%d:%d", m.BangumiID, m.SeasonNum, m.EpisodeNum)
+			return fmt.Sprintf("episode:%s:bangumi:%d:%s", kind, m.BangumiID, episodeTag)
 		case strings.TrimSpace(m.DoubanID) != "":
-			return fmt.Sprintf("episode:douban:%s:%d:%d", strings.ToLower(strings.TrimSpace(m.DoubanID)), m.SeasonNum, m.EpisodeNum)
+			return fmt.Sprintf("episode:%s:douban:%s:%s", kind, strings.ToLower(strings.TrimSpace(m.DoubanID)), episodeTag)
 		case strings.TrimSpace(m.TheTVDBID) != "":
-			return fmt.Sprintf("episode:thetvdb:%s:%d:%d", strings.ToLower(strings.TrimSpace(m.TheTVDBID)), m.SeasonNum, m.EpisodeNum)
+			return fmt.Sprintf("episode:%s:thetvdb:%s:%s", kind, strings.ToLower(strings.TrimSpace(m.TheTVDBID)), episodeTag)
 		}
 		title := firstNonEmpty(m.OriginalName, m.Title)
 		if title == "" {
@@ -126,21 +238,76 @@ func mediaVersionGroupKey(m model.Media) string {
 		}
 		return strings.Join([]string{
 			"episode",
-			strings.ToLower(strings.TrimSpace(m.LibraryID)),
+			kind,
+			libKey,
 			title,
-			fmt.Sprintf("%d:%d", m.SeasonNum, m.EpisodeNum),
+			episodeTag,
 		}, "|")
 	}
+
+	if specialKind != "" && specialKind != mediaSpecialTheatrical {
+		return mediaVersionStemGroupKey(m, libKey)
+	}
+
+	// 成人条目按番号折叠。在线刮削（MetaTube）会把番号与 provider「借用」
+	// 存进 douban_id/thetvdb_id，本地 NFO 路径则拿不到这两个字段；一旦按
+	// 外部 ID 分组，同一部片的各个分片就会因为元数据来源不同（在线刮削 vs
+	// 本地 NFO）裂成两张标题相同的卡。番号取自原文件名/路径/标题，与元数据
+	// 来源无关，因此这里统一用番号做版本身份。
+	if code := mediaAdultGroupCode(m); code != "" {
+		if libKey == "" {
+			libKey = "_"
+		}
+		return fmt.Sprintf("adult:%s:%s", libKey, code)
+	}
+
 	switch {
 	case m.TMDbID > 0:
+		if libKey != "" {
+			if specialKind != "" {
+				return fmt.Sprintf("movie:%s:%s:tmdb:%d", specialKind, libKey, m.TMDbID)
+			}
+			return fmt.Sprintf("movie:%s:tmdb:%d", libKey, m.TMDbID)
+		}
+		if specialKind != "" {
+			return fmt.Sprintf("movie:%s:tmdb:%d", specialKind, m.TMDbID)
+		}
 		return fmt.Sprintf("tmdb:%d", m.TMDbID)
 	case m.BangumiID > 0:
+		if libKey != "" {
+			if specialKind != "" {
+				return fmt.Sprintf("movie:%s:%s:bangumi:%d", specialKind, libKey, m.BangumiID)
+			}
+			return fmt.Sprintf("movie:%s:bangumi:%d", libKey, m.BangumiID)
+		}
+		if specialKind != "" {
+			return fmt.Sprintf("movie:%s:bangumi:%d", specialKind, m.BangumiID)
+		}
 		return fmt.Sprintf("bangumi:%d", m.BangumiID)
 	case strings.TrimSpace(m.DoubanID) != "":
+		if libKey != "" {
+			if specialKind != "" {
+				return fmt.Sprintf("movie:%s:%s:douban:%s", specialKind, libKey, strings.ToLower(strings.TrimSpace(m.DoubanID)))
+			}
+			return fmt.Sprintf("movie:%s:douban:%s", libKey, strings.ToLower(strings.TrimSpace(m.DoubanID)))
+		}
+		if specialKind != "" {
+			return "movie:" + specialKind + ":douban:" + strings.ToLower(strings.TrimSpace(m.DoubanID))
+		}
 		return "douban:" + strings.ToLower(strings.TrimSpace(m.DoubanID))
 	case strings.TrimSpace(m.TheTVDBID) != "":
+		if libKey != "" {
+			if specialKind != "" {
+				return fmt.Sprintf("movie:%s:%s:thetvdb:%s", specialKind, libKey, strings.ToLower(strings.TrimSpace(m.TheTVDBID)))
+			}
+			return fmt.Sprintf("movie:%s:thetvdb:%s", libKey, strings.ToLower(strings.TrimSpace(m.TheTVDBID)))
+		}
+		if specialKind != "" {
+			return "movie:" + specialKind + ":thetvdb:" + strings.ToLower(strings.TrimSpace(m.TheTVDBID))
+		}
 		return "thetvdb:" + strings.ToLower(strings.TrimSpace(m.TheTVDBID))
 	}
+
 	title := firstNonEmpty(m.OriginalName, m.Title)
 	titleYear := 0
 	if title == "" {
@@ -149,6 +316,10 @@ func mediaVersionGroupKey(m model.Media) string {
 		title, titleYear = mediaVersionTitleKey(title)
 	}
 	if title == "" {
+		// 无标题时退回同目录词干（覆盖 keep_ext 的 name.mkv.strm / name.mp4.strm）
+		if stemKey := mediaVersionStemGroupKey(m, libKey); stemKey != "" {
+			return stemKey
+		}
 		return ""
 	}
 	year := m.Year
@@ -158,7 +329,233 @@ func mediaVersionGroupKey(m model.Media) string {
 	if year <= 0 {
 		_, year = CleanQuery(m.Path)
 	}
+	if libKey != "" {
+		return fmt.Sprintf("movie:%s:%s:%d", libKey, title, year)
+	}
 	return fmt.Sprintf("movie:%s:%d", title, year)
+}
+
+// mediaAdultGroupCode 返回成人条目的番号，作为与元数据来源无关的版本身份。
+//
+// 只在已经确认是成人条目（NSFW）时才返回番号：番号本身来自原文件名/路径/
+// 标题，不会随「在线刮削（MetaTube 把番号与 provider 借用进 douban_id/
+// thetvdb_id）」还是「本地 NFO（不带外部 ID）」而改变，因此两条来源能算出
+// 同一个键。未标记 NSFW 的条目仍走标题分组，普通影视库里 "The Matrix 1999"
+// 这类文件名不会被当成番号。
+func mediaAdultGroupCode(m model.Media) string {
+	if !m.NSFW {
+		return ""
+	}
+	code := firstText(
+		normalizeAdultCode(m.OriginalName),
+		AdultCodeFromMediaPath(m.Path),
+		normalizeAdultCode(m.Title),
+	)
+	if code == "" {
+		return ""
+	}
+	return canonicalAdultGroupCode(code)
+}
+
+// canonicalAdultGroupCode 去掉番号数字部分的补零，让 IPVR-00192 与 IPVR-192
+// 这类同一部片的不同写法落到同一个分组键上。无法解析数字的番号原样返回
+// （如 FC2-PPV-4701981）。
+func canonicalAdultGroupCode(code string) string {
+	code = strings.ToUpper(strings.TrimSpace(code))
+	prefix, digits, ok := strings.Cut(code, "-")
+	if !ok {
+		return code
+	}
+	value, err := strconv.Atoi(digits)
+	if err != nil {
+		return code
+	}
+	return prefix + "-" + strconv.Itoa(value)
+}
+
+// mediaVersionStemGroupKey 按「库 + 父目录 + 文件词干」折叠多版本
+// （如 竞女01.mkv.strm 与 竞女01.mp4.strm）。
+func mediaVersionStemGroupKey(m model.Media, libKey string) string {
+	path := strings.ReplaceAll(strings.TrimSpace(m.Path), "\\", "/")
+	if path == "" || strings.HasPrefix(strings.ToLower(path), "cloud://") {
+		return ""
+	}
+	dir := ""
+	base := path
+	if idx := strings.LastIndex(path, "/"); idx >= 0 {
+		dir = path[:idx]
+		base = path[idx+1:]
+	}
+	stem := mediaVersionFileStem(base)
+	if stem == "" {
+		return ""
+	}
+	stem = normalizeMediaVersionText(stem)
+	if stem == "" {
+		return ""
+	}
+	if libKey == "" {
+		libKey = "_"
+	}
+	return fmt.Sprintf("stem:%s:%s:%s", libKey, strings.ToLower(dir), stem)
+}
+
+// mediaVersionFileStem 去掉最终扩展名；若为 .strm 且前一层是视频扩展，再剥一层。
+func mediaVersionFileStem(name string) string {
+	return mediaFileStem(name)
+}
+
+// MediaVersionLabel 生成版本切换展示名（分辨率 / 容器 / 编码 / 体积 / 文件名）。
+// 当只有容器等无法区分多版本的信息时，回退到清理后的文件名。
+func MediaVersionLabel(m model.Media) string {
+	parts := make([]string, 0, 4)
+	isStrm := strings.HasSuffix(strings.ToLower(strings.TrimSpace(m.Path)), ".strm") ||
+		strings.TrimSpace(m.STRMURL) != ""
+	if m.Height > 0 {
+		parts = append(parts, fmt.Sprintf("%dp", m.Height))
+	} else if m.Width > 0 {
+		parts = append(parts, fmt.Sprintf("%dw", m.Width))
+	}
+	container := strings.Trim(strings.ToLower(strings.TrimSpace(m.Container)), ". ")
+	if container == "" || container == "strm" {
+		container = mediaVersionContainerFromPath(m.Path, m.STRMURL)
+	}
+	if container != "" && container != "strm" {
+		parts = append(parts, strings.ToUpper(container))
+	}
+	if codec := strings.TrimSpace(m.VideoCodec); codec != "" {
+		parts = append(parts, strings.ToUpper(codec))
+	}
+	// STRM 占位体积（通常几十到几百字节）不能区分分片，跳过。
+	placeholderSize := isStrm && m.SizeBytes > 0 && m.SizeBytes < 1024*1024
+	if m.SizeBytes > 0 && !placeholderSize {
+		parts = append(parts, formatMediaSize(m.SizeBytes))
+	}
+	if len(parts) > 0 && !mediaVersionLabelIndistinct(parts) {
+		return strings.Join(parts, " · ")
+	}
+	if cleaned := cleanMediaVersionFilename(m.Path); cleaned != "" {
+		return cleaned
+	}
+	return firstNonEmpty(m.Title, m.OriginalName, m.ID)
+}
+
+func mediaVersionLabelIndistinct(parts []string) bool {
+	if len(parts) == 0 {
+		return true
+	}
+	for _, part := range parts {
+		upper := strings.ToUpper(strings.TrimSpace(part))
+		if upper == "" || upper == "云端直链" || upper == "STRM" {
+			continue
+		}
+		if _, ok := videoExtensions["."+strings.ToLower(upper)]; ok {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func cleanMediaVersionFilename(path string) string {
+	base := filepath.Base(strings.ReplaceAll(strings.TrimSpace(path), "\\", "/"))
+	if base == "" || base == "." {
+		return ""
+	}
+	stem := mediaFileStem(base)
+	stem = strings.ReplaceAll(stem, "_", " ")
+	stem = strings.ReplaceAll(stem, ".", " ")
+	return strings.Join(strings.Fields(stem), " ")
+}
+
+// mediaPartNumber 从路径提取分片序号（part1 / cd2 / -3）。
+// 裸后缀只认 1–2 位数字，避免把年份 2024 当成 part。
+func mediaPartNumber(path string) (int, bool) {
+	stem := mediaFileStem(filepath.Base(strings.ReplaceAll(strings.TrimSpace(path), "\\", "/")))
+	if stem == "" {
+		return 0, false
+	}
+	lower := strings.ToLower(stem)
+	for _, re := range mediaPartNumberPatterns {
+		if m := re.FindStringSubmatch(lower); len(m) == 2 {
+			n, err := strconv.Atoi(m[1])
+			if err == nil && n > 0 {
+				return n, true
+			}
+		}
+	}
+	return 0, false
+}
+
+var mediaPartNumberPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?:^|[.\-_])part[\s._-]*(\d{1,3})$`),
+	regexp.MustCompile(`(?:^|[.\-_])(?:cd|disc|disk)[\s._-]*(\d{1,3})$`),
+	regexp.MustCompile(`[-_](\d{1,2})$`),
+}
+
+func sortMediaVersionsForDisplay(rows []model.Media) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		return compareMediaVersionsForDisplay(rows[i], rows[j])
+	})
+}
+
+// compareMediaVersionsForDisplay：有分片号时按 1→2→3… 升序；否则按画质/体积择优。
+func compareMediaVersionsForDisplay(a, b model.Media) bool {
+	pa, oka := mediaPartNumber(a.Path)
+	pb, okb := mediaPartNumber(b.Path)
+	if oka && okb {
+		if pa != pb {
+			return pa < pb
+		}
+	} else if oka != okb {
+		return oka
+	}
+	return betterMediaVersion(a, b)
+}
+
+func mediaVersionContainerFromPath(path, strmURL string) string {
+	base := filepath.Base(strings.ReplaceAll(strings.TrimSpace(path), "\\", "/"))
+	ext := strings.ToLower(filepath.Ext(base))
+	name := strings.TrimSuffix(base, ext)
+	if ext == ".strm" {
+		if second := strings.ToLower(filepath.Ext(name)); second != "" {
+			if _, ok := videoExtensions[second]; ok {
+				return strings.TrimPrefix(second, ".")
+			}
+		}
+		// 从 strm 播放 URL 的 /video.mkv 推断
+		u := strings.ToLower(strmURL)
+		if idx := strings.LastIndex(u, "/video."); idx >= 0 {
+			rest := u[idx+len("/video."):]
+			if end := strings.IndexAny(rest, "?#&/"); end >= 0 {
+				rest = rest[:end]
+			}
+			rest = strings.Trim(rest, ".")
+			if rest != "" {
+				return rest
+			}
+		}
+		return "strm"
+	}
+	if ext != "" {
+		if _, ok := videoExtensions[ext]; ok {
+			return strings.TrimPrefix(ext, ".")
+		}
+	}
+	return strings.TrimPrefix(ext, ".")
+}
+
+func formatMediaSize(bytes int64) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	const unit = 1024
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 func mediaVersionTitleKey(value string) (string, int) {
@@ -189,6 +586,10 @@ func normalizeMediaVersionText(value string) string {
 			continue
 		}
 		if _, noise := noiseTokenSet[field]; noise {
+			continue
+		}
+		// 去掉视频容器词干残留（keep_ext / 旧标题「竞女01 mkv」）
+		if _, ok := videoExtensions["."+field]; ok {
 			continue
 		}
 		out = append(out, field)

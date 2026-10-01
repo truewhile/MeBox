@@ -12,6 +12,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/truewhile/MeBox/internal/helper"
 	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/repository"
 )
@@ -50,6 +51,8 @@ func (a *AuditService) RecordBestEffort(userID, action, target, ip, detail strin
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		a.Record(ctx, userID, action, target, ip, detail)
+		helper.Run(a.log, "audit.record", func() {
+			a.Record(ctx, userID, action, target, ip, detail)
+		})
 	}()
 }

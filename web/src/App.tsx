@@ -1,10 +1,11 @@
-import { Component, Suspense, type ErrorInfo, type ReactNode } from 'react'
+import { Component, Suspense, lazy, type ErrorInfo, type ReactNode } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 
 import { appRoutes, type AppRoute } from './appRoutes'
 import { Layout } from './components/Layout'
 import { RequireAdmin, RequireAuth } from './components/RequireAuth'
-import { LoginPage } from './pages/LoginPage'
+const LoginPage = lazy(() => import('./pages/LoginPage').then((m) => ({ default: m.LoginPage })))
+const ReaderRoutes = lazy(() => import('./pages/reader/ReaderRoutes').then((m) => ({ default: m.default })))
 
 const Loading = () => <p className="px-6 py-8 text-sand-500">加载中…</p>
 
@@ -62,6 +63,17 @@ export default function App() {
       <Suspense fallback={<Loading />}>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
+          {/* 阅读独立布局（不套影视 Layout，全屏沉浸） */}
+          <Route
+            path="/reader/*"
+            element={
+              <RequireAuth>
+                <Suspense fallback={<Loading />}>
+                  <ReaderRoutes />
+                </Suspense>
+              </RequireAuth>
+            }
+          />
           <Route
             path="/"
             element={

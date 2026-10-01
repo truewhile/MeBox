@@ -39,10 +39,15 @@ func listSystemConfigHandler(svc *service.Container) gin.HandlerFunc {
 }
 
 func isSecretKey(k string) bool {
-	for _, suffix := range []string{".token", ".secret", ".password", ".api_key", ".cookie"} {
+	for _, suffix := range []string{".token", ".secret", ".password", ".api_key", ".cookie", ".pin"} {
 		if endsWith(k, suffix) {
 			return true
 		}
+	}
+	// 非后缀型敏感键：可触发服务端任意命令的更新命令等。
+	switch k {
+	case "system.update.command":
+		return true
 	}
 	return false
 }
@@ -109,16 +114,6 @@ func schemaHandler(_ *service.Container) gin.HandlerFunc {
 						{"key": "adult.enabled", "type": "toggle"},
 						{"key": "adult.require_pin", "type": "toggle"},
 						{"key": "adult.pin", "type": "text"},
-					},
-				},
-				{
-					"key":   "qbittorrent",
-					"label": "qBittorrent",
-					"items": []gin.H{
-						{"key": "qbittorrent.url", "type": "text"},
-						{"key": "qbittorrent.username", "type": "text"},
-						{"key": "qbittorrent.password", "type": "text"},
-						{"key": "qbittorrent.savepath", "type": "text"},
 					},
 				},
 				{

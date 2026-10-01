@@ -2,9 +2,16 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/truewhile/MeBox/internal/model"
 )
@@ -19,6 +26,9 @@ func (e *EmbyService) Item(ctx context.Context, mediaID, userID string) (map[str
 		mountID, remoteID, _ := DecodeEmbyRemoteID(mediaID)
 		mount, acct, _ := e.remote.ResolveMount(ctx, mountID)
 		if mount == nil || acct == nil {
+			return nil, nil
+		}
+		if !EmbyMountLibraryAllowed(e.mediaVisibility(ctx, userID), mount) {
 			return nil, nil
 		}
 		out, err := e.remote.RemoteItem(ctx, mount, acct, remoteID)
@@ -47,14 +57,22 @@ func (e *EmbyService) Item(ctx context.Context, mediaID, userID string) (map[str
 		if season, ok, err := e.findSeasonGroup(ctx, mediaID, userID); err != nil {
 			return nil, err
 		} else if ok {
-			return e.seasonPayload(season), nil
+			item := e.seasonPayload(season)
+			if media := seriesPeopleMedia(season.Series); media != nil {
+				item["People"] = e.resolveMediaPeople(ctx, media)
+			}
+			return item, nil
 		}
 	}
 	if strings.HasPrefix(mediaID, embyVirtualSeriesPrefix) {
 		if series, ok, err := e.findSeriesGroup(ctx, mediaID, userID); err != nil {
 			return nil, err
 		} else if ok {
-			return e.seriesPayload(series), nil
+			item := e.seriesPayload(series)
+			if media := seriesPeopleMedia(series); media != nil {
+				item["People"] = e.resolveMediaPeople(ctx, media)
+			}
+			return item, nil
 		}
 	}
 	m, err := e.repo.Media.FindByID(ctx, mediaID)
@@ -65,7 +83,11 @@ func (e *EmbyService) Item(ctx context.Context, mediaID, userID string) (map[str
 		if series, ok, err := e.findSeriesGroup(ctx, mediaID, userID); err != nil {
 			return nil, err
 		} else if ok {
-			return e.seriesPayload(series), nil
+			item := e.seriesPayload(series)
+			if media := seriesPeopleMedia(series); media != nil {
+				item["People"] = e.resolveMediaPeople(ctx, media)
+			}
+			return item, nil
 		}
 		return nil, nil
 	}
@@ -87,43 +109,128 @@ func (e *EmbyService) Item(ctx context.Context, mediaID, userID string) (map[str
 			pos = h.PositionMs
 		}
 	}
-	return e.itemPayload(ctx, m, fav, pos), nil
+	// 单条目 payload 内部对库类型/series 标题有多次查找，挂请求级缓存合并。
+	return e.itemPayload(e.withPayloadCache(ctx), m, fav, pos, true), nil
 }
 
-// LatestItems 最近添加，全库或指定库。远程媒体库(parentID 带前缀)直接透传远程。
+// LatestItems 最近添加，全库或指定库。远程媒体库(parentID 带前缀)走远程并缓存。
 func (e *EmbyService) LatestItems(ctx context.Context, userID, parentID string, limit int) ([]map[string]any, error) {
+	if e == nil {
+		return nil, nil
+	}
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	if e.remote != nil && IsEmbyRemoteID(parentID) {
-		mountID, remoteParent, _ := DecodeEmbyRemoteID(parentID)
-		mount, acct, _ := e.remote.ResolveMount(ctx, mountID)
-		if mount == nil || acct == nil {
-			return nil, nil
+	cacheKey := e.embyLatestCacheKey(userID, parentID, limit)
+	if items, stale, ok := e.cachedLatestItemsWithStale(ctx, cacheKey); ok {
+		if stale {
+			e.refreshLatestItemsAsync(cacheKey, userID, parentID, limit)
 		}
-		out, err := e.remote.RemoteLatest(ctx, mount, acct, remoteParent, limit)
+		return items, nil
+	}
+	value, err := e.loadLatestItemsCached(ctx, userID, parentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	if value.Items == nil {
+		return []map[string]any{}, nil
+	}
+	return value.Items, nil
+}
+
+func (e *EmbyService) loadLatestItemsCached(ctx context.Context, userID, parentID string, limit int) (embyLatestCacheValue, error) {
+	cacheKey := e.embyLatestCacheKey(userID, parentID, limit)
+	// 一个客户端断开不应取消正在为其他客户端填充的共享重建。
+	loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
+	defer cancel()
+	v, err, _ := e.latestFlight.Do(cacheKey, func() (any, error) {
+		if items, ok := e.cachedLatestItems(loadCtx, cacheKey); ok {
+			return embyLatestCacheValue{Items: items}, nil
+		}
+		value, err := e.loadLatestItems(loadCtx, userID, parentID, limit)
 		if err != nil {
 			return nil, err
 		}
-		if err := e.mergeRemoteUserData(ctx, userID, out); err != nil {
-			return nil, err
+		if e.cache != nil {
+			freshTTL := time.Duration(e.embyLatestCacheTTLSeconds()) * time.Second
+			e.cache.SetJSONWithStale(loadCtx, cacheKey, value, freshTTL, freshTTL+30*time.Minute)
 		}
-		return out, nil
+		e.rememberArtworkRefs(value.Artwork)
+		return value, nil
+	})
+	if err != nil {
+		return embyLatestCacheValue{}, err
 	}
-	cacheKey := e.embyLatestCacheKey(userID, parentID, limit)
+	cached, _ := v.(embyLatestCacheValue)
+	return cached, nil
+}
+
+func (e *EmbyService) refreshLatestItemsAsync(cacheKey, userID, parentID string, limit int) {
+	if e == nil || e.cache == nil {
+		return
+	}
+	if _, loaded := e.latestRefresh.LoadOrStore(cacheKey, struct{}{}); loaded {
+		return
+	}
+	go func() {
+		defer e.latestRefresh.Delete(cacheKey)
+		if _, err := e.loadLatestItemsCached(context.Background(), userID, parentID, limit); err != nil && e.log != nil {
+			e.log.Debug("background refresh of latest items failed",
+				zap.String("parent_id", parentID),
+				zap.Error(redactSensitiveError(err)))
+		}
+	}()
+}
+
+func (e *EmbyService) cachedLatestItems(ctx context.Context, cacheKey string) ([]map[string]any, bool) {
+	items, stale, ok := e.cachedLatestItemsWithStale(ctx, cacheKey)
+	return items, ok && !stale
+}
+
+func (e *EmbyService) cachedLatestItemsWithStale(ctx context.Context, cacheKey string) ([]map[string]any, bool, bool) {
+	if e == nil || e.cache == nil {
+		return nil, false, false
+	}
 	var cached embyLatestCacheValue
-	if e.cache != nil && e.cache.GetJSON(ctx, cacheKey, &cached) {
-		return cached.Items, nil
+	found, stale := e.cache.GetJSONStale(ctx, cacheKey, &cached)
+	if !found {
+		return nil, false, false
+	}
+	e.rememberArtworkRefs(cached.Artwork)
+	if cached.Items == nil {
+		return []map[string]any{}, stale, true
+	}
+	return cached.Items, stale, true
+}
+
+func (e *EmbyService) loadLatestItems(ctx context.Context, userID, parentID string, limit int) (embyLatestCacheValue, error) {
+	if e.remote != nil && IsEmbyRemoteID(parentID) {
+		mountID, remoteParent, _ := DecodeEmbyRemoteID(parentID)
+		mount, acct, _ := e.remote.ResolveMount(ctx, mountID)
+		if mount == nil || acct == nil || !EmbyMountLibraryAllowed(e.mediaVisibility(ctx, userID), mount) {
+			return embyLatestCacheValue{Items: []map[string]any{}}, nil
+		}
+		out, err := e.remote.RemoteLatestForDisplay(ctx, mount, acct, remoteParent, limit)
+		if err != nil {
+			return embyLatestCacheValue{}, err
+		}
+		if out == nil {
+			out = []map[string]any{}
+		}
+		if err := e.mergeRemoteUserData(ctx, userID, out); err != nil {
+			return embyLatestCacheValue{}, err
+		}
+		return embyLatestCacheValue{Items: out}, nil
 	}
 	q := e.repo.DB.WithContext(ctx).Model(&model.Media{}).Where("deleted_at IS NULL")
 	q = e.applyUserMediaVisibility(ctx, q, userID)
 	if parentID != "" {
 		if episodic, err := e.libraryIsEpisodic(ctx, parentID); err == nil && episodic {
-			out, err := e.latestSeriesItemsForLibrary(ctx, userID, parentID, limit)
-			if err == nil && e.cache != nil {
-				e.cache.SetJSON(ctx, cacheKey, embyLatestCacheValue{Items: out}, time.Duration(e.mediaCacheTTLSeconds())*time.Second)
+			out, artwork, err := e.latestSeriesItemsForLibrary(ctx, userID, parentID, limit)
+			if err != nil {
+				return embyLatestCacheValue{}, err
 			}
-			return out, err
+			return embyLatestCacheValue{Items: out, Artwork: artwork}, nil
 		}
 		q = q.Where("library_id IN ?", e.mergedLibraryIDs(ctx, parentID))
 	}
@@ -136,7 +243,7 @@ func (e *EmbyService) LatestItems(ctx context.Context, userID, parentID string, 
 	}
 	var rows []model.Media
 	if err := q.Order(mediaReleaseOrderSQL(true)).Limit(rowLimit).Find(&rows).Error; err != nil {
-		return nil, err
+		return embyLatestCacheValue{}, err
 	}
 	rows = e.collapseMediaVersionRows(ctx, rows)
 	if len(rows) > limit {
@@ -144,15 +251,12 @@ func (e *EmbyService) LatestItems(ctx context.Context, userID, parentID string, 
 	}
 	out, err := e.payloadsForMedia(ctx, rows, userID)
 	if err != nil {
-		return nil, err
+		return embyLatestCacheValue{}, err
 	}
-	if e.cache != nil {
-		e.cache.SetJSON(ctx, cacheKey, embyLatestCacheValue{Items: out}, time.Duration(e.mediaCacheTTLSeconds())*time.Second)
-	}
-	return out, nil
+	return embyLatestCacheValue{Items: out}, nil
 }
 
-func (e *EmbyService) latestSeriesItemsForLibrary(ctx context.Context, userID, libraryID string, limit int) ([]map[string]any, error) {
+func (e *EmbyService) latestSeriesItemsForLibrary(ctx context.Context, userID, libraryID string, limit int) ([]map[string]any, map[string]embyArtworkRef, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
@@ -160,10 +264,11 @@ func (e *EmbyService) latestSeriesItemsForLibrary(ctx context.Context, userID, l
 		Where("library_id IN ? AND (season_num > 0 OR episode_num > 0)", e.mergedLibraryIDs(ctx, libraryID))
 	q = e.applyUserMediaVisibility(ctx, q, userID)
 	var rows []model.Media
-	if err := q.Order(mediaReleaseOrderSQL(true)).Limit(embySeriesGroupingLimit).Find(&rows).Error; err != nil {
-		return nil, err
+	// 只要最近几部剧的卡片，不要把整库 5 万行拉进内存再丢掉。
+	if err := q.Order(mediaReleaseOrderSQL(true)).Limit(embyLatestSeriesRowLimit(limit)).Find(&rows).Error; err != nil {
+		return nil, nil, err
 	}
-	groups := e.seriesGroupsFromMedia(rows)
+	groups := e.seriesGroupsFromMedia(ctx, rows)
 	sortSeriesGroups(groups, ItemsParams{SortBy: "premieredate", SortOrder: "Descending"})
 	if len(groups) > limit {
 		groups = groups[:limit]
@@ -172,17 +277,42 @@ func (e *EmbyService) latestSeriesItemsForLibrary(ctx context.Context, userID, l
 	for _, group := range groups {
 		items = append(items, e.seriesPayload(group))
 	}
-	return items, nil
+	return items, e.artworkRefsForSeriesGroups(groups), nil
+}
+
+// embyLatestSeriesRowLimit 是 Latest 剧集卡片的候选窗口。按「每部剧最近约 40
+// 集」估，刚好覆盖现有 25 部 × 40 集的分组测试，又不会为了 16 张海报去扫整库。
+// ponytail: 一部长剧如果占满窗口，更老的剧不会出现在 Latest 行；点进媒体库
+// 仍走完整分组。上限 2000 行。
+func embyLatestSeriesRowLimit(limit int) int {
+	if limit < 1 {
+		limit = 20
+	}
+	n := limit * 40
+	if n < 200 {
+		n = 200
+	}
+	if n > 2000 {
+		n = 2000
+	}
+	return n
 }
 
 // ResumeItems 列出有未完成播放进度的媒体。
-func (e *EmbyService) ResumeItems(ctx context.Context, userID string, limit int) (map[string]any, error) {
-	return e.resumableItems(ctx, ItemsParams{UserID: userID, Limit: limit})
+// parentID 非空时收窄到该库 / 该剧（含虚拟 msgo-series-* ID）。
+func (e *EmbyService) ResumeItems(ctx context.Context, userID, parentID string, limit, startIndex int) (map[string]any, error) {
+	return e.resumableItems(ctx, ItemsParams{
+		UserID:     userID,
+		ParentID:   strings.TrimSpace(parentID),
+		Limit:      limit,
+		StartIndex: startIndex,
+	})
 }
 
-// resumableItems 返回未完成播放进度的媒体（包含本地媒体与挂载的远程媒体），支持分页。
-func (e *EmbyService) resumableItems(ctx context.Context, p ItemsParams) (map[string]any, error) {
-	if p.Limit <= 0 || p.Limit > 100 {
+// favoriteItems returns favourited media for Emby clients, including mounted
+// remote items stored only in the local favourites table.
+func (e *EmbyService) favoriteItems(ctx context.Context, p ItemsParams) (map[string]any, error) {
+	if p.Limit <= 0 || p.Limit > 500 {
 		p.Limit = 50
 	}
 	if p.StartIndex < 0 {
@@ -192,20 +322,21 @@ func (e *EmbyService) resumableItems(ctx context.Context, p ItemsParams) (map[st
 		return map[string]any{"Items": []any{}, "TotalRecordCount": int64(0), "StartIndex": p.StartIndex}, nil
 	}
 
-	var hist []model.PlaybackHistory
+	var favs []model.Favorite
 	if err := e.repo.DB.WithContext(ctx).
-		Where("user_id = ? AND completed = ? AND position_ms > 0", p.UserID, false).
-		Order("watched_at desc").Find(&hist).Error; err != nil {
+		Where("user_id = ?", p.UserID).
+		Order("created_at desc").
+		Find(&favs).Error; err != nil {
 		return nil, err
 	}
-	if len(hist) == 0 {
+	if len(favs) == 0 {
 		return map[string]any{"Items": []any{}, "TotalRecordCount": int64(0), "StartIndex": p.StartIndex}, nil
 	}
 
-	localIDs := make([]string, 0, len(hist))
-	for _, h := range hist {
-		if !IsEmbyRemoteID(h.MediaID) {
-			localIDs = append(localIDs, h.MediaID)
+	localIDs := make([]string, 0, len(favs))
+	for _, fav := range favs {
+		if !IsEmbyRemoteID(fav.MediaID) {
+			localIDs = append(localIDs, fav.MediaID)
 		}
 	}
 	byID := map[string]*model.Media{}
@@ -221,19 +352,26 @@ func (e *EmbyService) resumableItems(ctx context.Context, p ItemsParams) (map[st
 		}
 	}
 
-	items := make([]map[string]any, 0, len(hist))
-	for _, h := range hist {
-		if m, ok := byID[h.MediaID]; ok {
-			if p.ParentID != "" && m.LibraryID != p.ParentID && m.SeriesID != p.ParentID {
+	items := make([]map[string]any, 0, len(favs))
+	for _, fav := range favs {
+		if m, ok := byID[fav.MediaID]; ok {
+			if !favoriteMatchesParent(ctx, e, p.ParentID, fav.MediaID, m.LibraryID, m.SeriesID, nil) {
 				continue
 			}
-			items = append(items, e.itemPayload(ctx, m, false, h.PositionMs))
+			if p.SearchTerm != "" {
+				needle := strings.ToLower(p.SearchTerm)
+				if !strings.Contains(strings.ToLower(m.Title), needle) &&
+					!strings.Contains(strings.ToLower(m.OriginalName), needle) {
+					continue
+				}
+			}
+			items = append(items, e.itemPayload(ctx, m, true, 0, false))
 			continue
 		}
-		if e.remote == nil || !IsEmbyRemoteID(h.MediaID) {
+		if e.remote == nil || !IsEmbyRemoteID(fav.MediaID) {
 			continue
 		}
-		mountID, remoteID, _ := DecodeEmbyRemoteID(h.MediaID)
+		mountID, remoteID, _ := DecodeEmbyRemoteID(fav.MediaID)
 		mount, acct, err := e.remote.ResolveMount(ctx, mountID)
 		if err != nil || mount == nil || acct == nil {
 			continue
@@ -242,14 +380,24 @@ func (e *EmbyService) resumableItems(ctx context.Context, p ItemsParams) (map[st
 		if err != nil || item == nil {
 			continue
 		}
-		if p.ParentID != "" {
-			parentID, _ := item["ParentId"].(string)
-			seriesID, _ := item["SeriesId"].(string)
-			if parentID != p.ParentID && seriesID != p.ParentID && mountID != p.ParentID {
+		if !favoriteMatchesParent(ctx, e, p.ParentID, fav.MediaID, "", "", item) {
+			continue
+		}
+		if p.SearchTerm != "" {
+			needle := strings.ToLower(p.SearchTerm)
+			name, _ := item["Name"].(string)
+			orig, _ := item["OriginalTitle"].(string)
+			if !strings.Contains(strings.ToLower(name), needle) &&
+				!strings.Contains(strings.ToLower(orig), needle) {
 				continue
 			}
 		}
-		item["UserData"] = mergedRemoteUserData(item["UserData"], &h)
+		userData, _ := item["UserData"].(map[string]any)
+		if userData == nil {
+			userData = map[string]any{}
+			item["UserData"] = userData
+		}
+		userData["IsFavorite"] = true
 		items = append(items, item)
 	}
 
@@ -261,23 +409,294 @@ func (e *EmbyService) resumableItems(ctx context.Context, p ItemsParams) (map[st
 	return map[string]any{"Items": items[p.StartIndex:end], "TotalRecordCount": total, "StartIndex": p.StartIndex}, nil
 }
 
-func (e *EmbyService) itemPayload(ctx context.Context, m *model.Media, fav bool, posMs int64) map[string]any {
+func favoriteMatchesParent(ctx context.Context, e *EmbyService, parentID, mediaID, libraryID, seriesID string, remoteItem map[string]any) bool {
+	if parentID == "" {
+		return true
+	}
+	if libraryID != "" {
+		if libraryID == parentID || seriesID == parentID {
+			return true
+		}
+		for _, id := range e.mergedLibraryIDs(ctx, parentID) {
+			if id == libraryID {
+				return true
+			}
+		}
+		return false
+	}
+	if remoteItem == nil {
+		return false
+	}
+	itemParent, _ := remoteItem["ParentId"].(string)
+	itemSeries, _ := remoteItem["SeriesId"].(string)
+	if itemParent == parentID || itemSeries == parentID || mediaID == parentID {
+		return true
+	}
+	if !IsEmbyRemoteID(parentID) {
+		return false
+	}
+	wantMountID, _, _ := DecodeEmbyRemoteID(parentID)
+	gotMountID, _, _ := DecodeEmbyRemoteID(mediaID)
+	return wantMountID != "" && gotMountID == wantMountID
+}
+
+// resumeMatchesParent 判断续播条目是否属于 ParentId / SeriesId 作用域。
+// 本地剧集的 series_id 常为空，实际对外 ID 是 msgo-series-* 虚拟 ID，必须用
+// seriesIDForMedia 对齐，否则按剧收窄永远匹配不上。
+func resumeMatchesParent(ctx context.Context, e *EmbyService, parentID, libraryID, seriesID string, m *model.Media) bool {
+	if parentID == "" {
+		return true
+	}
+	if libraryID == parentID || seriesID == parentID {
+		return true
+	}
+	if m != nil && e.seriesIDForMedia(ctx, m) == parentID {
+		return true
+	}
+	if m != nil && e.seasonIDForMedia(ctx, m) == parentID {
+		return true
+	}
+	for _, id := range e.mergedLibraryIDs(ctx, parentID) {
+		if id == libraryID {
+			return true
+		}
+	}
+	return false
+}
+
+// resumableItems 返回未完成播放进度的媒体（包含本地媒体与挂载的远程媒体），支持分页。
+func (e *EmbyService) resumableItems(ctx context.Context, p ItemsParams) (map[string]any, error) {
+	if p.Limit <= 0 || p.Limit > 100 {
+		p.Limit = 50
+	}
+	if p.StartIndex < 0 {
+		p.StartIndex = 0
+	}
+	if strings.TrimSpace(p.UserID) == "" {
+		return map[string]any{"Items": []any{}, "TotalRecordCount": int64(0), "StartIndex": p.StartIndex}, nil
+	}
+
+	// 历史记录限行：此前无上限全量加载，远程条目多时既拖慢 SQL 也放大
+	// 下面的远程详情请求量。
+	var hist []model.PlaybackHistory
+	if err := e.repo.DB.WithContext(ctx).
+		Where("user_id = ? AND completed = ? AND position_ms > 0", p.UserID, false).
+		Order("watched_at desc").Limit(200).Find(&hist).Error; err != nil {
+		return nil, err
+	}
+	if len(hist) == 0 {
+		return map[string]any{"Items": []any{}, "TotalRecordCount": int64(0), "StartIndex": p.StartIndex}, nil
+	}
+
+	mediaIDs := make([]string, 0, len(hist))
+	localIDs := make([]string, 0, len(hist))
+	for _, h := range hist {
+		mediaIDs = append(mediaIDs, h.MediaID)
+		if !IsEmbyRemoteID(h.MediaID) {
+			localIDs = append(localIDs, h.MediaID)
+		}
+	}
+	favSet := map[string]bool{}
+	if len(mediaIDs) > 0 {
+		var favs []model.Favorite
+		if err := e.repo.DB.WithContext(ctx).
+			Where("user_id = ? AND media_id IN ?", p.UserID, mediaIDs).
+			Find(&favs).Error; err != nil {
+			return nil, err
+		}
+		for _, fav := range favs {
+			favSet[fav.MediaID] = true
+		}
+	}
+	byID := map[string]*model.Media{}
+	if len(localIDs) > 0 {
+		var medias []model.Media
+		q := e.repo.DB.WithContext(ctx).Where("id IN ?", localIDs)
+		q = e.applyUserMediaVisibility(ctx, q, p.UserID)
+		if err := q.Find(&medias).Error; err != nil {
+			return nil, err
+		}
+		for i := range medias {
+			byID[medias[i].ID] = &medias[i]
+		}
+	}
+
+	// 分页前置：凑满 StartIndex+Limit 条即停，不再为「总数」逐条发远程
+	// 详情 GET（此前每条远程记录一次串行 GET，远程慢时请求挂起数分钟）。
+	// 总数用候选行数（本地过滤后 + 远程候选），对继续观看行的翻页语义
+	// 足够准确。
+	needed := p.StartIndex + p.Limit
+	slots := make([]resumeSlot, 0, len(hist))
+	localTotal, remoteTotal := 0, 0
+	for _, h := range hist {
+		if m, ok := byID[h.MediaID]; ok {
+			if p.ParentID != "" && !resumeMatchesParent(ctx, e, p.ParentID, m.LibraryID, m.SeriesID, m) {
+				continue
+			}
+			localTotal++
+			slots = append(slots, resumeSlot{item: e.itemPayload(ctx, m, favSet[h.MediaID], h.PositionMs, false)})
+			continue
+		}
+		if e.remote == nil || !IsEmbyRemoteID(h.MediaID) {
+			continue
+		}
+		remoteTotal++
+		slots = append(slots, resumeSlot{fetch: &resumeRemoteFetch{hist: h}})
+	}
+	for {
+		filled := 0
+		pending := make([]*resumeRemoteFetch, 0)
+		for i := range slots {
+			if slots[i].item != nil {
+				filled++
+				if filled >= needed {
+					break
+				}
+				continue
+			}
+			f := slots[i].fetch
+			if f == nil || f.done {
+				continue
+			}
+			if f.mount == nil {
+				mountID, remoteID, _ := DecodeEmbyRemoteID(f.hist.MediaID)
+				mount, acct, err := e.remote.ResolveMount(ctx, mountID)
+				if err != nil || mount == nil || acct == nil {
+					f.done = true
+					continue
+				}
+				f.mount, f.acct, f.remoteID = mount, acct, remoteID
+			}
+			pending = append(pending, f)
+			if filled+len(pending) >= needed {
+				break
+			}
+		}
+		if len(pending) == 0 {
+			break
+		}
+		e.fillResumeRemotes(ctx, pending)
+		for i := range slots {
+			f := slots[i].fetch
+			if f == nil || !pendingContains(pending, f) {
+				continue
+			}
+			f.done = true
+			item := f.item
+			f.item = nil
+			if item == nil {
+				continue
+			}
+			if p.ParentID != "" {
+				parentID, _ := item["ParentId"].(string)
+				seriesID, _ := item["SeriesId"].(string)
+				mountID, _, _ := DecodeEmbyRemoteID(f.hist.MediaID)
+				if parentID != p.ParentID && seriesID != p.ParentID && mountID != p.ParentID {
+					continue
+				}
+			}
+			item["UserData"] = applyMeBoxUserData(item["UserData"], &f.hist, favSet[f.hist.MediaID])
+			slots[i].item = item
+		}
+	}
+	items := make([]map[string]any, 0, p.Limit)
+	for i := range slots {
+		if slots[i].item == nil {
+			continue
+		}
+		items = append(items, slots[i].item)
+	}
+
+	total := int64(localTotal + remoteTotal)
+	if p.StartIndex >= len(items) {
+		return map[string]any{"Items": []map[string]any{}, "TotalRecordCount": total, "StartIndex": p.StartIndex}, nil
+	}
+	end := minInt(p.StartIndex+p.Limit, len(items))
+	return map[string]any{"Items": items[p.StartIndex:end], "TotalRecordCount": total, "StartIndex": p.StartIndex}, nil
+}
+
+type resumeSlot struct {
+	item  map[string]any
+	fetch *resumeRemoteFetch
+}
+
+type resumeRemoteFetch struct {
+	hist     model.PlaybackHistory
+	mount    *model.EmbyMount
+	acct     *model.StrmAccount
+	remoteID string
+	item     map[string]any
+	done     bool
+}
+
+func pendingContains(rows []*resumeRemoteFetch, target *resumeRemoteFetch) bool {
+	for _, row := range rows {
+		if row == target {
+			return true
+		}
+	}
+	return false
+}
+
+// fillResumeRemotes 并行补齐继续观看里的远程条目。同一页以前是串行 GET，
+// 远程一慢就把整个 Resume 拖到数秒。结果按原播放历史顺序回填。
+func (e *EmbyService) fillResumeRemotes(ctx context.Context, rows []*resumeRemoteFetch) {
+	if e == nil || e.remote == nil || len(rows) == 0 {
+		return
+	}
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4)
+	for i := range rows {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+			item, err := e.remote.RemoteItem(ctx, rows[i].mount, rows[i].acct, rows[i].remoteID)
+			if err != nil || item == nil {
+				return
+			}
+			rows[i].item = item
+		}(i)
+	}
+	wg.Wait()
+}
+
+func (e *EmbyService) itemPayload(ctx context.Context, m *model.Media, fav bool, posMs int64, includePeople bool) map[string]any {
 	itemType := "Movie"
 	name := m.Title
 	parentID := m.LibraryID
 	seriesID := m.SeriesID
 	seriesName := ""
 	seasonID := ""
+	seasonNum := m.SeasonNum
 	if e.mediaShouldBeEpisode(ctx, m) {
 		itemType = "Episode"
-		seriesID = e.seriesIDForMedia(m)
-		seriesName = e.seriesNameForMedia(m)
-		seasonID = e.seasonIDForMedia(m)
+		seriesID = e.seriesIDForMedia(ctx, m)
+		seriesName = e.seriesNameForMedia(ctx, m)
+		seasonNum = embySeasonNumForMedia(m)
+		seasonID = e.seasonIDForMedia(ctx, m)
 		parentID = seasonID
 		episodeTitle := strings.TrimSpace(m.EpisodeTitle)
-		if episodeTitle != "" {
+		// 半集（S01E11.5）在 Emby 协议里只能占用整数 IndexNumber 11，标题里
+		// 不再带上小数就会和真正的第 11 集完全分不清，所以显式补上集号。
+		halfLabel := ""
+		if m.EpisodeFraction > 0 && m.EpisodeNum > 0 {
+			halfLabel = fmt.Sprintf("第 %s 集", FormatEpisodeNumber(m.EpisodeNum, m.EpisodeFraction))
+		}
+		switch {
+		case episodeTitle != "":
 			name = episodeTitle
-		} else if m.EpisodeNum > 0 {
+			if halfLabel != "" && !strings.HasPrefix(episodeTitle, halfLabel) {
+				name = halfLabel + " · " + episodeTitle
+			}
+		case halfLabel != "":
+			name = halfLabel
+		case m.EpisodeNum > 0:
 			name = fmt.Sprintf("第 %d 集", m.EpisodeNum)
 		}
 	}
@@ -294,6 +713,13 @@ func (e *EmbyService) itemPayload(ctx context.Context, m *model.Media, fav bool,
 
 	runTimeTicks := int64(m.DurationSec) * 10_000_000
 	durationMs := int64(m.DurationSec) * 1000
+	if durationMs <= 0 && posMs > 0 {
+		durationMs = posMs * 2
+		if durationMs < 30*60*1000 {
+			durationMs = 30 * 60 * 1000
+		}
+		runTimeTicks = durationMs * 10_000
+	}
 	played := posMs > 0 && durationMs > 0 && posMs >= durationMs*9/10
 	pct := 0.0
 	if durationMs > 0 {
@@ -309,7 +735,7 @@ func (e *EmbyService) itemPayload(ctx context.Context, m *model.Media, fav bool,
 		"MediaType":         "Video",
 		"IsFolder":          false,
 		"ProductionYear":    m.Year,
-		"ParentIndexNumber": m.SeasonNum,
+		"ParentIndexNumber": seasonNum,
 		"IndexNumber":       m.EpisodeNum,
 		"Overview":          m.Overview,
 		"RunTimeTicks":      runTimeTicks,
@@ -321,12 +747,13 @@ func (e *EmbyService) itemPayload(ctx context.Context, m *model.Media, fav bool,
 		"Path":              m.Path,
 		"ParentId":          parentID,
 		"SeasonId":          seasonID,
-		"SeasonName":        seasonName(m.SeasonNum),
+		"SeasonName":        seasonName(seasonNum),
 		"SeriesId":          seriesID,
 		"SeriesName":        seriesName,
 		"ImageTags":         imageTags,
 		"BackdropImageTags": backdropTags,
 		"Genres":            splitCSV(m.Genres),
+		"People":            []map[string]any{},
 		"ProviderIds": map[string]string{
 			"Tmdb":    intToStr(m.TMDbID),
 			"Bangumi": intToStr(m.BangumiID),
@@ -340,8 +767,293 @@ func (e *EmbyService) itemPayload(ctx context.Context, m *model.Media, fav bool,
 		},
 		"MediaSources": e.mediaSourcesForItem(ctx, m, true, false),
 	}
+	if primaryArtwork != "" {
+		item["PrimaryImageTag"] = m.ID
+	}
+	if seriesID != "" {
+		if sEntry, ok, _ := e.payloadSeriesEntry(ctx, seriesID); ok {
+			if sEntry.posterURL != "" {
+				item["SeriesPrimaryImageTag"] = embyVirtualImageTag(seriesID, embyVirtualPrimaryTagSuffix)
+			}
+			if len(backdropTags) == 0 && (sEntry.backdropURL != "" || sEntry.posterURL != "") {
+				item["ParentBackdropItemId"] = seriesID
+				item["ParentBackdropImageTags"] = []string{embyVirtualImageTag(seriesID, embyVirtualBackdropTagSuffix)}
+			}
+		}
+	}
 	if premiered, ok := embyPremiereDate(m.ReleaseDate); ok {
 		item["PremiereDate"] = premiered
 	}
+	if includePeople {
+		item["People"] = e.resolveMediaPeople(ctx, m)
+	}
+	// Emby/Jellyfin 对「不适用」的字段是直接不下发（JSON 里没有该键），而不是下发
+	// 空串或占位值。电影等非剧集条目没有季/剧归属，小幻影视（RodelPlayer）2.2610
+	// 会把 "SeasonId": "" 原样传进播放准备逻辑并抛 ArgumentException
+	// （Parameter 'seasonId'），起播直接失败；"SeasonName": "特别篇" 也会让客户端
+	// 把电影当成特别篇展示。剧集则保留真实的季/剧信息，只清掉空值。
+	seasonKeys := []string{"SeasonId", "SeriesId", "SeasonName", "SeriesName"}
+	if itemType == "Episode" {
+		dropEmptyStringFields(item, seasonKeys...)
+	} else {
+		for _, key := range seasonKeys {
+			delete(item, key)
+		}
+	}
 	return item
+}
+
+// dropEmptyStringFields 删除值为空串（或全空白）的字符串字段。
+//
+// 用于对齐 Emby/Jellyfin 的序列化行为：这些字段在没有值时是「不存在」，
+// 而不是空串。客户端普遍把空串当合法值使用，收到空串会当成非法参数。
+func dropEmptyStringFields(item map[string]any, keys ...string) {
+	for _, key := range keys {
+		if value, ok := item[key].(string); ok && strings.TrimSpace(value) == "" {
+			delete(item, key)
+		}
+	}
+}
+
+func (e *EmbyService) resolveMediaPeople(ctx context.Context, m *model.Media) []map[string]any {
+	if m == nil {
+		return []map[string]any{}
+	}
+	cacheKey := embyMediaPeopleCacheKey(m)
+	if cacheKey == "" {
+		return []map[string]any{}
+	}
+	if people, ok := e.cachedMediaPeople(cacheKey); ok {
+		return people
+	}
+	people := e.fetchTMDbPeople(ctx, m)
+	if len(people) == 0 {
+		people = e.resolveNFOMediaPeople(m)
+	}
+	e.rememberMediaPeople(cacheKey, people)
+	return people
+}
+
+func seriesPeopleMedia(group embySeriesGroup) *model.Media {
+	if group.TMDbID <= 0 {
+		return nil
+	}
+	if len(group.Episodes) > 0 {
+		media := group.Episodes[0]
+		media.TMDbID = group.TMDbID
+		return &media
+	}
+	return &model.Media{Title: group.Name, TMDbID: group.TMDbID, SeasonNum: 1}
+}
+
+func (e *EmbyService) fetchTMDbPeople(ctx context.Context, m *model.Media) []map[string]any {
+	if e == nil || m == nil {
+		return nil
+	}
+	var people []map[string]any
+	if e.tmdb != nil && m.TMDbID > 0 {
+		mediaType := "movie"
+		if m.SeasonNum > 0 || m.EpisodeNum > 0 {
+			mediaType = "tv"
+		}
+		people, err := e.tmdb.GetPeople(ctx, m.TMDbID, mediaType)
+		if err != nil {
+			if e.log != nil {
+				e.log.Debug("tmdb: detail people lookup failed", zap.Int("tmdb_id", m.TMDbID), zap.String("type", mediaType), zap.Error(err))
+			}
+		} else if len(people) > 0 {
+			e.rememberPersonImages(people)
+			return people
+		}
+	}
+	if m.NSFW && e.adult != nil {
+		people = e.adult.GetPeople(ctx, m)
+	}
+	return people
+}
+
+func embyMediaPeopleCacheKey(m *model.Media) string {
+	if m == nil {
+		return ""
+	}
+	if m.TMDbID > 0 {
+		mediaType := "movie"
+		if m.SeasonNum > 0 || m.EpisodeNum > 0 {
+			mediaType = "tv"
+		}
+		return fmt.Sprintf("tmdb:%d:%s", m.TMDbID, mediaType)
+	}
+	if strings.TrimSpace(m.ID) != "" {
+		return "media:" + strings.TrimSpace(m.ID)
+	}
+	if strings.TrimSpace(m.Path) != "" {
+		return "path:" + strings.ToLower(filepath.Clean(m.Path))
+	}
+	return ""
+}
+
+func (e *EmbyService) resolveNFOMediaPeople(m *model.Media) []map[string]any {
+	if m == nil || strings.TrimSpace(m.Path) == "" {
+		return []map[string]any{}
+	}
+	dir := filepath.Dir(m.Path)
+	candidates := make([]string, 0, 6)
+	seenPath := map[string]struct{}{}
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		key := strings.ToLower(filepath.Clean(path))
+		if _, ok := seenPath[key]; ok {
+			return
+		}
+		seenPath[key] = struct{}{}
+		candidates = append(candidates, path)
+	}
+	// 共享词干优先（竞女01.mkv.strm → 竞女01.nfo），并兼容旧的单层剥扩展命名。
+	add(nfoPath(m.Path))
+	for _, base := range mediaSidecarBaseVariants(m.Path) {
+		add(filepath.Join(dir, base+".nfo"))
+	}
+	add(filepath.Join(dir, "movie.nfo"))
+	add(filepath.Join(dir, "tvshow.nfo"))
+
+	people := make([]map[string]any, 0)
+	seen := make(map[string]bool)
+	for _, p := range candidates {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			doc, _, err := decodeNFOFile(p)
+			if err == nil && doc != nil {
+				for _, d := range doc.Directors {
+					name := strings.TrimSpace(d)
+					if name == "" {
+						continue
+					}
+					personID := embyPersonID(name, "Director")
+					if seen[personID] {
+						continue
+					}
+					seen[personID] = true
+					people = append(people, map[string]any{
+						"Id":   personID,
+						"Name": name,
+						"Type": "Director",
+						"Role": "Director",
+					})
+				}
+				for _, a := range doc.Actors {
+					name := strings.TrimSpace(a.Name)
+					if name == "" {
+						continue
+					}
+					personID := embyPersonID(name, "Actor")
+					if seen[personID] {
+						continue
+					}
+					seen[personID] = true
+					role := strings.TrimSpace(a.Role)
+					if role == "" {
+						role = "Actor"
+					}
+					people = append(people, map[string]any{
+						"Id":   personID,
+						"Name": name,
+						"Type": "Actor",
+						"Role": role,
+					})
+				}
+				break
+			}
+		}
+	}
+	return people
+}
+
+func (e *EmbyService) cachedMediaPeople(key string) ([]map[string]any, bool) {
+	if e == nil || strings.TrimSpace(key) == "" {
+		return nil, false
+	}
+	now := time.Now()
+	e.peopleMu.RLock()
+	entry, ok := e.peopleCache[key]
+	e.peopleMu.RUnlock()
+	if !ok || now.After(entry.expiresAt) {
+		if ok {
+			e.peopleMu.Lock()
+			delete(e.peopleCache, key)
+			e.peopleMu.Unlock()
+		}
+		return nil, false
+	}
+	out := make([]map[string]any, len(entry.people))
+	copy(out, entry.people)
+	return out, true
+}
+
+func (e *EmbyService) rememberMediaPeople(key string, people []map[string]any) {
+	if e == nil || strings.TrimSpace(key) == "" {
+		return
+	}
+	e.peopleMu.Lock()
+	defer e.peopleMu.Unlock()
+	if e.peopleCache == nil || len(e.peopleCache) > 8000 {
+		e.peopleCache = make(map[string]embyPeopleCacheEntry, 128)
+	}
+	stored := make([]map[string]any, len(people))
+	copy(stored, people)
+	ttl := embyPeopleCacheTTL
+	if len(stored) == 0 {
+		ttl = embyPeopleEmptyCacheTTL
+	}
+	e.peopleCache[key] = embyPeopleCacheEntry{
+		people:    stored,
+		expiresAt: time.Now().Add(ttl),
+	}
+}
+
+func (e *EmbyService) rememberPersonImages(people []map[string]any) {
+	if e == nil || len(people) == 0 {
+		return
+	}
+	e.personImageMu.Lock()
+	defer e.personImageMu.Unlock()
+	if e.personImages == nil || len(e.personImages) > 20000 {
+		e.personImages = make(map[string]string, 128)
+	}
+	for _, person := range people {
+		id := strings.TrimSpace(fmt.Sprint(person["Id"]))
+		profilePath := tmdbProfilePathFromTag(fmt.Sprint(person["PrimaryImageTag"]))
+		if _, ok := parseTMDbPersonID(id); ok && profilePath != "" {
+			e.personImages[id] = profilePath
+		}
+	}
+}
+
+func (e *EmbyService) cachedPersonImage(id string) string {
+	if e == nil {
+		return ""
+	}
+	e.personImageMu.RLock()
+	profilePath := e.personImages[strings.TrimSpace(id)]
+	e.personImageMu.RUnlock()
+	return profilePath
+}
+
+func (e *EmbyService) rememberPersonImage(id, profilePath string) {
+	profilePath = strings.TrimSpace(profilePath)
+	if e == nil || strings.TrimSpace(id) == "" || !tmdbProfilePathRE.MatchString(profilePath) {
+		return
+	}
+	e.personImageMu.Lock()
+	if e.personImages == nil {
+		e.personImages = make(map[string]string, 128)
+	}
+	e.personImages[strings.TrimSpace(id)] = profilePath
+	e.personImageMu.Unlock()
+}
+
+func embyPersonID(name, roleType string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(name)) + ":" + strings.ToLower(strings.TrimSpace(roleType))))
+	return "person-" + hex.EncodeToString(sum[:8])
 }

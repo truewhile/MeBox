@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "ssh": {
+      "command": "cmd.exe",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "@aiondadotcom/mcp-ssh"
+      ],
+      "env": {
+        "ProgramData": "C:\\ProgramData"
+      }
+    }
+  }
+}

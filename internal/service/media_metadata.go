@@ -19,7 +19,10 @@ type MediaMetadataUpdate struct {
 	Rating       *float32 `json:"rating"`
 	SeasonNum    *int     `json:"season_num"`
 	EpisodeNum   *int     `json:"episode_num"`
-	TMDbID       *int     `json:"tmdb_id"`
+	// EpisodeFraction 是集号的小数部分（11.5 的 0.5）。单独提供是为了让编辑
+	// 「集」时不会把半集写成整数集号，也不会把整集写成小数。
+	EpisodeFraction *float64 `json:"episode_fraction"`
+	TMDbID          *int     `json:"tmdb_id"`
 	BangumiID    *int     `json:"bangumi_id"`
 	DoubanID     *string  `json:"douban_id"`
 	TheTVDBID    *string  `json:"thetvdb_id"`
@@ -76,6 +79,9 @@ func (s *MediaService) UpdateMetadata(ctx context.Context, id string, req MediaM
 	}
 	if req.EpisodeNum != nil {
 		updates["episode_num"] = clampNonNegativeInt(*req.EpisodeNum)
+	}
+	if req.EpisodeFraction != nil {
+		updates["episode_fraction"] = clampEpisodeFraction(*req.EpisodeFraction)
 	}
 	if req.TMDbID != nil {
 		updates["tm_db_id"] = clampNonNegativeInt(*req.TMDbID)
@@ -136,6 +142,15 @@ func normalizeMetadataCSV(value string) string {
 
 func clampNonNegativeInt(value int) int {
 	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+// clampEpisodeFraction 把集号小数部分夹到 [0,1)：小于 0 或大于等于 1 都视为
+// 「没有小数」，避免把非法值写进库。
+func clampEpisodeFraction(value float64) float64 {
+	if value <= 0 || value >= 1 {
 		return 0
 	}
 	return value

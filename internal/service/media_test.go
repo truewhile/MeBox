@@ -136,7 +136,7 @@ func TestResolveAccessibleMappedPathMapsEmbeddedHostDownloadMarker(t *testing.T)
 	}
 	t.Setenv("MEBOX_DOWNLOAD_CONTAINER_DIR", containerDownloads)
 
-	got, _, err := resolveAccessibleMappedPath("/vol1/1000/Docker/qbittorrent/downloads/国产剧")
+	got, _, err := resolveAccessibleMappedPath("/vol1/1000/nas/downloads/国产剧")
 	if err != nil {
 		t.Fatalf("resolveAccessibleMappedPath() error = %v", err)
 	}

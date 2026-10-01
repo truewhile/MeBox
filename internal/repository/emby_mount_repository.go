@@ -125,3 +125,16 @@ func (r *EmbyMountRepository) DeleteByAccountID(ctx context.Context, accountID s
 	})
 	return count, err
 }
+
+// DeleteOrphans 清理账号已不存在的挂载（老版本删除账号未级联的历史残留）。
+func (r *EmbyMountRepository) DeleteOrphans(ctx context.Context) (int64, error) {
+	var count int64
+	err := withSQLiteBusyRetry(ctx, func() error {
+		res := r.db.WithContext(ctx).
+			Where("account_id NOT IN (SELECT id FROM strm_accounts)").
+			Delete(&model.EmbyMount{})
+		count = res.RowsAffected
+		return res.Error
+	})
+	return count, err
+}

@@ -55,7 +55,7 @@ func (o *OrganizerService) lookupOrganizeMetadata(ctx context.Context, src, sour
 				continue
 			}
 		}
-		match := o.scraper.lookup(ctx, lib, media, candidate, year)
+		match := o.scraper.lookup(ctx, lib, media, candidate, year, false)
 		if match != nil && strings.TrimSpace(match.Title) != "" {
 			if !organizeMetadataMatchTrusted(candidate, year, match) {
 				if cache != nil {

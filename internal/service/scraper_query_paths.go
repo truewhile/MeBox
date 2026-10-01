@@ -1,6 +1,11 @@
 package service
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
+
+var namedTheatricalFolderRE = regexp.MustCompile(`(?i)(?:剧场版|劇場版|动画电影|動畫電影|电影版|電影版)`)
 
 func mediaFolderTitle(mediaPath, libraryRoot string) string {
 	dir := parentSlashPath(mediaPath)
@@ -13,7 +18,7 @@ func mediaFolderTitle(mediaPath, libraryRoot string) string {
 		if base == "" || base == "." {
 			return ""
 		}
-		if isTechnicalMediaFolder(base) || strictSeasonFolderMatched(base) {
+		if isTechnicalMediaFolder(base) || strictSeasonFolderMatched(base) || isTheatricalFolder(base) {
 			dir = parentSlashPath(dir)
 			continue
 		}
@@ -104,7 +109,7 @@ func parentSlashPath(value string) string {
 
 func seriesFolderTitle(mediaPath, libraryRoot string) string {
 	dir := parentSlashPath(mediaPath)
-	if strictSeasonFolderMatched(pathBaseSlash(dir)) {
+	if strictSeasonFolderMatched(pathBaseSlash(dir)) || isTheatricalFolder(pathBaseSlash(dir)) {
 		dir = parentSlashPath(dir)
 	}
 	if root := comparableLibraryRoot(libraryRoot); root != "" && sameSlashPath(dir, root) {
@@ -114,10 +119,37 @@ func seriesFolderTitle(mediaPath, libraryRoot string) string {
 	if base == "" || base == "." {
 		return ""
 	}
-	if isGenericMediaCategoryFolder(base) || isTechnicalMediaFolder(base) || strictSeasonFolderMatched(base) {
+	if isGenericMediaCategoryFolder(base) || isTechnicalMediaFolder(base) || strictSeasonFolderMatched(base) || isTheatricalFolder(base) {
 		return ""
 	}
 	return base
+}
+
+func isTheatricalFolder(name string) bool {
+	key := strings.ToLower(strings.TrimSpace(name))
+	key = strings.Trim(key, `\/`)
+	if namedTheatricalFolderRE.MatchString(key) {
+		return true
+	}
+	switch key {
+	case "剧场版", "劇場版", "动画电影", "動畫電影", "特别篇", "特別篇",
+		"special", "specials", "sp", "ova", "ovas", "oad", "oads", "ovd", "ovds", "ona", "onas",
+		"extra", "extras", "bonus", "bonuses", "omake", "picture drama", "ncop", "nced", "画像特典":
+		return true
+	default:
+		return false
+	}
+}
+
+func pathHasTheatricalFolder(path string) bool {
+	for _, part := range strings.FieldsFunc(path, func(r rune) bool {
+		return r == '/' || r == '\\'
+	}) {
+		if isTheatricalFolder(part) && namedTheatricalFolderRE.MatchString(part) {
+			return true
+		}
+	}
+	return false
 }
 
 func libraryRootTitle(libraryRoot string) string {

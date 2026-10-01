@@ -62,6 +62,9 @@ func TestMetaTubeProviderSearch(t *testing.T) {
 		t.Fatalf("expected 1 match, got %d", len(matches))
 	}
 	m := matches[0]
+	if m.Provider != "metatube" {
+		t.Errorf("expected provider metatube, got %q", m.Provider)
+	}
 	if m.OriginalName != "IPX-235" {
 		t.Errorf("expected original name IPX-235, got %s", m.OriginalName)
 	}
@@ -71,8 +74,17 @@ func TestMetaTubeProviderSearch(t *testing.T) {
 	if !m.NSFW {
 		t.Errorf("expected NSFW true")
 	}
-	if len(m.Genres) != 1 || m.Genres[0] != "相沢みなみ" {
-		t.Errorf("unexpected genres: %v", m.Genres)
+	if len(m.Genres) != 0 {
+		t.Errorf("actor names must not be persisted as genres: %v", m.Genres)
+	}
+	if len(m.People) != 1 || m.People[0]["Name"] != "相沢みなみ" || m.People[0]["Type"] != "Actor" {
+		t.Errorf("unexpected people: %#v", m.People)
+	}
+	if want := server.URL + "/v1/images/primary/javdb/123456?auto=false&pos=-1&quality=90&ratio=-1&url=https%3A%2F%2Fexample.com%2Fcover.jpg"; m.PosterURL != want {
+		t.Errorf("poster URL = %q, want %q", m.PosterURL, want)
+	}
+	if want := server.URL + "/v1/images/backdrop/javdb/123456?quality=90"; m.BackdropURL != want {
+		t.Errorf("backdrop URL = %q, want %q", m.BackdropURL, want)
 	}
 }
 
@@ -112,6 +124,7 @@ func TestMetaTubeProviderGetMovie(t *testing.T) {
 	provider := NewMetaTubeProvider(zap.NewNop())
 	cfg := MetaTubeConfig{
 		ServerURL: server.URL,
+		CropCover: true,
 	}
 
 	match, err := provider.GetMovie(context.Background(), cfg, "javdb", "123456")
@@ -124,11 +137,11 @@ func TestMetaTubeProviderGetMovie(t *testing.T) {
 	if match.Overview != "超绝美少女相沢みなみ出道作品！" {
 		t.Errorf("unexpected overview: %s", match.Overview)
 	}
-	if match.PosterURL != "https://example.com/big_cover.jpg" {
-		t.Errorf("unexpected poster URL: %s", match.PosterURL)
+	if want := server.URL + "/v1/images/primary/javdb/123456?auto=true&pos=1&quality=90&ratio=-1&url=https%3A%2F%2Fexample.com%2Fbig_cover.jpg"; match.PosterURL != want {
+		t.Errorf("poster URL = %q, want %q", match.PosterURL, want)
 	}
-	if match.BackdropURL != "https://example.com/preview1.jpg" {
-		t.Errorf("unexpected backdrop URL: %s", match.BackdropURL)
+	if want := server.URL + "/v1/images/backdrop/javdb/123456?quality=90"; match.BackdropURL != want {
+		t.Errorf("backdrop URL = %q, want %q", match.BackdropURL, want)
 	}
 	if match.Year != 2018 {
 		t.Errorf("expected year 2018, got %d", match.Year)

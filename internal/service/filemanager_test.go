@@ -153,6 +153,37 @@ func TestFileManagerRefusesRootMutation(t *testing.T) {
 	}
 }
 
+// TestFileManagerResolvePath 阅读模块的服务器选书/选目录入口靠它做边界校验：
+// 允许根目录内放行，越界一律拒绝。
+func TestFileManagerResolvePath(t *testing.T) {
+	root := t.TempDir()
+	svc := newFileManagerTestService(t, root)
+
+	inside := filepath.Join(root, "books", "小说.txt")
+	if err := os.MkdirAll(filepath.Dir(inside), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(inside, []byte("正文"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := svc.ResolvePath(inside)
+	if err != nil {
+		t.Fatalf("允许根目录内的路径应放行: %v", err)
+	}
+	if got != inside {
+		t.Fatalf("ResolvePath = %q，期望 %q", got, inside)
+	}
+
+	outside := filepath.Join(t.TempDir(), "越界.txt")
+	if err := os.WriteFile(outside, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ResolvePath(outside); !errors.Is(err, ErrPathOutOfBounds) {
+		t.Fatalf("越界路径 err = %v, want ErrPathOutOfBounds", err)
+	}
+}
+
 func hardlinksUnsupported(t *testing.T, root string) bool {
 	t.Helper()
 	src := filepath.Join(root, "hardlink-probe-src")
@@ -196,9 +227,10 @@ func TestFileManagerIncludesConfiguredOrganizeRoots(t *testing.T) {
 		got[root.Label] = root.Path
 	}
 	for label, want := range map[string]string{
-		"organize-source": filepath.Clean(sourceDir),
-		"organize-target": filepath.Clean(targetDir),
-		"qb-savepath":     filepath.Clean(qbDir),
+		"organize-source":     filepath.Clean(sourceDir),
+		"organize-target":     filepath.Clean(targetDir),
+		// 旧键 qbittorrent.savepath 写入应经兼容回退落在 downloader-savepath 下
+		"downloader-savepath": filepath.Clean(qbDir),
 	} {
 		if got[label] != want {
 			t.Fatalf("root %s = %q, want %q; roots=%#v", label, got[label], want, listing.Roots)

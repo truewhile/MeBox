@@ -2,7 +2,7 @@ import { ManualScrapeDialog } from '../components/ManualScrapeDialog'
 import { MetadataEditDialog } from '../components/MetadataEditDialog'
 import { ScrapeMetadataDialog } from '../components/ScrapeMetadataDialog'
 import type { Library, Media } from '../types'
-import { seriesTitle, type SeriesCard } from '../utils/groupSeries'
+import { isTheatricalFeature, seriesTitle, type SeriesCard } from '../utils/groupSeries'
 
 type LibraryPageDialogsProps = {
   scrapeDialogOpen: boolean
@@ -11,6 +11,7 @@ type LibraryPageDialogsProps = {
   seriesMetadataEditOpen: boolean
   manualMovie: Media | null
   selectedSeries: SeriesCard | null
+  selectedSeriesScrapeMedia: Media | null
   selectedSeriesMediaIDs: string[]
   libraryType?: string
   scrapeEpisodeArtwork: boolean
@@ -29,6 +30,7 @@ export function LibraryPageDialogs({
   seriesMetadataEditOpen,
   manualMovie,
   selectedSeries,
+  selectedSeriesScrapeMedia,
   selectedSeriesMediaIDs,
   libraryType,
   scrapeEpisodeArtwork,
@@ -53,10 +55,10 @@ export function LibraryPageDialogs({
       />
       <ManualScrapeDialog
         open={manualSeriesScrapeOpen}
-        media={selectedSeries?.rep ?? null}
+        media={selectedSeriesScrapeMedia}
         mediaIds={selectedSeriesMediaIDs}
         defaultQuery={selectedSeriesTitle}
-        mediaType={selectedSeries ? scrapeMediaType(libraryType, selectedSeries.rep) : 'tv'}
+        mediaType="tv"
         scopeLabel={selectedSeriesTitle || '当前剧集'}
         episodeArtwork={scrapeEpisodeArtwork}
         onClose={onCloseManualSeriesScrape}
@@ -86,6 +88,9 @@ export function LibraryPageDialogs({
 }
 
 function scrapeMediaType(libraryType: string | undefined, media: Media): string {
+  if (isTheatricalFeature(media)) {
+    return 'movie'
+  }
   if ((media.season_num ?? 0) > 0 || (media.episode_num ?? 0) > 0) {
     return 'tv'
   }

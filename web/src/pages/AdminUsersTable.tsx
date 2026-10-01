@@ -2,6 +2,7 @@ import {
   FolderLock,
   KeyRound,
   Loader2,
+  MonitorSmartphone,
   Pencil,
   ShieldCheck,
   Trash2,
@@ -23,6 +24,7 @@ type AdminUsersTableProps = {
   onStartEdit: (user: User) => void
   onResetPassword: (user: User) => void
   onConfigureLibraries: (user: User) => void
+  onManageDevices: (user: User) => void
   onToggleStatus: (user: User) => void
   onDeleteUser: (user: User) => void
 }
@@ -38,6 +40,7 @@ export function AdminUsersTable({
   onStartEdit,
   onResetPassword,
   onConfigureLibraries,
+  onManageDevices,
   onToggleStatus,
   onDeleteUser,
 }: AdminUsersTableProps) {
@@ -46,18 +49,18 @@ export function AdminUsersTable({
       <table className="min-w-[900px] w-full text-left text-sm">
         <thead className="text-xs uppercase tracking-wider text-sand-500">
           <tr>
-            <th className="py-2">用户名</th>
-            <th>角色</th>
-            <th>媒体库权限</th>
-            <th>状态</th>
+            <th className="py-2 whitespace-nowrap">用户名</th>
+            <th className="whitespace-nowrap">角色</th>
+            <th className="whitespace-nowrap">媒体库权限</th>
+            <th className="whitespace-nowrap">状态</th>
             <th>权限说明</th>
-            <th>最近登录</th>
-            <th className="text-right">操作</th>
+            <th className="whitespace-nowrap">最近登录</th>
+            <th className="whitespace-nowrap text-right">操作</th>
           </tr>
         </thead>
         <tbody>
           {users.map((u) => (
-            <tr key={u.id} className="border-t border-gray-200">
+            <tr key={u.id} id={`admin-user-${u.id}`} className="border-t border-gray-200">
               <td className="py-2 text-ink-600">
                 {editingID === u.id ? (
                   <input
@@ -72,8 +75,8 @@ export function AdminUsersTable({
                   </span>
                 )}
               </td>
-              <td className="text-ink-100">{u.role === 'admin' ? '管理员' : '观看用户'}</td>
-              <td>
+              <td className="text-ink-100 whitespace-nowrap">{u.role === 'admin' ? '管理员' : '观看用户'}</td>
+              <td className="whitespace-nowrap">
                 {u.role === 'admin' ? (
                   <span className="inline-flex items-center rounded-full bg-sand-100 px-2.5 py-0.5 text-xs text-sand-600 font-medium">
                     全库 (管理员)
@@ -94,13 +97,13 @@ export function AdminUsersTable({
                   </button>
                 )}
               </td>
-              <td className={u.is_active ? 'text-green-500' : 'text-red-400'}>
+              <td className={`whitespace-nowrap ${u.is_active ? 'text-green-500' : 'text-red-400'}`}>
                 {u.is_active ? '正常' : '已禁用'}
               </td>
-              <td className="text-ink-50">
+              <td className="text-ink-50 max-w-[22rem]">
                 {u.role === 'admin' ? '全部管理权限' : '仅浏览/播放/外部播放器，无下载与文件操作'}
               </td>
-              <td className="text-ink-50">
+              <td className="text-ink-50 whitespace-nowrap">
                 <span className="inline-flex flex-wrap items-center gap-2">
                   <span>{u.last_login_at ? new Date(u.last_login_at).toLocaleString() : '从未登录'}</span>
                   {u.realtime_online && <span className="rounded border border-green-400/40 px-1.5 py-0.5 text-[11px] text-green-500">在线</span>}
@@ -146,6 +149,13 @@ export function AdminUsersTable({
                   onClick={() => onResetPassword(u)}
                 >
                   {resettingPasswordID === u.id ? <Loader2 size={12} className="animate-spin" /> : <KeyRound size={12} />}
+                </button>
+                <button
+                  className="rounded-lg border border-sky-400/40 px-2 py-1 text-xs text-sky-500 hover:bg-sky-400/10"
+                  title="登录设备管理"
+                  onClick={() => onManageDevices(u)}
+                >
+                  <MonitorSmartphone size={12} />
                 </button>
                 <button
                   className={

@@ -5,24 +5,91 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/truewhile/MeBox/internal/model"
 )
 
-// RemovePath 物理删除磁盘上已不存在的媒体记录。
+// RemovePath 移除磁盘上已不存在的媒体记录。普通的删除仍做物理删除；
+// 可确认是 STRM 扩展名改名的路径则先保留软删除墓碑，供后续 ingest 继承元数据。
 func (s *ScannerService) RemovePath(ctx context.Context, path string) (int64, error) {
 	if _, err := os.Stat(path); err == nil {
 		return 0, nil // still exists; nothing to remove
 	}
-	res := s.repo.DB.WithContext(ctx).Unscoped().
-		Where("path = ?", path).
-		Delete(&model.Media{})
-	if res.Error == nil && res.RowsAffected > 0 {
+	// 目录整体消失（删除/改名离开）：连同其子树下的媒体行一并移除。
+	// 此前只删 path 精确匹配的行——目录本身通常没有 media 行，导致目录
+	// 改名后旧子树记录全部失联，只有全量扫描才能修复。
+	prefix := filepath.Clean(path) + string(filepath.Separator)
+	var rows []struct {
+		ID   string
+		Path string
+	}
+	if err := s.repo.DB.WithContext(ctx).Model(&model.Media{}).
+		Select("id, path").
+		Where("path = ? OR path LIKE ?", path, prefix+"%").
+		Find(&rows).Error; err != nil {
+		return 0, err
+	}
+	softIDs := make([]string, 0, len(rows))
+	hardIDs := make([]string, 0, len(rows))
+	for _, row := range rows {
+		// LIKE 里的 % _ 是通配符（候选集只会偏大），用 Go 前缀精确过滤，
+		// 避免对含 % / _ 的路径误删。
+		if row.Path != path && !strings.HasPrefix(filepath.Clean(row.Path), prefix) {
+			continue
+		}
+		// A vanished STRM with a live sibling (foo.strm <-> foo.mkv.strm)
+		// is a rename. Keep a soft-deleted tombstone so the later ingest can
+		// adopt its ID and scraped metadata even if fsnotify delivers the
+		// remove event before the create event. A true deletion stays hard.
+		if row.Path == path && liveSTRMPathAlias(path) {
+			softIDs = append(softIDs, row.ID)
+			continue
+		}
+		hardIDs = append(hardIDs, row.ID)
+	}
+	var removed int64
+	if len(softIDs) > 0 {
+		res := s.repo.DB.WithContext(ctx).
+			Where("id IN ?", softIDs).
+			Delete(&model.Media{})
+		if res.Error != nil {
+			return removed, res.Error
+		}
+		removed += res.RowsAffected
+	}
+	if len(hardIDs) > 0 {
+		res := s.repo.DB.WithContext(ctx).Unscoped().
+			Where("id IN ?", hardIDs).
+			Delete(&model.Media{})
+		if res.Error != nil {
+			return removed, res.Error
+		}
+		removed += res.RowsAffected
+	}
+	if removed > 0 {
 		s.invalidateMediaCache(ctx)
 	}
-	return res.RowsAffected, res.Error
+	if len(softIDs) > 0 {
+		s.purgeExpiredSTRMTombstones(ctx)
+	}
+	return removed, nil
+}
+
+const strmRenameTombstoneRetention = 7 * 24 * time.Hour
+
+// purgeExpiredSTRMTombstones keeps the soft-delete grace period bounded.
+// It is deliberately restricted to deleted media rows under a STRM alias
+// workflow; normal deletions are still hard-deleted immediately.
+func (s *ScannerService) purgeExpiredSTRMTombstones(ctx context.Context) {
+	cutoff := time.Now().Add(-strmRenameTombstoneRetention)
+	if err := s.repo.DB.WithContext(ctx).Unscoped().
+		Where("deleted_at IS NOT NULL AND deleted_at < ? AND path LIKE ?", cutoff, "%.strm").
+		Delete(&model.Media{}).Error; err != nil && s.log != nil {
+		s.log.Warn("purge expired STRM rename tombstones failed", zap.Error(err))
+	}
 }
 
 func (s *ScannerService) pruneMissingMedia(ctx context.Context, libraryID string, seen map[string]struct{}) (int64, error) {
