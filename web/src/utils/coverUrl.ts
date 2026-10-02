@@ -18,3 +18,16 @@ export function isRenderableCover(url?: string | null): boolean {
 
   return false
 }
+
+// needsCoverProxy 判断封面是否必须绕道后端图片代理才能显示。
+//
+// 明文 http 的封面在 https 部署下会被浏览器当作「混合内容」：浏览器先把 http
+// 自动升级成 https 再发请求，而不少书源图床（酷我 sycdn.kuwo.cn 等）根本没有
+// https，升级失败后图片被直接丢弃，界面上只剩占位图标。同一份书源在本地 http
+// 部署（127.0.0.1:8080）却一切正常，差异就出在这里。
+//
+// 其余地址不需要代理：https 本身是安全协议，data: 图片不经过网络，应用自身的
+// 相对地址天然同源。代理它们只会白白多一次服务端抓取。
+export function needsCoverProxy(url?: string | null): boolean {
+  return (url ?? '').trim().toLowerCase().startsWith('http://')
+}

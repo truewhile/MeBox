@@ -26,6 +26,29 @@
 - 阅读模式下移动端底部导航（首页/媒体库/收藏/列表/更多）隐藏，避免影视导航混进书架。
 - `/reader/*` 本来就是独立全屏布局（不套影视 Layout），不受影响。
 
+**MeBox 书架已实现的布局与信息（`ReaderHomeContent.tsx` + `BookshelfCard.tsx` + `BookshelfSettingsDialog.tsx`）**
+- 三套布局，设置在顶栏「书架设置」弹窗里（对应 legado dialog_bookshelf_config），存 `stores/readerSettings.ts`：
+  - 网格：封面宫格，列数 2–6 或「自适应」；窄屏自动降到 2–3 列兜底。卡片含封面 + 本地角标 + 未读章数徽标 + 双行书名 + 详情/移出按钮。
+  - 列表：66×90 封面 + 书名 + 作者 + 更新时间 + 读到（当前章）+ 最新章节；对应 legado `item_bookshelf_list.xml` 的四行信息。
+  - 紧凑列表：48×64 小封面 + 书名 +「作者 · 读到」，一屏放更多书（对应 legado `layout_list_compact`）。
+- 排序六档，对齐 legado `AppConfig.getBookSortByGroupId`：最近阅读（dur_chapter_time，默认）/ 最近更新（latest_chapter_time）/ 综合 / 按书名 / 按作者 / 手动顺序（order）。顶栏有快捷排序下拉，弹窗里也可选。
+- 显示项开关：未读章数徽标、更新时间。
+- 「更新目录」（对应 legado `menu_update_toc`）：`POST /reader/shelf/refresh-toc` 并发重抓书架内网络书籍的目录，覆盖章节缓存；末章标题变化时刷新 `latest_chapter_time`，用于「最近更新」排序与更新时间展示。本地书籍与无书源信息的书跳过。
+- 未实现（与 legado 的差距）：书籍二级分组网格（进入分组后的封面网格）、导出/导入书架、离线下载。
+
+**书架分组（`/reader/book-groups`，仿影视模块的媒体库标签）**
+- 按用户存服务端：`reader_book_groups` 表每个用户一条，`groups` 列是 `[{name, book_ids}]` 的 JSON。结构、语义与影视的媒体库标签（`User.LibraryTags`）同构——组名 → 成员 ID、整份替换、一个成员只归一个组、组内顺序即展示顺序。
+- 接口：`GET /reader/book-groups`（没有分组返回空数组）、`PUT /reader/book-groups`（整份替换）。服务端落库前做两条需要「知道书是否存在」的收敛：只保留该用户书架上的书（书移出书架后分组里不留死 ID）、一本书只归一个组（越靠前的分组优先）。空分组保留，方便先建组再放书。
+- 与影视的差异：书架有两个内置页签「全部」「未分组」（未分组是「没有被任何分组认领」的视图，不持久化，只有存在分组时才出现）；书籍不进管理弹窗逐个分配，而是在卡片上用「分组」按钮指定（书架可能有上千本，列出来既慢又难找）。
+- 前端：`utils/readerBookGroups.ts`（纯逻辑）+ `hooks/useBookGroups.ts`（乐观更新、串行提交、失败回滚，接口不可用时退回 localStorage，照搬 `useLibraryTags`）+ `components/BookGroupBar.tsx`（分组栏）+ `ManageBookGroupsDialogView.tsx`（新建/重命名/删除/拖拽排序）+ `BookGroupPickerDialog.tsx`（移到分组）。
+
+**阅读器偏好按账号同步（跨设备）**
+- 主题 / 夜间模式 / 排版（字号、行距、段距）/ 翻页或滚动模式 / 听书倍速与定时 / 书架布局·排序·显示项，原先只存浏览器 localStorage（设备级，换设备就丢），现在按用户落库到 `reader_profiles`（`model.ReaderProfile`，`user_id` 唯一索引），接口 `GET|PUT /reader/profile`。
+- 服务端是权威来源，localStorage（zustand persist 的 `mebox-reader-settings`）退化成首屏缓存：登录后 `hydrateReaderSettings()` 拉一次覆盖本地，之后本地改动防抖 600ms 回写（`utils/readerSettingsSync.ts`）。
+- 账号还没有偏好记录时 `GET` 返回 `null`，前端把本地现值推上去「播种」，升级前在本机调好的设置不会被重置。
+- 服务端只做存储 + 范围收敛（数值夹区间、枚举未知回落默认、主题标识限长），不做语义解释；前端另有本地 clamp，两处范围需同步（见 `service/reader/profile.go` 顶部注释）。
+- 首页的「影视 / 阅读」模式（homeMode）是设备级偏好，故意不参与同步。
+
 ## 2. 阅读界面（重点）
 
 文件：`<src>ui/book/read/`（ReadBookActivity、ReadMenu、SearchMenu、MangaMenu、config/*Dialog）、`ui/book/read/page/`（ReadView、PageView、ContentTextView、ChapterProvider）。
@@ -91,7 +114,7 @@
 - 定时关闭：0/5/10/15/30/60/90/180 分钟；暂停期间不倒计时；归零自动暂停播放；选定值持久化为下次默认（对应 AppConfig.ttsTimer 在服务启动时 setTimer）。
 - 倍速：滑杆 0.5–3.0（步进 0.1）+ 0.5/0.75/1/1.25/1.5/1.75/2/2.5/3 快捷档；持久化（对应 AudioPlay.playSpeed，Android 6 以下不支持调速）。
 - 跳过片头片尾：抽屉内两条滑杆（片头/片尾，秒，0 不跳过，上限 300），按书持久化（Book.openCredits/closeCredits，落库 books.open_credits / close_credits）。语义：全新开播（该章进度为 0）时 seek 到片头秒数；播放到 duration-片尾秒数即等同播完，有下一章则自动续播，末章则停在片尾处。**单位是秒，不是章数。**
-- 播放进度按秒记忆（节流 10s 上报），跨端一致；播完自动下一章。
+- 播放进度按秒记忆（节流 5s 上报），跨端一致；播完自动下一章。
 - legado 的「播放模式」（顺序/单章循环/随机/列表循环）与「音频服务唤醒锁」是客户端能力，Web 端未实现。
 
 ## 3. 搜索

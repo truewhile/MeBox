@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/truewhile/MeBox/internal/middleware"
+	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/service"
 	"github.com/truewhile/MeBox/internal/service/reader"
 )
@@ -57,6 +58,16 @@ func registerReaderRoutes(authed *gin.RouterGroup, svc *service.Container) {
 	g.POST("/local/audiobooks", middleware.AdminRequired(), readerImportLocalAudioDirHandler(svc))
 	g.DELETE("/books/:id", readerRemoveBookHandler(svc))
 	g.PUT("/books/:id/progress", readerSaveProgressHandler(svc))
+	// 更新目录：重抓书架里全部网络书籍的目录，刷新章节缓存与「最近更新」时间
+	g.POST("/shelf/refresh-toc", readerRefreshBooksTocHandler(svc))
+
+	// 阅读器偏好（每个用户一条）：主题 / 排版 / 听书 / 书架展示设置，跨设备同步
+	g.GET("/profile", readerGetProfileHandler(svc))
+	g.PUT("/profile", readerSaveProfileHandler(svc))
+
+	// 书架分组（每个用户一份）：组名 → 书籍 ID，仿影视模块的媒体库标签
+	g.GET("/book-groups", readerGetBookGroupsHandler(svc))
+	g.PUT("/book-groups", readerSetBookGroupsHandler(svc))
 	// 换源：把书架里的书切到另一个书源（保留阅读进度，目录缓存按新源重建）
 	g.POST("/books/:id/origin", readerSwitchOriginHandler(svc))
 	g.PUT("/books/:id/audio-config", readerSaveAudioConfigHandler(svc))
@@ -526,6 +537,20 @@ func readerImportLocalAudioDirHandler(svc *service.Container) gin.HandlerFunc {
 	}
 }
 
+// readerRefreshBooksTocHandler 更新目录：重抓书架里全部网络书籍的目录。
+// 本地书籍与没有书源信息的书籍跳过；单本失败只计数，不影响其它书。
+func readerRefreshBooksTocHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID := c.GetString(middleware.CtxUserID)
+		res, err := svc.Reader.RefreshBooksToc(c.Request.Context(), userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, res)
+	}
+}
+
 func readerRemoveBookHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID := c.GetString(middleware.CtxUserID)
@@ -537,11 +562,56 @@ func readerRemoveBookHandler(svc *service.Container) gin.HandlerFunc {
 	}
 }
 
-func readerSaveProgressHandler(svc *service.Container) gin.HandlerFunc {
+// readerGetProfileHandler 读当前用户的阅读器偏好。
+// 没保存过时返回 {"profile": null}，前端据此用本地值播种。
+func readerGetProfileHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID := c.GetString(middleware.CtxUserID)
+		settings, err := svc.Reader.GetReaderSettings(c.Request.Context(), userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"profile": settings})
+	}
+}
+
+// readerSaveProfileHandler 覆盖保存当前用户的阅读器偏好（服务端做范围收敛）。
+func readerSaveProfileHandler(svc *service.Container) gin.HandlerFunc {
+	var body reader.ReaderSettings
+	return func(c *gin.Context) {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		userID := c.GetString(middleware.CtxUserID)
+		saved, err := svc.Reader.SaveReaderSettings(c.Request.Context(), userID, body)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"profile": saved})
+	}
+}
+
+// readerGetBookGroupsHandler 读当前用户的书架分组。
+// 没有分组时返回空数组（不是 null），前端可以直接遍历。
+func readerGetBookGroupsHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID := c.GetString(middleware.CtxUserID)
+		groups, err := svc.Reader.GetBookGroups(c.Request.Context(), userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"groups": groups})
+	}
+}
+
+// readerSetBookGroupsHandler 覆盖保存当前用户的书架分组（整份替换）。
+func readerSetBookGroupsHandler(svc *service.Container) gin.HandlerFunc {
 	var body struct {
-		ChapterIndex int    `json:"chapter_index"`
-		Pos          int    `json:"pos"`
-		ChapterTitle string `json:"chapter_title"`
+		Groups []model.BookGroupSet `json:"groups"`
 	}
 	return func(c *gin.Context) {
 		if err := c.ShouldBindJSON(&body); err != nil {
@@ -549,7 +619,44 @@ func readerSaveProgressHandler(svc *service.Container) gin.HandlerFunc {
 			return
 		}
 		userID := c.GetString(middleware.CtxUserID)
-		if err := svc.Reader.SaveProgress(c.Request.Context(), userID, c.Param("id"), body.ChapterIndex, body.Pos, body.ChapterTitle); err != nil {
+		groups, err := svc.Reader.SetBookGroups(c.Request.Context(), userID, body.Groups)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"groups": groups})
+	}
+}
+
+// maxReaderChapterPos 进度上限：秒（听书）/ 页码（文本）/ 图片序号（漫画）都远小于它，
+// 只用来挡住异常大的浮点数转 int 时溢出。约 115 天，足够覆盖任何单章。
+const maxReaderChapterPos = 10_000_000
+
+func readerSaveProgressHandler(svc *service.Container) gin.HandlerFunc {
+	var body struct {
+		ChapterIndex int `json:"chapter_index"`
+		// Pos 用 float64 接：听书的进度是 audio.currentTime（秒，天然带小数），
+		// 漫画是图片序号、文本是页码（都是整数）。用 int 接小数会让整个请求
+		// 400，而前端是 fire-and-forget，音频进度就被静默丢掉了。
+		Pos          float64 `json:"pos"`
+		ChapterTitle string  `json:"chapter_title"`
+	}
+	return func(c *gin.Context) {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		// dur_chapter_pos 落库是 int，截断成秒；负数没有意义，夹到 0。
+		posFloat := body.Pos
+		if !(posFloat > 0) { // 同时挡住 0 与负数（JSON 不会给出 NaN）
+			posFloat = 0
+		}
+		if posFloat > maxReaderChapterPos {
+			posFloat = maxReaderChapterPos
+		}
+		pos := int(posFloat)
+		userID := c.GetString(middleware.CtxUserID)
+		if err := svc.Reader.SaveProgress(c.Request.Context(), userID, c.Param("id"), body.ChapterIndex, pos, body.ChapterTitle); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}

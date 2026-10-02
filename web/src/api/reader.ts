@@ -1,4 +1,7 @@
 import { LONG_REQUEST_TIMEOUT, api } from './client'
+// 只引类型：阅读器偏好的字段定义在 store（它是本地状态的形状），
+// 这里作为 /reader/profile 的线上载荷复用，类型导入不会产生运行时依赖。
+import type { ReaderSettingsProfile } from '../stores/readerSettings'
 
 // 阅读子系统 API（/api/reader/*），字段与后端 model/reader.go 对齐。
 
@@ -59,6 +62,8 @@ export interface ReaderBook {
   intro: string
   type: number
   latest_chapter_title: string
+  /** 最后一次检测到「目录末尾章节变化」的时间（毫秒，0 表示未检测到更新）。 */
+  latest_chapter_time: number
   total_chapter_num: number
   dur_chapter_index: number
   dur_chapter_pos: number
@@ -72,6 +77,12 @@ export interface ReaderBook {
   /** 听书跳过片头/片尾秒数（0 表示不跳过，对应 legado Book.openCredits/closeCredits）。 */
   open_credits: number
   close_credits: number
+}
+
+/** 书架分组（对齐影视模块的媒体库标签）：组名 + 组内书籍 ID，顺序即组内展示顺序。 */
+export interface BookGroup {
+  name: string
+  book_ids: string[]
 }
 
 export interface ReaderBookInfo {
@@ -283,6 +294,31 @@ export const readerAPI = {
       .post<ReaderBook>('/reader/local/audiobooks', { path }, { timeout: LONG_REQUEST_TIMEOUT })
       .then((r) => r.data),
   removeBook: (id: string) => api.delete(`/reader/books/${id}`),
+  /**
+   * 读取当前账号的阅读器偏好（主题 / 排版 / 听书 / 书架展示）。
+   * 从未保存过时返回 null，由前端用本地的值播种。
+   */
+  getReaderSettings: () =>
+    api.get<{ profile: ReaderSettingsProfile | null }>('/reader/profile').then((r) => r.data.profile),
+  /** 覆盖保存阅读器偏好（服务端会做范围收敛）。 */
+  saveReaderSettings: (body: ReaderSettingsProfile) =>
+    api.put<{ profile: ReaderSettingsProfile }>('/reader/profile', body).then((r) => r.data.profile),
+
+  // ── 书架分组（每个用户一份，仿影视模块的媒体库标签）──
+  /** 读取当前账号的书架分组；没有分组时返回空数组。 */
+  getBookGroups: () =>
+    api.get<{ groups: BookGroup[] | null }>('/reader/book-groups').then((r) => r.data.groups ?? []),
+  /** 覆盖保存书架分组：服务端会收敛成「一书一组」并丢弃已不在书架上的书。 */
+  setBookGroups: (groups: BookGroup[]) =>
+    api.put<{ groups: BookGroup[] | null }>('/reader/book-groups', { groups }).then((r) => r.data.groups ?? []),
+  /**
+   * 更新目录（对应 legado 书架的「更新目录」）：重抓书架里全部网络书籍的目录，
+   * 覆盖章节缓存并刷新「最近更新」时间。返回本次刷新的汇总。
+   */
+  refreshBooksToc: () =>
+    api
+      .post<{ total: number; updated: number; failed: number }>('/reader/shelf/refresh-toc', {}, longOpts)
+      .then((r) => r.data),
   /**
    * 换源：把书架里的书切到另一个书源。
    * 阅读进度保留，旧源目录缓存由服务端清空并按新源重新预热。

@@ -192,6 +192,63 @@ func (r *ReaderRepository) GetChapter(ctx context.Context, bookID string, index 
 	return &out, nil
 }
 
+// GetReaderProfile 取用户阅读器偏好；没有记录时返回 (nil, nil)，
+// 由调用方决定是否用前端上送的当前值播种。
+func (r *ReaderRepository) GetReaderProfile(ctx context.Context, userID string) (*model.ReaderProfile, error) {
+	var out model.ReaderProfile
+	err := r.db.WithContext(ctx).First(&out, "user_id = ?", userID).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SaveReaderProfile 覆盖保存用户阅读器偏好（不存在则新建）。
+func (r *ReaderRepository) SaveReaderProfile(ctx context.Context, p *model.ReaderProfile) error {
+	var existing model.ReaderProfile
+	err := r.db.WithContext(ctx).First(&existing, "user_id = ?", p.UserID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return r.db.WithContext(ctx).Create(p).Error
+	}
+	if err != nil {
+		return err
+	}
+	p.ID = existing.ID
+	p.CreatedAt = existing.CreatedAt
+	return r.db.WithContext(ctx).Save(p).Error
+}
+
+// GetBookGroups 取用户的书架分组；没有记录时返回 (nil, nil)。
+func (r *ReaderRepository) GetBookGroups(ctx context.Context, userID string) (*model.ReaderBookGroups, error) {
+	var out model.ReaderBookGroups
+	err := r.db.WithContext(ctx).First(&out, "user_id = ?", userID).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SaveBookGroups 覆盖保存用户的书架分组（不存在则新建）。
+func (r *ReaderRepository) SaveBookGroups(ctx context.Context, row *model.ReaderBookGroups) error {
+	var existing model.ReaderBookGroups
+	err := r.db.WithContext(ctx).First(&existing, "user_id = ?", row.UserID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return r.db.WithContext(ctx).Create(row).Error
+	}
+	if err != nil {
+		return err
+	}
+	row.ID = existing.ID
+	row.CreatedAt = existing.CreatedAt
+	return r.db.WithContext(ctx).Save(row).Error
+}
+
 // ListReplaceRules 用户替换规则（按 order 排序）。
 func (r *ReaderRepository) ListReplaceRules(ctx context.Context, userID string) ([]model.ReaderReplaceRule, error) {
 	var out []model.ReaderReplaceRule

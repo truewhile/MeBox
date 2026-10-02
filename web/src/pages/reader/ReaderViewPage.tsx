@@ -30,6 +30,11 @@ const COLUMN_GAP = 48
 /** 正文里的图片占位行前缀（本地 EPUB 的图片，服务端已换成签名地址）。 */
 const IMG_MARK = '[img]'
 
+/** 听书进度上报节流（毫秒）：按秒记忆，退出最多丢 5 秒。 */
+const AUDIO_SAVE_INTERVAL_MS = 5_000
+/** 漫画进度上报节流（毫秒）：按图片序号记忆。 */
+const COMIC_SAVE_INTERVAL_MS = 2_000
+
 /** 菜单打开时正文下移过渡（与顶栏动画同节奏）。 */
 const MENU_SHIFT = 'transition-transform duration-200'
 
@@ -172,13 +177,16 @@ export default function ReaderViewPage() {
         setComicPage(0)
         setCurrentImage(0)
         // 音频/漫画的进度恢复值在这里取走（文本由排版/滚动效果消费 pendingPosRef）
+        const savedPos = Math.max(0, Math.floor(pendingPosRef.current))
         if (ct.type !== 'text') {
-          setRestorePos(pendingPosRef.current)
+          setRestorePos(savedPos)
           pendingPosRef.current = 0
         }
-        // 进度上报（pos 保留原值，排版完成后才被消费清零）
+        // 进度上报（文本的 pos 保留原值，排版完成后才被消费清零）。
+        // 注意用 savedPos：非文本在上面已经把 pendingPosRef 清零了，直接读会把
+        // 刚恢复的进度又写成 0，退出重进就从头开始。
         readerAPI
-          .saveProgress(book.id, { chapter_index: chapterIndex, pos: pendingPosRef.current, chapter_title: ch.title })
+          .saveProgress(book.id, { chapter_index: chapterIndex, pos: savedPos, chapter_title: ch.title })
           .catch(() => undefined)
         // 预取下一章
         if (!contentCache.current.has(String(chapterIndex + 1))) {
@@ -246,23 +254,31 @@ export default function ReaderViewPage() {
     }
   }, [content, settings.pageMode])
 
-  // ── 进度保存（翻页 / 滚动） ──
+  // ── 进度保存（翻页 / 滚动 / 听书 / 漫画） ──
+  // pos 对文本是页码、漫画是图片序号、听书是秒；audio.currentTime 带小数，
+  // 统一取整后再上报，和 dur_chapter_pos 的 int 语义对齐。
   const savePos = useCallback(
     (pos: number) => {
       if (!book || chapterIndex === null) return
       const ch = chapters[chapterIndex]
       readerAPI
-        .saveProgress(book.id, { chapter_index: chapterIndex, pos, chapter_title: ch?.title ?? '' })
+        .saveProgress(book.id, {
+          chapter_index: chapterIndex,
+          pos: Math.max(0, Math.floor(pos)),
+          chapter_title: ch?.title ?? '',
+        })
         .catch(() => undefined)
     },
     [book, chapterIndex, chapters],
   )
 
   useEffect(() => {
-    if (settings.pageMode !== 'page' || content === null || chapterIndex === null) return
+    // 只处理文本：听书/漫画的正文为空串（不是 null），不能落到页码保存逻辑里，
+    // 否则打开音频章 1.5 秒后就会把页码 0 写成进度，覆盖掉刚才恢复的秒数。
+    if (contentType !== 'text' || settings.pageMode !== 'page' || content === null || chapterIndex === null) return
     const t = setTimeout(() => savePos(page), 1500)
     return () => clearTimeout(t)
-  }, [page, content, chapterIndex, settings.pageMode, savePos])
+  }, [page, content, chapterIndex, settings.pageMode, contentType, savePos])
 
   // 漫画单页进度保存
   useEffect(() => {
@@ -271,12 +287,13 @@ export default function ReaderViewPage() {
     return () => clearTimeout(t)
   }, [comicPage, contentType, settings.pageMode, media, chapterIndex, savePos])
 
-  // 音频/漫画滚动：节流进度保存
+  // 音频/漫画滚动：节流进度保存（听书 5s、漫画 2s）
   const throttledMediaSave = useCallback(
     (pos: number) => {
       if (!book || chapterIndex === null) return
       const now = Date.now()
-      if (now - lastMediaSaveRef.current < (contentType === 'audio' ? 10_000 : 2_000)) return
+      const interval = contentType === 'audio' ? AUDIO_SAVE_INTERVAL_MS : COMIC_SAVE_INTERVAL_MS
+      if (now - lastMediaSaveRef.current < interval) return
       lastMediaSaveRef.current = now
       savePos(pos)
     },

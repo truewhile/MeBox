@@ -66,5 +66,7 @@ func AllModels() []interface{} {
 		&ReaderBook{},
 		&ReaderChapter{},
 		&ReaderReplaceRule{},
+		&ReaderProfile{},
+		&ReaderBookGroups{},
 	}
 }

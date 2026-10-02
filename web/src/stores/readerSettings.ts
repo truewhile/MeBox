@@ -33,16 +33,46 @@ export function getReaderTheme(themeId: string, night: boolean): { bg: string; t
 export type ReaderPageMode = 'page' | 'scroll'
 export type ReaderHomeMode = 'media' | 'reading'
 
+/** 书架布局：网格封面 / 常规列表 / 紧凑列表（对应 legado AppConfig.bookshelfLayout）。 */
+export type ReaderShelfLayout = 'grid' | 'list' | 'compact'
+
+/**
+ * 书架排序（对应 legado AppConfig 的 bookSort）：
+ * recent=最近阅读、update=最近更新、name=书名、author=作者、mixed=综合、manual=手动顺序。
+ */
+export type ReaderShelfSort = 'recent' | 'update' | 'name' | 'author' | 'mixed' | 'manual'
+
+/** 书架网格列数：0 表示按屏幕自适应（legado 是固定 2–6 列）。 */
+export const SHELF_GRID_COLUMNS = [0, 2, 3, 4, 5, 6] as const
+
 interface ReaderSettingsState {
   // 首页模式切换（影视 / 阅读）
   homeMode: ReaderHomeMode
   setHomeMode: (mode: ReaderHomeMode) => void
+
+  // ── 书架布局与展示（对应 legado 的书架设置）──
+  /** 布局样式。 */
+  shelfLayout: ReaderShelfLayout
+  setShelfLayout: (layout: ReaderShelfLayout) => void
+  /** 网格列数，0 为自适应。 */
+  shelfGridColumns: number
+  setShelfGridColumns: (columns: number) => void
+  /** 排序方式。 */
+  shelfSort: ReaderShelfSort
+  setShelfSort: (sort: ReaderShelfSort) => void
+  /** 是否显示未读章数徽标。 */
+  shelfShowUnread: boolean
+  setShelfShowUnread: (show: boolean) => void
+  /** 是否显示「更新时间」一行（仅列表布局）。 */
+  shelfShowUpdateTime: boolean
+  setShelfShowUpdateTime: (show: boolean) => void
 
   themeId: string
   setThemeId: (id: string) => void
 
   night: boolean
   toggleNight: () => void
+  setNight: (night: boolean) => void
 
   pageMode: ReaderPageMode
   setPageMode: (mode: ReaderPageMode) => void
@@ -80,11 +110,28 @@ export const useReaderSettingsStore = create<ReaderSettingsState>()(
       homeMode: 'media',
       setHomeMode: (mode) => set({ homeMode: mode }),
 
+      shelfLayout: 'grid',
+      setShelfLayout: (shelfLayout) => set({ shelfLayout }),
+
+      shelfGridColumns: 0,
+      setShelfGridColumns: (shelfGridColumns) =>
+        set({ shelfGridColumns: Math.min(6, Math.max(0, Math.round(shelfGridColumns))) }),
+
+      shelfSort: 'recent',
+      setShelfSort: (shelfSort) => set({ shelfSort }),
+
+      shelfShowUnread: true,
+      setShelfShowUnread: (shelfShowUnread) => set({ shelfShowUnread }),
+
+      shelfShowUpdateTime: true,
+      setShelfShowUpdateTime: (shelfShowUpdateTime) => set({ shelfShowUpdateTime }),
+
       themeId: 'preset1',
       setThemeId: (themeId) => set({ themeId }),
 
       night: false,
       toggleNight: () => set((s) => ({ night: !s.night })),
+      setNight: (night) => set({ night }),
 
       pageMode: 'page',
       setPageMode: (pageMode) => set({ pageMode }),
@@ -110,3 +157,65 @@ export const useReaderSettingsStore = create<ReaderSettingsState>()(
     { name: 'mebox-reader-settings' },
   ),
 )
+
+/**
+ * 与账号同步的阅读器偏好（对应后端 GET/PUT /reader/profile 的载荷）。
+ *
+ * 这些设置原先是设备级的（只存 localStorage）；现在按用户落库，换设备也能保持一致。
+ * 首页的「影视 / 阅读」模式（homeMode）属于设备偏好，故意不参与同步。
+ */
+export interface ReaderSettingsProfile {
+  theme_id: string
+  night: boolean
+  page_mode: ReaderPageMode
+  font_size: number
+  line_height: number
+  paragraph_spacing: number
+  audio_speed: number
+  audio_timer_minutes: number
+  shelf_layout: ReaderShelfLayout
+  shelf_grid_columns: number
+  shelf_sort: ReaderShelfSort
+  shelf_show_unread: boolean
+  shelf_show_update_time: boolean
+}
+
+/** 把本地状态整理成 /reader/profile 的载荷（只含参与同步的字段）。 */
+export function readerSettingsPayload(s: ReaderSettingsState): ReaderSettingsProfile {
+  return {
+    theme_id: s.themeId,
+    night: s.night,
+    page_mode: s.pageMode,
+    font_size: s.fontSize,
+    line_height: s.lineHeight,
+    paragraph_spacing: s.paragraphSpacing,
+    audio_speed: s.audioSpeed,
+    audio_timer_minutes: s.audioTimerMinutes,
+    shelf_layout: s.shelfLayout,
+    shelf_grid_columns: s.shelfGridColumns,
+    shelf_sort: s.shelfSort,
+    shelf_show_unread: s.shelfShowUnread,
+    shelf_show_update_time: s.shelfShowUpdateTime,
+  }
+}
+
+/**
+ * 用服务端的偏好覆盖本地状态（服务端是权威来源）。
+ * 走 store 的 setter 而不是 setState，保证范围收敛只有一处实现。
+ */
+export function applyReaderSettingsProfile(p: ReaderSettingsProfile): void {
+  const s = useReaderSettingsStore.getState()
+  s.setThemeId(p.theme_id)
+  s.setNight(p.night)
+  s.setPageMode(p.page_mode)
+  s.setFontSize(p.font_size)
+  s.setLineHeight(p.line_height)
+  s.setParagraphSpacing(p.paragraph_spacing)
+  s.setAudioSpeed(p.audio_speed)
+  s.setAudioTimerMinutes(p.audio_timer_minutes)
+  s.setShelfLayout(p.shelf_layout)
+  s.setShelfGridColumns(p.shelf_grid_columns)
+  s.setShelfSort(p.shelf_sort)
+  s.setShelfShowUnread(p.shelf_show_unread)
+  s.setShelfShowUpdateTime(p.shelf_show_update_time)
+}

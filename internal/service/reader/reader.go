@@ -610,24 +610,24 @@ func srcNameOf(src *model.ReaderBookSource, bs *BookSource) string {
 
 // SearchBook 搜索结果项（对应 legado SearchBook）。
 type SearchBook struct {
-	Name          string        `json:"name"`
-	Author        string        `json:"author"`
-	Kind          string        `json:"kind"`
-	WordCount     string        `json:"word_count"`
-	LatestChapter string        `json:"latest_chapter"`
-	Intro         string        `json:"intro"`
-	CoverURL      string        `json:"cover_url"`
-	BookURL       string        `json:"book_url"`
+	Name          string         `json:"name"`
+	Author        string         `json:"author"`
+	Kind          string         `json:"kind"`
+	WordCount     string         `json:"word_count"`
+	LatestChapter string         `json:"latest_chapter"`
+	Intro         string         `json:"intro"`
+	CoverURL      string         `json:"cover_url"`
+	BookURL       string         `json:"book_url"`
 	Origins       []SearchOrigin `json:"origins"`
 }
 
 // SearchOrigin 命中该书目的书源（换源用）。
 type SearchOrigin struct {
-	SourceID   string `json:"source_id"`
-	Origin     string `json:"origin"`
-	OriginName string `json:"origin_name"`
-	OriginType int    `json:"origin_type"`
-	BookURL    string `json:"book_url"`
+	SourceID      string `json:"source_id"`
+	Origin        string `json:"origin"`
+	OriginName    string `json:"origin_name"`
+	OriginType    int    `json:"origin_type"`
+	BookURL       string `json:"book_url"`
 	LatestChapter string `json:"latest_chapter"`
 }
 
@@ -975,10 +975,10 @@ func (s *ReaderService) getBookInfoFrom(ctx context.Context, src *model.ReaderBo
 
 // TocChapter 目录章节项。
 type TocChapter struct {
-	Index     int    `json:"index"`
-	Title     string `json:"title"`
-	URL       string `json:"url"`
-	IsVolume  bool   `json:"is_volume"`
+	Index      int    `json:"index"`
+	Title      string `json:"title"`
+	URL        string `json:"url"`
+	IsVolume   bool   `json:"is_volume"`
 	UpdateTime string `json:"update_time"`
 }
 
@@ -1016,22 +1016,53 @@ func (s *ReaderService) GetToc(ctx context.Context, userID, sourceID, sourceURL,
 	}
 	// 对应 legado：书源给 book.type 赋值后 legado 会持久化到 Book.type。
 	// 书架的「开始阅读」与详情页都会在这里拉目录，此时书籍已在书架时即可写回。
-	s.applyDeclaredBookType(ctx, userID, src.SourceURL, bookURL, declared)
+	// 顺便把末章标题与「最近更新」时间写回，供书架显示与排序。
+	s.applyTocMeta(ctx, userID, src.SourceURL, bookURL, declared, chapters)
 	return chapters, nil
 }
 
-// applyDeclaredBookType 把书源声明的书籍类型写回书架记录。
-func (s *ReaderService) applyDeclaredBookType(ctx context.Context, userID, origin, bookURL string, declared int) {
-	if declared < 0 || userID == "" || origin == "" || bookURL == "" {
+// latestChapterTitleOf 取目录里最后一个非卷章节的标题（对应 legado 的「最新章节」）。
+// 目录为空或全是卷名时返回空串。
+func latestChapterTitleOf(chapters []TocChapter) string {
+	for i := len(chapters) - 1; i >= 0; i-- {
+		if !chapters[i].IsVolume {
+			return strings.TrimSpace(chapters[i].Title)
+		}
+	}
+	return ""
+}
+
+// applyTocMeta 把目录阶段得到的信息写回书架记录：
+//   - 书源在规则 JS 里声明的书籍类型（declared >= 0 时）；
+//   - 末章标题，以及末章变化时刷新的「最近更新」时间（对应 legado Book.latestChapterTime）。
+//
+// 书籍不在书架（搜索/详情预览）时直接跳过。首次记录末章标题不算「更新」，
+// 只有原本已有标题、且新标题不同，才认为书源这边出现了新章节。
+func (s *ReaderService) applyTocMeta(ctx context.Context, userID, origin, bookURL string, declared int, chapters []TocChapter) {
+	if userID == "" || origin == "" || bookURL == "" {
 		return
 	}
 	book, err := s.repo.FindBookByURL(ctx, userID, origin, bookURL)
-	if err != nil || book == nil || book.Type == declared {
+	if err != nil || book == nil {
 		return
 	}
-	book.Type = declared
+	dirty := false
+	if declared >= 0 && book.Type != declared {
+		book.Type = declared
+		dirty = true
+	}
+	if latest := latestChapterTitleOf(chapters); latest != "" && latest != book.LatestChapterTitle {
+		if book.LatestChapterTitle != "" {
+			book.LatestChapterTime = time.Now().UnixMilli()
+		}
+		book.LatestChapterTitle = latest
+		dirty = true
+	}
+	if !dirty {
+		return
+	}
 	if err := s.repo.UpdateBook(ctx, book); err != nil && s.log != nil {
-		s.log.Warn("reader: 写回书籍类型失败", zap.String("book", book.ID), zap.Error(err))
+		s.log.Warn("reader: 写回目录信息失败", zap.String("book", book.ID), zap.Error(err))
 	}
 }
 
@@ -1566,6 +1597,91 @@ func (s *ReaderService) WarmUpBookChapters(ctx context.Context, userID string, b
 	if err := s.SaveChapters(ctx, book.ID, inputs); err != nil && s.log != nil {
 		s.log.Warn("reader: 预热目录写入失败", zap.String("book", book.ID), zap.Error(err))
 	}
+}
+
+// TocRefreshResult 「更新目录」的结果汇总（对应 legado 更新目录后的提示）。
+type TocRefreshResult struct {
+	Total   int `json:"total"`   // 参与刷新的网络书籍数
+	Updated int `json:"updated"` // 章数变多的书（有新章节）
+	Failed  int `json:"failed"`  // 抓取或写入失败的书
+}
+
+// refreshTocConcurrency 「更新目录」的并发度。书源站点多有限流，不宜过大。
+const refreshTocConcurrency = 4
+
+// RefreshBooksToc 刷新用户书架里全部网络书籍的目录（对应 legado 的「更新目录」菜单）。
+//
+// 逐本重新抓目录、覆盖章节缓存；末章变化时由 GetToc → applyTocMeta 刷新
+// latest_chapter_time。本地书籍与没有书源信息的书籍跳过。
+// 并发受限，单本失败只计数、不中断整体；等待全部结束后返回汇总。
+func (s *ReaderService) RefreshBooksToc(ctx context.Context, userID string) (*TocRefreshResult, error) {
+	books, err := s.repo.ListBooks(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	res := &TocRefreshResult{}
+	targets := make([]model.ReaderBook, 0, len(books))
+	for i := range books {
+		b := books[i]
+		if b.LocalPath != "" || b.BookURL == "" || b.Origin == "" {
+			continue
+		}
+		targets = append(targets, b)
+	}
+	res.Total = len(targets)
+	if res.Total == 0 {
+		return res, nil
+	}
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, refreshTocConcurrency)
+	for i := range targets {
+		b := targets[i]
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(b model.ReaderBook) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			bookCtx, cancel := context.WithTimeout(ctx, perSourceTimeout)
+			defer cancel()
+			if s.refreshBookToc(bookCtx, userID, b) {
+				mu.Lock()
+				res.Updated++
+				mu.Unlock()
+				return
+			}
+			mu.Lock()
+			res.Failed++
+			mu.Unlock()
+		}(b)
+	}
+	wg.Wait()
+	return res, nil
+}
+
+// refreshBookToc 刷新单本书的目录，返回是否检测到新章节。
+func (s *ReaderService) refreshBookToc(ctx context.Context, userID string, book model.ReaderBook) bool {
+	before, _ := s.repo.CountChaptersByBook(ctx, []string{book.ID})
+	chapters, err := s.GetToc(ctx, userID, "", book.Origin, book.BookURL, book.TocURL)
+	if err != nil || len(chapters) == 0 {
+		if err != nil && s.log != nil {
+			s.log.Debug("reader: 更新目录失败", zap.String("book", book.ID), zap.Error(err))
+		}
+		return false
+	}
+	inputs := make([]ChapterInput, 0, len(chapters))
+	for _, ch := range chapters {
+		inputs = append(inputs, ChapterInput{Index: ch.Index, Title: ch.Title, URL: ch.URL, IsVolume: ch.IsVolume})
+	}
+	if err := s.SaveChapters(ctx, book.ID, inputs); err != nil {
+		if s.log != nil {
+			s.log.Warn("reader: 更新目录写入失败", zap.String("book", book.ID), zap.Error(err))
+		}
+		return false
+	}
+	beforeCount := before[book.ID]
+	return beforeCount > 0 && len(chapters) > beforeCount
 }
 
 // ListReplaceRules 用户替换规则列表。

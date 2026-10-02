@@ -1,24 +1,134 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
-import { BookOpen, ChevronDown, FileUp, FolderOpen, HardDrive, Headphones, Loader2, MoreHorizontal, RefreshCw, Settings2, Trash2 } from 'lucide-react'
+import {
+  BookOpen,
+  Check,
+  ChevronDown,
+  FileUp,
+  FolderOpen,
+  Headphones,
+  LayoutGrid,
+  List,
+  Loader2,
+  MoreHorizontal,
+  RefreshCw,
+  Rows3,
+  Settings2,
+  SlidersHorizontal,
+} from 'lucide-react'
 
 import { readerAPI, type ReaderBook } from '../../api/reader'
+import { BookGroupBar } from '../../components/BookGroupBar'
+import { BookGroupPickerDialog } from '../../components/BookGroupPickerDialog'
+import { ManageBookGroupsDialogView } from '../../components/ManageBookGroupsDialogView'
 import { confirmAction } from '../../components/confirmAction'
-import ReaderBookCover from '../../components/ReaderBookCover'
+import { useBookGroups } from '../../hooks/useBookGroups'
 import { useAuthStore } from '../../stores/auth'
+import { useReaderSettingsStore } from '../../stores/readerSettings'
+import { buildBookGroupTabs, filterBooksByGroup, groupIdOfBook, ALL_GROUP_ID } from '../../utils/readerBookGroups'
+import { BookshelfCard } from './BookshelfCard'
+import { BookshelfSettingsDialog } from './BookshelfSettingsDialog'
+import { SHELF_SORT_OPTIONS, sortShelfBooks } from './bookshelfModel'
 import { ReaderModeSwitch } from './ReaderModeSwitch'
 import { ServerFilePickerDialog } from './ServerFilePickerDialog'
 
 // 首页阅读模式的书架内容（首页切换与 /reader 路由共用）。
-// 结构仿 legado 书架：网格封面 + 书名 + 阅读进度，右上上传本地书籍/搜索/书源管理入口。
+// 结构仿 legado 书架：顶部操作区 + 分组栏 + 网格/列表/紧凑列表三套布局 +
+// 可配置排序与显示项。布局、排序、显示项存在 readerSettings store；
+// 分组按用户存在服务端（见 utils/readerBookGroups.ts、hooks/useBookGroups.ts）。
 
-// 未读章数：dur_chapter_time 为 0 表示还没开始读，否则读完到当前章为止。
-// total_chapter_num 为 0 表示目录尚未缓存，无法计算。
-function unreadChapters(book: ReaderBook): number | null {
-  if (book.total_chapter_num <= 0) return null
-  const read = book.dur_chapter_time > 0 ? book.dur_chapter_index + 1 : 0
-  return Math.max(0, Math.min(book.total_chapter_num, book.total_chapter_num - read))
+// 网格列数 → Tailwind 栅格类。窄屏保留 2–3 列兜底，避免固定列数在手机上挤成一团。
+const GRID_COLUMNS_CLASS: Record<number, string> = {
+  0: 'grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8',
+  2: 'grid-cols-2',
+  3: 'grid-cols-2 sm:grid-cols-3',
+  4: 'grid-cols-3 sm:grid-cols-4',
+  5: 'grid-cols-3 sm:grid-cols-4 md:grid-cols-5',
+  6: 'grid-cols-3 sm:grid-cols-4 md:grid-cols-6',
+}
+
+/** 工具栏下拉菜单：自管开合、点外部或 Esc 关闭。 */
+function ToolbarMenu({
+  trigger,
+  title,
+  disabled = false,
+  width = 'w-44',
+  children,
+}: {
+  trigger: ReactNode
+  title?: string
+  disabled?: boolean
+  width?: string
+  children: (close: () => void) => ReactNode
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [open])
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={title}
+        disabled={disabled}
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 whitespace-nowrap rounded-xl border border-[var(--app-border)] px-3 py-1.5 text-xs font-bold text-[var(--app-muted)] transition hover:text-[var(--app-text)] disabled:opacity-60"
+      >
+        {trigger}
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className={`absolute right-0 z-30 mt-1.5 origin-top-right rounded-xl border border-[var(--app-border)] bg-[var(--app-panel)] p-1 shadow-xl ${width}`}
+        >
+          {children(() => setOpen(false))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function MenuItem({
+  icon,
+  children,
+  onClick,
+  disabled = false,
+}: {
+  icon?: ReactNode
+  children: ReactNode
+  onClick: () => void
+  disabled?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      disabled={disabled}
+      onClick={onClick}
+      className="flex w-full items-center gap-2 whitespace-nowrap rounded-lg px-2.5 py-2 text-left text-xs font-bold text-[var(--app-muted)] transition hover:bg-[var(--app-hover)] hover:text-[var(--app-text)] disabled:opacity-60"
+    >
+      {icon}
+      {children}
+    </button>
+  )
 }
 
 export function ReaderHomeContent({ embedded = false }: { embedded?: boolean }) {
@@ -28,26 +138,42 @@ export function ReaderHomeContent({ embedded = false }: { embedded?: boolean }) 
   const [error, setError] = useState('')
   const [uploading, setUploading] = useState<number | null>(null) // 上传进度百分比
   const [picker, setPicker] = useState<'book' | 'audio' | null>(null)
-  const [menuOpen, setMenuOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [manageGroupsOpen, setManageGroupsOpen] = useState(false)
+  const [groupPickerBook, setGroupPickerBook] = useState<ReaderBook | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
-  const menuRef = useRef<HTMLDivElement>(null)
 
-  // 下拉菜单：点外部或按 Esc 关闭
-  useEffect(() => {
-    if (!menuOpen) return
-    const onPointerDown = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false)
+  const shelfLayout = useReaderSettingsStore((s) => s.shelfLayout)
+  const shelfSort = useReaderSettingsStore((s) => s.shelfSort)
+  const setShelfSort = useReaderSettingsStore((s) => s.setShelfSort)
+  const shelfGridColumns = useReaderSettingsStore((s) => s.shelfGridColumns)
+  const shelfShowUnread = useReaderSettingsStore((s) => s.shelfShowUnread)
+  const shelfShowUpdateTime = useReaderSettingsStore((s) => s.shelfShowUpdateTime)
+
+  const sortedBooks = useMemo(() => (books ? sortShelfBooks(books, shelfSort) : null), [books, shelfSort])
+  const sortLabel = SHELF_SORT_OPTIONS.find((o) => o.value === shelfSort)?.label ?? '最近阅读'
+
+  // ── 书架分组（仿影视模块的媒体库标签）──
+  const bookGroups = useBookGroups()
+  const groupTabs = useMemo(
+    () => buildBookGroupTabs(books ?? [], bookGroups.groups),
+    [books, bookGroups.groups],
+  )
+  // 先按分组过滤，再按当前排序方式排；两者互不影响。
+  const visibleBooks = useMemo(
+    () => (sortedBooks ? filterBooksByGroup(sortedBooks, bookGroups.groups, bookGroups.selectedGroupId) : null),
+    [sortedBooks, bookGroups.groups, bookGroups.selectedGroupId],
+  )
+  // 管理弹窗里每个分组的书籍数只统计书架上真实存在的书。
+  const groupBookCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    const available = new Set((books ?? []).map((b) => b.id))
+    for (const group of bookGroups.groups) {
+      counts[group.name] = group.book_ids.filter((id) => available.has(id)).length
     }
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setMenuOpen(false)
-    }
-    document.addEventListener('mousedown', onPointerDown)
-    document.addEventListener('keydown', onKeyDown)
-    return () => {
-      document.removeEventListener('mousedown', onPointerDown)
-      document.removeEventListener('keydown', onKeyDown)
-    }
-  }, [menuOpen])
+    return counts
+  }, [books, bookGroups.groups])
 
   const load = () => {
     setError('')
@@ -114,14 +240,52 @@ export function ReaderHomeContent({ embedded = false }: { embedded?: boolean }) 
     }
   }
 
+  // 更新目录（对应 legado 书架的「更新目录」）：重抓全部网络书籍的目录，刷出最新章节。
+  const refreshToc = async () => {
+    setRefreshing(true)
+    const toastId = toast.loading('正在更新目录…')
+    try {
+      const res = await readerAPI.refreshBooksToc()
+      load()
+      if (res.total === 0) {
+        toast.success('没有需要更新的网络书籍', { id: toastId })
+      } else if (res.failed > 0) {
+        toast(`更新完成：${res.updated} 本有新章节，${res.failed} 本失败`, { id: toastId, icon: '⚠️' })
+      } else {
+        toast.success(res.updated > 0 ? `更新完成，${res.updated} 本有新章节` : '已是最新目录', { id: toastId })
+      }
+    } catch (e) {
+      toast.error((e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '更新目录失败', {
+        id: toastId,
+      })
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
+  const assignBookToGroup = async (book: ReaderBook, groupName: string) => {
+    setGroupPickerBook(null)
+    await bookGroups.assignBook(book.id, groupName)
+  }
+
+  const inSpecificGroup = bookGroups.selectedGroupId !== ALL_GROUP_ID
+
   return (
     <div className="space-y-6">
       {!embedded && <ReaderModeSwitch />}
 
-      {/* 标题右侧一个下拉入口，收纳全部书架操作 */}
-      <div className="flex items-center justify-between gap-3">
-        <h1 className="shrink-0 font-display text-2xl text-ink-600">书架</h1>
-        <div className="relative" ref={menuRef}>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="shrink-0 font-display text-2xl text-ink-600">
+          书架
+          {visibleBooks !== null && visibleBooks.length > 0 && (
+            <span className="ml-2 align-middle text-xs font-normal text-[var(--app-muted)]">
+              {visibleBooks.length} 本
+              {inSpecificGroup && books !== null && <span className="ml-1">/ 共 {books.length} 本</span>}
+            </span>
+          )}
+        </h1>
+
+        <div className="flex items-center gap-2">
           <input
             ref={fileRef}
             type="file"
@@ -132,80 +296,147 @@ export function ReaderHomeContent({ embedded = false }: { embedded?: boolean }) 
               if (f) void upload(f)
             }}
           />
+
+          {/* 排序（对应 legado 书架设置的排序项） */}
+          <ToolbarMenu
+            title="排序方式"
+            trigger={
+              <>
+                <SlidersHorizontal size={13} />
+                <span className="hidden sm:inline">{sortLabel}</span>
+                <ChevronDown size={13} />
+              </>
+            }
+          >
+            {(close) => (
+              <>
+                {SHELF_SORT_OPTIONS.map((option) => (
+                  <MenuItem
+                    key={option.value}
+                    icon={shelfSort === option.value ? <Check size={13} /> : <span className="w-[13px]" />}
+                    onClick={() => {
+                      setShelfSort(option.value)
+                      close()
+                    }}
+                  >
+                    {option.label}
+                  </MenuItem>
+                ))}
+              </>
+            )}
+          </ToolbarMenu>
+
+          {/* 布局 / 显示设置 */}
           <button
             type="button"
-            aria-haspopup="menu"
-            aria-expanded={menuOpen}
-            onClick={() => setMenuOpen((v) => !v)}
-            className="flex items-center gap-1.5 whitespace-nowrap rounded-xl border border-[var(--app-border)] px-3 py-1.5 text-xs font-bold text-[var(--app-muted)] hover:text-[var(--app-text)]"
-            title="书架操作"
+            aria-label="书架设置"
+            title="书架设置：布局、排序、显示项"
+            onClick={() => setSettingsOpen(true)}
+            className="flex items-center gap-1.5 whitespace-nowrap rounded-xl border border-[var(--app-border)] px-3 py-1.5 text-xs font-bold text-[var(--app-muted)] transition hover:text-[var(--app-text)]"
           >
-            {uploading !== null ? <Loader2 size={13} className="animate-spin" /> : <MoreHorizontal size={14} />}
-            {uploading !== null ? `上传中 ${uploading}%` : '管理'}
-            <ChevronDown size={13} className={`transition-transform ${menuOpen ? 'rotate-180' : ''}`} />
+            {shelfLayout === 'grid' ? <LayoutGrid size={14} /> : shelfLayout === 'list' ? <List size={14} /> : <Rows3 size={14} />}
+            <Settings2 size={13} />
           </button>
 
-          {menuOpen && (
-            <div
-              role="menu"
-              className="absolute right-0 z-30 mt-1.5 w-40 origin-top-right rounded-xl border border-[var(--app-border)] bg-[var(--app-panel)] p-1 shadow-xl"
-            >
-              <button
-                type="button"
-                role="menuitem"
-                disabled={uploading !== null}
-                title="上传 TXT / EPUB 到服务器阅读"
-                onClick={() => {
-                  setMenuOpen(false)
-                  fileRef.current?.click()
-                }}
-                className="flex w-full items-center gap-2 whitespace-nowrap rounded-lg px-2.5 py-2 text-left text-xs font-bold text-[var(--app-muted)] transition hover:bg-[var(--app-hover)] hover:text-[var(--app-text)] disabled:opacity-60"
-              >
-                <FileUp size={13} /> 本地导入
-              </button>
-              {isAdmin && (
-                <>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    disabled={uploading !== null}
-                    title="选择服务器上已有的 TXT / EPUB 文件导入（原地引用，不复制）"
-                    onClick={() => {
-                      setMenuOpen(false)
-                      setPicker('book')
-                    }}
-                    className="flex w-full items-center gap-2 whitespace-nowrap rounded-lg px-2.5 py-2 text-left text-xs font-bold text-[var(--app-muted)] transition hover:bg-[var(--app-hover)] hover:text-[var(--app-text)] disabled:opacity-60"
-                  >
-                    <FolderOpen size={13} /> 服务器导入
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    disabled={uploading !== null}
-                    title="选择服务器上的一个目录导入为有声书（含 .strm 播放指针）"
-                    onClick={() => {
-                      setMenuOpen(false)
-                      setPicker('audio')
-                    }}
-                    className="flex w-full items-center gap-2 whitespace-nowrap rounded-lg px-2.5 py-2 text-left text-xs font-bold text-[var(--app-muted)] transition hover:bg-[var(--app-hover)] hover:text-[var(--app-text)] disabled:opacity-60"
-                  >
-                    <Headphones size={13} /> 有声书导入
-                  </button>
-                </>
-              )}
-              <div className="my-1 border-t border-[var(--app-border)]" />
-              <Link
-                to="/reader/sources"
-                role="menuitem"
-                onClick={() => setMenuOpen(false)}
-                className="flex w-full items-center gap-2 whitespace-nowrap rounded-lg px-2.5 py-2 text-left text-xs font-bold text-[var(--app-muted)] transition hover:bg-[var(--app-hover)] hover:text-[var(--app-text)]"
-              >
-                <Settings2 size={13} /> 书源管理
-              </Link>
-            </div>
-          )}
+          {/* 书架操作 */}
+          <ToolbarMenu
+            title="书架操作"
+            width="w-44"
+            disabled={uploading !== null}
+            trigger={
+              <>
+                {uploading !== null ? <Loader2 size={13} className="animate-spin" /> : <MoreHorizontal size={14} />}
+                <span className="hidden sm:inline">{uploading !== null ? `上传中 ${uploading}%` : '管理'}</span>
+                <ChevronDown size={13} />
+              </>
+            }
+          >
+            {(close) => (
+              <>
+                <MenuItem
+                  icon={<FileUp size={13} />}
+                  disabled={uploading !== null}
+                  onClick={() => {
+                    close()
+                    fileRef.current?.click()
+                  }}
+                >
+                  本地导入
+                </MenuItem>
+                {isAdmin && (
+                  <>
+                    <MenuItem
+                      icon={<FolderOpen size={13} />}
+                      disabled={uploading !== null}
+                      onClick={() => {
+                        close()
+                        setPicker('book')
+                      }}
+                    >
+                      服务器导入
+                    </MenuItem>
+                    <MenuItem
+                      icon={<Headphones size={13} />}
+                      disabled={uploading !== null}
+                      onClick={() => {
+                        close()
+                        setPicker('audio')
+                      }}
+                    >
+                      有声书导入
+                    </MenuItem>
+                  </>
+                )}
+                <MenuItem
+                  icon={refreshing ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+                  disabled={refreshing}
+                  onClick={() => {
+                    close()
+                    void refreshToc()
+                  }}
+                >
+                  更新目录
+                </MenuItem>
+                <MenuItem
+                  icon={<SlidersHorizontal size={13} />}
+                  onClick={() => {
+                    close()
+                    setSettingsOpen(true)
+                  }}
+                >
+                  书架设置
+                </MenuItem>
+                <MenuItem
+                  icon={<Settings2 size={13} />}
+                  onClick={() => {
+                    close()
+                    setManageGroupsOpen(true)
+                  }}
+                >
+                  管理分组
+                </MenuItem>
+                <div className="my-1 border-t border-[var(--app-border)]" />
+                <Link
+                  to="/reader/sources"
+                  role="menuitem"
+                  onClick={close}
+                  className="flex w-full items-center gap-2 whitespace-nowrap rounded-lg px-2.5 py-2 text-left text-xs font-bold text-[var(--app-muted)] transition hover:bg-[var(--app-hover)] hover:text-[var(--app-text)]"
+                >
+                  <Settings2 size={13} /> 书源管理
+                </Link>
+              </>
+            )}
+          </ToolbarMenu>
         </div>
       </div>
+
+      {books !== null && books.length > 0 && (
+        <BookGroupBar
+          tabs={groupTabs}
+          selectedGroupId={bookGroups.selectedGroupId}
+          onSelect={bookGroups.setSelectedGroupId}
+        />
+      )}
 
       {books === null && !error && (
         <div className="flex items-center justify-center py-24 text-[var(--app-muted)]">
@@ -254,64 +485,73 @@ export function ReaderHomeContent({ embedded = false }: { embedded?: boolean }) 
         </div>
       )}
 
-      {books !== null && books.length > 0 && (
-        <div className="grid grid-cols-3 gap-x-4 gap-y-6 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8">
-          {books.map((book) => {
-            const unread = unreadChapters(book)
-            return (
-              <div key={book.id} className="group">
-                <div
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => navigate(`/reader/view/${book.id}`)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault()
-                      navigate(`/reader/view/${book.id}`)
-                    }
-                  }}
-                  className="relative w-full cursor-pointer overflow-hidden rounded-xl border border-[var(--app-border)] bg-[var(--app-panel-soft)] shadow-sm transition group-hover:shadow-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500"
-                >
-                  <div className="aspect-[3/4] w-full">
-                    <ReaderBookCover url={book.cover_url} alt={book.name} iconSize={22} />
-                  </div>
-                  {/* 左下角：本地来源标记（右上角留给未读徽标，右下角是移出按钮，避免窄卡片时重叠） */}
-                  {book.is_local && (
-                    <span className="absolute bottom-1 left-1 flex items-center gap-1 whitespace-nowrap rounded-lg bg-black/55 px-1.5 py-0.5 text-[10px] font-bold text-white backdrop-blur">
-                      <HardDrive size={10} /> 本地
-                    </span>
-                  )}
-                  {unread !== null && (
-                    <span
-                      title={unread > 0 ? `还有 ${unread} 章未读` : '已读完'}
-                      className={`absolute right-1 top-1 whitespace-nowrap rounded-lg px-1.5 py-0.5 text-[10px] font-bold text-white backdrop-blur ${
-                        unread > 0 ? 'bg-rose-500/90' : 'bg-black/55'
-                      }`}
-                    >
-                      {unread > 0 ? `${unread} 章未读` : '已读完'}
-                    </span>
-                  )}
-                  <button
-                    type="button"
-                    aria-label={`移出书架：${book.name}`}
-                    title="移出书架"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      void removeFromShelf(book)
-                    }}
-                    className="absolute bottom-1 right-1 rounded-lg bg-black/55 p-1 text-white opacity-80 backdrop-blur transition hover:bg-red-500 hover:opacity-100 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-white"
-                  >
-                    <Trash2 size={11} />
-                  </button>
-                </div>
-                <p className="mt-2 truncate text-xs font-bold text-[var(--app-text)]">{book.name}</p>
-                <p className="truncate text-2xs text-[var(--app-muted)]">
-                  {book.dur_chapter_title ? `读到 ${book.dur_chapter_title}` : book.author || '未开始阅读'}
-                </p>
-              </div>
-            )
-          })}
+      {books !== null && books.length > 0 && visibleBooks !== null && visibleBooks.length === 0 && (
+        <div className="rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel-soft)] p-10 text-center">
+          <p className="text-sm font-bold text-[var(--app-text)]">这个分组还没有书</p>
+          <p className="mt-1 text-xs text-[var(--app-muted)]">
+            在书籍卡片上点「移到分组」把书放进来，或切到「未分组」看看还没归组的书
+          </p>
         </div>
+      )}
+
+      {visibleBooks !== null && visibleBooks.length > 0 && (
+        shelfLayout === 'grid' ? (
+          <div className={`grid gap-x-4 gap-y-6 ${GRID_COLUMNS_CLASS[shelfGridColumns] ?? GRID_COLUMNS_CLASS[0]}`}>
+            {visibleBooks.map((book) => (
+              <BookshelfCard
+                key={book.id}
+                book={book}
+                layout="grid"
+                showUnread={shelfShowUnread}
+                showUpdateTime={shelfShowUpdateTime}
+                onOpen={() => navigate(`/reader/view/${book.id}`)}
+                onPickGroup={() => setGroupPickerBook(book)}
+                onRemove={() => void removeFromShelf(book)}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {visibleBooks.map((book) => (
+              <BookshelfCard
+                key={book.id}
+                book={book}
+                layout={shelfLayout}
+                showUnread={shelfShowUnread}
+                showUpdateTime={shelfShowUpdateTime}
+                groupName={groupIdOfBook(bookGroups.groups, book.id)}
+                onOpen={() => navigate(`/reader/view/${book.id}`)}
+                onPickGroup={() => setGroupPickerBook(book)}
+                onRemove={() => void removeFromShelf(book)}
+              />
+            ))}
+          </div>
+        )
+      )}
+
+      {settingsOpen && <BookshelfSettingsDialog onClose={() => setSettingsOpen(false)} />}
+
+      {manageGroupsOpen && (
+        <ManageBookGroupsDialogView
+          groups={bookGroups.groups}
+          bookCounts={groupBookCounts}
+          saving={bookGroups.saving}
+          onCreate={bookGroups.createGroup}
+          onRename={bookGroups.renameGroup}
+          onRemove={bookGroups.removeGroup}
+          onReorder={bookGroups.reorderGroups}
+          onClose={() => setManageGroupsOpen(false)}
+        />
+      )}
+
+      {groupPickerBook && (
+        <BookGroupPickerDialog
+          book={groupPickerBook}
+          groups={bookGroups.groups}
+          currentGroupId={groupIdOfBook(bookGroups.groups, groupPickerBook.id)}
+          onPick={(groupName) => void assignBookToGroup(groupPickerBook, groupName)}
+          onClose={() => setGroupPickerBook(null)}
+        />
       )}
 
       {picker && (

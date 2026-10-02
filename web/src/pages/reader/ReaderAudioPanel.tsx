@@ -21,6 +21,7 @@ import {
   AUDIO_TIMERS,
   useReaderSettingsStore,
 } from '../../stores/readerSettings'
+import { readerCoverSrc } from '../../utils/readerCover'
 
 // 音频播放面板（仿 legado AudioPlayActivity / AudioPlayService transport 行）：
 // hls.js 播 m3u8，<audio> 播直链。
@@ -119,6 +120,8 @@ export function ReaderAudioPanel({
   useEffect(() => {
     setCoverOK(true)
   }, [cover])
+  // 明文 http 封面在 https 部署下会被混合内容策略拦掉，统一经后端代理下发
+  const coverSrc = readerCoverSrc(cover)
 
   // 定时关闭：timerLeft 为剩余秒数，0 表示未开启（legado BaseReadAloudService.timeMinute）
   const [timerLeft, setTimerLeft] = useState(0)
@@ -291,10 +294,10 @@ export function ReaderAudioPanel({
     >
       {/* 背景：书籍封面强模糊铺满 + 主题底色蒙层（legado AudioPlayActivity.upCover 的 ivBg）。
           蒙层用主题底色但很淡：既保留日/夜主题色调，又能看清封面。 */}
-      {cover && coverOK && (
+      {coverSrc && coverOK && (
         <>
           <img
-            src={cover}
+            src={coverSrc}
             alt=""
             aria-hidden
             referrerPolicy="no-referrer"
@@ -316,9 +319,9 @@ export function ReaderAudioPanel({
           style={{ borderColor: theme.accent + '66', color: theme.accent }}
         >
           <div className="h-full w-full overflow-hidden rounded-full">
-            {cover && coverOK ? (
+            {coverSrc && coverOK ? (
               <img
-                src={cover}
+                src={coverSrc}
                 alt={title}
                 referrerPolicy="no-referrer"
                 className="h-full w-full object-cover"
