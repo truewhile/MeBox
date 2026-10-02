@@ -77,6 +77,10 @@ interface ReaderSettingsState {
   pageMode: ReaderPageMode
   setPageMode: (mode: ReaderPageMode) => void
 
+  /** 漫画左右「双页铺开」偏好（legado 无对应项，是 Web 端桌面化补充）。 */
+  comicDoublePage: boolean
+  setComicDoublePage: (on: boolean) => void
+
   fontSize: number
   setFontSize: (size: number) => void
 
@@ -136,6 +140,13 @@ export const useReaderSettingsStore = create<ReaderSettingsState>()(
       pageMode: 'page',
       setPageMode: (pageMode) => set({ pageMode }),
 
+      // 默认开启：桌面端（窗口够宽）漫画自动两页铺开，窄屏（手机/窗口拉窄）
+      // 由渲染层按窗口宽度自动退回单页，所以这里开着不会影响手机阅读。
+      // 刻意不做跨设备同步：双页是否合适取决于屏幕宽度，属于设备级偏好，
+      // 和 homeMode 同理（见 utils/readerSettingsSync.ts 的载荷字段）。
+      comicDoublePage: true,
+      setComicDoublePage: (comicDoublePage) => set({ comicDoublePage }),
+
       fontSize: 20,
       setFontSize: (fontSize) => set({ fontSize: Math.min(32, Math.max(14, fontSize)) }),
 
@@ -162,7 +173,8 @@ export const useReaderSettingsStore = create<ReaderSettingsState>()(
  * 与账号同步的阅读器偏好（对应后端 GET/PUT /reader/profile 的载荷）。
  *
  * 这些设置原先是设备级的（只存 localStorage）；现在按用户落库，换设备也能保持一致。
- * 首页的「影视 / 阅读」模式（homeMode）属于设备偏好，故意不参与同步。
+ * 首页的「影视 / 阅读」模式（homeMode）与漫画双页（comicDoublePage）属于设备偏好，
+ * 故意不参与同步——前者是入口选择，后者是否合适取决于屏幕宽度。
  */
 export interface ReaderSettingsProfile {
   theme_id: string

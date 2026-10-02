@@ -1,8 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { Loader2 } from 'lucide-react'
 
+import { useSmoothWheelScroll } from '../../hooks/useSmoothWheelScroll'
+import { rememberImageSize } from '../../utils/comicSpread'
+
 // 漫画/图片阅读器（仿 legado MangaMenu 能力面）：
-// 上下滚动（默认）/ 左右单页两种模式；点击分区翻页/呼出菜单；图片懒加载。
+// 上下滚动（默认）/ 左右单页 / 左右双页三种呈现；点击分区翻页/呼出菜单；图片懒加载。
+//
+// 双页铺开由外层算好「这一屏显示哪几张」传进来（见 utils/comicSpread.ts），
+// 这里只负责把它们并排摆好、各自撑满视口高度。
 
 interface ReaderComicProps {
   images: string[]
@@ -14,17 +20,22 @@ interface ReaderComicProps {
   onProgress: (imageIndex: number) => void
   scrollTo: number | null // 滚动模式：外部要求滚动到的图片序号
   onScrolled: () => void
+  /** 双页模式：本屏要并排显示的图片序号（1 张=独占的宽图/单页，2 张=左右一对）。 */
+  spread?: number[] | null
 }
 
 function ComicImage({
   src,
   theme,
   fit = false,
+  half = false,
 }: {
   src: string
   theme: { bg: string; text: string; accent: string }
-  // fit：单页模式用。整页缩放至视口内，长图不再被 overflow-hidden 的容器裁掉。
+  // fit：整页缩放至视口内，长图不再被 overflow-hidden 的容器裁掉。
   fit?: boolean
+  // half：双页并排时占位不超过半屏；容器收窄到图片本身宽度，两页之间不留缝。
+  half?: boolean
 }) {
   const [state, setState] = useState<'loading' | 'ok' | 'error'>('loading')
 
@@ -40,14 +51,25 @@ function ComicImage({
   // 改成图片正常参与布局，未加载时用 minHeight 占位，转圈/失败信息盖在上层。
   return (
     <div
-      className={`relative flex w-full items-center justify-center ${fit ? 'h-full' : ''}`}
-      style={{ backgroundColor: theme.bg }}
+      className={`relative flex items-center justify-center ${fit ? 'h-full' : ''} ${half ? '' : 'w-full'}`}
+      style={{
+        backgroundColor: theme.bg,
+        // 半屏占位：宽度取「图片自然宽度」与「半屏」的较小值。容器是 flex item，
+        // 百分比 max-width 相对这一行的宽度解析，所以图片不会撑破半屏；
+        // 图片比半屏窄时容器跟着收窄，左右两页自然贴在一起。
+        ...(half ? { maxWidth: '50%', minWidth: 0 } : null),
+      }}
     >
       <img
         src={src}
         loading="lazy"
         alt=""
-        onLoad={() => setState('ok')}
+        onLoad={(e) => {
+          const el = e.currentTarget
+          // 顺带回填原始尺寸：双页分组要用它判断这张图是否横跨两页
+          rememberImageSize(src, el.naturalWidth, el.naturalHeight)
+          setState('ok')
+        }}
         onError={() => setState('error')}
         className={fit ? 'block max-h-full w-auto max-w-full object-contain' : 'block w-full'}
         style={state === 'ok' ? undefined : { minHeight: '10rem' }}
@@ -72,7 +94,7 @@ function ComicImage({
   )
 }
 
-export function ReaderComic({ images, theme, mode, page, onZone, initialImage, onProgress, scrollTo, onScrolled }: ReaderComicProps) {
+export function ReaderComic({ images, theme, mode, page, onZone, initialImage, onProgress, scrollTo, onScrolled, spread }: ReaderComicProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const imgRefs = useRef<(HTMLDivElement | null)[]>([])
   const restoredRef = useRef(false)
@@ -98,6 +120,9 @@ export function ReaderComic({ images, theme, mode, page, onZone, initialImage, o
     restoredRef.current = false
   }, [mode])
 
+  // 上下滚动模式的滚轮同样走「类手机滑动」的平滑惯性滚动
+  useSmoothWheelScroll(scrollRef, mode === 'scroll')
+
   if (images.length === 0) {
     return (
       <div className="flex h-full items-center justify-center text-sm opacity-60" style={{ color: theme.text }}>
@@ -107,11 +132,16 @@ export function ReaderComic({ images, theme, mode, page, onZone, initialImage, o
   }
 
   if (mode === 'page') {
-    // 单页模式：翻页由外层点击区驱动（page 语义 = 图片序号）
-    const idx = Math.min(Math.max(page, 0), images.length - 1)
+    // 翻页模式：翻页由外层点击区驱动（page 语义 = 图片序号）。
+    // 双页铺开时外层按「屏」给好成员（spread），这里只负责并排摆开。
+    const group = (spread ?? []).filter((i) => i >= 0 && i < images.length)
+    const idxs = group.length > 0 ? group : [Math.min(Math.max(page, 0), images.length - 1)]
+    const paired = idxs.length > 1
     return (
       <div className="flex h-full items-center justify-center">
-        <ComicImage key={images[idx]} src={images[idx]} theme={theme} fit />
+        {idxs.map((i) => (
+          <ComicImage key={images[i]} src={images[i]} theme={theme} fit half={paired} />
+        ))}
       </div>
     )
   }

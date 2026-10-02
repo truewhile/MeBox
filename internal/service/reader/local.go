@@ -501,6 +501,11 @@ func (s *ReaderService) LocalChapterContent(
 	// EPUB 里的图片换成签名地址（前端按 [img] 标记渲染）
 	text = s.rewriteLocalImages(book.ID, text)
 	text = s.applyUserReplaceRules(ctx, userID, book.Name, text)
+	// 图片版 EPUB（整章都是 [img] 标记）同样是漫画：按图片类型下发，
+	// 前端走漫画阅读器，才有整页缩放与双页铺开。
+	if imgs, ok := imageMarkersOnly(text); ok {
+		return &ChapterContent{Type: "image", Images: imgs, declaredType: -1}, nil
+	}
 	return &ChapterContent{Type: "text", Content: text, declaredType: -1}, nil
 }
 

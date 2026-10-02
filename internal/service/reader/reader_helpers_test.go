@@ -57,6 +57,76 @@ func TestRewriteContentImageMarkersWithoutProxy(t *testing.T) {
 	}
 }
 
+// TestImageMarkersOnly 整章都是 [img] 标记时判定为图片章（前端才能走漫画阅读器、
+// 双页铺开）；只要掺了能读的正文就必须保持文本，不能把文字吃掉。
+func TestImageMarkersOnly(t *testing.T) {
+	cases := []struct {
+		name     string
+		content  string
+		wantOK   bool
+		wantURLs []string
+	}{
+		{
+			name:     "整章都是标记",
+			content:  imgMarkerPrefix + "/a.jpg\n" + imgMarkerPrefix + "/b.jpg\n",
+			wantOK:   true,
+			wantURLs: []string{"/a.jpg", "/b.jpg"},
+		},
+		{
+			name: "夹着空行 / 孤立 html 标签 / 首尾空白",
+			content: "\n" + imgMarkerPrefix + "/a.jpg\n \n<div>\n</div>\n< br >\n" +
+				"  " + imgMarkerPrefix + " /b.jpg  \n",
+			wantOK:   true,
+			wantURLs: []string{"/a.jpg", "/b.jpg"},
+		},
+		{
+			name:    "掺了正文就保持文本（图 + 长段落）",
+			content: imgMarkerPrefix + "/a.jpg\n" + "第一句话。\n" + imgMarkerPrefix + "/b.jpg\n",
+			wantOK:  false,
+		},
+		{
+			name:    "纯文本",
+			content: "第一章\n正文正文\n",
+			wantOK:  false,
+		},
+		{
+			name:    "空正文",
+			content: "\n\n   \n",
+			wantOK:  false,
+		},
+		{
+			name:    "标记地址为空",
+			content: imgMarkerPrefix + "/a.jpg\n" + imgMarkerPrefix + "   \n",
+			wantOK:  false,
+		},
+		{
+			// 「<3」这类不是标签，是有内容的一行，不能当成空白忽略
+			name:    "非标签的尖括号行",
+			content: imgMarkerPrefix + "/a.jpg\n3 < 5\n",
+			wantOK:  false,
+		},
+	}
+	for _, c := range cases {
+		got, ok := imageMarkersOnly(c.content)
+		if ok != c.wantOK {
+			t.Errorf("%s: ok = %v，期望 %v（urls=%v）", c.name, ok, c.wantOK, got)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if len(got) != len(c.wantURLs) {
+			t.Errorf("%s: urls = %v，期望 %v", c.name, got, c.wantURLs)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.wantURLs[i] {
+				t.Errorf("%s: urls[%d] = %q，期望 %q", c.name, i, got[i], c.wantURLs[i])
+			}
+		}
+	}
+}
+
 // TestSearchCheckKeyWord 校验关键字的取值规则（对应 legado getCheckKeyword）：
 // 含 http/::/++/-- 的值是地址或扩展标记，不当作关键字。
 func TestSearchCheckKeyWord(t *testing.T) {

@@ -1696,6 +1696,63 @@ func rewriteContentImageMarkers(content, baseURL string, proxy func(string) stri
 	return strings.Join(out, "\n")
 }
 
+// imageMarkersOnly 判断一章正文是不是「整章都是图片」：非空行全部是 [img] 标记行。
+//
+// 文本型漫画源（拷贝漫画等，bookSourceType=0 但正文规则给 <img>，见
+// rewriteContentImageMarkers）和图片版 EPUB 的正文就是这样一连串的标记行。
+// 这类章节本质上就是漫画，必须按漫画渲染：文本阅读器的分页把每张图当成一列，
+// 一屏只看得到一张，桌面端也没法两页并排——正是「漫画没法双页铺开」的根因。
+// 所以这里识别出来之后由调用方把类型改成 image，交给漫画阅读器。
+//
+// 只认「非空行全是标记」：混了正文的章节一律保持 text，绝不能把文字吃掉。
+// 返回的地址已经是签名代理地址（调用点在此之前刚做过改写）。
+func imageMarkersOnly(content string) ([]string, bool) {
+	var images []string
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		// 空行和一个孤立的 HTML 标签（<div>/</div> 之类，正文规则给 outerHTML 时很常见）
+		// 都没有可读文字，不影响判断。
+		if trimmed == "" || isHTMLTagOnly(trimmed) {
+			continue
+		}
+		if !strings.HasPrefix(trimmed, imgMarkerPrefix) {
+			return nil, false
+		}
+		addr := strings.TrimSpace(strings.TrimPrefix(trimmed, imgMarkerPrefix))
+		if addr == "" {
+			return nil, false
+		}
+		images = append(images, addr)
+	}
+	return images, len(images) > 0
+}
+
+// isHTMLTagOnly 判断整行是不是一个孤立的 HTML 标签（<div>、</div>、<br> 之类）。
+// 即「<」开头、「>」结尾，且尖括号内是标签名的形状（字母开头，后面可带属性）。
+// 标签名两侧的空白（源码里常见的 < div > 这类手写残渣）一并忽略。
+func isHTMLTagOnly(line string) bool {
+	if len(line) < 3 || line[0] != '<' || line[len(line)-1] != '>' {
+		return false
+	}
+	inner := strings.TrimSpace(strings.TrimPrefix(line[1:len(line)-1], "/"))
+	if inner == "" {
+		return false
+	}
+	for i, r := range inner {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'):
+			continue
+		case i == 0:
+			// 首字符不是字母：<3、<!-- 注释 --> 之类，一律不当标签
+			return false
+		default:
+			// 标签名之后（属性、空白、自闭合斜杠）都算标签
+			return true
+		}
+	}
+	return true
+}
+
 // imageRefsInLine 取出一行正文里的图片地址。
 //
 //   - 正文规则给的就是地址 → 原样返回；
@@ -2189,6 +2246,15 @@ func (s *ReaderService) GetContentForBook(ctx context.Context, userID, bookID st
 		out.Content = rewriteContentImageMarkers(out.Content, ch.URL, func(u string) string {
 			return s.ProxyURL(book.ID, u)
 		})
+	}
+	// 整章都是 [img] 标记 → 这就是一章漫画，改成图片类型交给漫画阅读器。
+	// 若还按文本下发，前端会把它当文字按列分页，一屏只有一张图（双页铺开也无从谈起）。
+	if out.Type == "text" {
+		if imgs, ok := imageMarkersOnly(out.Content); ok {
+			out.Type = "image"
+			out.Images = imgs
+			out.Content = ""
+		}
 	}
 	return out, nil
 }

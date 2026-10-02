@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   ArrowLeftRight,
   BookOpen,
+  Columns2,
   LayoutList,
   ListEnd,
   Loader2,
@@ -17,6 +18,8 @@ import {
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 
 import { readerAPI, type ReaderBook, type ReaderChapter, type ReaderChapterContent, type ReaderSearchOrigin } from '../../api/reader'
+import { useComicSpreads } from '../../hooks/useComicSpreads'
+import { useSmoothWheelScroll } from '../../hooks/useSmoothWheelScroll'
 import { READER_THEMES, getReaderTheme, useReaderSettingsStore } from '../../stores/readerSettings'
 import { buildChapterGroups, chapterGroupIndexOf } from '../../utils/chapterGroups'
 import { ReaderAudioPanel } from './ReaderAudioPanel'
@@ -48,6 +51,15 @@ const WHEEL_SWIPE_THRESHOLD = 60
 const WHEEL_TURN_COOLDOWN = 220
 /** 滚轮事件间隔超过这个毫秒数算新手势，重新累计（用于判断触控板一次滑动结束）。 */
 const WHEEL_GESTURE_GAP = 180
+
+/**
+ * 漫画双页铺开的最小窗口宽度。比这窄时并排两页每页只剩一条竖条，
+ * 反而比单页更难看清，所以渲染层按窗口宽度自动退回单页（偏好设置不动）。
+ */
+const COMIC_SPREAD_MIN_WIDTH = 900
+
+/** 空图片列表的常量引用：避免每次渲染产生新数组、把分组结果的 memo 依赖打散。 */
+const NO_IMAGES: string[] = []
 
 function firstReadableIndex(chapters: ReaderChapter[]): number {
   const i = chapters.findIndex((c) => !c.is_volume && c.url)
@@ -108,6 +120,34 @@ export default function ReaderViewPage() {
   const contentCache = useRef(new Map<string, ReaderChapterContent>())
   const pendingPosRef = useRef(0)
   const pendingEndRef = useRef(false)
+
+  // ── 漫画双页铺开（桌面端） ──
+  // 窗口宽度决定双页是否可用：偏好在 settings 里（用户可关），但窗口不够宽时
+  // 即使开着也退回单页，所以这里额外跟一个窗口宽度。
+  const [windowWidth, setWindowWidth] = useState(() => window.innerWidth)
+  useEffect(() => {
+    const onResize = () => setWindowWidth(window.innerWidth)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  const comicImages = contentType === 'image' && media?.images ? media.images : NO_IMAGES
+  const comicDoublePage =
+    contentType === 'image' &&
+    settings.pageMode === 'page' &&
+    settings.comicDoublePage &&
+    windowWidth >= COMIC_SPREAD_MIN_WIDTH
+  // 分组依赖每张图的原始宽高（横跨两页的宽图要独占一屏），探测窗口跟着当前页走
+  const { spreads: comicSpreads, spreadIndexOf: comicSpreadIndexOf } = useComicSpreads(
+    comicImages,
+    comicDoublePage,
+    comicPage,
+  )
+  /** 当前是第几「屏」。进度仍按图片序号记，屏序号只用于翻页与渲染。 */
+  const comicSpreadIndex =
+    comicDoublePage && comicSpreads.length > 0
+      ? Math.min(comicSpreadIndexOf[comicPage] ?? 0, comicSpreads.length - 1)
+      : 0
 
   // ── 加载书籍与章节 ──
   useEffect(() => {
@@ -258,6 +298,11 @@ export default function ReaderViewPage() {
       pendingPosRef.current = 0
     }
   }, [content, settings.pageMode])
+
+  // 滚动模式的滚轮改成「类手机滑动」：把滚轮格数累加成目标位置再逐帧逼近，
+  // 滚动连续、松手后自己滑行一段，而不是浏览器整格跳变。
+  // 翻页模式的滚轮由下面的翻页监听器接管，这里必须关掉。
+  useSmoothWheelScroll(scrollRef, settings.pageMode === 'scroll' && contentType === 'text')
 
   // ── 进度保存（翻页 / 滚动 / 听书 / 漫画） ──
   // pos 对文本是页码、漫画是图片序号、听书是秒；audio.currentTime 带小数，
@@ -446,6 +491,12 @@ export default function ReaderViewPage() {
       return
     }
     if (contentType === 'image' && settings.pageMode === 'page') {
+      // 双页：一次退一屏；进度落在该屏的首张图上
+      if (comicDoublePage && comicSpreads.length > 0) {
+        if (comicSpreadIndex > 0) setComicPage(comicSpreads[comicSpreadIndex - 1][0])
+        else goChapter(-1, true)
+        return
+      }
       if (comicPage > 0) setComicPage((p) => p - 1)
       else goChapter(-1, true)
       return
@@ -456,7 +507,7 @@ export default function ReaderViewPage() {
     }
     if (page > 0) setPage((p) => p - 1)
     else goChapter(-1, true)
-  }, [contentType, settings.pageMode, comicPage, page, goChapter])
+  }, [contentType, settings.pageMode, comicDoublePage, comicSpreads, comicSpreadIndex, comicPage, page, goChapter])
 
   const goNext = useCallback(() => {
     if (contentType === 'audio') {
@@ -464,6 +515,11 @@ export default function ReaderViewPage() {
       return
     }
     if (contentType === 'image' && settings.pageMode === 'page') {
+      if (comicDoublePage && comicSpreads.length > 0) {
+        if (comicSpreadIndex < comicSpreads.length - 1) setComicPage(comicSpreads[comicSpreadIndex + 1][0])
+        else goChapter(1)
+        return
+      }
       const n = media?.images?.length ?? 0
       if (comicPage < n - 1) setComicPage((p) => p + 1)
       else goChapter(1)
@@ -477,7 +533,22 @@ export default function ReaderViewPage() {
     }
     if (page < pageCount - 1) setPage((p) => p + 1)
     else goChapter(1)
-  }, [contentType, settings.pageMode, media, comicPage, page, pageCount, goChapter])
+  }, [contentType, settings.pageMode, comicDoublePage, comicSpreads, comicSpreadIndex, media, comicPage, page, pageCount, goChapter])
+
+  // ── 点击分区（左 30% 上一页 / 中间呼出菜单 / 右 30% 下一页） ──
+  // 翻页模式用覆盖层上的三个按钮驱动；滚动模式不能再用覆盖层——
+  // 覆盖层不是滚动容器的子节点，手机上手指落在它上面会让纵向滑动失效
+  // （只能点左右），所以滚动模式改在滚动容器自身的 onClick 上按 x 坐标分区：
+  // 纵向拖动不会产生 click，浏览器原生滚动照常工作。
+  const handleZoneTap = useCallback(
+    (clientX: number, rect: DOMRect) => {
+      const x = rect.width > 0 ? (clientX - rect.left) / rect.width : 0.5
+      if (x < 0.3) goPrev()
+      else if (x > 0.7) goNext()
+      else setMenuOpen((v) => !v)
+    },
+    [goPrev, goNext],
+  )
 
   // ── 键盘（桌面端） ──
   useEffect(() => {
@@ -499,12 +570,13 @@ export default function ReaderViewPage() {
   }, [goPrev, goNext, menuOpen, panel])
 
   // ── 鼠标滚轮翻页（仅翻页模式） ──
-  // 往上滚=上一页，往下滚=下一页。滚动模式保持浏览器原生滚动，不做接管。
+  // 往上滚=上一页，往下滚=下一页。滚动模式的滚轮不在这里处理，
+  // 由 useSmoothWheelScroll 接管做平滑惯性滚动。
   // 滚轮必须用原生监听器：React 的 onWheel 是 passive 的，调不了 preventDefault。
   useEffect(() => {
     const el = readerRef.current
     if (!el) return
-    // 滚动模式/听书面板/漫画滚动交给浏览器自己处理；菜单打开时不翻页
+    // 滚动模式/听书面板/漫画滚动交给各自的滚动逻辑；菜单打开时不翻页
     if (settings.pageMode !== 'page' || menuOpen) return
     if (contentType !== 'text' && contentType !== 'image') return
 
@@ -639,7 +711,7 @@ export default function ReaderViewPage() {
     <div ref={readerRef} className="fixed inset-0 z-40 flex flex-col" style={{ backgroundColor: theme.bg, color: theme.text }}>
       {/* 正文视口 */}
       <div className="relative flex-1 overflow-hidden">
-        <div className="mx-auto h-full w-full max-w-[900px]">
+        <div className={`mx-auto h-full w-full ${contentType === 'image' && comicDoublePage ? '' : 'max-w-[900px]'}`}>
           {contentType === 'audio' ? (
             media && media.tracks && media.tracks.length > 0 ? (
               <ReaderAudioPanel
@@ -670,10 +742,11 @@ export default function ReaderViewPage() {
             )
           ) : contentType === 'image' ? (
             <ReaderComic
-              images={media?.images ?? []}
+              images={comicImages}
               theme={theme}
               mode={settings.pageMode}
               page={comicPage}
+              spread={comicDoublePage ? (comicSpreads[comicSpreadIndex] ?? null) : null}
               onZone={(zone) => {
                 if (zone === 'center') setMenuOpen((v) => !v)
               }}
@@ -711,6 +784,7 @@ export default function ReaderViewPage() {
           ) : (
             <div
               ref={scrollRef}
+              onClick={(e) => handleZoneTap(e.clientX, e.currentTarget.getBoundingClientRect())}
               onScroll={(e) => {
                 const el = e.currentTarget
                 if (chapterIndex === null) return
@@ -723,7 +797,7 @@ export default function ReaderViewPage() {
                   }
                 }
               }}
-              className={`h-full overflow-y-auto px-4 ${MENU_SHIFT}`}
+              className={`h-full overflow-y-auto overscroll-contain px-4 ${MENU_SHIFT}`}
               style={{ fontSize: settings.fontSize, lineHeight: settings.lineHeight, ...menuShiftStyle }}
             >
               <div className="py-4">
@@ -763,7 +837,10 @@ export default function ReaderViewPage() {
           )}
         </div>
 
-        {(contentType === 'text' || (contentType === 'image' && settings.pageMode === 'page')) && (
+        {/* 点击分区覆盖层：只在翻页模式用。滚动模式用覆盖层会挡住正文的
+            原生纵向滚动（手指落在覆盖层上时找不到可滚动的祖先节点），
+            所以滚动模式由正文容器的 onClick 分区（见 handleZoneTap）。 */}
+        {settings.pageMode === 'page' && (contentType === 'text' || contentType === 'image') && (
           <div className="absolute inset-0 grid grid-cols-[30%_40%_30%]">
             <button type="button" aria-label="上一页" onClick={goPrev} className="cursor-w-resize" />
             <button
@@ -846,8 +923,10 @@ export default function ReaderViewPage() {
               </button>
             </div>
 
-            {/* 动作行（目录 / 界面 / 夜间 / 模式 / 换源） */}
-            <div className={`${canSwitchSource ? 'grid-cols-5' : 'grid-cols-4'} grid pt-1`} style={{ color: theme.text }}>
+            {/* 动作行（目录 / 界面 / 夜间 / 模式 / 双页 / 换源）。
+                用 flex 等分而不是 grid-cols-N：动作数量随内容类型和书源能力变化，
+                grid 列数得写死成字面量类名，多一个按钮就要再加一档。 */}
+            <div className="flex pt-1" style={{ color: theme.text }}>
               {([
                 { icon: <LayoutList size={18} />, label: '目录', action: () => openPanel('toc') },
                 { icon: <BookOpen size={18} />, label: '界面', action: () => openPanel('style') },
@@ -861,6 +940,17 @@ export default function ReaderViewPage() {
                   label: settings.pageMode === 'page' ? '滚动' : '翻页',
                   action: () => settings.setPageMode(settings.pageMode === 'page' ? 'scroll' : 'page'),
                 },
+                // 双页铺开只对漫画的翻页模式有意义；窗口太窄时并排两页没法看，
+                // 干脆不显示入口（不是灰掉，避免用户以为坏了）。
+                ...(contentType === 'image' && settings.pageMode === 'page' && windowWidth >= COMIC_SPREAD_MIN_WIDTH
+                  ? [
+                      {
+                        icon: <Columns2 size={18} />,
+                        label: settings.comicDoublePage ? '单页' : '双页',
+                        action: () => settings.setComicDoublePage(!settings.comicDoublePage),
+                      },
+                    ]
+                  : []),
                 ...(canSwitchSource
                   ? [
                       {
@@ -877,7 +967,7 @@ export default function ReaderViewPage() {
                   key={item.label}
                   type="button"
                   onClick={item.action}
-                  className="flex flex-col items-center gap-1 py-1 opacity-80 hover:opacity-100"
+                  className="flex flex-1 flex-col items-center gap-1 py-1 opacity-80 hover:opacity-100"
                 >
                   {item.icon}
                   <span className="text-2xs">{item.label}</span>
