@@ -1222,49 +1222,127 @@ func (s *ReaderService) VerifyProxyURL(bookID, encoded, sig string) (string, err
 // FetchMedia 服务端拉取媒体资源（携带书源级请求头与 Referer，支持 Range 透传）。
 // 调用方负责关闭 resp.Body。
 func (s *ReaderService) FetchMedia(ctx context.Context, book *model.ReaderBook, rawURL, rangeHeader string) (*http.Response, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	for k, v := range helper.HTTPHeaderPresets() {
-		httpReq.Header.Set(k, v)
-	}
-	// 媒体流同样交给 net/http 管压缩：否则压缩过的资源会以原始字节透传给
-	// 播放器/图片标签，表现为「打不开」。Range 请求服务端通常不压缩，
-	// 解压后 resp 会去掉 Content-Length/Content-Encoding，透传逻辑不受影响。
-	helper.StripAcceptEncoding(httpReq.Header)
-	// 书源级请求头
-	if s.repo != nil {
-		if found, findErr := s.repo.GetSourceByURL(ctx, book.Origin); findErr == nil && found != nil && found.Header != "" {
-			var headers map[string]any
-			if json.Unmarshal([]byte(found.Header), &headers) == nil {
-				for k, v := range headers {
-					httpReq.Header.Set(k, fmt.Sprintf("%v", v))
+	// 请求构造抽成闭包：http.Request 不可复用，重试时必须重建。
+	buildRequest := func() (*http.Request, error) {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range helper.HTTPHeaderPresets() {
+			httpReq.Header.Set(k, v)
+		}
+		// 媒体流同样交给 net/http 管压缩：否则压缩过的资源会以原始字节透传给
+		// 播放器/图片标签，表现为「打不开」。Range 请求服务端通常不压缩，
+		// 解压后 resp 会去掉 Content-Length/Content-Encoding，透传逻辑不受影响。
+		helper.StripAcceptEncoding(httpReq.Header)
+		// 书源级请求头
+		if s.repo != nil {
+			if found, findErr := s.repo.GetSourceByURL(ctx, book.Origin); findErr == nil && found != nil && found.Header != "" {
+				var headers map[string]any
+				if json.Unmarshal([]byte(found.Header), &headers) == nil {
+					for k, v := range headers {
+						httpReq.Header.Set(k, fmt.Sprintf("%v", v))
+					}
 				}
 			}
 		}
-	}
-	// 登录态：登录类书源的漫画/音频资源同样需要 Cookie 与 loginHeader 才能取到。
-	if s.repo != nil {
-		state := s.newSourceState(ctx, book.Origin)
-		for k, v := range state.LoginHeaderMap() {
-			if !strings.EqualFold(k, "cookie") && httpReq.Header.Get(k) == "" {
-				httpReq.Header.Set(k, v)
+		// 登录态：登录类书源的漫画/音频资源同样需要 Cookie 与 loginHeader 才能取到。
+		if s.repo != nil {
+			state := s.newSourceState(ctx, book.Origin)
+			for k, v := range state.LoginHeaderMap() {
+				if !strings.EqualFold(k, "cookie") && httpReq.Header.Get(k) == "" {
+					httpReq.Header.Set(k, v)
+				}
+			}
+			if httpReq.Header.Get("Cookie") == "" {
+				if ck := state.CookieForRequest(rawURL); ck != "" {
+					httpReq.Header.Set("Cookie", ck)
+				}
 			}
 		}
-		if httpReq.Header.Get("Cookie") == "" {
-			if ck := state.CookieForRequest(rawURL); ck != "" {
-				httpReq.Header.Set("Cookie", ck)
+		// 默认 Referer 只能用「真正的 http(s) 书源地址」。
+		// legado 的 origin 对普通书源是 bookSourceUrl，但聚合类书源（如「光遇聚合」）
+		// 的 origin 是个显示名，拼出来的 Referer 非法，会被图床判定为盗链并
+		// 301 到一张「请到本网站阅读」的占位图 —— 表现为漫画每一页都是同一张提示图。
+		// 这种情况下宁可不发 Referer（实测不带 Referer 能拿到原图）；书源 header
+		// 里自己声明的 Referer 优先级更高，不受这里影响。
+		if httpReq.Header.Get("Referer") == "" {
+			if referer := sourceReferer(book.Origin); referer != "" {
+				httpReq.Header.Set("Referer", referer)
 			}
 		}
+		if rangeHeader != "" {
+			httpReq.Header.Set("Range", rangeHeader)
+		}
+		return httpReq, nil
 	}
-	if httpReq.Header.Get("Referer") == "" && book.Origin != "" {
-		httpReq.Header.Set("Referer", strings.TrimSuffix(book.Origin, "/")+"/")
+
+	var lastErr error
+	for attempt := 1; attempt <= mediaFetchAttempts; attempt++ {
+		if attempt > 1 {
+			// 图床在高并发拉取时会偶发 403/429（实测同一张图稍后重试即可成功）。
+			// 漫画一屏会并发取多张，零星失败就会在页面上留几个破图，因此做少量退避重试。
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(mediaFetchRetryDelay * time.Duration(attempt-1)):
+			}
+		}
+		httpReq, err := buildRequest()
+		if err != nil {
+			return nil, err
+		}
+		resp, err := s.http.Do(httpReq)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if attempt == mediaFetchAttempts || !mediaRetryableStatus(resp.StatusCode) {
+			return resp, nil
+		}
+		// 可重试的状态码：读完并关闭响应体再试，避免连接泄漏。
+		lastErr = fmt.Errorf("upstream returned %s", resp.Status)
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		_ = resp.Body.Close()
 	}
-	if rangeHeader != "" {
-		httpReq.Header.Set("Range", rangeHeader)
+	return nil, lastErr
+}
+
+const (
+	// mediaFetchAttempts 媒体拉取最多尝试次数（含首次）。
+	mediaFetchAttempts = 3
+	// mediaFetchRetryDelay 重试退避基数，实际等待为 (attempt-1) 倍。
+	mediaFetchRetryDelay = 400 * time.Millisecond
+)
+
+// mediaRetryableStatus 判断上游状态码是否值得重试。
+// 403/429 是图床并发限流的表现，5xx 是上游抖动。
+func mediaRetryableStatus(code int) bool {
+	switch code {
+	case http.StatusForbidden, http.StatusRequestTimeout, http.StatusTooManyRequests,
+		http.StatusInternalServerError, http.StatusBadGateway,
+		http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
 	}
-	return s.http.Do(httpReq)
+}
+
+// sourceReferer 把书源的 origin 转成可用的默认 Referer。
+//
+// 只有 origin 本身是合法的 http(s) 地址时才使用；聚合类书源的 origin 是
+// 「显示名」，用它当 Referer 会被图床当成盗链（见 FetchMedia 中的注释），
+// 此时返回空串表示不发 Referer。
+func sourceReferer(origin string) string {
+	origin = strings.TrimSpace(origin)
+	if origin == "" {
+		return ""
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return ""
+	}
+	return strings.TrimSuffix(origin, "/") + "/"
 }
 
 // RewritePlaylist 重写 m3u8 播放列表：分片与密钥地址改写为签名代理地址。

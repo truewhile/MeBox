@@ -286,8 +286,12 @@ func (s *ReaderService) transcodeInputHeaders(ctx context.Context, bookID, sourc
 	if ck := state.CookieForRequest(source); ck != "" {
 		headers["Cookie"] = ck
 	}
+	// 默认 Referer 同上：聚合类书源的 origin 是显示名，拼出来的 Referer 非法，
+	// 会被音源/图床判盗链。只在 origin 是真正的 http(s) 地址时才补。
 	if headers["Referer"] == "" {
-		headers["Referer"] = strings.TrimSuffix(book.Origin, "/") + "/"
+		if referer := sourceReferer(book.Origin); referer != "" {
+			headers["Referer"] = referer
+		}
 	}
 	return headers
 }
