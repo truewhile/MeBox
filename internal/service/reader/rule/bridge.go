@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/dop251/goja"
+	"github.com/google/uuid"
 )
 
 // 本文件对应 legado JsExtensions / JsEncodeUtils / RegexJsExtensions 中
@@ -401,9 +402,38 @@ func newJavaObject(vm *goja.Runtime, r *JSRunner, a *AnalyzeRule) *goja.Object {
 	set("getWebViewUA", func(call goja.FunctionCall) goja.Value {
 		return vm.ToValue(defaultWebViewUA)
 	})
-	set("t2s", func(call goja.FunctionCall) goja.Value { return vm.ToValue(stringArg(call, 0)) })
-	set("s2t", func(call goja.FunctionCall) goja.Value { return vm.ToValue(stringArg(call, 0)) })
+	// 简繁转换（对应 legado ChineseUtils → quick-transfer）。这里按单字映射实现，
+	// 见 zh_convert.go 的说明。
+	set("t2s", func(call goja.FunctionCall) goja.Value { return vm.ToValue(zhToSimplified(stringArg(call, 0))) })
+	set("s2t", func(call goja.FunctionCall) goja.Value { return vm.ToValue(zhToTraditional(stringArg(call, 0))) })
 	set("htmlFormat", func(call goja.FunctionCall) goja.Value { return vm.ToValue(stringArg(call, 0)) })
+	// randomUUID：部分书源拿它生成设备标识/请求 ID（缺失会让整条规则抛异常）。
+	set("randomUUID", func(call goja.FunctionCall) goja.Value { return vm.ToValue(uuid.NewString()) })
+	// toNumChapter：章节标题里的数字规整成阿拉伯数字（见 zh_number.go）。
+	set("toNumChapter", func(call goja.FunctionCall) goja.Value { return vm.ToValue(numChapter(stringArg(call, 0))) })
+	// toURL(url[, baseUrl])：对应 legado JsURL（host/origin/pathname/searchParams）。
+	set("toURL", func(call goja.FunctionCall) goja.Value {
+		base := ""
+		if len(call.Arguments) > 1 && !goja.IsUndefined(call.Arguments[1]) && !goja.IsNull(call.Arguments[1]) {
+			base = call.Arguments[1].String()
+		}
+		obj, err := newJSURLObject(vm, stringArg(call, 0), base)
+		if err != nil {
+			bridgeErr("toURL", err)
+		}
+		return obj
+	})
+	// logType：调试用，打印值的类型（对应 legado 的日志实现）。
+	set("logType", func(call goja.FunctionCall) goja.Value {
+		if r.cfg.Log != nil {
+			if len(call.Arguments) == 0 || goja.IsNull(call.Arguments[0]) || goja.IsUndefined(call.Arguments[0]) {
+				r.cfg.Log("null")
+			} else {
+				r.cfg.Log(fmt.Sprintf("%T", call.Arguments[0].Export()))
+			}
+		}
+		return goja.Null()
+	})
 
 	// ── 书源会话状态（legado 中 `java` 与 `source` 是同一对象） ──
 	if r.state != nil {
@@ -496,21 +526,26 @@ func newJavaObject(vm *goja.Runtime, r *JSRunner, a *AnalyzeRule) *goja.Object {
 	//   open / searchBook —— legado 中仅做原生界面跳转（打开搜索页 / 登录页），
 	//                        服务端没有对应页面，谎报成功会让书源走错分支
 
-	// 需要真正无头浏览器/本地文件系统的能力：明确抛出不支持
-	unsupported := func(name string) func(goja.FunctionCall) goja.Value {
+	// 需要真正无头浏览器/本地文件系统的能力：明确抛出不支持，并把原因说清楚
+	// （书源调试面板会把这句原样显示出来，用户能立刻判断该不该继续折腾这个源）。
+	unsupported := func(name, reason string) func(goja.FunctionCall) goja.Value {
 		return func(call goja.FunctionCall) goja.Value {
-			panic(vm.ToValue("java." + name + " 需要浏览器或本地文件能力，服务端不支持"))
+			panic(vm.ToValue(fmt.Sprintf("java.%s 服务端不支持：%s", name, reason)))
 		}
 	}
 	for _, name := range []string{
 		"webView", "webViewGetSource", "webViewGetOverrideUrl",
 		"openVideoPlayer", "getVerificationCode",
+	} {
+		set(name, unsupported(name, "需要无头浏览器（WebView）"))
+	}
+	for _, name := range []string{
 		"importScript", "cacheFile", "downloadFile", "readFile", "readTxtFile", "deleteFile",
 		"unzipFile", "un7zFile", "unrarFile", "unArchiveFile", "getTxtInFolder",
 		"getZipStringContent", "getZipByteArrayContent",
 		"getRarStringContent", "get7zStringContent",
 	} {
-		set(name, unsupported(name))
+		set(name, unsupported(name, "需要本地文件/压缩包能力"))
 	}
 
 	return o

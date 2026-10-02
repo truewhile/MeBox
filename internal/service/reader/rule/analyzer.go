@@ -332,13 +332,14 @@ func (a *AnalyzeRule) getStringListRules(ruleList []*SourceRule, mContent any, i
 		result = strings.Split(s, "\n")
 	}
 	if isUrl {
+		// 这里必须接受任何切片形态：书源的下一页地址/章节地址规则常常由 JS 生成，
+		// goja 导出的是 []any。早期只认 []string，JS 给的地址数组会被静默丢掉，
+		// 表现为「nextTocUrl 明明有规则却永远不翻页」。
 		var urlList []string
-		if lst, ok := result.([]string); ok {
-			for _, u := range lst {
-				abs := a.absolutize(u)
-				if abs != "" && !containsStr(urlList, abs) {
-					urlList = append(urlList, abs)
-				}
+		for _, u := range resultStrings(result) {
+			abs := a.absolutize(u)
+			if abs != "" && !containsStr(urlList, abs) {
+				urlList = append(urlList, abs)
 			}
 		}
 		return urlList, nil
@@ -360,6 +361,32 @@ func (a *AnalyzeRule) getStringListRules(ruleList []*SourceRule, mContent any, i
 		return out, nil
 	default:
 		return []string{anyToString(result)}, nil
+	}
+}
+
+// resultStrings 把任意分析结果归一成字符串切片（[]string / []any / []*html.Node / 单值）。
+func resultStrings(result any) []string {
+	switch t := result.(type) {
+	case nil:
+		return nil
+	case []string:
+		return t
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, v := range t {
+			out = append(out, anyToString(v))
+		}
+		return out
+	case []*html.Node:
+		out := make([]string, 0, len(t))
+		for _, v := range t {
+			out = append(out, outerHTML(v))
+		}
+		return out
+	case string:
+		return strings.Split(t, "\n")
+	default:
+		return []string{anyToString(result)}
 	}
 }
 

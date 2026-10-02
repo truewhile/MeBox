@@ -28,6 +28,9 @@ type ReaderBookSource struct {
 	RespondTime    int64      `json:"respond_time"` // 最近一次调试响应耗时（ms）
 	// HasLogin 是否声明了登录能力（loginUrl/loginUi），列表接口按需计算，不落库。
 	HasLogin bool `gorm:"-" json:"has_login"`
+	// NeedsBrowser 是否依赖 WebView/无头浏览器（webView 选项或 webjs 规则）。
+	// 服务端没有浏览器，这类源注定不可用，列表接口按需计算让前端能提前提示。
+	NeedsBrowser bool `gorm:"-" json:"needs_browser"`
 }
 
 // ReaderSourceState 书源会话状态：对应 legado 中按书源 key 存储的

@@ -48,6 +48,8 @@ type Request struct {
 	// Unsupported 非 nil 表示该请求依赖当前阶段不支持的能力，
 	// 值为对应错误（webView；JS 在接入 runner 后已支持）。
 	Unsupported error
+	// Retry 对应 URL 选项的 retry：可恢复失败时的额外重试次数。
+	Retry *int
 }
 
 // ParseAnalyzeUrl 对应 AnalyzeUrl.init：URL 规则 → 可执行请求。
@@ -202,6 +204,7 @@ func ParseAnalyzeUrlWithJS(mUrl, key string, page int, baseUrl string, runner *J
 			}
 		}
 		req.Charset = option.Charset
+		req.Retry = option.Retry
 		// 对应 legado AnalyzeUrl.type：值本身不参与判断，只要非空就把响应按
 		// 「原始字节的 hex」返回。书源借此把 data: 地址当参数信封用。
 		if option.Type != "" {

@@ -47,16 +47,20 @@ type ReaderService struct {
 	// （java.startBrowser / startBrowserAwait，见 browser_panel.go）。
 	browserMu      sync.Mutex
 	browserPending map[string]*pendingBrowser
+
+	// limiter 单源限速（书源 concurrentRate）。
+	limiter *sourceRateLimiter
 }
 
 // NewReaderService 创建服务。
 func NewReaderService(cfg *config.Config, log *zap.Logger, repos *repository.Container) *ReaderService {
 	return &ReaderService{
-		cfg:    cfg,
-		log:    log,
-		repo:   repos.Reader,
-		http:   helper.NewSiteHTTPClient(30, true),
-		crypto: helper.NewSecretCipher(firstNonEmpty(cfg.Secrets.EncryptionKey, cfg.Secrets.JWTSecret)),
+		cfg:     cfg,
+		log:     log,
+		repo:    repos.Reader,
+		http:    helper.NewSiteHTTPClient(30, true),
+		crypto:  helper.NewSecretCipher(firstNonEmpty(cfg.Secrets.EncryptionKey, cfg.Secrets.JWTSecret)),
+		limiter: newSourceRateLimiter(),
 	}
 }
 
@@ -83,9 +87,15 @@ func (s *ReaderService) ImportSources(ctx context.Context, text string) (int, er
 		return 0, fmt.Errorf("未识别到有效书源（支持 JSON 数组/对象或 Base64）")
 	}
 	imported := 0
-	for _, raw := range sources {
+	var failures []string
+	for i, raw := range sources {
 		bs, err := ParseBookSource(raw)
-		if err != nil || bs.BookSourceURL == "" {
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("第 %d 条解析失败: %v", i+1, err))
+			continue
+		}
+		if bs.BookSourceURL == "" {
+			failures = append(failures, fmt.Sprintf("第 %d 条缺少 bookSourceUrl", i+1))
 			continue
 		}
 		// 已存在则更新，否则新建（按书源 URL 去重）
@@ -124,13 +134,22 @@ func (s *ReaderService) ImportSources(ctx context.Context, text string) (int, er
 			existing.LastCheckAt = &now
 			if err := s.repo.UpdateSource(ctx, existing); err == nil {
 				imported++
+			} else {
+				failures = append(failures, fmt.Sprintf("%s: %v", record.Name, err))
 			}
 			continue
 		}
 		record.LastCheckAt = &now
 		if err := s.repo.CreateSource(ctx, record); err == nil {
 			imported++
+		} else {
+			failures = append(failures, fmt.Sprintf("%s: %v", record.Name, err))
 		}
+	}
+	// 一条都没进来时不能只回 0：前端只会弹一句「成功导入 0 个书源」，
+	// 用户完全不知道哪里不对。把第一条失败原因带回去，让界面能说清楚。
+	if imported == 0 && len(failures) > 0 {
+		return 0, fmt.Errorf("书源导入失败：%s", failures[0])
 	}
 	return imported, nil
 }
@@ -207,8 +226,19 @@ func (s *ReaderService) ListSources(ctx context.Context) ([]model.ReaderBookSour
 	}
 	for i := range sources {
 		sources[i].HasLogin = rawSourceHasLogin(sources[i].RawJSON)
+		sources[i].NeedsBrowser = rawSourceNeedsBrowser(sources[i].RawJSON)
 	}
 	return sources, nil
+}
+
+// rawSourceNeedsBrowser 粗判书源是否依赖 WebView（webView 请求选项 / webjs 规则）。
+//
+// 服务端没有无头浏览器，这类源注定跑不通；列表先标出来，用户不用等到报错才知道。
+// 用字符串粗扫而不是完整解析：这些标记只出现在规则/选项里，误报代价也只是多一个提示。
+func rawSourceNeedsBrowser(rawJSON string) bool {
+	lower := strings.ToLower(rawJSON)
+	return strings.Contains(lower, "webview") || strings.Contains(lower, "webjs") ||
+		strings.Contains(lower, "\"webview\"")
 }
 
 // rawSourceHasLogin 只解出 loginUrl/loginUi 两个字段判断登录能力。
@@ -249,10 +279,6 @@ func (s *ReaderService) execute(ctx context.Context, req *rule.Request) (string,
 // executeWithState 在 execute 基础上叠加会话：附加 Cookie / loginHeader，
 // 并在 captureCookies 为真时把响应 Set-Cookie 回写到会话。
 func (s *ReaderService) executeWithState(ctx context.Context, req *rule.Request, state *sourceState, captureCookies bool) (string, string, int, error) {
-	var bodyReader io.Reader
-	if req.Body != "" {
-		bodyReader = strings.NewReader(req.Body)
-	}
 	// 请求目标是含 query 的完整 URL：对应 legado 的 `get(urlNoQuery, encodedQuery)`
 	// （两端拼起来才是最终地址）。ParseAnalyzeUrl 已把重编码后的 query 放进
 	// req.URL。早期这里误用 URLNoQuery，导致所有「参数写在 query 里」的 GET
@@ -283,36 +309,77 @@ func (s *ReaderService) executeWithState(ctx context.Context, req *rule.Request,
 			}
 		}
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, req.Method, target, bodyReader)
-	if err != nil {
-		return "", "", 0, err
+	// 请求构造抽成闭包：重试时必须重建请求（body 读取器只能消费一次）。
+	buildRequest := func() (*http.Request, error) {
+		var bodyReader io.Reader
+		if req.Body != "" {
+			bodyReader = strings.NewReader(req.Body)
+		}
+		httpReq, err := http.NewRequestWithContext(ctx, req.Method, target, bodyReader)
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range helper.HTTPHeaderPresets() {
+			httpReq.Header.Set(k, v)
+		}
+		for k, v := range req.Headers {
+			httpReq.Header.Set(k, v)
+		}
+		// Accept-Encoding 必须留给 net/http：只有调用方没设置时它才会自动解压，
+		// 否则压缩响应会以原始字节进入规则层（书源的 JSON.parse 会直接炸）。
+		// 书源 JSON 的 header 字段也可能塞了这个头，所以放在最后统一清掉。
+		helper.StripAcceptEncoding(httpReq.Header)
+		if req.Method == "POST" {
+			switch {
+			case req.IsForm:
+				httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			case req.IsJSON:
+				httpReq.Header.Set("Content-Type", "application/json")
+			}
+		}
+		return httpReq, nil
 	}
-	for k, v := range helper.HTTPHeaderPresets() {
-		httpReq.Header.Set(k, v)
-	}
-	for k, v := range req.Headers {
-		httpReq.Header.Set(k, v)
-	}
-	// Accept-Encoding 必须留给 net/http：只有调用方没设置时它才会自动解压，
-	// 否则压缩响应会以原始字节进入规则层（书源的 JSON.parse 会直接炸）。
-	// 书源 JSON 的 header 字段也可能塞了这个头，所以放在最后统一清掉。
-	helper.StripAcceptEncoding(httpReq.Header)
-	if req.Method == "POST" {
-		switch {
-		case req.IsForm:
-			httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		case req.IsJSON:
-			httpReq.Header.Set("Content-Type", "application/json")
+
+	// retry：URL 选项声明的重试次数（对应 legado AnalyzeUrl 的同名字段）。
+	// 只重试可恢复的失败：网络错误、5xx、403/429（防盗链/限流）。确定性 4xx 不重试。
+	attempts := 1
+	if req.Retry != nil && *req.Retry > 0 {
+		attempts += *req.Retry
+		if attempts > maxRequestAttempts {
+			attempts = maxRequestAttempts
 		}
 	}
-	resp, err := s.http.Do(httpReq)
-	if err != nil {
-		return "", "", 0, err
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	if err != nil {
-		return "", "", resp.StatusCode, err
+	var (
+		resp *http.Response
+		data []byte
+	)
+	for attempt := 1; ; attempt++ {
+		httpReq, err := buildRequest()
+		if err != nil {
+			return "", "", 0, err
+		}
+		resp, err = s.http.Do(httpReq)
+		if err != nil {
+			if attempt < attempts && sleepWithContext(ctx, requestRetryDelay*time.Duration(attempt)) {
+				continue
+			}
+			return "", "", 0, err
+		}
+		data, err = io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+		_ = resp.Body.Close()
+		if err != nil {
+			if attempt < attempts && sleepWithContext(ctx, requestRetryDelay*time.Duration(attempt)) {
+				continue
+			}
+			return "", "", resp.StatusCode, err
+		}
+		if attempt < attempts && retryableStatus(resp.StatusCode) {
+			if !sleepWithContext(ctx, requestRetryDelay*time.Duration(attempt)) {
+				return "", "", resp.StatusCode, nil
+			}
+			continue
+		}
+		break
 	}
 	data = helper.DecompressBody(resp, data)
 	// 声明了 type 的请求按「原始字节的 hex」返回（对应 legado AnalyzeUrl.type），
@@ -429,6 +496,11 @@ func (sess *sourceSession) close() {
 
 // fetch 执行请求，并按书源配置决定是否自动保存响应里的 Cookie。
 func (sess *sourceSession) fetch(req *rule.Request) (string, string, int, error) {
+	// 单源限速（书源 concurrentRate）：挂在这里，规则请求与书源 JS 的 java.ajax
+	// 都会经过，保证同一个源不会并发轰炸站点。
+	if sess.svc.limiter != nil {
+		sess.svc.limiter.wait(sess.ctx, sess.srcURL(), SPtr(sess.bs.ConcurrentRate))
+	}
 	body, finalURL, code, err := sess.svc.executeWithState(sess.ctx, req, sess.state, sess.captureCookies())
 	if err != nil {
 		return body, finalURL, code, err
@@ -572,17 +644,45 @@ func (sess *sourceSession) srcName() string {
 	return srcNameOf(sess.src, sess.bs)
 }
 
-// headerJSON 书源级请求头 JSON。
-func (sess *sourceSession) headerJSON() string {
+// headerJSON 书源级请求头（JSON 文本）。
+//
+// 对应 legado BaseSource.getHeaderMap：header 有两种写法 —— 直接的 JSON 对象，
+// 或者是 @js:/<js> 规则在运行时拼出来（拷贝漫画就是后者：用 baseUrl 拼 referer、
+// 带上 platform/version）。之前这里只做 json.Unmarshal，JS 形态会被整体丢掉，
+// 请求少了这些必需头，上游照样回 200，但结果是空列表 —— 表现为「书源能导入、
+// 却搜不到任何内容」。JS 求值失败时返回空串，宁可不带自定义头也不发半成品。
+func (sess *sourceSession) headerJSON(runner *rule.JSRunner) string {
+	raw := ""
 	if sess.src != nil && sess.src.Header != "" {
-		return sess.src.Header
+		raw = sess.src.Header
+	} else {
+		raw = SPtr(sess.bs.Header)
 	}
-	return SPtr(sess.bs.Header)
+	js, isJS := stripJSWrapperOK(raw)
+	if !isJS {
+		return raw
+	}
+	if runner == nil {
+		return ""
+	}
+	// baseUrl 绑成书源地址：legado 在 getHeaderMap 里用的也是 getKey()（bookSourceUrl）。
+	v, err := runner.Run(nil, js, nil, sess.srcURL())
+	if err != nil {
+		if sess.svc.log != nil {
+			sess.svc.log.Warn("reader: 执行书源请求头规则失败",
+				zap.String("source", sess.srcName()), zap.Error(err))
+		}
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return strings.TrimSpace(fmt.Sprintf("%v", v))
 }
 
 // applyHeaders 把书源级请求头合并进请求（不覆盖已显式设置的值）。
-func (sess *sourceSession) applyHeaders(req *rule.Request) {
-	raw := sess.headerJSON()
+func (sess *sourceSession) applyHeaders(req *rule.Request, runner *rule.JSRunner) {
+	raw := sess.headerJSON(runner)
 	if raw == "" {
 		return
 	}
@@ -792,7 +892,7 @@ func (s *ReaderService) searchInSource(ctx context.Context, src *model.ReaderBoo
 	if req.Unsupported != nil {
 		return nil, req.Unsupported
 	}
-	sess.applyHeaders(req)
+	sess.applyHeaders(req, runner)
 	body, finalURL, _, err := sess.fetch(req)
 	if err != nil {
 		return nil, err
@@ -837,6 +937,14 @@ func (s *ReaderService) searchInSource(ctx context.Context, src *model.ReaderBoo
 				LatestChapter: lastChapter,
 			}},
 		})
+	}
+	// 一条结果都没有时，用书源声明的校验关键字判断是「真没这本书」还是「被风控了」。
+	// legado 用 checkKeyWord 做同样的事（源失效/被拦截时响应里不会出现它）。
+	// 这里只把它当成失败原因的提示，不改变「有结果就返回结果」的行为。
+	if len(books) == 0 {
+		if kw := bs.SearchCheckKeyWord(); kw != "" && !strings.Contains(body, kw) {
+			return nil, fmt.Errorf("搜索结果为空，且响应未包含校验关键字「%s」（源可能已失效或触发风控）", kw)
+		}
 	}
 	return books, nil
 }
@@ -927,7 +1035,7 @@ func (s *ReaderService) getBookInfoFrom(ctx context.Context, src *model.ReaderBo
 	if req.Unsupported != nil {
 		return nil, req.Unsupported
 	}
-	sess.applyHeaders(req)
+	sess.applyHeaders(req, runner)
 	body, finalURL, _, err := sess.fetch(req)
 	if err != nil {
 		return nil, err
@@ -1122,32 +1230,101 @@ func (s *ReaderService) getTocFrom(ctx context.Context, src *model.ReaderBookSou
 	}
 	sess := s.newSession(ctx, src, bs)
 	defer sess.close()
+
+	declaredType := -1
+	var chapters []TocChapter
+	seenChapter := map[string]bool{}
+	visited := map[string]bool{}
+	// 用队列收集待抓页：书源有两种写法 —— 有的只给「下一页」，有的一次给出全部
+	// 后续页（拷贝漫画就是后者，且它的规则锚定 offset=0，只有第一页能算出完整列表）。
+	// 每页都再看一次 nextTocUrl 并去重入队，两种写法都能覆盖。
+	queue := []string{tocURL}
+	fetched := 0
+	for len(queue) > 0 && fetched < maxTocPages {
+		current := queue[0]
+		queue = queue[1:]
+		if current == "" || visited[current] {
+			continue
+		}
+		visited[current] = true
+		fetched++
+
+		pageChapters, nextURLs, declared, err := s.fetchTocPage(ctx, sess, bs, current, bookURL)
+		if err != nil {
+			// 第一页失败才算整体失败；后续页失败保留已经拿到的章节
+			if fetched == 1 {
+				return nil, -1, err
+			}
+			continue
+		}
+		if declared >= 0 {
+			declaredType = declared
+		}
+		for _, ch := range pageChapters {
+			if seenChapter[ch.URL] {
+				continue
+			}
+			seenChapter[ch.URL] = true
+			ch.Index = len(chapters)
+			chapters = append(chapters, ch)
+		}
+		for _, u := range nextURLs {
+			if u != "" && !visited[u] {
+				queue = append(queue, u)
+			}
+		}
+	}
+	return chapters, declaredType, nil
+}
+
+// maxTocPages 目录翻页上限。书源的 nextTocUrl 规则可能给出自引用或极长的链路
+// （legado 靠协程取消兜底），这里用硬上限 + 已访问集合双重保护。
+const maxTocPages = 50
+
+// fetchTocPage 抓一页目录，返回该页章节、书源声明的后续页地址、声明的书籍类型。
+// 对应 legado BookChapterList.analyzeChapterList（含 nextTocUrl 处理）。
+func (s *ReaderService) fetchTocPage(ctx context.Context, sess *sourceSession, bs *BookSource, tocURL, bookURL string) ([]TocChapter, []string, int, error) {
+	tr := bs.RuleToc
 	runner := sess.runner("", 0)
 	req, err := rule.ParseAnalyzeUrlWithJS(tocURL, "", 0, sess.srcURL(), runner)
 	if err != nil {
-		return nil, -1, err
+		return nil, nil, -1, err
 	}
 	if req.Unsupported != nil {
-		return nil, -1, req.Unsupported
+		return nil, nil, -1, req.Unsupported
 	}
-	sess.applyHeaders(req)
+	sess.applyHeaders(req, runner)
 	body, finalURL, _, err := sess.fetch(req)
 	if err != nil {
-		return nil, -1, err
+		return nil, nil, -1, err
 	}
 	ar := sess.newAnalyzer("", 0, body, finalURL)
 	sess.applyBookContext(ar, bookURL, nil, "", 0)
 
 	elements, err := ar.GetElements(SPtr(tr.ChapterList))
 	if err != nil {
-		return nil, -1, err
+		return nil, nil, -1, err
 	}
 	declaredType := -1
 	if t, ok := ar.BookTypeOverride(); ok {
 		declaredType = normalizeBookType(t)
 	}
+
+	// 下一页目录：对应 legado 的 getStringList(nextTocUrl, isUrl=true)，并排除当前页
+	// 地址。规则可能一次给出全部后续页（拷贝漫画就是这种写法），也可能每页只给一个。
+	var nextURLs []string
+	if SPtr(tr.NextTocURL) != "" {
+		if urls, err := ar.GetStringList(SPtr(tr.NextTocURL), nil, true); err == nil {
+			for _, u := range urls {
+				if u != "" && u != finalURL && u != tocURL {
+					nextURLs = append(nextURLs, u)
+				}
+			}
+		}
+	}
+
 	var chapters []TocChapter
-	for i, el := range elements {
+	for _, el := range elements {
 		title, err := ar.GetString(SPtr(tr.ChapterName), el, false)
 		if err != nil || title == "" {
 			continue
@@ -1164,14 +1341,14 @@ func (s *ReaderService) getTocFrom(ctx context.Context, src *model.ReaderBookSou
 		}
 		updateTime, _ := ar.GetString(SPtr(tr.UpdateTime), el, false)
 		chapters = append(chapters, TocChapter{
-			Index: i, Title: title, URL: url, IsVolume: isVolume, UpdateTime: updateTime,
+			Title: title, URL: url, IsVolume: isVolume, UpdateTime: updateTime,
 		})
 	}
 	// 章节规则可能逐条执行，取最后一次声明（书源是在元素循环前设置的）。
 	if t, ok := ar.BookTypeOverride(); ok {
 		declaredType = normalizeBookType(t)
 	}
-	return chapters, declaredType, nil
+	return chapters, nextURLs, declaredType, nil
 }
 
 // ChapterContent 章节内容（按类型返回文本/音频/图片）。
@@ -1297,7 +1474,7 @@ func (s *ReaderService) FetchMedia(ctx context.Context, book *model.ReaderBook, 
 			lastErr = err
 			continue
 		}
-		if attempt == mediaFetchAttempts || !mediaRetryableStatus(resp.StatusCode) {
+		if attempt == mediaFetchAttempts || !retryableStatus(resp.StatusCode) {
 			return resp, nil
 		}
 		// 可重试的状态码：读完并关闭响应体再试，避免连接泄漏。
@@ -1314,19 +1491,6 @@ const (
 	// mediaFetchRetryDelay 重试退避基数，实际等待为 (attempt-1) 倍。
 	mediaFetchRetryDelay = 400 * time.Millisecond
 )
-
-// mediaRetryableStatus 判断上游状态码是否值得重试。
-// 403/429 是图床并发限流的表现，5xx 是上游抖动。
-func mediaRetryableStatus(code int) bool {
-	switch code {
-	case http.StatusForbidden, http.StatusRequestTimeout, http.StatusTooManyRequests,
-		http.StatusInternalServerError, http.StatusBadGateway,
-		http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		return true
-	default:
-		return false
-	}
-}
 
 // sourceReferer 把书源的 origin 转成可用的默认 Referer。
 //
@@ -1421,7 +1585,7 @@ func (s *ReaderService) getContentFrom(ctx context.Context, src *model.ReaderBoo
 		if req.Unsupported != nil {
 			return nil, req.Unsupported
 		}
-		sess.applyHeaders(req)
+		sess.applyHeaders(req, runner)
 		body, finalURL, _, err := sess.fetch(req)
 		if err != nil {
 			return nil, err
@@ -1430,14 +1594,19 @@ func (s *ReaderService) getContentFrom(ctx context.Context, src *model.ReaderBoo
 		ar := sess.newAnalyzer("", 0, body, finalURL)
 		sess.applyBookContext(ar, bookURL, nil, "", 0)
 
-		list, err := ar.GetStringList(SPtr(cr.Content), nil, false)
+		// 正文规则用 getString 求值（对应 legado BookContent：analyzeRule.getString(contentRule.content)）。
+		// 关键差别出在 JS 段：getStringList 会把上一段的结果按「列表」交给 JS，而 legado
+		// 交给 JS 的是按 \n 拼好的字符串。拷贝漫画的正文规则正是 result.split("\n")，
+		// 喂成列表就报 Object has no member 'split'，整章图片都取不到。
+		// 对 jsoup / xpath 规则，getString 与 getStringList+join 结果一致，文本源不受影响。
+		page, err := ar.GetString(SPtr(cr.Content), nil, false)
 		if err != nil {
 			return nil, err
 		}
 		if t, ok := ar.BookTypeOverride(); ok {
 			declaredType = normalizeBookType(t)
 		}
-		parts = append(parts, strings.Join(list, "\n"))
+		parts = append(parts, page)
 		if SPtr(cr.NextContentURL) == "" {
 			break
 		}
@@ -1485,6 +1654,46 @@ func (s *ReaderService) getContentFrom(ctx context.Context, src *model.ReaderBoo
 		out.Type = "text"
 	}
 	return out, nil
+}
+
+// rewriteContentImageMarkers 把网络文本正文里「整行就是 <img src="…">」的内容改写成
+// [img]<地址> 标记行，前端据此渲染成图片。
+//
+// 对应 legado 的 ruleContent.imageStyle：文本型漫画源（bookSourceType=0，但正文规则
+// 直接给 <img> 标签，如拷贝漫画）就是靠它把图片显示出来的；不转换的话读者看到的是
+// 原始的 <img src="..."> 文本。只处理「整行是标签」的行，不碰正常文本源里夹在段落
+// 中间的内嵌图片，避免改变原有语义。
+func rewriteContentImageMarkers(content, baseURL string, proxy func(string) string) string {
+	if !strings.Contains(content, "<img") {
+		return content
+	}
+	lines := strings.Split(content, "\n")
+	out := make([]string, 0, len(lines))
+	changed := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToLower(trimmed), "<img") {
+			if refs := imageRefsInLine(trimmed); len(refs) > 0 {
+				for _, ref := range refs {
+					abs := rule.GetAbsoluteURL(baseURL, ref)
+					if abs == "" {
+						continue
+					}
+					if proxy != nil {
+						abs = proxy(abs)
+					}
+					out = append(out, imgMarkerPrefix+abs)
+					changed = true
+				}
+				continue
+			}
+		}
+		out = append(out, line)
+	}
+	if !changed {
+		return content
+	}
+	return strings.Join(out, "\n")
 }
 
 // imageRefsInLine 取出一行正文里的图片地址。
@@ -1973,6 +2182,13 @@ func (s *ReaderService) GetContentForBook(ctx context.Context, userID, bookID st
 	}
 	for i, img := range out.Images {
 		out.Images[i] = s.ProxyURL(book.ID, img)
+	}
+	// 文本型漫画源：正文里的 <img> 标签换成前端认识的 [img] 标记（同样走签名代理，
+	// 这样需要防盗链头的图片也能显示）。见 rewriteContentImageMarkers 的说明。
+	if out.Type == "text" && strings.Contains(out.Content, "<img") {
+		out.Content = rewriteContentImageMarkers(out.Content, ch.URL, func(u string) string {
+			return s.ProxyURL(book.ID, u)
+		})
 	}
 	return out, nil
 }
