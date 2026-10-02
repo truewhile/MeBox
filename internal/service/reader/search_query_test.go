@@ -46,7 +46,7 @@ func TestSearchSendsQueryString(t *testing.T) {
 	svc, _ := newLoginTestService(t)
 	_ = prepareLoginSource(t, svc, queryEchoSource(srv.URL))
 
-	books, skipped, err := svc.Search(t.Context(), "宠魅")
+	books, skipped, err := svc.Search(t.Context(), "宠魅", nil)
 	if err != nil {
 		t.Fatalf("搜索失败: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestSearchResponseUsesEmptyArrays(t *testing.T) {
 	svc, _ := newLoginTestService(t)
 	_ = prepareLoginSource(t, svc, queryEchoSource(srv.URL))
 
-	books, skipped, err := svc.Search(t.Context(), "宠魅")
+	books, skipped, err := svc.Search(t.Context(), "宠魅", nil)
 	if err != nil {
 		t.Fatalf("搜索失败: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestSearchPreservesExistingPercentEncoding(t *testing.T) {
 	out, _ := json.Marshal(src)
 	_ = prepareLoginSource(t, svc, string(out))
 
-	if _, _, err := svc.Search(t.Context(), "宠魅"); err != nil {
+	if _, _, err := svc.Search(t.Context(), "宠魅", nil); err != nil {
 		t.Fatalf("搜索失败: %v", err)
 	}
 	if gotQuery != "宠魅" {

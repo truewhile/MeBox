@@ -151,7 +151,7 @@ func TestSourceLoginEndToEnd(t *testing.T) {
 	sourceID := prepareLoginSource(t, svc, loginTestSourceJSON(t, srv.URL))
 
 	// ── 登录前：未鉴权，站点返回未登录页 → 搜不到书 ──
-	if books, _, err := svc.Search(ctx, "会员"); err != nil {
+	if books, _, err := svc.Search(ctx, "会员", nil); err != nil {
 		t.Fatal(err)
 	} else if len(books) != 0 {
 		t.Fatalf("未登录时不应搜到结果: %+v", books)
@@ -188,7 +188,7 @@ func TestSourceLoginEndToEnd(t *testing.T) {
 	}
 
 	// ── 登录后搜索：应携带 Cookie 并成功 ──
-	books, skipped, err := svc.Search(ctx, "会员")
+	books, skipped, err := svc.Search(ctx, "会员", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestSourceLoginEndToEnd(t *testing.T) {
 	if info.LoggedIn || len(info.Cookies) != 0 {
 		t.Fatalf("登出后不应残留登录态: %+v", info)
 	}
-	if books, _, err := svc.Search(ctx, "会员"); err != nil {
+	if books, _, err := svc.Search(ctx, "会员", nil); err != nil {
 		t.Fatal(err)
 	} else if len(books) != 0 {
 		t.Fatalf("登出后不应还能搜到结果: %+v", books)
@@ -367,7 +367,7 @@ func TestEnabledCookieJarGating(t *testing.T) {
 }`
 	sourceID := prepareLoginSource(t, svc, srcJSON)
 
-	if _, _, err := svc.Search(ctx, "任意"); err != nil {
+	if _, _, err := svc.Search(ctx, "任意", nil); err != nil {
 		t.Fatal(err)
 	}
 	// 自动捕获被关闭：不应出现 auto=from-response
@@ -389,7 +389,7 @@ func TestEnabledCookieJarGating(t *testing.T) {
 	if _, err := svc.ImportSources(ctx, srcJSONOn); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := svc.Search(ctx, "任意"); err != nil {
+	if _, _, err := svc.Search(ctx, "任意", nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := svc.newSourceState(ctx, srv2.URL).GetCookie(srv2.URL); !strings.Contains(got, "auto=from-response") {

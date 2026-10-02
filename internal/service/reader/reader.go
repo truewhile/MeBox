@@ -737,17 +737,17 @@ type searchHit struct {
 }
 
 // Search 多源聚合搜索（同步返回，P1 改为 WS 流式推送）。
-func (s *ReaderService) Search(ctx context.Context, key string) ([]SearchBook, []SearchSkipped, error) {
+//
+// sourceIDs 是本次的搜索范围（对应 legado SearchScope.getBookSourceParts）：
+// 空表示「全部书源」——所有已启用书源；非空则只搜其中仍存在、仍启用的书源。
+// 范围内一个可搜书源都不剩时退回全部启用（对应 legado 范围失效时的兜底），
+// 这样删源/停源后不会因为残留的旧选择把搜索变成「什么都搜不到」。
+func (s *ReaderService) Search(ctx context.Context, key string, sourceIDs []string) ([]SearchBook, []SearchSkipped, error) {
 	sources, err := s.repo.ListSources(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	var enabled []model.ReaderBookSource
-	for _, src := range sources {
-		if src.Enabled {
-			enabled = append(enabled, src)
-		}
-	}
+	enabled := enabledSourcesForScope(sources, sourceIDs)
 	if len(enabled) == 0 {
 		return nil, nil, fmt.Errorf("没有已启用的书源")
 	}
@@ -781,6 +781,34 @@ func (s *ReaderService) Search(ctx context.Context, key string) ([]SearchBook, [
 	}
 	_ = g.Wait()
 	return mergeSearchResults(hits, key), skipped, nil
+}
+
+// enabledSourcesForScope 按搜索范围挑出可搜的书源（保持 ListSources 的 customOrder）。
+// 空范围 = 全部启用；范围里的书源不存在或已停用时忽略；全被忽略则退回全部启用。
+func enabledSourcesForScope(sources []model.ReaderBookSource, sourceIDs []string) []model.ReaderBookSource {
+	enabled := make([]model.ReaderBookSource, 0, len(sources))
+	for _, src := range sources {
+		if src.Enabled {
+			enabled = append(enabled, src)
+		}
+	}
+	if len(sourceIDs) == 0 {
+		return enabled
+	}
+	want := make(map[string]struct{}, len(sourceIDs))
+	for _, id := range sourceIDs {
+		want[id] = struct{}{}
+	}
+	scoped := make([]model.ReaderBookSource, 0, len(enabled))
+	for _, src := range enabled {
+		if _, ok := want[src.ID]; ok {
+			scoped = append(scoped, src)
+		}
+	}
+	if len(scoped) == 0 {
+		return enabled
+	}
+	return scoped
 }
 
 // SearchSkipped 搜索失败的书源与原因（书源管理调试用）。

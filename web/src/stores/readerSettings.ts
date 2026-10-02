@@ -81,6 +81,15 @@ interface ReaderSettingsState {
   comicDoublePage: boolean
   setComicDoublePage: (on: boolean) => void
 
+  // ── 搜索范围（对应 legado 搜索页的 SearchScopeDialog / AppConfig.searchScope）──
+  /**
+   * 已选书源 ID；空数组表示「全部启用书源」（默认）。只影响书籍搜索的并发范围。
+   * 和 comicDoublePage 一样是设备级偏好：刻意不参与账号同步（legado 也把
+   * searchScope 存在本机 AppConfig），换设备重新默认全选即可。
+   */
+  searchScopeIds: string[]
+  setSearchScopeIds: (ids: string[]) => void
+
   fontSize: number
   setFontSize: (size: number) => void
 
@@ -146,6 +155,9 @@ export const useReaderSettingsStore = create<ReaderSettingsState>()(
       // 和 homeMode 同理（见 utils/readerSettingsSync.ts 的载荷字段）。
       comicDoublePage: true,
       setComicDoublePage: (comicDoublePage) => set({ comicDoublePage }),
+
+      searchScopeIds: [],
+      setSearchScopeIds: (ids) => set({ searchScopeIds: [...new Set(ids)] }),
 
       fontSize: 20,
       setFontSize: (fontSize) => set({ fontSize: Math.min(32, Math.max(14, fontSize)) }),

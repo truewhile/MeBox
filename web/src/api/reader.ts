@@ -245,11 +245,13 @@ export const readerAPI = {
   setSourceVariable: (id: string, variable: string) => api.put(`/reader/sources/${id}/variable`, { variable }),
 
   // ── 搜索 / 详情 / 目录 / 正文 ──
-  search: (key: string) =>
+  // 多源聚合搜索。sourceIds 为空表示搜索范围＝全部启用书源（默认）；
+  // 非空则只搜这些书源（后端会忽略其中已删除/停用的，全部失效时退回全部启用）。
+  search: (key: string, sourceIds: string[] = []) =>
     api
       .post<{ books: ReaderSearchBook[] | null; skipped: ReaderSearchSkipped[] | null }>(
         '/reader/search',
-        { key },
+        { key, source_ids: sourceIds },
         longOpts,
       )
       .then((r) => r.data),
