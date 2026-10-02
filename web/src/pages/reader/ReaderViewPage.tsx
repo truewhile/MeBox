@@ -14,10 +14,11 @@ import {
   ScrollText,
   Sun,
 } from 'lucide-react'
-import { Virtuoso } from 'react-virtuoso'
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 
 import { readerAPI, type ReaderBook, type ReaderChapter, type ReaderChapterContent, type ReaderSearchOrigin } from '../../api/reader'
 import { READER_THEMES, getReaderTheme, useReaderSettingsStore } from '../../stores/readerSettings'
+import { buildChapterGroups, chapterGroupIndexOf } from '../../utils/chapterGroups'
 import { ReaderAudioPanel } from './ReaderAudioPanel'
 import { ReaderComic } from './ReaderComic'
 import { SourcePickerDialog } from './SourcePickerDialog'
@@ -71,6 +72,8 @@ export default function ReaderViewPage() {
 
   const [menuOpen, setMenuOpen] = useState(false)
   const [panel, setPanel] = useState<'none' | 'toc' | 'style'>('none')
+  /** 目录面板顶部「区间下拉」选中的组号，随列表滚动同步。 */
+  const [tocGroupIndex, setTocGroupIndex] = useState(0)
   // 换源：候选源来自按书名重新搜索的结果；reloadKey 变化时整本书重新加载
   const [switchOpen, setSwitchOpen] = useState(false)
   const [switchLoading, setSwitchLoading] = useState(false)
@@ -85,6 +88,8 @@ export default function ReaderViewPage() {
   const wheelLastEventRef = useRef(0)
   const wheelLastTurnRef = useRef(0)
   const wheelSwipeLockedRef = useRef(false)
+  /** 目录面板虚拟列表句柄：区间下拉靠它整段跳转。 */
+  const tocRef = useRef<VirtuosoHandle>(null)
 
   // 分页状态
   const viewportRef = useRef<HTMLDivElement>(null)
@@ -338,6 +343,35 @@ export default function ReaderViewPage() {
     setError('')
     setChapterIndex(idx)
   }, [chapters.length])
+
+  // ── 目录面板的分段跳转（对齐听书面板的区间下拉） ──
+  // 上千章的目录按 100 章一组切开，顶部下拉选区间即整段跳转（见 utils/chapterGroups.ts）。
+  // 目录不足一组（≤100 章）时不显示下拉——一屏能扫完，多一个控件只是噪声。
+  const tocGroups = useMemo(() => buildChapterGroups(chapters.length), [chapters.length])
+
+  const jumpToTocGroup = useCallback(
+    (next: number) => {
+      const group = tocGroups[next]
+      if (!group) return
+      setTocGroupIndex(next)
+      tocRef.current?.scrollToIndex({ index: group.start, align: 'start' })
+    },
+    [tocGroups],
+  )
+
+  // 面板开关：打开目录时把区间下拉对齐到当前章节所在组。上次可能停在第 3 组，
+  // 续读已到第 12 组，沿用旧值会显示错误的区间。
+  const openPanel = useCallback(
+    (next: 'none' | 'toc' | 'style') => {
+      if (panel === next) {
+        setPanel('none')
+        return
+      }
+      if (next === 'toc') setTocGroupIndex(chapterGroupIndexOf(chapterIndex ?? 0, chapters.length))
+      setPanel(next)
+    },
+    [chapterIndex, chapters.length, panel],
+  )
 
   // 听书：是否还有下一章（片尾跳过/播完时决定续播还是停住）
   const hasNextAudioChapter = useMemo(() => {
@@ -621,6 +655,7 @@ export default function ReaderViewPage() {
                 hasNext={hasNextAudioChapter}
                 transcoding={media.transcoding ?? false}
                 onProgress={throttledMediaSave}
+                onCommitProgress={savePos}
                 onPrevChapter={() => goChapter(-1)}
                 onNextChapter={() => goChapter(1)}
                 onSelectChapter={jumpToChapter}
@@ -814,8 +849,8 @@ export default function ReaderViewPage() {
             {/* 动作行（目录 / 界面 / 夜间 / 模式 / 换源） */}
             <div className={`${canSwitchSource ? 'grid-cols-5' : 'grid-cols-4'} grid pt-1`} style={{ color: theme.text }}>
               {([
-                { icon: <LayoutList size={18} />, label: '目录', action: () => setPanel(panel === 'toc' ? 'none' : 'toc') },
-                { icon: <BookOpen size={18} />, label: '界面', action: () => setPanel(panel === 'style' ? 'none' : 'style') },
+                { icon: <LayoutList size={18} />, label: '目录', action: () => openPanel('toc') },
+                { icon: <BookOpen size={18} />, label: '界面', action: () => openPanel('style') },
                 {
                   icon: settings.night ? <Sun size={18} /> : <Moon size={18} />,
                   label: settings.night ? '日间' : '夜间',
@@ -927,15 +962,39 @@ export default function ReaderViewPage() {
                 >
                   <ArrowLeft size={18} />
                 </button>
-                <p className="flex-1 truncate text-sm font-bold">
+                <p className="min-w-0 flex-1 truncate text-sm font-bold">
                   {book?.name ?? '目录'}
                   <span className="ml-2 text-2xs font-normal opacity-60">目录（{chapters.length} 章）</span>
                 </p>
+                {tocGroups.length > 1 && (
+                  <select
+                    value={tocGroupIndex}
+                    onChange={(e) => jumpToTocGroup(Number(e.target.value))}
+                    aria-label="按区间快速定位章节"
+                    title="按区间快速定位章节"
+                    className="shrink-0 rounded-lg border bg-transparent px-2 py-1 text-2xs outline-none"
+                    style={{ borderColor: theme.text + '33', color: theme.text }}
+                  >
+                    {tocGroups.map((group) => (
+                      <option
+                        key={group.index}
+                        value={group.index}
+                        style={{ color: '#111827', backgroundColor: '#ffffff' }}
+                      >
+                        {group.label}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </div>
               <div className="min-h-0 flex-1">
                 <Virtuoso
+                  ref={tocRef}
                   data={chapters}
                   initialTopMostItemIndex={Math.max(0, chapterIndex ?? 0)}
+                  rangeChanged={(range) =>
+                    setTocGroupIndex(chapterGroupIndexOf(range.startIndex, chapters.length))
+                  }
                   itemContent={(index, ch) => {
                     const isCurrent = index === chapterIndex
                     return (

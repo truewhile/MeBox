@@ -257,15 +257,17 @@ export const readerAPI = {
     api.get<ReaderBookInfo>('/reader/book-info', { params, timeout: LONG_REQUEST_TIMEOUT }).then((r) => r.data),
   toc: (params: { source_id?: string; source_url?: string; book_url: string; toc_url: string }) =>
     api
-      .get<{ chapters: ReaderTocChapter[] }>('/reader/toc', { params, timeout: LONG_REQUEST_TIMEOUT })
-      .then((r) => r.data.chapters),
+      .get<{ chapters: ReaderTocChapter[] | null }>('/reader/toc', { params, timeout: LONG_REQUEST_TIMEOUT })
+      // 后端把 nil 目录编码成 null；调用方一律按数组处理，
+      // 否则 `chapters.length` 会抛 TypeError（页面只剩一句 JS 报错）。
+      .then((r) => r.data.chapters ?? []),
   content: (params: { source_id?: string; source_url?: string; book_url: string; chapter_url: string }) =>
     api
       .get<ReaderChapterContent>('/reader/content', { params, timeout: LONG_REQUEST_TIMEOUT })
       .then((r) => r.data),
 
   // ── 书架 ──
-  listBooks: () => api.get<{ books: ReaderBook[] }>('/reader/books').then((r) => r.data.books),
+  listBooks: () => api.get<{ books: ReaderBook[] | null }>('/reader/books').then((r) => r.data.books ?? []),
   addBook: (body: { origin: ReaderSearchOrigin; name: string; author: string; cover_url: string }) =>
     api.post<ReaderBook>('/reader/books', body).then((r) => r.data),
   /** 上传本地书籍（TXT / EPUB），服务端解析目录后加入书架。 */
@@ -331,7 +333,9 @@ export const readerAPI = {
   saveAudioConfig: (id: string, body: { open_credits: number; close_credits: number }) =>
     api.put(`/reader/books/${id}/audio-config`, body),
   listChapters: (id: string) =>
-    api.get<{ chapters: ReaderChapter[] }>(`/reader/books/${id}/chapters`).then((r) => r.data.chapters),
+    api
+      .get<{ chapters: ReaderChapter[] | null }>(`/reader/books/${id}/chapters`)
+      .then((r) => r.data.chapters ?? []),
   saveChapters: (id: string, chapters: ReaderChapter[]) => api.post(`/reader/books/${id}/chapters`, { chapters }),
   // 书架维度正文（服务端已应用书源 replaceRegex 与用户替换净化规则）
   bookContent: (id: string, chapter: number) =>

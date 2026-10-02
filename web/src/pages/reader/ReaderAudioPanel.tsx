@@ -12,7 +12,7 @@ import {
   Timer,
   X,
 } from 'lucide-react'
-import { Virtuoso } from 'react-virtuoso'
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 
 import type { ReaderChapter } from '../../api/reader'
 import {
@@ -21,6 +21,7 @@ import {
   AUDIO_TIMERS,
   useReaderSettingsStore,
 } from '../../stores/readerSettings'
+import { buildChapterGroups, chapterGroupIndexOf } from '../../utils/chapterGroups'
 import { readerCoverSrc } from '../../utils/readerCover'
 
 // 音频播放面板（仿 legado AudioPlayActivity / AudioPlayService transport 行）：
@@ -48,6 +49,11 @@ interface ReaderAudioPanelProps {
   /** 该音轨由服务端转码，首次播放需要等转码完成。 */
   transcoding?: boolean
   onProgress: (seconds: number) => void
+  /**
+   * 立即落一次进度（不节流）。只在「用户要离开这一章」时用（切后台/关页面），
+   * 把节流窗口里最后几秒补上；正常播放走 onProgress 的节流上报。
+   */
+  onCommitProgress: (seconds: number) => void
   onPrevChapter: () => void
   onNextChapter: () => void
   onSelectChapter: (index: number) => void
@@ -91,6 +97,7 @@ export function ReaderAudioPanel({
   hasNext,
   transcoding = false,
   onProgress,
+  onCommitProgress,
   onPrevChapter,
   onNextChapter,
   onSelectChapter,
@@ -102,6 +109,8 @@ export function ReaderAudioPanel({
   const hlsRef = useRef<{ destroy: () => void } | null>(null)
   const restoredRef = useRef(false)
   const skippedEndRef = useRef(false)
+  /** 章节抽屉的虚拟列表句柄：分组下拉靠它整段跳转。 */
+  const tocRef = useRef<VirtuosoHandle>(null)
 
   const speed = useReaderSettingsStore((s) => s.audioSpeed)
   const setSpeed = useReaderSettingsStore((s) => s.setAudioSpeed)
@@ -115,6 +124,16 @@ export function ReaderAudioPanel({
   // 音轨加载失败（格式不支持 / 转码失败）：界面上要给出原因，不能一直停在「加载中」
   const [audioError, setAudioError] = useState('')
   const [sheet, setSheet] = useState<Sheet>('none')
+  /** 章节抽屉顶部「区间下拉」当前选中的组号，随列表滚动同步。 */
+  const [groupIndex, setGroupIndex] = useState(0)
+  // 当前音轨的最后播放位置（秒）。timeupdate 只在播放中触发，离开页面时要用它补报一次。
+  const lastTimeRef = useRef(0)
+  // onCommitProgress 每次渲染都可能换实例（父级闭包里的 chapterIndex 会变），
+  // 卸载时只能通过 ref 拿到最新的那个，否则会写错章节。
+  const commitRef = useRef(onCommitProgress)
+  useEffect(() => {
+    commitRef.current = onCommitProgress
+  }, [onCommitProgress])
   // 封面可能被防盗链挡掉：加载失败就退回主题色占位，不留破图
   const [coverOK, setCoverOK] = useState(true)
   useEffect(() => {
@@ -145,6 +164,8 @@ export function ReaderAudioPanel({
     setAudioError('')
     setCur(0)
     setDur(0)
+    // 换章时清零：否则离开页面时会把上一章的位置补报成新章节的进度
+    lastTimeRef.current = 0
     let cancelled = false
     let hls: { destroy: () => void } | null = null
 
@@ -183,6 +204,27 @@ export function ReaderAudioPanel({
     const audio = audioRef.current
     if (audio) audio.playbackRate = speed
   }, [speed])
+
+  // ── 离开这一章时补报进度 ──
+  // 进度平时靠 timeupdate 节流上报（听书 5s 一次），而 timeupdate 只在播放中触发：
+  // 用户按退出/切后台那一瞬间的位置没人上报，节流窗口内最后几秒就丢了。
+  // 这里只处理「离开」事件：换章不会卸载本面板（src 变化时 lastTimeRef 已清零），
+  // 因此不会把上一章的位置写到新章节头上。
+  useEffect(() => {
+    const flush = () => {
+      if (lastTimeRef.current > 0) commitRef.current(lastTimeRef.current)
+    }
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') flush()
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    window.addEventListener('pagehide', flush)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      window.removeEventListener('pagehide', flush)
+      flush()
+    }
+  }, [])
 
   // ── 定时关闭 ──
   const applyTimer = useCallback(
@@ -277,12 +319,32 @@ export function ReaderAudioPanel({
 
   const closeSheet = () => setSheet('none')
 
-  const openSheet = (next: Sheet) => setSheet((cur) => (cur === next ? 'none' : next))
+  const openSheet = (next: Sheet) => {
+    if (sheet === next) {
+      setSheet('none')
+      return
+    }
+    // 每次打开章节抽屉都把区间下拉对齐到当前章节：上次可能停在第 3 组，
+    // 续读已到第 12 组，沿用旧值会显示错误的区间。
+    if (next === 'chapters') setGroupIndex(chapterGroupIndexOf(chapterIndex ?? 0, chapters.length))
+    setSheet(next)
+  }
 
   const chapterList = useMemo(
     () => chapters.map((c, i) => ({ ...c, i })),
     [chapters],
   )
+
+  // 上千章的目录整段跳转：每 100 条一组，下拉里选区间即可（见 utils/chapterGroups.ts）。
+  // 目录不足一组（≤100 章）时不显示下拉——那时一屏能扫完，多了反而是噪声。
+  const chapterGroups = useMemo(() => buildChapterGroups(chapterList.length), [chapterList.length])
+
+  const jumpToChapterGroup = (next: number) => {
+    const group = chapterGroups[next]
+    if (!group) return
+    setGroupIndex(next)
+    tocRef.current?.scrollToIndex({ index: group.start, align: 'start' })
+  }
 
   return (
     <div
@@ -504,18 +566,46 @@ export function ReaderAudioPanel({
             {sheet === 'chapters' && (
               <div className="flex h-full flex-col">
                 <div
-                  className="flex items-center justify-between border-b px-4 py-3 text-xs font-bold"
+                  className="flex items-center gap-2 border-b px-4 py-3 text-xs font-bold"
                   style={{ borderColor: theme.text + '22' }}
                 >
-                  <span>章节（{chapters.length}）</span>
-                  <button type="button" onClick={closeSheet} className="opacity-70 hover:opacity-100">
+                  <span className="shrink-0">章节（{chapters.length}）</span>
+                  {chapterGroups.length > 1 && (
+                    <select
+                      value={groupIndex}
+                      onChange={(e) => jumpToChapterGroup(Number(e.target.value))}
+                      aria-label="按区间快速定位章节"
+                      title="按区间快速定位章节"
+                      className="min-w-0 flex-1 rounded-lg border bg-transparent px-2 py-1 text-2xs font-normal outline-none"
+                      style={{ borderColor: theme.text + '33', color: theme.text }}
+                    >
+                      {chapterGroups.map((group) => (
+                        <option
+                          key={group.index}
+                          value={group.index}
+                          style={{ color: '#111827', backgroundColor: '#ffffff' }}
+                        >
+                          {group.label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <button
+                    type="button"
+                    onClick={closeSheet}
+                    className="shrink-0 opacity-70 hover:opacity-100"
+                  >
                     <X size={16} />
                   </button>
                 </div>
                 <div className="h-[45vh] min-h-0">
                   <Virtuoso
+                    ref={tocRef}
                     data={chapterList}
                     initialTopMostItemIndex={Math.max(0, chapterIndex ?? 0)}
+                    rangeChanged={(range) =>
+                      setGroupIndex(chapterGroupIndexOf(range.startIndex, chapterList.length))
+                    }
                     itemContent={(_i, row) => {
                       const isCurrent = row.i === chapterIndex
                       return (
@@ -717,6 +807,7 @@ export function ReaderAudioPanel({
         onTimeUpdate={(e) => {
           const audio = e.currentTarget
           const t = audio.currentTime
+          lastTimeRef.current = t
           setCur(t)
           onProgress(t)
           // 片尾跳过（legado upPlayProgress：durP >= duration - skipEnds 即当播完）

@@ -373,6 +373,11 @@ func readerTocHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		// nil 切片会被编码成 null，前端拿到 null 再取 .length 就是一句
+		// 「Cannot read properties of null」。空目录统一给 []。
+		if chapters == nil {
+			chapters = []reader.TocChapter{}
+		}
 		c.JSON(http.StatusOK, gin.H{"chapters": chapters})
 	}
 }

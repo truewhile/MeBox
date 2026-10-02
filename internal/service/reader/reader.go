@@ -1011,8 +1011,20 @@ func (s *ReaderService) GetToc(ctx context.Context, userID, sourceID, sourceURL,
 		return nil, err
 	}
 	chapters, declared, err := s.getTocFrom(ctx, src, bs, bookURL, tocURL)
-	if err != nil {
-		return nil, err
+	if err != nil || len(chapters) == 0 {
+		// 给的目录地址抓不到章节。典型情形是聚合类书源（光遇聚合的 gydetail 信封）：
+		// 加书架时只存了 book_url，调用方又把 book_url 当目录地址传进来，规则返回的
+		// 是书籍详情（没有章节），表现为「目录为空」——漫画就是卡在这里。
+		// 对齐 legado：目录地址在详情结果里，补走一次详情规则取 tocUrl 再抓，并写回书架。
+		if detailTocURL := s.deriveTocURLFromDetail(ctx, src, bs, bookURL, tocURL); detailTocURL != "" {
+			if retried, declared2, retryErr := s.getTocFrom(ctx, src, bs, bookURL, detailTocURL); retryErr == nil && len(retried) > 0 {
+				chapters, declared, err = retried, declared2, nil
+				s.persistBookTocURL(ctx, userID, src.SourceURL, bookURL, detailTocURL)
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	// 对应 legado：书源给 book.type 赋值后 legado 会持久化到 Book.type。
 	// 书架的「开始阅读」与详情页都会在这里拉目录，此时书籍已在书架时即可写回。
@@ -1030,6 +1042,40 @@ func latestChapterTitleOf(chapters []TocChapter) string {
 		}
 	}
 	return ""
+}
+
+// deriveTocURLFromDetail 走一次详情规则，取书源声明的目录地址。
+//
+// 详情规则没配、或解析出的 tocUrl 与 bookUrl 相同（说明书源就是用书籍页当目录页）时
+// 返回空串，调用方按原样处理、不做多余请求。
+func (s *ReaderService) deriveTocURLFromDetail(
+	ctx context.Context, src *model.ReaderBookSource, bs *BookSource, bookURL, currentTocURL string,
+) string {
+	detail, err := s.getBookInfoFrom(ctx, src, bs, bookURL)
+	if err != nil || detail == nil {
+		return ""
+	}
+	derived := strings.TrimSpace(detail.TocURL)
+	if derived == "" || derived == strings.TrimSpace(bookURL) || derived == strings.TrimSpace(currentTocURL) {
+		return ""
+	}
+	return derived
+}
+
+// persistBookTocURL 把详情里解析出的目录地址写回书架记录。
+// 只有第一次抓目录要多走一次详情，之后书架、阅读页、更新目录都直接用这个地址。
+func (s *ReaderService) persistBookTocURL(ctx context.Context, userID, origin, bookURL, tocURL string) {
+	if userID == "" || origin == "" || bookURL == "" || tocURL == "" {
+		return
+	}
+	book, err := s.repo.FindBookByURL(ctx, userID, origin, bookURL)
+	if err != nil || book == nil || book.TocURL == tocURL {
+		return
+	}
+	book.TocURL = tocURL
+	if err := s.repo.UpdateBook(ctx, book); err != nil && s.log != nil {
+		s.log.Warn("reader: 写回目录地址失败", zap.String("book", book.ID), zap.Error(err))
+	}
 }
 
 // applyTocMeta 把目录阶段得到的信息写回书架记录：
@@ -1348,8 +1394,12 @@ func (s *ReaderService) getContentFrom(ctx context.Context, src *model.ReaderBoo
 	case 2: // 漫画/图片
 		out.Type = "image"
 		for _, line := range splitURLLines(content) {
-			if abs := rule.GetAbsoluteURL(lastFinalURL, line); abs != "" {
-				out.Images = append(out.Images, abs)
+			// 漫画源的正文规则常直接给 <img src="…"> 的 HTML（一个标签一行）。
+			// 整行当地址会被代理成一堆取不回的「图」，页面上全是破图，所以先抽 src。
+			for _, ref := range imageRefsInLine(line) {
+				if abs := rule.GetAbsoluteURL(lastFinalURL, ref); abs != "" {
+					out.Images = append(out.Images, abs)
+				}
 			}
 		}
 		out.ImageStyle = SPtr(cr.ImageStyle)
@@ -1357,6 +1407,35 @@ func (s *ReaderService) getContentFrom(ctx context.Context, src *model.ReaderBoo
 		out.Type = "text"
 	}
 	return out, nil
+}
+
+// imageRefsInLine 取出一行正文里的图片地址。
+//
+//   - 正文规则给的就是地址 → 原样返回；
+//   - 给的是 <img src="…">（一行可能有多个标签）→ 按标签抽 src，
+//     legado 的 ruleContent.imageStyle 缺省也是这个语义；
+//   - 给的是别的 HTML 片段（<div>/</div> 之类，规则返回的 outerHTML 换行后很常见）
+//     → 跳过，否则会被当成相对地址拼出一个取不回的「图」。
+func imageRefsInLine(line string) []string {
+	matches := imgTagPattern.FindAllStringSubmatch(line, -1)
+	if len(matches) == 0 {
+		if strings.ContainsRune(line, '<') {
+			return nil
+		}
+		return []string{line}
+	}
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		// imgTagPattern 的捕获组：整段标签 / 双引号内的 src / 单引号内的 src
+		ref := strings.TrimSpace(m[2])
+		if ref == "" {
+			ref = strings.TrimSpace(m[3])
+		}
+		if ref != "" {
+			out = append(out, ref)
+		}
+	}
+	return out
 }
 
 func splitURLLines(s string) []string {
