@@ -20,11 +20,13 @@ import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { readerAPI, type ReaderBook, type ReaderChapter, type ReaderChapterContent, type ReaderSearchOrigin } from '../../api/reader'
 import { useComicSpreads } from '../../hooks/useComicSpreads'
 import { useSmoothWheelScroll } from '../../hooks/useSmoothWheelScroll'
+import { useReaderAudioStore } from '../../stores/readerAudio'
 import { COMIC_IMAGE_FITS, READER_THEMES, getReaderTheme, useReaderSettingsStore } from '../../stores/readerSettings'
 import { buildChapterGroups, chapterGroupIndexOf } from '../../utils/chapterGroups'
 import { ReaderAudioPanel } from './ReaderAudioPanel'
 import { ReaderComic } from './ReaderComic'
 import { SourcePickerDialog } from './SourcePickerDialog'
+import { getReaderAudioEngine } from './readerAudioEngine'
 
 // 文本阅读器（仿 legado ReadBookActivity：主题配色、点击区域、上下章、
 // 进度记忆、翻页/滚动双模式；桌面端限宽居中，支持键盘翻页）。
@@ -193,11 +195,28 @@ export default function ReaderViewPage() {
         const qChapterRaw = new URLSearchParams(window.location.search).get('chapter')
         const qChapter = qChapterRaw && qChapterRaw.trim() !== '' ? Number(qChapterRaw) : NaN
         let idx = firstReadableIndex(chs)
-        if (Number.isInteger(qChapter) && chs[qChapter] && !chs[qChapter].is_volume) idx = qChapter
+        const explicitChapter = Number.isInteger(qChapter) && !!chs[qChapter] && !chs[qChapter].is_volume
+        if (explicitChapter) idx = qChapter
         else if (b.dur_chapter_index > 0 && chs[b.dur_chapter_index] && !chs[b.dur_chapter_index].is_volume) {
           idx = b.dur_chapter_index
         }
         pendingPosRef.current = b.dur_chapter_pos ?? 0
+        // 听书：引擎是常驻的，可能已经自动播到更靠后的章，而服务端的进度还停在
+        // 上一次落库的位置。这种「续听」场景要以引擎的实时章节为准，否则回到本书
+        // 会把正在播的章节往回拽。URL 显式指定 chapter 时尊重 URL（那是明确的跳转）。
+        const live = useReaderAudioStore.getState()
+        if (
+          !explicitChapter &&
+          live.bookId === b.id &&
+          live.track !== '' &&
+          (live.status === 'playing' || live.status === 'loading' || live.status === 'paused') &&
+          live.chapterIndex !== idx &&
+          chs[live.chapterIndex]
+        ) {
+          idx = live.chapterIndex
+          // 位置由引擎自己掌握，服务端那份属于上一章，别写过去
+          pendingPosRef.current = 0
+        }
         setChapterIndex(idx)
       } catch (e) {
         if (!cancelled) setError((e as Error).message || '加载失败')
@@ -239,6 +258,22 @@ export default function ReaderViewPage() {
         if (ct.type !== 'text') {
           setRestorePos(savedPos)
           pendingPosRef.current = 0
+        }
+        // 听书：把这一章交给常驻播放引擎。引擎是全局单例，离开本页也不会被卸载，
+        // 因此换章/离开路由/息屏都继续播（面板卸载不再掐播放）。
+        if (ct.type === 'audio' && ct.tracks && ct.tracks.length > 0) {
+          getReaderAudioEngine().loadChapter({
+            bookId: book.id,
+            bookName: book.name,
+            cover: book.cover_url ?? '',
+            chapters,
+            chapterIndex,
+            track: ct.tracks[0],
+            transcoding: ct.transcoding ?? false,
+            openCredits: book.open_credits ?? 0,
+            closeCredits: book.close_credits ?? 0,
+            initialPos: savedPos,
+          })
         }
         // 进度上报（文本的 pos 保留原值，排版完成后才被消费清零）。
         // 注意用 savedPos：非文本在上面已经把 pendingPosRef 清零了，直接读会把
@@ -431,14 +466,17 @@ export default function ReaderViewPage() {
     [chapterIndex, chapters.length, panel],
   )
 
-  // 听书：是否还有下一章（片尾跳过/播完时决定续播还是停住）
-  const hasNextAudioChapter = useMemo(() => {
-    if (chapterIndex === null) return false
-    for (let i = chapterIndex + 1; i < chapters.length; i++) {
-      if (!chapters[i].is_volume) return true
-    }
-    return false
-  }, [chapterIndex, chapters])
+  // 听书：引擎自己也可能切章（播完自动下一章、锁屏/耳机按键上一章下一章），把它的
+  // 当前章节回写进本页，目录与菜单才不会停在旧章节上。只认本书，避免串到别的书。
+  const audioChapterIndex = useReaderAudioStore((s) =>
+    book && s.bookId === book.id ? s.chapterIndex : null,
+  )
+  useEffect(() => {
+    if (contentType !== 'audio' || audioChapterIndex === null) return
+    if (audioChapterIndex === chapterIndex) return
+    pendingEndRef.current = false
+    setChapterIndex(audioChapterIndex)
+  }, [audioChapterIndex, chapterIndex, contentType])
 
   // ── 换源（对应 legado 阅读页的「换源」） ──
   //
@@ -488,19 +526,11 @@ export default function ReaderViewPage() {
   // 本地导入的书没有书源，不显示换源入口
   const canSwitchSource = !!book && !book.is_local
 
-  // 听书：片头/片尾跳过秒数按书写入（对应 legado Book.openCredits/closeCredits）
-  const saveAudioCredits = useCallback(
-    (open: number, close: number) => {
-      if (!book) return
-      setBook((prev) => (prev ? { ...prev, open_credits: open, close_credits: close } : prev))
-      readerAPI.saveAudioConfig(book.id, { open_credits: open, close_credits: close }).catch(() => undefined)
-    },
-    [book],
-  )
+  // 听书：片头/片尾跳过秒数的落库改由播放引擎负责（它持有当前书 ID，离开本页也能写）。
 
   const goPrev = useCallback(() => {
     if (contentType === 'audio') {
-      goChapter(-1)
+      getReaderAudioEngine().prev()
       return
     }
     if (contentType === 'image' && settings.pageMode === 'page') {
@@ -524,7 +554,7 @@ export default function ReaderViewPage() {
 
   const goNext = useCallback(() => {
     if (contentType === 'audio') {
-      goChapter(1)
+      getReaderAudioEngine().next()
       return
     }
     if (contentType === 'image' && settings.pageMode === 'page') {
@@ -727,27 +757,7 @@ export default function ReaderViewPage() {
         <div className={`mx-auto h-full w-full ${comicFullWidth ? '' : 'max-w-[900px]'}`}>
           {contentType === 'audio' ? (
             media && media.tracks && media.tracks.length > 0 ? (
-              <ReaderAudioPanel
-                src={media.tracks[0]}
-                title={currentChapter?.title ?? book?.name ?? '播放'}
-                cover={book?.cover_url ?? ''}
-                theme={theme}
-                initialPos={restorePos}
-                openCredits={book?.open_credits ?? 0}
-                closeCredits={book?.close_credits ?? 0}
-                chapters={chapters}
-                chapterIndex={chapterIndex}
-                hasNext={hasNextAudioChapter}
-                transcoding={media.transcoding ?? false}
-                onProgress={throttledMediaSave}
-                onCommitProgress={savePos}
-                onPrevChapter={() => goChapter(-1)}
-                onNextChapter={() => goChapter(1)}
-                onSelectChapter={jumpToChapter}
-                onEnded={() => goChapter(1)}
-                onCreditsChange={saveAudioCredits}
-                onToggleMenu={() => setMenuOpen((v) => !v)}
-              />
+              <ReaderAudioPanel theme={theme} onToggleMenu={() => setMenuOpen((v) => !v)} />
             ) : (
               <div className="flex h-full items-center justify-center text-sm opacity-60" style={{ color: theme.text }}>
                 {loadingStage !== null ? <Loader2 className="animate-spin opacity-60" size={24} /> : '本章没有可播放的音频'}

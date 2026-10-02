@@ -4,6 +4,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { appRoutes, type AppRoute } from './appRoutes'
 import { Layout } from './components/Layout'
 import { RequireAdmin, RequireAuth } from './components/RequireAuth'
+import { ReaderMiniPlayer } from './pages/reader/ReaderMiniPlayer'
 const LoginPage = lazy(() => import('./pages/LoginPage').then((m) => ({ default: m.LoginPage })))
 const ReaderRoutes = lazy(() => import('./pages/reader/ReaderRoutes').then((m) => ({ default: m.default })))
 
@@ -93,6 +94,8 @@ export default function App() {
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        {/* 听书迷你条：播放引擎常驻，离开阅读页后仍可从这里控制 */}
+        <ReaderMiniPlayer />
       </Suspense>
     </AppErrorBoundary>
   )
