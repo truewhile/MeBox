@@ -45,6 +45,30 @@ export type ReaderShelfSort = 'recent' | 'update' | 'name' | 'author' | 'mixed' 
 /** 书架网格列数：0 表示按屏幕自适应（legado 是固定 2–6 列）。 */
 export const SHELF_GRID_COLUMNS = [0, 2, 3, 4, 5, 6] as const
 
+/**
+ * 漫画图片的显示尺寸档位（上下滚动模式用）。
+ *
+ * legado 的漫画阅读有「缩放」，Web 版原先只有一种写死的宽度（正文列封顶 900px），
+ * 桌面端看不到也放不大，所以补上这一组档位。屏幕越宽越该放大，属于设备级偏好，
+ * 和 comicDoublePage 一样只存本机、不参与账号同步。
+ *
+ * - `default`  现状：正文列封顶 900px 居中，图片铺满该列
+ * - `width`    适应宽度：正文列不再封顶，图片铺满窗口宽度
+ * - `height`   适应高度：每页高度贴合一屏（一屏一页），宽度按原始比例
+ * - `long`     适应长边：整页完整可见，宽高都不超出视口
+ * - `original` 原始像素 1:1：既不放大也不缩小，超出部分横向滚动
+ */
+export type ComicImageFit = 'default' | 'width' | 'height' | 'long' | 'original'
+
+/** 漫画图片尺寸档位的展示顺序与标签（界面面板按此渲染）。 */
+export const COMIC_IMAGE_FITS: { id: ComicImageFit; label: string }[] = [
+  { id: 'default', label: '默认' },
+  { id: 'width', label: '适应宽度' },
+  { id: 'height', label: '适应高度' },
+  { id: 'long', label: '适应长边' },
+  { id: 'original', label: '原图' },
+]
+
 interface ReaderSettingsState {
   // 首页模式切换（影视 / 阅读）
   homeMode: ReaderHomeMode
@@ -80,6 +104,10 @@ interface ReaderSettingsState {
   /** 漫画左右「双页铺开」偏好（legado 无对应项，是 Web 端桌面化补充）。 */
   comicDoublePage: boolean
   setComicDoublePage: (on: boolean) => void
+
+  /** 漫画图片显示尺寸档位（设备级偏好，见 ComicImageFit）。 */
+  comicImageFit: ComicImageFit
+  setComicImageFit: (fit: ComicImageFit) => void
 
   // ── 搜索范围（对应 legado 搜索页的 SearchScopeDialog / AppConfig.searchScope）──
   /**
@@ -156,6 +184,12 @@ export const useReaderSettingsStore = create<ReaderSettingsState>()(
       comicDoublePage: true,
       setComicDoublePage: (comicDoublePage) => set({ comicDoublePage }),
 
+      // 默认保持老样子（正文列 900px 居中）：放大到铺满屏幕是「想要更大」时才做的事，
+      // 不该在升级后突然改变所有人已经习惯的宽度。想放大点「适应宽度」，想 1:1 看细节
+      // 点「原图」。
+      comicImageFit: 'default',
+      setComicImageFit: (comicImageFit) => set({ comicImageFit }),
+
       searchScopeIds: [],
       setSearchScopeIds: (ids) => set({ searchScopeIds: [...new Set(ids)] }),
 
@@ -185,8 +219,9 @@ export const useReaderSettingsStore = create<ReaderSettingsState>()(
  * 与账号同步的阅读器偏好（对应后端 GET/PUT /reader/profile 的载荷）。
  *
  * 这些设置原先是设备级的（只存 localStorage）；现在按用户落库，换设备也能保持一致。
- * 首页的「影视 / 阅读」模式（homeMode）与漫画双页（comicDoublePage）属于设备偏好，
- * 故意不参与同步——前者是入口选择，后者是否合适取决于屏幕宽度。
+ * 首页的「影视 / 阅读」模式（homeMode）、漫画双页（comicDoublePage）与漫画图片尺寸
+ * （comicImageFit）属于设备偏好，故意不参与同步——前者是入口选择，后两者是否合适
+ * 取决于屏幕宽度和分辨率。
  */
 export interface ReaderSettingsProfile {
   theme_id: string

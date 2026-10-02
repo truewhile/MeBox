@@ -3,12 +3,15 @@ import { Loader2 } from 'lucide-react'
 
 import { useSmoothWheelScroll } from '../../hooks/useSmoothWheelScroll'
 import { rememberImageSize } from '../../utils/comicSpread'
+import { comicImageSizing, isSelfSizedComicFit } from '../../utils/comicImageFit'
+import type { ComicImageFit } from '../../stores/readerSettings'
 
 // 漫画/图片阅读器（仿 legado MangaMenu 能力面）：
 // 上下滚动（默认）/ 左右单页 / 左右双页三种呈现；点击分区翻页/呼出菜单；图片懒加载。
 //
 // 双页铺开由外层算好「这一屏显示哪几张」传进来（见 utils/comicSpread.ts），
 // 这里只负责把它们并排摆好、各自撑满视口高度。
+// 滚动模式的显示尺寸由 imageFit 档位决定（见 utils/comicImageFit.ts）。
 
 interface ReaderComicProps {
   images: string[]
@@ -22,6 +25,8 @@ interface ReaderComicProps {
   onScrolled: () => void
   /** 双页模式：本屏要并排显示的图片序号（1 张=独占的宽图/单页，2 张=左右一对）。 */
   spread?: number[] | null
+  /** 滚动模式的图片显示尺寸档位（翻页模式不适用，传 default 即可）。 */
+  imageFit?: ComicImageFit
 }
 
 function ComicImage({
@@ -29,13 +34,19 @@ function ComicImage({
   theme,
   fit = false,
   half = false,
+  imageFit = 'default',
+  viewportHeight = 0,
 }: {
   src: string
   theme: { bg: string; text: string; accent: string }
-  // fit：整页缩放至视口内，长图不再被 overflow-hidden 的容器裁掉。
+  // fit：整页缩放至视口内，长图不再被 overflow-hidden 的容器裁掉（翻页模式）。
   fit?: boolean
   // half：双页并排时占位不超过半屏；容器收窄到图片本身宽度，两页之间不留缝。
   half?: boolean
+  // imageFit：滚动模式的显示尺寸档位。
+  imageFit?: ComicImageFit
+  // viewportHeight：滚动容器高度（px），height/long 档位按它换算。
+  viewportHeight?: number
 }) {
   const [state, setState] = useState<'loading' | 'ok' | 'error'>('loading')
 
@@ -44,6 +55,15 @@ function ComicImage({
   useEffect(() => {
     setState('loading')
   }, [src])
+
+  const loaded = state === 'ok'
+  // 翻页模式：整页缩放进视口。滚动模式：按用户选的尺寸档位摆（外层列宽已放开）。
+  const sizing = fit
+    ? {
+        className: 'block max-h-full w-auto max-w-full object-contain',
+        style: loaded ? {} : { minHeight: '10rem' },
+      }
+    : comicImageSizing(imageFit, viewportHeight, loaded)
 
   // <img> 必须始终留在渲染树里（不能 display:none）：浏览器不会去拉取
   // display:none 的 loading="lazy" 图片，onLoad 就永远不会触发，于是更没机会
@@ -71,8 +91,8 @@ function ComicImage({
           setState('ok')
         }}
         onError={() => setState('error')}
-        className={fit ? 'block max-h-full w-auto max-w-full object-contain' : 'block w-full'}
-        style={state === 'ok' ? undefined : { minHeight: '10rem' }}
+        className={sizing.className}
+        style={sizing.style}
       />
       {state === 'loading' && (
         <div
@@ -94,10 +114,27 @@ function ComicImage({
   )
 }
 
-export function ReaderComic({ images, theme, mode, page, onZone, initialImage, onProgress, scrollTo, onScrolled, spread }: ReaderComicProps) {
+export function ReaderComic({ images, theme, mode, page, onZone, initialImage, onProgress, scrollTo, onScrolled, spread, imageFit = 'default' }: ReaderComicProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const imgRefs = useRef<(HTMLDivElement | null)[]>([])
   const restoredRef = useRef(false)
+  // 滚动容器的高度：「一屏多高」以这个容器为准，而不是 window.innerHeight——正文区是
+  // root（fixed inset-0）里的 flex-1，将来上下再挂条之类的布局变化就不等于窗口高度了。
+  // 用 ResizeObserver 跟着它，改窗口大小时 height/long 档位自动重算。
+  const [viewportHeight, setViewportHeight] = useState(0)
+
+  const selfSized = isSelfSizedComicFit(imageFit)
+  useEffect(() => {
+    // 只有 height/long/original 用得到，默认档位不挂观察器，免得每次改窗口都重渲染整章。
+    if (mode !== 'scroll' || !selfSized) return
+    const el = scrollRef.current
+    if (!el) return
+    const update = () => setViewportHeight(el.clientHeight)
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [mode, selfSized])
 
   // 滚动模式：恢复进度（图片序号）并上报当前图
   useEffect(() => {
@@ -183,7 +220,7 @@ export function ReaderComic({ images, theme, mode, page, onZone, initialImage, o
             }
           }}
         >
-          <ComicImage src={src} theme={theme} />
+          <ComicImage src={src} theme={theme} imageFit={imageFit} viewportHeight={viewportHeight} />
           <p className="pb-1 text-center text-2xs opacity-40" style={{ color: theme.text }}>
             {i + 1} / {images.length}
           </p>

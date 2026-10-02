@@ -20,7 +20,7 @@ import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { readerAPI, type ReaderBook, type ReaderChapter, type ReaderChapterContent, type ReaderSearchOrigin } from '../../api/reader'
 import { useComicSpreads } from '../../hooks/useComicSpreads'
 import { useSmoothWheelScroll } from '../../hooks/useSmoothWheelScroll'
-import { READER_THEMES, getReaderTheme, useReaderSettingsStore } from '../../stores/readerSettings'
+import { COMIC_IMAGE_FITS, READER_THEMES, getReaderTheme, useReaderSettingsStore } from '../../stores/readerSettings'
 import { buildChapterGroups, chapterGroupIndexOf } from '../../utils/chapterGroups'
 import { ReaderAudioPanel } from './ReaderAudioPanel'
 import { ReaderComic } from './ReaderComic'
@@ -148,6 +148,19 @@ export default function ReaderViewPage() {
     comicDoublePage && comicSpreads.length > 0
       ? Math.min(comicSpreadIndexOf[comicPage] ?? 0, comicSpreads.length - 1)
       : 0
+
+  // ── 漫画滚动模式的图片显示尺寸 ──
+  // 档位只在上下滚动模式生效：翻页模式是整页缩放进视口，没有「太大/太小」的问题，
+  // 掺进来反而会和双页铺开的排版打架。所以翻页模式一律按 default 处理。
+  const comicScrollFit = contentType === 'image' && settings.pageMode === 'scroll' ? settings.comicImageFit : 'default'
+  /** 图片尺寸档位只在漫画的滚动模式下起作用，别的场景不显示这一行免得点了没反应。 */
+  const showComicImageFit = contentType === 'image' && settings.pageMode === 'scroll'
+  /**
+   * 正文列是否放开 900px 上限。两种情况：漫画双页铺开要吃满窗口宽度；
+   * 或者用户把图片尺寸调成了「适应宽度/高度/长边/原图」——这些档位由图片自己定尺寸，
+   * 900px 的列会把它们再压回去。
+   */
+  const comicFullWidth = contentType === 'image' && (comicDoublePage || comicScrollFit !== 'default')
 
   // ── 加载书籍与章节 ──
   useEffect(() => {
@@ -711,7 +724,7 @@ export default function ReaderViewPage() {
     <div ref={readerRef} className="fixed inset-0 z-40 flex flex-col" style={{ backgroundColor: theme.bg, color: theme.text }}>
       {/* 正文视口 */}
       <div className="relative flex-1 overflow-hidden">
-        <div className={`mx-auto h-full w-full ${contentType === 'image' && comicDoublePage ? '' : 'max-w-[900px]'}`}>
+        <div className={`mx-auto h-full w-full ${comicFullWidth ? '' : 'max-w-[900px]'}`}>
           {contentType === 'audio' ? (
             media && media.tracks && media.tracks.length > 0 ? (
               <ReaderAudioPanel
@@ -746,6 +759,7 @@ export default function ReaderViewPage() {
               theme={theme}
               mode={settings.pageMode}
               page={comicPage}
+              imageFit={comicScrollFit}
               spread={comicDoublePage ? (comicSpreads[comicSpreadIndex] ?? null) : null}
               onZone={(zone) => {
                 if (zone === 'center') setMenuOpen((v) => !v)
@@ -975,7 +989,7 @@ export default function ReaderViewPage() {
               ))}
             </div>
 
-            {/* 界面设置面板（主题 / 字号 / 行距 / 段距） */}
+            {/* 界面设置面板（主题 / 字号 / 行距 / 段距 / 漫画图片尺寸） */}
             {panel === 'style' && (
               <div
                 className="absolute bottom-full inset-x-0 border-t px-4 py-4"
@@ -1029,6 +1043,30 @@ export default function ReaderViewPage() {
                     </button>
                   </div>
                 </div>
+                {/* 漫画滚动模式的图片显示尺寸。默认档就是老样子（900px 居中），
+                    「适应宽度」铺满窗口，「原图」按原始像素 1:1 看细节。 */}
+                {showComicImageFit && (
+                  <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+                    <span className="opacity-70">图片尺寸</span>
+                    {COMIC_IMAGE_FITS.map((item) => {
+                      const active = settings.comicImageFit === item.id
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={() => settings.setComicImageFit(item.id)}
+                          className={`rounded-lg border px-2 py-0.5 ${active ? 'font-bold' : 'opacity-70'}`}
+                          style={{
+                            borderColor: active ? theme.accent : theme.text + '44',
+                            color: active ? theme.accent : theme.text,
+                          }}
+                        >
+                          {item.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
               </div>
             )}
           </div>
