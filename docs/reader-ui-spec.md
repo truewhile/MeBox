@@ -33,7 +33,7 @@
   - 紧凑列表：48×64 小封面 + 书名 +「作者 · 读到」，一屏放更多书（对应 legado `layout_list_compact`）。
 - 排序六档，对齐 legado `AppConfig.getBookSortByGroupId`：最近阅读（dur_chapter_time，默认）/ 最近更新（latest_chapter_time）/ 综合 / 按书名 / 按作者 / 手动顺序（order）。顶栏有快捷排序下拉，弹窗里也可选。
 - 显示项开关：未读章数徽标、更新时间。
-- 「更新目录」（对应 legado `menu_update_toc`）：`POST /reader/shelf/refresh-toc` 并发重抓书架内网络书籍的目录，覆盖章节缓存；末章标题变化时刷新 `latest_chapter_time`，用于「最近更新」排序与更新时间展示。本地书籍与无书源信息的书跳过。
+- 「更新目录」（对应 legado `menu_update_toc`）：`POST /reader/shelf/refresh-toc` 并发重抓书架内网络书籍的目录，覆盖章节缓存；末章标题变化时刷新 `latest_chapter_time`，用于「最近更新」排序与更新时间展示。本地书籍与无书源信息的书跳过。返回 `total/updated/unchanged/failed` 四档——抓到但章数没变（完结书）记 `unchanged`「已是最新」，只有抓取或写入真的失败才记 `failed`，避免把正常结果报成「更新失败」；失败会打 Warn 日志（含书名与书源）。
 - 未实现（与 legado 的差距）：书籍二级分组网格（进入分组后的封面网格）、导出/导入书架、离线下载。
 
 **书架分组（`/reader/book-groups`，仿影视模块的媒体库标签）**

@@ -250,7 +250,11 @@ export function ReaderHomeContent({ embedded = false }: { embedded?: boolean }) 
       if (res.total === 0) {
         toast.success('没有需要更新的网络书籍', { id: toastId })
       } else if (res.failed > 0) {
-        toast(`更新完成：${res.updated} 本有新章节，${res.failed} 本失败`, { id: toastId, icon: '⚠️' })
+        // 只有抓取/写入真的失败才告警；「抓到但没有新章节」属正常结果，另算一档
+        const parts = [`${res.updated} 本有新章节`]
+        if (res.unchanged > 0) parts.push(`${res.unchanged} 本已是最新`)
+        parts.push(`${res.failed} 本失败，可在日志中查看书源报错`)
+        toast(`更新完成：${parts.join('，')}`, { id: toastId, icon: '⚠️' })
       } else {
         toast.success(res.updated > 0 ? `更新完成，${res.updated} 本有新章节` : '已是最新目录', { id: toastId })
       }

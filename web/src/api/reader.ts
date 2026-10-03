@@ -317,11 +317,16 @@ export const readerAPI = {
     api.put<{ groups: BookGroup[] | null }>('/reader/book-groups', { groups }).then((r) => r.data.groups ?? []),
   /**
    * 更新目录（对应 legado 书架的「更新目录」）：重抓书架里全部网络书籍的目录，
-   * 覆盖章节缓存并刷新「最近更新」时间。返回本次刷新的汇总。
+   * 覆盖章节缓存并刷新「最近更新」时间。返回本次刷新的汇总：
+   * updated 有新章节 / unchanged 抓成功但没新章节 / failed 抓取或写入失败。
    */
   refreshBooksToc: () =>
     api
-      .post<{ total: number; updated: number; failed: number }>('/reader/shelf/refresh-toc', {}, longOpts)
+      .post<{ total: number; updated: number; unchanged: number; failed: number }>(
+        '/reader/shelf/refresh-toc',
+        {},
+        longOpts,
+      )
       .then((r) => r.data),
   /**
    * 换源：把书架里的书切到另一个书源。

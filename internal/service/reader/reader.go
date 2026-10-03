@@ -2074,10 +2074,23 @@ func (s *ReaderService) WarmUpBookChapters(ctx context.Context, userID string, b
 
 // TocRefreshResult 「更新目录」的结果汇总（对应 legado 更新目录后的提示）。
 type TocRefreshResult struct {
-	Total   int `json:"total"`   // 参与刷新的网络书籍数
-	Updated int `json:"updated"` // 章数变多的书（有新章节）
-	Failed  int `json:"failed"`  // 抓取或写入失败的书
+	Total     int `json:"total"`     // 参与刷新的网络书籍数
+	Updated   int `json:"updated"`   // 章数变多的书（有新章节）
+	Unchanged int `json:"unchanged"` // 抓取成功但没有新章节的书（已是最新）
+	Failed    int `json:"failed"`    // 抓取或写入失败的书
 }
+
+// tocRefreshStatus 单本书目录刷新的结果。
+type tocRefreshStatus int
+
+const (
+	// tocRefreshUnchanged 抓取并覆盖成功，只是章数没变多（完结书、站点暂无更新）。
+	tocRefreshUnchanged tocRefreshStatus = iota
+	// tocRefreshUpdated 抓取成功且章数变多，有新章节。
+	tocRefreshUpdated
+	// tocRefreshFailed 抓不到目录、抓到空目录或写不进缓存。
+	tocRefreshFailed
+)
 
 // refreshTocConcurrency 「更新目录」的并发度。书源站点多有限流，不宜过大。
 const refreshTocConcurrency = 4
@@ -2087,6 +2100,8 @@ const refreshTocConcurrency = 4
 // 逐本重新抓目录、覆盖章节缓存；末章变化时由 GetToc → applyTocMeta 刷新
 // latest_chapter_time。本地书籍与没有书源信息的书籍跳过。
 // 并发受限，单本失败只计数、不中断整体；等待全部结束后返回汇总。
+// 「抓到但没新章节」与「抓失败」分开计数：前者是正常结果（完结书天天检查都没有新章节），
+// 混在一起会让人误以为书源坏了。
 func (s *ReaderService) RefreshBooksToc(ctx context.Context, userID string) (*TocRefreshResult, error) {
 	books, err := s.repo.ListBooks(ctx, userID)
 	if err != nil {
@@ -2118,43 +2133,67 @@ func (s *ReaderService) RefreshBooksToc(ctx context.Context, userID string) (*To
 			defer func() { <-sem }()
 			bookCtx, cancel := context.WithTimeout(ctx, perSourceTimeout)
 			defer cancel()
-			if s.refreshBookToc(bookCtx, userID, b) {
-				mu.Lock()
-				res.Updated++
-				mu.Unlock()
-				return
-			}
+			status := s.refreshBookToc(bookCtx, userID, b)
 			mu.Lock()
-			res.Failed++
-			mu.Unlock()
+			defer mu.Unlock()
+			switch status {
+			case tocRefreshUpdated:
+				res.Updated++
+			case tocRefreshUnchanged:
+				res.Unchanged++
+			default:
+				res.Failed++
+			}
 		}(b)
 	}
 	wg.Wait()
 	return res, nil
 }
 
-// refreshBookToc 刷新单本书的目录，返回是否检测到新章节。
-func (s *ReaderService) refreshBookToc(ctx context.Context, userID string, book model.ReaderBook) bool {
+// refreshBookToc 刷新单本书的目录，返回本次刷新的结果。
+func (s *ReaderService) refreshBookToc(ctx context.Context, userID string, book model.ReaderBook) tocRefreshStatus {
 	before, _ := s.repo.CountChaptersByBook(ctx, []string{book.ID})
 	chapters, err := s.GetToc(ctx, userID, "", book.Origin, book.BookURL, book.TocURL)
-	if err != nil || len(chapters) == 0 {
-		if err != nil && s.log != nil {
-			s.log.Debug("reader: 更新目录失败", zap.String("book", book.ID), zap.Error(err))
-		}
-		return false
+	if err != nil {
+		s.logTocRefreshFailure("reader: 更新目录失败", book, err)
+		return tocRefreshFailed
+	}
+	// 书源规则不报错但一章都没解析出来，多是站点返回了风控/报错响应体（规则解析成空列表）。
+	// 这种静默失败要当失败处理并留下日志，否则书架上只会看到「已是最新」。
+	if len(chapters) == 0 {
+		s.logTocRefreshFailure("reader: 更新目录为空", book, nil)
+		return tocRefreshFailed
 	}
 	inputs := make([]ChapterInput, 0, len(chapters))
 	for _, ch := range chapters {
 		inputs = append(inputs, ChapterInput{Index: ch.Index, Title: ch.Title, URL: ch.URL, IsVolume: ch.IsVolume})
 	}
 	if err := s.SaveChapters(ctx, book.ID, inputs); err != nil {
-		if s.log != nil {
-			s.log.Warn("reader: 更新目录写入失败", zap.String("book", book.ID), zap.Error(err))
-		}
-		return false
+		s.logTocRefreshFailure("reader: 更新目录写入失败", book, err)
+		return tocRefreshFailed
 	}
-	beforeCount := before[book.ID]
-	return beforeCount > 0 && len(chapters) > beforeCount
+	// 首次抓目录（书架还没有缓存）没有可比基准，按「已是最新」计，不虚报新章节。
+	if beforeCount := before[book.ID]; beforeCount > 0 && len(chapters) > beforeCount {
+		return tocRefreshUpdated
+	}
+	return tocRefreshUnchanged
+}
+
+// logTocRefreshFailure 记录目录刷新失败。用 Warn 而不是 Debug：这类失败基本都来自
+// 书源站点（风控、改版、限流），排查时只能靠日志，info 级别下 Debug 是看不到的。
+func (s *ReaderService) logTocRefreshFailure(msg string, book model.ReaderBook, err error) {
+	if s.log == nil {
+		return
+	}
+	fields := []zap.Field{
+		zap.String("book", book.ID),
+		zap.String("name", book.Name),
+		zap.String("origin", book.OriginName),
+	}
+	if err != nil {
+		fields = append(fields, zap.Error(err))
+	}
+	s.log.Warn(msg, fields...)
 }
 
 // ListReplaceRules 用户替换规则列表。
