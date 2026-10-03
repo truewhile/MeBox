@@ -375,11 +375,20 @@ func initLoginInfoFromUI(props map[string]any) map[string]string {
 }
 
 // ─── cache 对象（对应 legado CacheManager 注入的 `cache`） ──────────────────
-
+//
+// legado 的 cache 有两套存储：put/get/delete 落持久缓存（ACache），
+// putMemory/getFromMemory 落进程内内存缓存。书源靠后者记录「这条段评点过几次」
+// 这类临时状态——光遇聚合的 paraForAndroid 每一段带段评的文字都会调
+// cache.putMemory(url, 0)，缺了它整条正文规则会抛 TypeError 直接失败。
+// 两套存储分开，否则 getFromMemory 会读到 put 写进去的持久值。
 var jsCache = struct {
-	mu sync.Mutex
-	m  map[string]string
-}{m: map[string]string{}}
+	mu  sync.Mutex
+	m   map[string]string
+	mem map[string]string
+}{m: map[string]string{}, mem: map[string]string{}}
+
+// jsCacheMaxEntries 单套存储的条目上限：超了整体清空，避免书源把内存吃满。
+const jsCacheMaxEntries = 4096
 
 func newCacheObject(vm *goja.Runtime) *goja.Object {
 	o := vm.NewObject()
@@ -388,37 +397,52 @@ func newCacheObject(vm *goja.Runtime) *goja.Object {
 			panic(vm.ToValue(err.Error()))
 		}
 	}
-	set("put", func(call goja.FunctionCall) goja.Value {
-		key := stringArg(call, 0)
-		val := ""
-		if len(call.Arguments) > 1 && !goja.IsUndefined(call.Arguments[1]) && !goja.IsNull(call.Arguments[1]) {
-			val = call.Arguments[1].String()
+
+	// 两套存储共用同一份读写实现，只有落点不同。
+	putTo := func(store *map[string]string) func(goja.FunctionCall) goja.Value {
+		return func(call goja.FunctionCall) goja.Value {
+			key := stringArg(call, 0)
+			val := ""
+			if len(call.Arguments) > 1 && !goja.IsUndefined(call.Arguments[1]) && !goja.IsNull(call.Arguments[1]) {
+				val = call.Arguments[1].String()
+			}
+			jsCache.mu.Lock()
+			if len(*store) >= jsCacheMaxEntries {
+				*store = map[string]string{}
+			}
+			(*store)[key] = val
+			jsCache.mu.Unlock()
+			return vm.ToValue(val)
 		}
-		jsCache.mu.Lock()
-		if len(jsCache.m) >= 4096 {
-			jsCache.m = map[string]string{}
+	}
+	getFrom := func(store *map[string]string) func(goja.FunctionCall) goja.Value {
+		return func(call goja.FunctionCall) goja.Value {
+			key := stringArg(call, 0)
+			jsCache.mu.Lock()
+			v, ok := (*store)[key]
+			jsCache.mu.Unlock()
+			if !ok {
+				return goja.Null()
+			}
+			return vm.ToValue(v)
 		}
-		jsCache.m[key] = val
-		jsCache.mu.Unlock()
-		return vm.ToValue(val)
-	})
-	set("get", func(call goja.FunctionCall) goja.Value {
-		key := stringArg(call, 0)
-		jsCache.mu.Lock()
-		v, ok := jsCache.m[key]
-		jsCache.mu.Unlock()
-		if !ok {
+	}
+	deleteFrom := func(store *map[string]string) func(goja.FunctionCall) goja.Value {
+		return func(call goja.FunctionCall) goja.Value {
+			key := stringArg(call, 0)
+			jsCache.mu.Lock()
+			delete(*store, key)
+			jsCache.mu.Unlock()
 			return goja.Null()
 		}
-		return vm.ToValue(v)
-	})
-	set("delete", func(call goja.FunctionCall) goja.Value {
-		key := stringArg(call, 0)
-		jsCache.mu.Lock()
-		delete(jsCache.m, key)
-		jsCache.mu.Unlock()
-		return goja.Null()
-	})
+	}
+
+	set("put", putTo(&jsCache.m))
+	set("get", getFrom(&jsCache.m))
+	set("delete", deleteFrom(&jsCache.m))
+	// 内存缓存（legado Cache.getFromMemory / putMemory）
+	set("putMemory", putTo(&jsCache.mem))
+	set("getFromMemory", getFrom(&jsCache.mem))
 	return o
 }
 

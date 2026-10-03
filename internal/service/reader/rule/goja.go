@@ -177,6 +177,22 @@ func (r *JSRunner) pauseTimeout() func() {
 	return g.Pause()
 }
 
+// fetch 执行一次桥接网络请求，等待期间暂停 JS 超时看门狗。
+//
+// 书源会把「线路重试」写进规则 JS：光遇聚合的 request() 会串行试 7 条线路，单条
+// 线路最长可能等到客户端的 30s 超时。不暂停的话整条规则会被 10s 的 JS 超时打断，
+// 而这个中断是 goja 的 Go panic，书源自己写的 try/catch 接不住——表现就是「线路
+// 还在重试，接口已经 400」。java.startBrowserAwait 等待人工操作时用的是同一套暂停
+// 机制。暂停只覆盖网络等待，纯 CPU 死循环仍然受 Timeout 约束。
+func (r *JSRunner) fetch(req *Request) (string, string, int, error) {
+	if r.cfg.Fetch == nil {
+		return "", "", 0, ErrJsUnsupported
+	}
+	resume := r.pauseTimeout()
+	defer resume()
+	return r.cfg.Fetch(req)
+}
+
 // NewJSRunner 创建运行时：注入全局对象 cookie / cache / source，并执行 jsLib。
 func NewJSRunner(cfg JSConfig) *JSRunner {
 	vm := goja.New()

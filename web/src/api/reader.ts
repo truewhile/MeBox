@@ -366,9 +366,15 @@ export const readerAPI = {
       .then((r) => r.data.chapters ?? []),
   saveChapters: (id: string, chapters: ReaderChapter[]) => api.post(`/reader/books/${id}/chapters`, { chapters }),
   // 书架维度正文（服务端已应用书源 replaceRegex 与用户替换净化规则）
-  bookContent: (id: string, chapter: number) =>
+  // signal：换章/换源/离开页面时取消在途请求——慢源上一章要等十几秒，不取消的话
+  // 旧源的响应会白等，换源后还可能把旧源的正文写进新书的缓存。
+  bookContent: (id: string, chapter: number, signal?: AbortSignal) =>
     api
-      .get<ReaderChapterContent>(`/reader/books/${id}/content`, { params: { chapter }, timeout: LONG_REQUEST_TIMEOUT })
+      .get<ReaderChapterContent>(`/reader/books/${id}/content`, {
+        params: { chapter },
+        timeout: LONG_REQUEST_TIMEOUT,
+        signal,
+      })
       .then((r) => r.data),
 
   // ── 替换净化规则 ──

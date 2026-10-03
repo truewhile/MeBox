@@ -2,9 +2,12 @@ import axios, { AxiosError, type InternalAxiosRequestConfig } from 'axios'
 
 import { useAuthStore } from '../stores/auth'
 import { getActivePlayProfileId, getActivePlayProfilePinToken } from '../stores/playProfile'
+import type { RefreshOutcome } from '../utils/authRefresh'
 
 // Single axios instance used by every API helper. Adds the JWT to outgoing
-// requests and routes 401s back to the login page.
+// requests and refreshes it on 401. Only an explicit server-side rejection of
+// the refresh token sends the user back to the login page; transient failures
+// (deploy/restart window, gateway errors, timeouts) keep the stored session.
 export const api = axios.create({
   baseURL: '/api',
   timeout: 30000,
@@ -92,33 +95,30 @@ api.interceptors.response.use(
       originalRequest._retry = true
       isRefreshing = true
 
-      try {
-        const refreshed = await useAuthStore.getState().tokenRefresh()
-        if (refreshed) {
-          const newToken = useAuthStore.getState().token
-          if (newToken && originalRequest.headers) {
-            originalRequest.headers.Authorization = `Bearer ${newToken}`
-          }
-          onTokenRefreshed(newToken || '')
-          isRefreshing = false
-          return api(originalRequest)
+      // 刷新可能因为部署/重启窗口的瞬时故障失败。只有服务端明确判定
+      // 凭证失效（401/403）时才清空会话并跳登录页；网络错误、网关 502、
+      // 超时只是暂时不可用，保留本地令牌等下一次重试。
+      const outcome: RefreshOutcome = await useAuthStore
+        .getState()
+        .refreshSession()
+        .catch((): RefreshOutcome => 'transient')
+      isRefreshing = false
+
+      if (outcome === 'refreshed') {
+        const newToken = useAuthStore.getState().token
+        if (newToken && originalRequest.headers) {
+          originalRequest.headers.Authorization = `Bearer ${newToken}`
         }
-      } catch (refreshError) {
-        isRefreshing = false
-        onTokenRefreshFailed(refreshError)
+        onTokenRefreshed(newToken || '')
+        return api(originalRequest)
+      }
+
+      onTokenRefreshFailed(err)
+      if (outcome === 'invalid') {
         useAuthStore.getState().logout()
         if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
           window.location.href = '/login'
         }
-        return Promise.reject(refreshError)
-      }
-
-      // Refresh failed, logout
-      isRefreshing = false
-      onTokenRefreshFailed(err)
-      useAuthStore.getState().logout()
-      if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
-        window.location.href = '/login'
       }
       return Promise.reject(err)
     }

@@ -174,6 +174,33 @@ func TestNormalizeContentBlocks(t *testing.T) {
 	}
 }
 
+// TestChapterContentEmpty 判断「什么都没取到」的正文。
+//
+// 聚合类书源把所有线路试完会返回空串（光遇聚合的 request() 就是这么写的），
+// 这种空结果不能再当成功下发（前端会渲染成白页并缓存下来）。
+func TestChapterContentEmpty(t *testing.T) {
+	cases := []struct {
+		name string
+		in   ChapterContent
+		want bool
+	}{
+		{"空正文", ChapterContent{Type: "text"}, true},
+		{"只有空白字符", ChapterContent{Type: "text", Content: "  \n\t "}, true},
+		{"正常正文", ChapterContent{Type: "text", Content: "第一章 世界大变"}, false},
+		// 整章正文只有一个本章说气泡时正文文字为空，但不能算抓取失败。
+		{"只有段评气泡", ChapterContent{Type: "text", Comments: []ContentComment{{Line: 0, Count: 3}}}, false},
+		{"音频无音轨", ChapterContent{Type: "audio"}, true},
+		{"音频有音轨", ChapterContent{Type: "audio", Tracks: []string{"https://cdn.example.com/a.m4a"}}, false},
+		{"漫画无图", ChapterContent{Type: "image"}, true},
+		{"漫画有图", ChapterContent{Type: "image", Images: []string{"https://cdn.example.com/1.jpg"}}, false},
+	}
+	for _, c := range cases {
+		if got := chapterContentEmpty(&c.in); got != c.want {
+			t.Errorf("%s: chapterContentEmpty = %v，期望 %v", c.name, got, c.want)
+		}
+	}
+}
+
 // TestSearchCheckKeyWord 校验关键字的取值规则（对应 legado getCheckKeyword）：
 // 含 http/::/++/-- 的值是地址或扩展标记，不当作关键字。
 func TestSearchCheckKeyWord(t *testing.T) {

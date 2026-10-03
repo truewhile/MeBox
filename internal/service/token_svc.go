@@ -48,11 +48,31 @@ type TokenService struct {
 	// 因为 refresh token 从未落库而被判定无效，被强制踢回登录页，
 	// 表现就是「经常登录报错」。
 	delayedStores map[string]pendingRefreshToken
+
+	// now 是可替换的时间源（测试用）；为 nil 时退回 time.Now。
+	now func() time.Time
+
+	// rotateMu 保护 refreshFlights / rotations。
+	rotateMu sync.Mutex
+	// refreshFlights 记录「正在进行的刷新」：同一个 refresh token 被并发
+	// 提交时，只有第一个请求去轮换，其余等待并共享同一个结果。
+	refreshFlights map[string]*refreshFlight
+	// rotations 记录刚轮换过的 refresh token 及其新令牌对，供宽限期内
+	// 幂等复用（见 token_refresh_rotation.go）。
+	rotations map[string]rotatedRefreshToken
 }
 
 // NewTokenService 创建令牌服务实例。
 func NewTokenService(cfg *config.Config, log *zap.Logger, repo *repository.Container) *TokenService {
-	return &TokenService{cfg: cfg, log: log, repo: repo, delayedStores: make(map[string]pendingRefreshToken)}
+	return &TokenService{
+		cfg:            cfg,
+		log:            log,
+		repo:           repo,
+		delayedStores:  make(map[string]pendingRefreshToken),
+		now:            time.Now,
+		refreshFlights: make(map[string]*refreshFlight),
+		rotations:      make(map[string]rotatedRefreshToken),
+	}
 }
 
 // TokenPair 包含访问令牌和刷新令牌。
@@ -168,9 +188,32 @@ func (s *TokenService) generateRefreshToken() (string, error) {
 }
 
 // Refresh 使用 Refresh Token 轮换获取新的令牌对。
+//
+// refresh token 是一次性凭证，但真实客户端会并发使用同一个令牌（同一标签
+// 页的 WebSocket 重连与 401 拦截器、多个标签页、容器重启后同时刷新的多个
+// 页面）。因此这里做两件事：
+//  1. 同一个 token 的并发刷新共享同一次轮换（single-flight）；
+//  2. 轮换后在宽限期内重复提交同一个 token，返回同一次轮换的令牌对。
+//
+// 二者共同保证「重复刷新不会把已经成功的会话打成 401 revoked」。
 func (s *TokenService) Refresh(ctx context.Context, refreshToken string) (*TokenPair, error) {
 	tokenHash := repository.HashToken(refreshToken)
 
+	flight, leader := s.startRefreshFlight(tokenHash)
+	if !leader {
+		// 已有一次刷新在途：等它的结果，不再拿同一个一次性凭证轮换第二次。
+		return s.waitForRefreshFlight(flight)
+	}
+
+	pair, err := s.refreshOnce(ctx, tokenHash)
+	s.finishRefreshFlight(tokenHash, pair, err)
+	if err != nil {
+		return nil, err
+	}
+	return pair, nil
+}
+
+func (s *TokenService) refreshOnce(ctx context.Context, tokenHash string) (*TokenPair, error) {
 	// 查找 Refresh Token 记录
 	rt, err := s.repo.RefreshToken.FindByHash(ctx, tokenHash)
 	if err != nil {
@@ -180,7 +223,12 @@ func (s *TokenService) Refresh(ctx context.Context, refreshToken string) (*Token
 		// 登录高峰/扫描写压力下，refresh token 可能还在后台补写队列里
 		// 没来得及落库。此时令牌对客户端而言是合法的，不能判无效。
 		pending, ok := s.pendingDelayedStore(tokenHash)
-		if !ok || time.Now().After(pending.ExpiresAt) {
+		if !ok || !s.currentTime().Before(pending.ExpiresAt) {
+			// 也可能是「刚轮换完但从未落库」的令牌（同上，行本身不存在），
+			// 宽限期内同样幂等复用。
+			if pair, reused := s.reusedRotation(tokenHash, ""); reused {
+				return pair, nil
+			}
 			return nil, ErrInvalidRefreshToken
 		}
 		rt = &model.RefreshToken{
@@ -192,6 +240,11 @@ func (s *TokenService) Refresh(ctx context.Context, refreshToken string) (*Token
 
 	// 检查是否已撤销
 	if rt.Revoked {
+		// 刚被轮换过的 token 在宽限期内允许幂等复用，避免并发/重试的
+		// 客户端拿到 revoked 401 后清空整个会话。
+		if pair, ok := s.reusedRotation(tokenHash, rt.UserID); ok {
+			return pair, nil
+		}
 		return nil, ErrTokenRevoked
 	}
 
@@ -211,7 +264,7 @@ func (s *TokenService) Refresh(ctx context.Context, refreshToken string) (*Token
 	if !user.IsActive {
 		return nil, ErrUserInactive
 	}
-	if user.ExpiredAt != nil && time.Now().After(*user.ExpiredAt) {
+	if user.ExpiredAt != nil && s.currentTime().After(*user.ExpiredAt) {
 		return nil, ErrUserExpired
 	}
 
@@ -222,11 +275,21 @@ func (s *TokenService) Refresh(ctx context.Context, refreshToken string) (*Token
 	s.untrackDelayedStore(rt.UserID, tokenHash)
 
 	// 签发新的令牌对
-	return s.IssuePairBestEffort(ctx, user.ID, user.Role, user.Tier)
+	pair, err := s.IssuePairBestEffort(ctx, user.ID, user.Role, user.Tier)
+	if err != nil {
+		return nil, err
+	}
+	// 必须在结束 flight 之前记住本次轮换：否则等待中的请求会在 flight 与
+	// 复用表之间的空档里查不到记录，把并发刷新误判为 revoked。
+	s.rememberRotation(tokenHash, user.ID, pair)
+	return pair, nil
 }
 
 // RevokeAll 撤销用户的所有 Refresh Token（用于登出）。
 func (s *TokenService) RevokeAll(ctx context.Context, userID string) error {
+	// 复用条目必须一起丢弃：否则登出/被踢下线后的宽限期内，
+	// 旧令牌仍能换回一对有效令牌。
+	s.forgetRotationsForUser(userID)
 	return s.repo.RefreshToken.RevokeByUserID(ctx, userID)
 }
 

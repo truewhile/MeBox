@@ -53,7 +53,7 @@ func newJavaObject(vm *goja.Runtime, r *JSRunner, a *AnalyzeRule) *goja.Object {
 				req.Headers[k] = fmt.Sprintf("%v", v)
 			}
 		}
-		body, _, _, err := r.cfg.Fetch(req)
+		body, _, _, err := r.fetch(req)
 		if err != nil {
 			bridgeErr(name, err)
 		}
@@ -93,7 +93,7 @@ func newJavaObject(vm *goja.Runtime, r *JSRunner, a *AnalyzeRule) *goja.Object {
 		if req.Unsupported != nil {
 			bridgeErr(name, req.Unsupported)
 		}
-		respBody, finalURL, code, err := r.cfg.Fetch(req)
+		respBody, finalURL, code, err := r.fetch(req)
 		if err != nil {
 			bridgeErr(name, err)
 		}

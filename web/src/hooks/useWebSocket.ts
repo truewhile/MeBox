@@ -52,13 +52,24 @@ export function useWebSocket(onEvent: (topic: string, payload: unknown) => void)
     let timer: number | undefined
     let reconnectAttempts = 0
 
+    // 过期的 token 握手必然 401。先走刷新流程：成功会更新 token 并让本
+    // effect 重建连接；「暂时不可用」（部署/重启窗口的网络故障）时保留
+    // 会话继续退避重试；只有服务端明确判定凭证失效才会停止重连。
+    const refreshExpiredToken = () => {
+      void useAuthStore
+        .getState()
+        .tokenRefresh()
+        .then((refreshed) => {
+          if (closed || refreshed) return
+          if (!useAuthStore.getState().refreshToken) return
+          timer = window.setTimeout(open, SLOW_RECONNECT_INTERVAL)
+        })
+    }
+
     const open = () => {
       if (closed) return
-      // 过期的 token 握手必然 401。此前这里会以 60s 间隔无限重试，服务端
-      // 日志里表现为每分钟一条 401。改为先走刷新流程：成功会更新 token 并
-      // 让本 effect 重建连接，失败则清空会话停止重连。
       if (isTokenExpired(token)) {
-        void useAuthStore.getState().tokenRefresh()
+        refreshExpiredToken()
         return
       }
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -82,7 +93,7 @@ export function useWebSocket(onEvent: (topic: string, payload: unknown) => void)
         if (closed) return
         // token 过期时不要继续退避重试，交给刷新流程处理。
         if (isTokenExpired(token)) {
-          void useAuthStore.getState().tokenRefresh()
+          refreshExpiredToken()
           return
         }
         reconnectAttempts += 1

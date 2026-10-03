@@ -53,6 +53,12 @@ type ReaderService struct {
 
 	// limiter 单源限速（书源 concurrentRate）。
 	limiter *sourceRateLimiter
+
+	// tocFlightsMu / tocFlights 保护「同一本书正在抓目录」的单飞登记表：
+	// 换源、加入书架之后，服务端预热与阅读页会几乎同时来抓同一份目录
+	// （见 fetchTocDeduped）。
+	tocFlightsMu sync.Mutex
+	tocFlights   map[string]*tocFlight
 }
 
 // NewReaderService 创建服务。
@@ -1164,6 +1170,87 @@ func (s *ReaderService) GetToc(ctx context.Context, userID, sourceID, sourceURL,
 	if err != nil {
 		return nil, err
 	}
+	chapters, declared, err := s.fetchTocDeduped(ctx, userID, src, bs, bookURL, tocURL)
+	if err != nil {
+		return nil, err
+	}
+	// 对应 legado：书源给 book.type 赋值后 legado 会持久化到 Book.type。
+	// 书架的「开始阅读」与详情页都会在这里拉目录，此时书籍已在书架时即可写回。
+	// 顺便把末章标题与「最近更新」时间写回，供书架显示与排序。
+	s.applyTocMeta(ctx, userID, src.SourceURL, bookURL, declared, chapters)
+	return chapters, nil
+}
+
+// tocFetchTimeout 单飞抓目录的时间上限。与目录预热一致，并且与调用方的 ctx 脱钩：
+// 共用的那一次抓取不该因为某一个调用方断开而半途而废。
+const tocFetchTimeout = 60 * time.Second
+
+// tocFlight 一次进行中的目录抓取，并发的调用方共享它的结果。
+type tocFlight struct {
+	done     chan struct{}
+	chapters []TocChapter
+	declared int
+	err      error
+}
+
+// fetchTocDeduped 抓目录，但同一本书的并发抓取合并成一次网络请求。
+//
+// 换源、加入书架之后，服务端的目录预热（WarmUpBookChaptersAsync）与阅读页在章节
+// 缓存为空时的 /api/reader/toc 会几乎同时到达：实测同一个请求打了两遍上游
+// （目录 3.7s 与 11.7s），目录也因此被写了两遍。这里按「书源 + 书本地址」登记在飞
+// 请求，后到的一方直接等前一方出结果，不再重复抓。
+//
+// key 里的 tocURL 取「规范化后」的值：调用方为空时按 book_url 处理（getTocFrom 的
+// 语义），于是预热传空串、阅读页传 toc_url || book_url 这两种情况会落到同一个 key 上。
+// 显式给了不同目录地址的调用方（详情页用详情里解析出的 tocUrl）不与之合并，避免把
+// 一次抓取的结果当成另一份目录。
+//
+// key 不含 userID：目录本身是公开内容，只有写回书架那一步分用户（用发起抓取的那个
+// 调用方的身份；没拿到写回的调用方下次会自己补一次详情，代价很小）。
+func (s *ReaderService) fetchTocDeduped(
+	ctx context.Context, userID string, src *model.ReaderBookSource, bs *BookSource, bookURL, tocURL string,
+) ([]TocChapter, int, error) {
+	effectiveToc := strings.TrimSpace(tocURL)
+	if effectiveToc == "" {
+		effectiveToc = bookURL
+	}
+	key := firstNonEmpty(src.ID, src.SourceURL) + "\x00" + bookURL + "\x00" + effectiveToc
+
+	s.tocFlightsMu.Lock()
+	if s.tocFlights == nil {
+		s.tocFlights = map[string]*tocFlight{}
+	}
+	if f, ok := s.tocFlights[key]; ok {
+		s.tocFlightsMu.Unlock()
+		select {
+		case <-f.done:
+			return f.chapters, f.declared, f.err
+		case <-ctx.Done():
+			// 自己先不等了（浏览器断开/超时），共用的那次抓取照常跑完。
+			return nil, -1, ctx.Err()
+		}
+	}
+	f := &tocFlight{done: make(chan struct{})}
+	s.tocFlights[key] = f
+	s.tocFlightsMu.Unlock()
+
+	// 抓取与调用方的取消脱钩：两个调用方共用这份结果，谁先断开都不该让另一方拿到
+	//「context canceled」，也不能让预热在阅读页断开时白跑一半。
+	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tocFetchTimeout)
+	defer cancel()
+	f.chapters, f.declared, f.err = s.loadTocFromSource(fetchCtx, userID, src, bs, bookURL, tocURL)
+	close(f.done)
+
+	s.tocFlightsMu.Lock()
+	delete(s.tocFlights, key)
+	s.tocFlightsMu.Unlock()
+	return f.chapters, f.declared, f.err
+}
+
+// loadTocFromSource 真正抓一次目录，含「给的目录地址抓不到章节就回退详情规则」的兜底。
+func (s *ReaderService) loadTocFromSource(
+	ctx context.Context, userID string, src *model.ReaderBookSource, bs *BookSource, bookURL, tocURL string,
+) ([]TocChapter, int, error) {
 	chapters, declared, err := s.getTocFrom(ctx, src, bs, bookURL, tocURL)
 	if err != nil || len(chapters) == 0 {
 		// 给的目录地址抓不到章节。典型情形是聚合类书源（光遇聚合的 gydetail 信封）：
@@ -1177,14 +1264,10 @@ func (s *ReaderService) GetToc(ctx context.Context, userID, sourceID, sourceURL,
 			}
 		}
 		if err != nil {
-			return nil, err
+			return nil, declared, err
 		}
 	}
-	// 对应 legado：书源给 book.type 赋值后 legado 会持久化到 Book.type。
-	// 书架的「开始阅读」与详情页都会在这里拉目录，此时书籍已在书架时即可写回。
-	// 顺便把末章标题与「最近更新」时间写回，供书架显示与排序。
-	s.applyTocMeta(ctx, userID, src.SourceURL, bookURL, declared, chapters)
-	return chapters, nil
+	return chapters, declared, nil
 }
 
 // latestChapterTitleOf 取目录里最后一个非卷章节的标题（对应 legado 的「最新章节」）。
@@ -1715,7 +1798,30 @@ func (s *ReaderService) getContentFrom(ctx context.Context, src *model.ReaderBoo
 		// 归一成结构化锚点，正文文字原样保留（见 comment.go 的说明）。
 		out.Content, out.Comments = extractContentComments(content)
 	}
+	if chapterContentEmpty(out) {
+		if name := srcNameOf(src, bs); name != "" {
+			return nil, fmt.Errorf("正文为空：书源「%s」未返回内容，可稍后重试或换源", name)
+		}
+		return nil, fmt.Errorf("正文为空：书源未返回内容，可稍后重试或换源")
+	}
 	return out, nil
+}
+
+// chapterContentEmpty 判断正文是不是「什么都没取到」。
+//
+// 聚合类书源在自己的 request() 里把所有线路都试完后会返回空串（光遇聚合就是这么
+// 写的），内容规则于是给出空正文。这种空结果以前当成功下发，前端渲染成一张白页
+// 还会缓存下来，读者只能干等；这里改成明确报错，让页面提示「可重试 / 可换源」。
+func chapterContentEmpty(out *ChapterContent) bool {
+	switch out.Type {
+	case "audio":
+		return len(out.Tracks) == 0
+	case "image":
+		return len(out.Images) == 0
+	default:
+		// 只挂段评、没有正文文字的行不算空：整章正文可能确实只有一个本章说气泡。
+		return strings.TrimSpace(out.Content) == "" && len(out.Comments) == 0
+	}
 }
 
 // 正文里的块级标签边界：<p>、</p>、<br> 这类只表达段落、没有文字的标签。

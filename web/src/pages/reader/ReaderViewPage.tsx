@@ -109,6 +109,8 @@ export default function ReaderViewPage() {
   const [switchLoading, setSwitchLoading] = useState(false)
   const [switchCandidates, setSwitchCandidates] = useState<ReaderSearchOrigin[]>([])
   const [reloadKey, setReloadKey] = useState(0)
+  // 正文重载计数：错误态的「重试」只重取本章正文，不重载整本书（换源用 reloadKey）。
+  const [contentReloadKey, setContentReloadKey] = useState(0)
   /** 段评承载页：点击段评气泡后由宿主浏览器打开评论页（带书源登录态）。 */
   const [browserPage, setBrowserPage] = useState<ReaderBrowserPage | null>(null)
   // 顶栏高度：菜单打开时正文整体下移这么多，顶栏就不会压住开头几行
@@ -248,20 +250,33 @@ export default function ReaderViewPage() {
     }
   }, [bookId, reloadKey])
 
+  // 正文缓存的键带上书源标识（origin + book_url）：换源后在途的旧源响应即使晚到，
+  // 也只会落在旧键上，不会被新源读到。聚合源的不同子源共用同一个 origin（子源写在
+  // book_url 里），所以不能只用 origin。
+  const contentCacheKey = useCallback(
+    (index: number) => `${book?.origin ?? ''}\u0000${book?.book_url ?? ''}\u0000${index}`,
+    [book?.origin, book?.book_url],
+  )
+
   // ── 加载章节正文（带缓存与下一章预取） ──
   useEffect(() => {
     if (chapterIndex === null || !book || chapters.length === 0) return
     const ch = chapters[chapterIndex]
     if (!ch) return
     let cancelled = false
+    // 换章/换源/离开页面时取消在途请求：慢源一章要等十几秒，不取消就会白等旧源的
+    // 响应，换源后还可能把旧源的正文塞进新书的缓存。
+    const ac = new AbortController()
     ;(async () => {
       setContent(null)
       setLoadingStage('content')
       try {
-        const cacheKey = String(chapterIndex)
+        const cacheKey = contentCacheKey(chapterIndex)
         let ct = contentCache.current.get(cacheKey)
         if (!ct) {
-          ct = await readerAPI.bookContent(book.id, chapterIndex)
+          ct = await readerAPI.bookContent(book.id, chapterIndex, ac.signal)
+          // 请求期间切了章/换了源：结果已作废，既不用也不必入缓存。
+          if (cancelled) return
           contentCache.current.set(cacheKey, ct)
         }
         if (cancelled) return
@@ -300,10 +315,14 @@ export default function ReaderViewPage() {
           .saveProgress(book.id, { chapter_index: chapterIndex, pos: savedPos, chapter_title: ch.title })
           .catch(() => undefined)
         // 预取下一章
-        if (!contentCache.current.has(String(chapterIndex + 1))) {
+        if (!contentCache.current.has(contentCacheKey(chapterIndex + 1))) {
           readerAPI
-            .bookContent(book.id, chapterIndex + 1)
-            .then((c) => contentCache.current.set(String(chapterIndex + 1), c))
+            .bookContent(book.id, chapterIndex + 1, ac.signal)
+            .then((c) => {
+              // 预取是在「旧源」发起、在换源后才回来的话，结果属于脏数据，丢掉。
+              if (cancelled) return
+              contentCache.current.set(contentCacheKey(chapterIndex + 1), c)
+            })
             .catch(() => undefined)
         }
       } catch (e) {
@@ -317,8 +336,9 @@ export default function ReaderViewPage() {
     })()
     return () => {
       cancelled = true
+      ac.abort()
     }
-  }, [chapterIndex, book, chapters])
+  }, [chapterIndex, book, chapters, contentCacheKey, contentReloadKey])
 
   // ── 分页排版（CSS 多栏 + 平移） ──
   const relayout = useCallback(() => {
@@ -953,8 +973,10 @@ export default function ReaderViewPage() {
                 onClick={() => {
                   setError('')
                   if (chapterIndex !== null) {
-                    contentCache.current.delete(String(chapterIndex))
-                    setChapterIndex(chapterIndex)
+                    contentCache.current.delete(contentCacheKey(chapterIndex))
+                    // 用 reload 计数触发重取：把 chapterIndex 设成同一个值不会让
+                    // effect 重跑，以前点「重试」只是把错误提示清掉了。
+                    setContentReloadKey((v) => v + 1)
                   }
                 }}
                 className="rounded-xl border px-4 py-1.5 text-xs font-bold"

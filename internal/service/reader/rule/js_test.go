@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ─── 基础执行与绑定 ─────────────────────────────────────────────────────────
@@ -43,6 +44,39 @@ func TestJSTimeoutInterrupt(t *testing.T) {
 	_, err := r.Run(NewAnalyzeRule(), "while(true){}", nil, "")
 	if err == nil || !strings.Contains(err.Error(), "超时") {
 		t.Fatalf("expected timeout error, got %v", err)
+	}
+}
+
+// TestJSTimeoutPausedDuringFetch 网络等待期间不能被 JS 超时打断。
+//
+// 回归：书源把「线路重试」写在规则 JS 里（光遇聚合的 request() 串行试 7 条线路，
+// 单条最长等到 HTTP 客户端超时）。看门狗不暂停的话，整条规则会被 10s 的 JS 超时
+// 中断，而这个中断是 goja 的 Go panic，书源自己写的 try/catch 接不住——表现就是
+// 「线路还在重试，接口已经 400」。
+func TestJSTimeoutPausedDuringFetch(t *testing.T) {
+	r := NewJSRunner(JSConfig{
+		Timeout: 100 * time.Millisecond,
+		Fetch: func(req *Request) (string, string, int, error) {
+			time.Sleep(400 * time.Millisecond) // 远超过 JS 超时：模拟慢线路
+			return `{"content":"正文"}`, req.URL, 200, nil
+		},
+	})
+	ar := NewAnalyzeRule()
+	v, err := r.Run(ar, `(function(){
+		try { return java.ajax('https://slow.example.com/content'); }
+		catch (e) { return 'caught:' + e; }
+	})()`, nil, "")
+	if err != nil {
+		t.Fatalf("网络等待期间不应触发 JS 超时: %v", err)
+	}
+	if got := anyToString(v); !strings.Contains(got, "正文") {
+		t.Fatalf("ajax 返回值 = %q，期望上游正文", got)
+	}
+
+	// 暂停只覆盖网络等待：回到 JS 里的纯 CPU 死循环仍然要被超时打断。
+	_, err = r.Run(ar, `java.ajax('https://slow.example.com/content'); while(true){}`, nil, "")
+	if err == nil || !strings.Contains(err.Error(), "超时") {
+		t.Fatalf("网络等待之后的 CPU 死循环应当仍然超时，实际: %v", err)
 	}
 }
 
