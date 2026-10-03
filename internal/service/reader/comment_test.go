@@ -217,8 +217,12 @@ func TestGetContentForBookExtractsComments(t *testing.T) {
 	if strings.Contains(out.Content, "<img") || strings.Contains(out.Content, "showCmt") {
 		t.Fatalf("段评标记没有清干净：%q", out.Content)
 	}
-	if out.Content != "<p>第一段</p>\n<p>第二段</p>" {
+	// 块级标签折成换行后，段落文字一个字都不少（多余空行已压掉）。
+	if out.Content != "第一段\n第二段" {
 		t.Fatalf("正文被破坏：%q", out.Content)
+	}
+	if strings.Contains(out.Content, "<p>") || strings.Contains(out.Content, "</p>") {
+		t.Fatalf("块级标签没有折行：%q", out.Content)
 	}
 	if len(out.Comments) != 1 {
 		t.Fatalf("段评数 = %d，期望 1", len(out.Comments))
@@ -226,5 +230,113 @@ func TestGetContentForBookExtractsComments(t *testing.T) {
 	c := out.Comments[0]
 	if c.Line != 0 || c.Count != 5 || c.URL != "https://v1.example.com/get_review?book_id=1" {
 		t.Fatalf("段评内容不符：%+v", c)
+	}
+}
+
+// setupTextChapterBook 搭一个「正文规则直接返回指定字符串」的文本源 + 一本书，
+// 返回服务实例与书籍 ID，供正文链路回归测试复用。
+func setupTextChapterBook(t *testing.T, content string) (*ReaderService, string) {
+	t.Helper()
+	pageJSON := fmt.Sprintf(`{"content":%q}`, content)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write([]byte(pageJSON))
+	}))
+	t.Cleanup(srv.Close)
+
+	svc, _ := newLoginTestService(t)
+	ctx := t.Context()
+	srcJSON := fmt.Sprintf(`{
+  "bookSourceUrl": %q,
+  "bookSourceName": "正文链路测试源",
+  "bookSourceType": 0,
+  "ruleContent": { "content": "$.content" }
+}`, srv.URL)
+	importTestSource(t, svc, srcJSON, srv.URL)
+
+	book := &model.ReaderBook{
+		UserID:     "u1",
+		Origin:     srv.URL,
+		OriginName: "正文链路测试源",
+		BookURL:    srv.URL + "/book/1",
+		Name:       "测试书",
+		Type:       0,
+	}
+	if err := svc.repo.CreateBook(ctx, book); err != nil {
+		t.Fatalf("创建书籍失败: %v", err)
+	}
+	if err := svc.SaveChapters(ctx, book.ID, []ChapterInput{
+		{Index: 0, Title: "第一章", URL: srv.URL + "/book/1/c1.html"},
+	}); err != nil {
+		t.Fatalf("写入章节失败: %v", err)
+	}
+	return svc, book.ID
+}
+
+// TestGetContentForBookKeepsTextWithStandaloneImage 回归问题 A：带 <p> 正文的章节
+// 混入一行独立普通插图时，仍然必须是文本类型、正文一个字都不能丢
+// （旧实现把 <p>正文</p> 当孤立标签跳过，整章被误判成图片章清空）。
+func TestGetContentForBookKeepsTextWithStandaloneImage(t *testing.T) {
+	content := "<p>第一段正文</p>\n" +
+		"<p>第二段正文</p>\n" +
+		`<img src="https://cdn.example.com/pic.jpg">`
+	svc, bookID := setupTextChapterBook(t, content)
+
+	out, err := svc.GetContentForBook(t.Context(), "u1", bookID, 0)
+	if err != nil {
+		t.Fatalf("取正文失败: %v", err)
+	}
+	if out.Type != "text" {
+		t.Fatalf("类型 = %q，期望 text（正文不能被当成图片章）", out.Type)
+	}
+	if !strings.Contains(out.Content, "第一段正文") || !strings.Contains(out.Content, "第二段正文") {
+		t.Fatalf("正文文字丢失：%q", out.Content)
+	}
+	if !strings.HasPrefix(out.Content, "第一段正文\n第二段正文\n"+imgMarkerPrefix) {
+		t.Fatalf("正文结构不符：%q", out.Content)
+	}
+	if len(out.Images) != 0 {
+		t.Fatalf("文本类型的 Images 应为空，得到 %v", out.Images)
+	}
+}
+
+// TestGetContentForBookStripsBlockTagsKeepsText 回归问题 B：段评开启时正文是
+// <p>正文<img …,{click}> 形态，下发/显示的文本里不能残留块级标签，且文字一字不少。
+func TestGetContentForBookStripsBlockTagsKeepsText(t *testing.T) {
+	src := svgCommentSrc(t, 3, "showCmt('https://v1.example.com/get_review?book_id=1','番茄','段评')", "text")
+	content := "<p>第一段正文</p>\n" +
+		"<p>第二段正文<img src=\"" + src + "\"></p>\n" +
+		"<p>第三段<br>折行后的文字</p>\n" +
+		`<img src="https://cdn.example.com/pic.jpg">`
+	svc, bookID := setupTextChapterBook(t, content)
+
+	out, err := svc.GetContentForBook(t.Context(), "u1", bookID, 0)
+	if err != nil {
+		t.Fatalf("取正文失败: %v", err)
+	}
+	if out.Type != "text" {
+		t.Fatalf("类型 = %q，期望 text", out.Type)
+	}
+	t.Logf("最终下发/显示的正文 = %q", out.Content)
+	t.Logf("段评锚点 = %+v", out.Comments)
+	for _, tag := range []string{"<p>", "</p>", "<br>", "<img", "showCmt"} {
+		if strings.Contains(out.Content, tag) {
+			t.Fatalf("显示文本里残留了 %q：%q", tag, out.Content)
+		}
+	}
+	// 正文文字一字不少（含 <br> 折出来的那一段）。
+	for _, want := range []string{"第一段正文", "第二段正文", "折行后的文字"} {
+		if !strings.Contains(out.Content, want) {
+			t.Fatalf("正文文字丢失 %q：%q", want, out.Content)
+		}
+	}
+	if !strings.Contains(out.Content, imgMarkerPrefix) {
+		t.Fatalf("普通插图应保留成 %s 标记：%q", imgMarkerPrefix, out.Content)
+	}
+	if len(out.Comments) != 1 {
+		t.Fatalf("段评数 = %d，期望 1", len(out.Comments))
+	}
+	if out.Comments[0].URL != "https://v1.example.com/get_review?book_id=1" {
+		t.Fatalf("段评地址不符：%+v", out.Comments[0])
 	}
 }

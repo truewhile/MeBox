@@ -105,6 +105,13 @@ func TestImageMarkersOnly(t *testing.T) {
 			content: imgMarkerPrefix + "/a.jpg\n3 < 5\n",
 			wantOK:  false,
 		},
+		{
+			// 回归：<p>正文</p> 是「标签里裹着正文」，绝不能当成孤立标签跳过，
+			// 否则整章正文会被误判成图片章清空。
+			name:    "标签里裹着正文的行",
+			content: imgMarkerPrefix + "/a.jpg\n<p>第一章正文</p>\n<p>第二章正文</p>\n",
+			wantOK:  false,
+		},
 	}
 	for _, c := range cases {
 		got, ok := imageMarkersOnly(c.content)
@@ -123,6 +130,46 @@ func TestImageMarkersOnly(t *testing.T) {
 			if got[i] != c.wantURLs[i] {
 				t.Errorf("%s: urls[%d] = %q，期望 %q", c.name, i, got[i], c.wantURLs[i])
 			}
+		}
+	}
+}
+
+// TestIsHTMLTagOnly 「没有可读文字的标签行」才算空行：标签里裹着正文的行必须放行，
+// 否则 imageMarkersOnly 会把整章正文当图片丢掉。
+func TestIsHTMLTagOnly(t *testing.T) {
+	blank := []string{"<div>", "</div>", "< br >", "<br/>", "<p></p>", "<hr />", "</p >", "<a> </a>", "<p>"}
+	for _, s := range blank {
+		if !isHTMLTagOnly(s) {
+			t.Errorf("%q 应视为没有可读文字的标签行", s)
+		}
+	}
+	text := []string{
+		"<p>正文</p>", "<p>正文</p></p>", "<div>文字</div>", "<p>第一段</p><p>第二段</p>",
+		"正文 <b>粗</b>", "3 < 5", "<3>", "a", "", "   ",
+	}
+	for _, s := range text {
+		if isHTMLTagOnly(s) {
+			t.Errorf("%q 含可读文字/不是标签，不能当空行", s)
+		}
+	}
+}
+
+// TestNormalizeContentBlocks 块级标签折成换行、行内标签与文字原样保留。
+func TestNormalizeContentBlocks(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"<p>第一段</p>\n<p>第二段</p>", "第一段\n第二段"},
+		{"<p>第一段<br>折行文字</p>", "第一段\n折行文字"},
+		{"<P CLASS='x'>大写带属性</P>", "大写带属性"},
+		{"<div>块</div><br/><br />", "块"},
+		// 行内插图原样保留（不能吃掉普通 <img>）
+		{`<p>正文<img src="https://cdn.example.com/a.jpg"></p>`, `正文<img src="https://cdn.example.com/a.jpg">`},
+		// 纯文本原样返回
+		{"第一段。\n第二段。", "第一段。\n第二段。"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := normalizeContentBlocks(c.in); got != c.want {
+			t.Errorf("normalizeContentBlocks(%q) = %q，期望 %q", c.in, got, c.want)
 		}
 	}
 }

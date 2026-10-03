@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -1707,11 +1708,43 @@ func (s *ReaderService) getContentFrom(ctx context.Context, src *model.ReaderBoo
 		out.ImageStyle = SPtr(cr.ImageStyle)
 	default:
 		out.Type = "text"
+		// 块级标签（<p>/</p>/<br>）折成换行：书源段评开启时正文就是这种 HTML 形态，
+		// 前端纯文本渲染，不折的话读者会看到字面标签。必须先折行再摘段评（行号会变）。
+		content = normalizeContentBlocks(content)
 		// 正文里的段评标记（<comment …/> 或「图片地址 + click 配置」的内嵌评论图）
 		// 归一成结构化锚点，正文文字原样保留（见 comment.go 的说明）。
 		out.Content, out.Comments = extractContentComments(content)
 	}
 	return out, nil
+}
+
+// 正文里的块级标签边界：<p>、</p>、<br> 这类只表达段落、没有文字的标签。
+// 书源（如光遇聚合的 paraForAndroid）在段评开启时把正文拼成 <p>正文<comment/></p>，
+// 前端是纯文本渲染（{text}），不折行的话读者看到的就是字面的 <p>、</p>。
+var (
+	contentBreakRe      = regexp.MustCompile(`(?i)<\s*br\s*/?\s*>`)
+	contentBlockOpenRe  = regexp.MustCompile(`(?i)<\s*(?:p|div|h[1-6]|li|tr|blockquote|section|article)\b[^>]*>`)
+	contentBlockCloseRe = regexp.MustCompile(`(?i)</\s*(?:p|div|h[1-6]|li|tr|blockquote|section|article)\s*>`)
+	contentBlankLineRe  = regexp.MustCompile(`\n{2,}`)
+)
+
+// normalizeContentBlocks 把正文里的块级标签（<p></p>、<br> 等）按语义折成换行。
+//
+// 只处理段落边界的标签，绝不删除行内标签（普通插图 <img> 原样保留），
+// 也不做任意 HTML 渲染——前端仍然只渲染纯文本 + [img] 标记。
+// 必须在摘段评之前调用：折行会改变行号，段评锚点要落在折行后的正文上，
+// 否则前端按行号挂气泡会错位。
+func normalizeContentBlocks(content string) string {
+	if !strings.ContainsRune(content, '<') {
+		return content
+	}
+	content = contentBreakRe.ReplaceAllString(content, "\n")
+	content = contentBlockOpenRe.ReplaceAllString(content, "\n")
+	content = contentBlockCloseRe.ReplaceAllString(content, "\n")
+	// 相邻块边界（</p> 与下一行 <p>）会折出多余空行，压成一行；首尾空行一并去掉，
+	// 免得段评行号里混进无意义的空行。
+	content = contentBlankLineRe.ReplaceAllString(content, "\n")
+	return strings.Trim(content, "\n")
 }
 
 // rewriteContentImageMarkers 把网络文本正文里「整行就是 <img src="…">」的内容改写成
@@ -1762,7 +1795,8 @@ func rewriteContentImageMarkers(content, baseURL string, proxy func(string) stri
 // 一屏只看得到一张，桌面端也没法两页并排——正是「漫画没法双页铺开」的根因。
 // 所以这里识别出来之后由调用方把类型改成 image，交给漫画阅读器。
 //
-// 只认「非空行全是标记」：混了正文的章节一律保持 text，绝不能把文字吃掉。
+// 只认「非空行全是标记」且至少有一张图：混了正文的章节一律保持 text，绝不能把文字吃掉；
+// 没有一张图标记的空/纯标签章节也不是图片章。
 // 返回的地址已经是签名代理地址（调用点在此之前刚做过改写）。
 func imageMarkersOnly(content string) ([]string, bool) {
 	var images []string
@@ -1785,30 +1819,47 @@ func imageMarkersOnly(content string) ([]string, bool) {
 	return images, len(images) > 0
 }
 
-// isHTMLTagOnly 判断整行是不是一个孤立的 HTML 标签（<div>、</div>、<br> 之类）。
-// 即「<」开头、「>」结尾，且尖括号内是标签名的形状（字母开头，后面可带属性）。
-// 标签名两侧的空白（源码里常见的 < div > 这类手写残渣）一并忽略。
+// isHTMLTagOnly 判断整行是不是「没有可读文字的标签/空白」（<div>、</div>、< br > 之类）。
+//
+// 逐个跳过尖括号片段，只要尖括号外还剩非空白字符，就不是空行。
+// 关键：<p>正文</p> 这类「标签里裹着正文」的行第一个 '>' 后面还有文字，
+// 必须当正文放行——旧实现看到标签名后的第一个非字母字符（'>'）就返回 true，
+// 于是整章正文被 imageMarkersOnly 当成孤立标签跳过、误判成图片章清空。
+//
+// 尖括号里的内容必须像标签（字母开头）才算数，避免把「3 < 5」这类普通文字行当成标签。
 func isHTMLTagOnly(line string) bool {
-	if len(line) < 3 || line[0] != '<' || line[len(line)-1] != '>' {
+	if !strings.ContainsRune(line, '<') {
 		return false
 	}
-	inner := strings.TrimSpace(strings.TrimPrefix(line[1:len(line)-1], "/"))
+	for i := 0; i < len(line); {
+		if line[i] != '<' {
+			if !isHTMLSpace(line[i]) {
+				return false // 尖括号外还有可读文字
+			}
+			i++
+			continue
+		}
+		gt := strings.IndexByte(line[i:], '>')
+		if gt < 0 {
+			return false // 没闭合的 '<'，当正文处理
+		}
+		if !looksLikeTag(line[i+1 : i+gt]) {
+			return false
+		}
+		i += gt + 1
+	}
+	return true
+}
+
+// looksLikeTag 判断尖括号里的内容是不是标签名（<div>、</div>、< br >），
+// 而不是「<3」这类普通文字。允许标签名前后的空白与自闭合斜杠。
+func looksLikeTag(inner string) bool {
+	inner = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(inner), "/"))
 	if inner == "" {
 		return false
 	}
-	for i, r := range inner {
-		switch {
-		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'):
-			continue
-		case i == 0:
-			// 首字符不是字母：<3、<!-- 注释 --> 之类，一律不当标签
-			return false
-		default:
-			// 标签名之后（属性、空白、自闭合斜杠）都算标签
-			return true
-		}
-	}
-	return true
+	c := inner[0]
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // imageRefsInLine 取出一行正文里的图片地址。
