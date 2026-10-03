@@ -204,7 +204,9 @@ export function filterBooksByGroup<T extends { id: string }>(
 }
 
 /**
- * 生成分组栏模型：首项固定「全部」，有分组时追加「未分组」，其后按分组顺序追加。
+ * 生成分组栏模型：首项固定「全部」，其后按分组顺序追加，最后（有分组时）追加「未分组」。
+ * 把「未分组」放到最后：它是一个兜底视图而不是一个真实分组，放在用户分组后面才不会
+ * 把用户自己排的分组顺序挤开（用户拖拽排序只影响中间那段）。
  * 计数只统计当前书架上仍存在的书，避免分组里残留的死 ID 让数字虚高。
  */
 export function buildBookGroupTabs(books: { id: string }[], groups: BookGroup[]): BookGroupTab[] {
@@ -219,12 +221,6 @@ export function buildBookGroupTabs(books: { id: string }[], groups: BookGroup[])
     { id: ALL_GROUP_ID, name: '全部', count: books.length, kind: 'all' },
   ]
   if (groups.length === 0) return tabs
-  tabs.push({
-    id: UNGROUPED_GROUP_ID,
-    name: '未分组',
-    count: books.length - claimed.size,
-    kind: 'ungrouped',
-  })
   for (const group of groups) {
     tabs.push({
       id: group.name,
@@ -233,6 +229,12 @@ export function buildBookGroupTabs(books: { id: string }[], groups: BookGroup[])
       kind: 'group',
     })
   }
+  tabs.push({
+    id: UNGROUPED_GROUP_ID,
+    name: '未分组',
+    count: books.length - claimed.size,
+    kind: 'ungrouped',
+  })
   return tabs
 }
 

@@ -66,13 +66,14 @@ const noGroups = buildBookGroupTabs(books, [])
 check('no groups → only 全部', noGroups.length === 1 && noGroups[0].id === ALL_GROUP_ID && noGroups[0].count === 4)
 
 const tabs = buildBookGroupTabs(books, groups)
-check('tabs = 全部 + 未分组 + groups', tabs.map((t) => t.name).join(',') === '全部,未分组,科幻,在读')
+check('tabs = 全部 + groups + 未分组（未分组殿后）', tabs.map((t) => t.name).join(',') === '全部,科幻,在读,未分组')
 check('全部 counts all books', tabs[0].count === 4)
-check('未分组 counts unclaimed', tabs[1].count === 1)
-check('group counts only existing books', tabs[2].count === 2 && tabs[3].count === 1)
+check('ungrouped is the last tab', tabs[tabs.length - 1].kind === 'ungrouped')
+check('未分组 counts unclaimed', tabs[3].count === 1)
+check('group counts only existing books', tabs[1].count === 2 && tabs[2].count === 1)
 check('stale ids do not inflate counts', (() => {
   const withStale = buildBookGroupTabs(books, [{ name: '科幻', book_ids: ['a', 'ghost', 'ghost2'] }])
-  return withStale[2].count === 1 && withStale[1].count === 3
+  return withStale[1].count === 1 && withStale[2].count === 3
 })())
 
 // ── 排序与选中回落 ──
