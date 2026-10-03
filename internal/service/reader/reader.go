@@ -1139,6 +1139,21 @@ func normalizeBookType(t int) int {
 	return 0
 }
 
+// contentTypeCode 把 ChapterContent.Type 换算回书架记录的类型码
+// （0 文本 / 1 音频 / 2 图片，与 model.ReaderBook.Type 同一套约定）。
+// 第二个返回值为 false 表示这个渲染类型没有对应的书籍类型（如视频）。
+func contentTypeCode(t string) (int, bool) {
+	switch t {
+	case "text":
+		return 0, true
+	case "audio":
+		return 1, true
+	case "image":
+		return 2, true
+	}
+	return 0, false
+}
+
 // GetToc 抓取目录。返回值中的 declaredType 是书源在规则 JS 里声明的书籍类型
 // （-1 表示未声明），书源用它在目录阶段把听书/漫画/短剧源标成对应类型。
 func (s *ReaderService) GetToc(ctx context.Context, userID, sourceID, sourceURL, bookURL, tocURL string) ([]TocChapter, error) {
@@ -1655,7 +1670,14 @@ func (s *ReaderService) getContentFrom(ctx context.Context, src *model.ReaderBoo
 	if declaredType >= 0 {
 		effective = declaredType
 	}
-	if effective < 0 {
+	// 书架类型还停在默认的「文本」时，用书源声明的类型兜底。
+	//
+	// 书籍详情页的「加入书架/开始阅读」曾经把 origin_type 写死成 0（见 web
+	// ReaderBookPage），听书/漫画书于是以文本类型落库；而书架类型优先级高于
+	// 书源类型，正文就被当文本渲染——听书源的播放直链会排满整个阅读页。
+	// 规则 JS 里显式声明的类型（declaredType）仍然最优先，所以「文本型聚合源
+	// 提供听书/漫画内容」这类靠 JS 声明类型的情形不受影响。
+	if declaredType < 0 && effective <= 0 {
 		effective = src.Type
 	}
 	switch effective {
@@ -2256,6 +2278,14 @@ func (s *ReaderService) GetContentForBook(ctx context.Context, userID, bookID st
 		book.Type = out.declaredType
 		if err := s.repo.UpdateBook(ctx, book); err != nil && s.log != nil {
 			s.log.Warn("reader: 写回书籍类型失败", zap.String("book", book.ID), zap.Error(err))
+		}
+	} else if code, ok := contentTypeCode(out.Type); ok && code != 0 && code != book.Type {
+		// 书源类型兜底纠正出来的音频/漫画类型也落库：这些书被详情页写死的
+		// origin_type=0 记成了文本，不写回的话每读一章都要再纠正一次，
+		// 注入规则 JS 的 book.type 也一直是错的。只向上纠正，不覆盖成文本。
+		book.Type = code
+		if err := s.repo.UpdateBook(ctx, book); err != nil && s.log != nil {
+			s.log.Warn("reader: 修正书籍类型失败", zap.String("book", book.ID), zap.Error(err))
 		}
 	}
 	if out.Type == "text" {

@@ -24,6 +24,8 @@ export default function ReaderBookPage() {
   const [chapters, setChapters] = useState<ReaderTocChapter[] | null>(null)
   const [shelfBook, setShelfBook] = useState<ReaderBook | null>(null)
   const [busy, setBusy] = useState(false)
+  // 当前书源声明的类型（1 音频 / 2 图片），加入书架时写进来源记录
+  const [sourceType, setSourceType] = useState(0)
   const [tocExpanded, setTocExpanded] = useState(false)
   const [introExpanded, setIntroExpanded] = useState(false)
   // 换源：候选源来自按书名重新搜索的结果
@@ -58,6 +60,16 @@ export default function ReaderBookPage() {
       .catch(() => setChapters([]))
   }, [bookURL, sourceURL])
 
+  // 书源声明的类型（1 音频 / 2 图片）。加入书架时要带上它：写死成 0（文本）会让
+  // 听书源的书以文本类型落库，阅读器就把播放直链当正文排版出来，根本播不了。
+  useEffect(() => {
+    if (!sourceURL) return
+    readerAPI
+      .listSources()
+      .then((sources) => setSourceType(sources.find((s) => s.source_url === sourceURL)?.type ?? 0))
+      .catch(() => undefined)
+  }, [sourceURL])
+
   // 详情返回的 tocUrl 更准确，拿到后重新拉目录
   useEffect(() => {
     const tocURL = info?.toc_url
@@ -84,7 +96,7 @@ export default function ReaderBookPage() {
             source_id: originID,
             origin: sourceURL,
             origin_name: originName || info?.name || '',
-            origin_type: 0,
+            origin_type: sourceType,
             book_url: bookURL,
             latest_chapter: info?.latest_chapter ?? '',
           },
