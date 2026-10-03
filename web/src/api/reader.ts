@@ -118,8 +118,24 @@ export interface ReaderChapterContent {
   tracks?: string[]
   images?: string[]
   image_style?: string
+  /** 正文里的段评锚点（按 line 挂到对应段落旁的气泡）。 */
+  comments?: ReaderContentComment[]
   /** 该音轨走了服务端转码（源格式浏览器解不了），首次播放需要等转码完成。 */
   transcoding?: boolean
+}
+
+/** 正文里的一条段评（服务端从 <comment> / 内嵌评论图里解析出来）。 */
+export interface ReaderContentComment {
+  /** 段落行号：content 按 \n 拆分后的 0-based 下标。 */
+  line: number
+  /** 评论数（0 表示未知，只画一个不带数字的气泡）。 */
+  count: number
+  /** 评论地址（书源 showCmt 的第一个参数）。 */
+  url: string
+  /** 段评 / 本章说。 */
+  label?: string
+  /** 独占一行的整块评论（章末「本章说」）。 */
+  block?: boolean
 }
 
 export interface ReaderReplaceRule {
@@ -174,6 +190,8 @@ export interface ReaderBrowserPage {
   title: string
   /** wait = 需要回传 DOM（点 √）；open = 仅展示。 */
   mode: 'wait' | 'open'
+  /** 登记序号（单调递增）。同时有多个待办时，取它最大的那个展示。 */
+  seq: number
   /** iframe 承载地址（同源，带签名）。 */
   page_url: string
   refetch: boolean
@@ -223,6 +241,9 @@ export const readerAPI = {
   // 回传用户操作后的 DOM（或取消），解除服务端阻塞
   submitBrowserResult: (body: { id: string; body?: string; url?: string; cancelled?: boolean }) =>
     api.post('/reader/browser/result', body).then((r) => r.data),
+  // 打开一条段评：复用书源登录态在宿主浏览器里承载评论页（对应书源的 showCmt）
+  openContentComment: (body: { book_id: string; url: string; title?: string }) =>
+    api.post<ReaderBrowserPage>('/reader/comments/open', body).then((r) => r.data),
   // 承载页面内的接口请求转交服务端代发（iframe 是不透明源，带不上书源 Cookie）
   browserXHR: (body: {
     id: string

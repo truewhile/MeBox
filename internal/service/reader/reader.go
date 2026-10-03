@@ -45,8 +45,10 @@ type ReaderService struct {
 
 	// browserMu / browserPending 保护「待用户完成的页面」表
 	// （java.startBrowser / startBrowserAwait，见 browser_panel.go）。
+	// browserSeq 是页面登记的单调递增序号，供前端判断哪个页面最新。
 	browserMu      sync.Mutex
 	browserPending map[string]*pendingBrowser
+	browserSeq     int64
 
 	// limiter 单源限速（书源 concurrentRate）。
 	limiter *sourceRateLimiter
@@ -1401,6 +1403,9 @@ type ChapterContent struct {
 	Tracks     []string `json:"tracks,omitempty"`      // 音频播放地址（已改写为服务端签名代理）
 	Images     []string `json:"images,omitempty"`      // 漫画图片列表（已改写为服务端签名代理）
 	ImageStyle string   `json:"image_style,omitempty"` // 对应 legado ruleContent.imageStyle
+	// Comments 正文里的段评锚点（<comment> 标记与带 click 配置的内嵌评论图，见 comment.go）。
+	// 只在文本类型下有意义；前端按 Line 把气泡挂到对应段落旁。
+	Comments []ContentComment `json:"comments,omitempty"`
 	// Transcoding 为真表示该音轨走了服务端转码（源格式浏览器解不了），
 	// 首次播放需要等转码完成，之后命中缓存秒开。
 	Transcoding bool `json:"transcoding,omitempty"`
@@ -1702,6 +1707,9 @@ func (s *ReaderService) getContentFrom(ctx context.Context, src *model.ReaderBoo
 		out.ImageStyle = SPtr(cr.ImageStyle)
 	default:
 		out.Type = "text"
+		// 正文里的段评标记（<comment …/> 或「图片地址 + click 配置」的内嵌评论图）
+		// 归一成结构化锚点，正文文字原样保留（见 comment.go 的说明）。
+		out.Content, out.Comments = extractContentComments(content)
 	}
 	return out, nil
 }

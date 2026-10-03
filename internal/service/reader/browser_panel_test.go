@@ -390,3 +390,46 @@ func TestBrowserPanelUnknownSourceIsolated(t *testing.T) {
 		t.Fatal("未解除阻塞")
 	}
 }
+
+// TestBrowserPanelOpenPageDroppedAfterResolve open 模式（java.startBrowser）
+// 的页面在用户关闭后必须立刻离开待办表。
+//
+// 回归：这条日志只删除 wait 模式（awaitBrowser 的 defer），open 模式没有清理
+// 路径，会一直躺到 15 分钟 TTL 到期。前端轮询到它就又把旧页面弹出来——光遇
+// 聚合点过「❇️ 更新书源」后，接下来点「书源设置」「段评设置」都会跳到书源更新页。
+func TestBrowserPanelOpenPageDroppedAfterResolve(t *testing.T) {
+	svc, _ := newLoginTestService(t)
+	ctx := t.Context()
+	sourceID := prepareLoginSource(t, svc, browserPanelSourceJSON(t, "https://panel.example.com"))
+
+	// 等价于书源的 renderVersionPage()：java.startBrowser(data:..., '光遇书源更新')
+	if err := svc.openBrowser(ctx, "https://panel.example.com", sourceID, readerTestUserID,
+		rule.BrowserTask{URL: "data:text/html,<html><body>更新</body></html>", Title: "光遇书源更新"}); err != nil {
+		t.Fatalf("登记 open 页面失败: %v", err)
+	}
+	old := waitPending(t, svc, sourceID)
+	if old.Mode != browserModeOpen {
+		t.Fatalf("模式 = %q，期望 open", old.Mode)
+	}
+
+	// 用户关掉页面
+	if err := svc.ResolveBrowser(old.ID, readerTestUserID, "", "", true); err != nil {
+		t.Fatalf("关闭页面失败: %v", err)
+	}
+	if pages := svc.PendingBrowserPages(readerTestUserID, sourceID); len(pages) != 0 {
+		t.Fatalf("关闭后待办未清理: %+v", pages)
+	}
+
+	// 再点别的按钮：待办表里只应剩新页面，且序号更大
+	if err := svc.openBrowser(ctx, "https://panel.example.com", sourceID, readerTestUserID,
+		rule.BrowserTask{URL: "data:text/html,<html><body>设置</body></html>", Title: "光遇书源设置"}); err != nil {
+		t.Fatalf("登记新页面失败: %v", err)
+	}
+	pages := svc.PendingBrowserPages(readerTestUserID, sourceID)
+	if len(pages) != 1 || pages[0].Title != "光遇书源设置" {
+		t.Fatalf("待办表应只剩新页面: %+v", pages)
+	}
+	if pages[0].Seq <= old.Seq {
+		t.Fatalf("新页面 seq 应更大: %d <= %d", pages[0].Seq, old.Seq)
+	}
+}

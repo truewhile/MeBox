@@ -70,8 +70,16 @@ export default function SourceLoginDialog({ sourceId, sourceName, onClose, onLog
   const pollBrowserPages = useCallback(async () => {
     try {
       const pages = await readerAPI.browserPending(sourceId)
-      const next = pages.find((p) => !handledPages.current.has(p.id))
-      if (next) setBrowserPage(next)
+      // 只取本次还没处理过的页面，并按 seq 取最新登记的那个。
+      // 不能直接拿数组第一个：服务端待办表可能同时存着多个页面，且返回顺序
+      // 是随机的（Go map 遍历），拿第一个会把旧页面顶到正在点的按钮上
+      // （光遇聚合「更新书源」残留后串页就是这么来的）。
+      const next = pages
+        .filter((p) => !handledPages.current.has(p.id))
+        .reduce<ReaderBrowserPage | null>((acc, p) => (!acc || p.seq > acc.seq ? p : acc), null)
+      if (!next) return
+      // 已经在展示的页面不要被更旧的页面替换掉
+      setBrowserPage((cur) => (cur && cur.seq >= next.seq ? cur : next))
     } catch {
       // 轮询失败不打断正在执行的动作
     }

@@ -40,6 +40,9 @@ func registerReaderRoutes(authed *gin.RouterGroup, svc *service.Container) {
 	// 页面内的 fetch/XHR 经此转发（iframe 是不透明源，请求带不上书源 Cookie）
 	g.POST("/browser/xhr", readerBrowserXHRHandler(svc))
 
+	// 段评：用宿主浏览器打开评论地址（带书源 Cookie/登录态，对应书源的 showCmt）
+	g.POST("/comments/open", readerOpenCommentHandler(svc))
+
 	// 搜索（多源聚合）
 	g.POST("/search", readerSearchHandler(svc))
 
@@ -246,6 +249,30 @@ func readerBrowserXHRHandler(svc *service.Container) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, res)
+	}
+}
+
+// readerOpenCommentHandler 打开一条段评：复用书源登录态在宿主浏览器里承载评论页。
+// 书源的 showCmt 内部就是「java.ajax 取评论页 → java.showBrowser 展示」，
+// 这里用承载登录页的同一套机制等价实现（见 reader.OpenContentComment）。
+func readerOpenCommentHandler(svc *service.Container) gin.HandlerFunc {
+	var body struct {
+		BookID string `json:"book_id" binding:"required"`
+		URL    string `json:"url" binding:"required"`
+		Title  string `json:"title"`
+	}
+	return func(c *gin.Context) {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		userID := c.GetString(middleware.CtxUserID)
+		page, err := svc.Reader.OpenContentComment(c.Request.Context(), userID, body.BookID, body.URL, body.Title)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, page)
 	}
 }
 

@@ -64,6 +64,9 @@ type BrowserPage struct {
 	Title string `json:"title"`
 	// Mode wait = 需回传（点 √ 后回传 DOM）；open = 仅展示。
 	Mode string `json:"mode"`
+	// Seq 登记序号（单调递增）。待办表可能同时存多个页面，前端按它取最新的
+	// 那个展示——不能依赖返回顺序，map 遍历是随机的。
+	Seq int64 `json:"seq"`
 	// PageURL 同源承载地址（iframe src），带 HMAC 签名。
 	PageURL string `json:"page_url"`
 	// Refetch 见 rule.BrowserTask.Refetch。
@@ -83,8 +86,10 @@ type BrowserPageSnapshot struct {
 }
 
 // pendingBrowser 一个待用户完成的页面。
+// seq 为登记序号（越大越新，见 ReaderService.browserSeq），供前端挑选最新页面。
 type pendingBrowser struct {
 	id        string
+	seq       int64
 	sourceID  string
 	sourceURL string
 	userID    string
@@ -180,6 +185,8 @@ func (s *ReaderService) registerBrowser(ctx context.Context, sourceURL, sourceID
 		s.browserPending = map[string]*pendingBrowser{}
 	}
 	s.pruneBrowsersLocked()
+	s.browserSeq++
+	entry.seq = s.browserSeq
 	s.browserPending[id] = entry
 	s.browserMu.Unlock()
 
@@ -716,6 +723,10 @@ func (s *ReaderService) PendingBrowserPages(userID, sourceID string) []BrowserPa
 		if e.sourceID != sourceID {
 			continue
 		}
+		// 已交付/已取消的页面不再返回：否则前端下一次轮询会把它当成新页面弹出来。
+		if e.finished {
+			continue
+		}
 		// 待办是短生命周期对象；未标注用户的老调用路径一律放行。
 		if e.userID != "" && userID != "" && e.userID != userID {
 			continue
@@ -726,14 +737,20 @@ func (s *ReaderService) PendingBrowserPages(userID, sourceID string) []BrowserPa
 }
 
 // ResolveBrowser 用户完成/取消页面后回传结果，解除 JS 侧的阻塞。
+//
+// 交付后立刻把条目移出待办表：open 模式（java.startBrowser）没有别的清理
+// 路径，留着会一直躺到 TTL 到期——光遇聚合的「❇️ 更新书源」就是这么在
+// 15 分钟内反复串到其它按钮上的。
 func (s *ReaderService) ResolveBrowser(id, otherUserID, body, finalURL string, cancelled bool) error {
 	entry := s.lookupBrowser(id)
 	if entry == nil {
 		return errors.New("页面已过期或已完成")
 	}
+	// 注意锁序：browserMu 必须在 entry.mu 之外获取（pruneBrowsersLocked 是
+	// browserMu → entry.mu），这里不能持着 entry.mu 去等 browserMu。
 	entry.mu.Lock()
-	defer entry.mu.Unlock()
 	if entry.finished {
+		entry.mu.Unlock()
 		return errors.New("该页面已完成")
 	}
 	if cancelled {
@@ -749,6 +766,9 @@ func (s *ReaderService) ResolveBrowser(id, otherUserID, body, finalURL string, c
 	if entry.done != nil {
 		close(entry.done)
 	}
+	entry.mu.Unlock()
+
+	s.dropBrowser(id)
 	return nil
 }
 
@@ -785,6 +805,14 @@ func (s *ReaderService) pruneBrowsersLocked() {
 	}
 }
 
+// browserPageOf 生成前端展示用的描述（自行加锁）。
+// registerBrowser 之后需要把页面直接回给调用方（如打开一条段评）时用它。
+func (s *ReaderService) browserPageOf(e *pendingBrowser) BrowserPage {
+	s.browserMu.Lock()
+	defer s.browserMu.Unlock()
+	return s.pageOfLocked(e)
+}
+
 // pageOfLocked 生成前端展示用的描述（调用方需持有 browserMu）。
 func (s *ReaderService) pageOfLocked(e *pendingBrowser) BrowserPage {
 	target := e.request.URL
@@ -795,6 +823,7 @@ func (s *ReaderService) pageOfLocked(e *pendingBrowser) BrowserPage {
 		ID:        e.id,
 		Title:     e.request.Title,
 		Mode:      e.mode,
+		Seq:       e.seq,
 		PageURL:   s.browserPageURL(e.id),
 		Refetch:   e.request.Refetch,
 		SourceID:  e.sourceID,

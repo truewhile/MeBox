@@ -9,6 +9,7 @@ import {
   LayoutList,
   ListEnd,
   Loader2,
+  MessageSquare,
   Minus,
   Moon,
   Plus,
@@ -17,12 +18,21 @@ import {
 } from 'lucide-react'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 
-import { readerAPI, type ReaderBook, type ReaderChapter, type ReaderChapterContent, type ReaderSearchOrigin } from '../../api/reader'
+import {
+  readerAPI,
+  type ReaderBook,
+  type ReaderBrowserPage,
+  type ReaderChapter,
+  type ReaderChapterContent,
+  type ReaderContentComment,
+  type ReaderSearchOrigin,
+} from '../../api/reader'
 import { useComicSpreads } from '../../hooks/useComicSpreads'
 import { useSmoothWheelScroll } from '../../hooks/useSmoothWheelScroll'
 import { useReaderAudioStore } from '../../stores/readerAudio'
 import { COMIC_IMAGE_FITS, READER_THEMES, getReaderTheme, useReaderSettingsStore } from '../../stores/readerSettings'
 import { buildChapterGroups, chapterGroupIndexOf } from '../../utils/chapterGroups'
+import BrowserPanel from './BrowserPanel'
 import { ReaderAudioPanel } from './ReaderAudioPanel'
 import { ReaderComic } from './ReaderComic'
 import { SourcePickerDialog } from './SourcePickerDialog'
@@ -63,6 +73,12 @@ const COMIC_SPREAD_MIN_WIDTH = 900
 /** 空图片列表的常量引用：避免每次渲染产生新数组、把分组结果的 memo 依赖打散。 */
 const NO_IMAGES: string[] = []
 
+/** 一个渲染单元：一段正文文字 + 挂在这一行上的段评气泡。 */
+interface ReaderParagraphBlock {
+  text: string
+  comments: ReaderContentComment[]
+}
+
 function firstReadableIndex(chapters: ReaderChapter[]): number {
   const i = chapters.findIndex((c) => !c.is_volume && c.url)
   if (i !== -1) return i
@@ -93,6 +109,8 @@ export default function ReaderViewPage() {
   const [switchLoading, setSwitchLoading] = useState(false)
   const [switchCandidates, setSwitchCandidates] = useState<ReaderSearchOrigin[]>([])
   const [reloadKey, setReloadKey] = useState(0)
+  /** 段评承载页：点击段评气泡后由宿主浏览器打开评论页（带书源登录态）。 */
+  const [browserPage, setBrowserPage] = useState<ReaderBrowserPage | null>(null)
   // 顶栏高度：菜单打开时正文整体下移这么多，顶栏就不会压住开头几行
   const topBarRef = useRef<HTMLDivElement>(null)
   const [menuInset, setMenuInset] = useState(0)
@@ -715,15 +733,59 @@ export default function ReaderViewPage() {
       },
     }
   })()
-  const paragraphs = (content ?? '').split('\n').map((p) => p.trim()).filter(Boolean)
+  // 正文按行组织成「段落块」：保留原始行号（段评锚点按行号挂靠），
+  // 只丢掉既无文字又无段评的空行。
+  const blocks = useMemo<ReaderParagraphBlock[]>(() => {
+    const lines = (content ?? '').split('\n')
+    const byLine = new Map<number, ReaderContentComment[]>()
+    for (const c of media?.type === 'text' ? (media.comments ?? []) : []) {
+      const list = byLine.get(c.line)
+      if (list) list.push(c)
+      else byLine.set(c.line, [c])
+    }
+    const out: ReaderParagraphBlock[] = []
+    for (let i = 0; i < lines.length; i++) {
+      const text = lines[i].trim()
+      const comments = byLine.get(i) ?? []
+      if (text === '' && comments.length === 0) continue
+      out.push({ text, comments })
+    }
+    return out
+  }, [content, media])
 
-  // 正文段落：普通段落按缩进排版，[img] 行渲染成居中图片
-  const renderParagraph = (line: string, key: number) => {
-    if (line.startsWith(IMG_MARK)) {
+  // 打开段评：服务端带书源 Cookie 抓取评论页，这里用 iframe 承载。
+  // 前端直接 window.open 会以未登录身份访问，评论接口拿不到数据。
+  const openComment = useCallback(
+    async (comment: ReaderContentComment) => {
+      if (!book) return
+      if (!comment.url) {
+        toast('这条评论没有可用地址')
+        return
+      }
+      try {
+        const page = await readerAPI.openContentComment({
+          book_id: book.id,
+          url: comment.url,
+          title: comment.label || '段评',
+        })
+        setBrowserPage(page)
+      } catch (e) {
+        toast.error(
+          (e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '打开段评失败',
+        )
+      }
+    },
+    [book],
+  )
+
+  // 正文段落块：普通段落按缩进排版，[img] 行渲染成居中图片，段评在段末挂气泡
+  const renderParagraph = (block: ReaderParagraphBlock, key: number) => {
+    const { text, comments } = block
+    if (text.startsWith(IMG_MARK)) {
       return (
         <p key={key} style={{ marginBottom: settings.paragraphSpacing, textAlign: 'center' }}>
           <img
-            src={line.slice(IMG_MARK.length)}
+            src={text.slice(IMG_MARK.length)}
             alt=""
             referrerPolicy="no-referrer"
             style={{ maxWidth: '100%', maxHeight: '70vh', margin: '0 auto', objectFit: 'contain' }}
@@ -731,9 +793,44 @@ export default function ReaderViewPage() {
         </p>
       )
     }
+    const standalone = text === '' && comments.length > 0
     return (
-      <p key={key} style={{ textIndent: '2em', marginBottom: settings.paragraphSpacing }}>
-        {line}
+      <p
+        key={key}
+        style={{
+          textIndent: text ? '2em' : undefined,
+          marginBottom: settings.paragraphSpacing,
+          textAlign: standalone && comments.every((c) => c.block) ? 'center' : undefined,
+        }}
+      >
+        {text}
+        {comments.map((c, ci) => (
+          <button
+            key={`${c.line}-${ci}`}
+            type="button"
+            onClick={(e) => {
+              // 滚动容器的分区点击与翻页覆盖层都在上层，不拦住冒泡，
+              // 点气泡会顺带翻页或呼出菜单。
+              e.stopPropagation()
+              void openComment(c)
+            }}
+            title={c.label || '段评'}
+            // 外层正文档关掉了指针事件（见上面的层叠说明），气泡自己开关。
+            className="relative z-10 mx-1 inline-flex items-center gap-0.5 rounded-full border align-middle"
+            style={{
+              borderColor: theme.accent,
+              color: theme.accent,
+              fontSize: Math.max(10, settings.fontSize - 4),
+              lineHeight: 1,
+              padding: '2px 6px',
+              verticalAlign: 'middle',
+              pointerEvents: 'auto',
+            }}
+          >
+            <MessageSquare size={11} />
+            {c.count > 0 && <span>{c.count}</span>}
+          </button>
+        ))}
       </p>
     )
   }
@@ -785,8 +882,16 @@ export default function ReaderViewPage() {
           ) : settings.pageMode === 'page' ? (
             /* 左右/上下留边（legado 默认左右16/上下6），避免正文贴屏幕边；
                菜单打开时整体下移一个顶栏高度，顶栏不再压住正文（用 transform，
-               不改高度也就不触发重新分页） */
-            <div className={`h-full px-4 py-2 ${MENU_SHIFT}`} style={menuShiftStyle}>
+               不改高度也就不触发重新分页）。
+               relative + z-index + pointer-events-none：正文容器带 transform，
+               本身就形成一个层叠上下文，段评气泡的 z-index 只在容器内部生效，
+               会被后面的点击覆盖层压住。把整层抬到覆盖层之上并关闭指针事件，
+               只让气泡自己 pointer-events:auto，气泡可点、其余位置照样透给
+               覆盖层翻页/呼出菜单。 */
+            <div
+              className={`pointer-events-none relative z-[5] h-full px-4 py-2 ${MENU_SHIFT}`}
+              style={menuShiftStyle}
+            >
               <div ref={viewportRef} className="relative h-full overflow-hidden">
                 <div
                   ref={contentRef}
@@ -801,7 +906,7 @@ export default function ReaderViewPage() {
                     lineHeight: settings.lineHeight,
                   }}
                 >
-                  {paragraphs.map((p, i) => renderParagraph(p, i))}
+                  {blocks.map((b, i) => renderParagraph(b, i))}
                 </div>
               </div>
             </div>
@@ -825,13 +930,13 @@ export default function ReaderViewPage() {
               style={{ fontSize: settings.fontSize, lineHeight: settings.lineHeight, ...menuShiftStyle }}
             >
               <div className="py-4">
-                {paragraphs.map((p, i) => renderParagraph(p, i))}
+                {blocks.map((b, i) => renderParagraph(b, i))}
               </div>
             </div>
           )}
 
           {/* 加载 / 错误 / 空内容态 */}
-          {(loadingStage !== null || (content !== null && paragraphs.length === 0)) && contentType === 'text' && (
+          {(loadingStage !== null || (content !== null && blocks.length === 0)) && contentType === 'text' && (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center" style={{ color: theme.text }}>
               {loadingStage !== null ? (
                 <Loader2 className="animate-spin opacity-60" size={24} />
@@ -865,7 +970,7 @@ export default function ReaderViewPage() {
             原生纵向滚动（手指落在覆盖层上时找不到可滚动的祖先节点），
             所以滚动模式由正文容器的 onClick 分区（见 handleZoneTap）。 */}
         {settings.pageMode === 'page' && (contentType === 'text' || contentType === 'image') && (
-          <div className="absolute inset-0 grid grid-cols-[30%_40%_30%]">
+          <div className="absolute inset-0 z-[1] grid grid-cols-[30%_40%_30%]">
             <button type="button" aria-label="上一页" onClick={goPrev} className="cursor-w-resize" />
             <button
               type="button"
@@ -1172,6 +1277,9 @@ export default function ReaderViewPage() {
           onClose={() => setSwitchOpen(false)}
         />
       )}
+
+      {/* 段评评论页：复用书源页面的承载面板（带书源 Cookie 由服务端抓取） */}
+      {browserPage && <BrowserPanel page={browserPage} onClose={() => setBrowserPage(null)} />}
     </div>
   )
 }
