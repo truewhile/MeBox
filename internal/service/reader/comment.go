@@ -451,6 +451,8 @@ func (s *ReaderService) OpenContentComment(ctx context.Context, userID, bookID, 
 		title = "段评"
 	}
 	entry, err := s.registerBrowser(ctx, book.Origin, sourceID, userID,
+		// 段评是「只展示」的页面，没有登录会话可回写 Cookie。
+		browserCookieTarget{},
 		rule.BrowserTask{URL: target, Title: title}, browserModeOpen)
 	if err != nil {
 		return nil, err

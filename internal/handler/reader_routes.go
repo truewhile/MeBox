@@ -295,12 +295,12 @@ func readerBrowserPageHandler(svc *service.Container) gin.HandlerFunc {
 // 服务端补上书源 Cookie 与请求头，使「用户后台」这类页面在 iframe 里保持登录态。
 func readerBrowserAssetHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		target, sourceURL, err := svc.Reader.VerifyBrowserAsset(c.Query("id"), c.Query("u"), c.Query("s"))
+		target, _, err := svc.Reader.VerifyBrowserAsset(c.Query("id"), c.Query("u"), c.Query("s"))
 		if err != nil {
 			c.String(http.StatusForbidden, "%s", err.Error())
 			return
 		}
-		contentType, status, data, err := svc.Reader.FetchBrowserAsset(c.Request.Context(), sourceURL, target)
+		contentType, status, data, err := svc.Reader.FetchBrowserAsset(c.Request.Context(), c.Query("id"), target)
 		if err != nil {
 			c.String(http.StatusBadGateway, "资源加载失败: %s", err.Error())
 			return

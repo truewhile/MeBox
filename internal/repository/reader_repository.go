@@ -56,7 +56,12 @@ func (r *ReaderRepository) DeleteSource(ctx context.Context, id string) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		src := &model.ReaderBookSource{}
 		if err := tx.First(src, "id = ?", id).Error; err == nil && src.SourceURL != "" {
-			if err := tx.Delete(&model.ReaderSourceState{}, "source_url = ?", src.SourceURL).Error; err != nil {
+			// 会话状态是「一源一条」，而 source_url 上有覆盖软删行的唯一索引：
+			// 软删会让这一行继续占着 source_url，之后 SaveSourceState 的
+			// First（默认排除软删行）查不到、Create 就会撞唯一约束，
+			// 表现为「保存书源会话状态失败: UNIQUE constraint failed」，
+			// cookie / 登录态从此再也存不进去。这里必须硬删。
+			if err := tx.Unscoped().Delete(&model.ReaderSourceState{}, "source_url = ?", src.SourceURL).Error; err != nil {
 				return err
 			}
 		}
@@ -79,8 +84,11 @@ func (r *ReaderRepository) GetSourceState(ctx context.Context, sourceURL string)
 
 // SaveSourceState 覆盖保存书源会话状态（不存在则新建）。
 func (r *ReaderRepository) SaveSourceState(ctx context.Context, st *model.ReaderSourceState) error {
+	// 用 Unscoped 连软删行一起找：source_url 的唯一索引覆盖软删行，
+	// 只按未删行查会漏掉历史行，随后 Create 必然撞唯一约束，
+	// 结果就是该源的会话状态（含 cookie、登录态）永远保存失败。
 	var existing model.ReaderSourceState
-	err := r.db.WithContext(ctx).First(&existing, "source_url = ?", st.SourceURL).Error
+	err := r.db.WithContext(ctx).Unscoped().First(&existing, "source_url = ?", st.SourceURL).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return r.db.WithContext(ctx).Create(st).Error
 	}
@@ -89,6 +97,11 @@ func (r *ReaderRepository) SaveSourceState(ctx context.Context, st *model.Reader
 	}
 	st.ID = existing.ID
 	st.CreatedAt = existing.CreatedAt
+	if existing.DeletedAt.Valid {
+		// 历史行被软删过：连 deleted_at 一起写回，把它复活
+		st.DeletedAt = gorm.DeletedAt{}
+		return r.db.WithContext(ctx).Unscoped().Save(st).Error
+	}
 	return r.db.WithContext(ctx).Save(st).Error
 }
 

@@ -63,11 +63,14 @@ type ReaderService struct {
 
 // NewReaderService 创建服务。
 func NewReaderService(cfg *config.Config, log *zap.Logger, repos *repository.Container) *ReaderService {
+	client := helper.NewSiteHTTPClient(30, true)
+	// 逐跳收集 Set-Cookie：登录源常把凭证放在跳转链中间那一跳（见 cookies.go）。
+	enableCookieCapture(client)
 	return &ReaderService{
 		cfg:     cfg,
 		log:     log,
 		repo:    repos.Reader,
-		http:    helper.NewSiteHTTPClient(30, true),
+		http:    client,
 		crypto:  helper.NewSecretCipher(firstNonEmpty(cfg.Secrets.EncryptionKey, cfg.Secrets.JWTSecret)),
 		limiter: newSourceRateLimiter(),
 	}
@@ -319,12 +322,13 @@ func (s *ReaderService) executeWithState(ctx context.Context, req *rule.Request,
 		}
 	}
 	// 请求构造抽成闭包：重试时必须重建请求（body 读取器只能消费一次）。
-	buildRequest := func() (*http.Request, error) {
+	// reqCtx 每次尝试单独传入，好让 Set-Cookie 只从「最终那次尝试」收集。
+	buildRequest := func(reqCtx context.Context) (*http.Request, error) {
 		var bodyReader io.Reader
 		if req.Body != "" {
 			bodyReader = strings.NewReader(req.Body)
 		}
-		httpReq, err := http.NewRequestWithContext(ctx, req.Method, target, bodyReader)
+		httpReq, err := http.NewRequestWithContext(reqCtx, req.Method, target, bodyReader)
 		if err != nil {
 			return nil, err
 		}
@@ -361,9 +365,18 @@ func (s *ReaderService) executeWithState(ctx context.Context, req *rule.Request,
 	var (
 		resp *http.Response
 		data []byte
+		// sink 收集这次请求（含重定向各跳）下发的 Set-Cookie，
+		// 只在需要回写会话且书源允许自动累积时才挂。
+		sink *cookieSink
 	)
 	for attempt := 1; ; attempt++ {
-		httpReq, err := buildRequest()
+		sink = nil
+		reqCtx := ctx
+		if state != nil && captureCookies {
+			sink = &cookieSink{}
+			reqCtx = withCookieSink(ctx, sink)
+		}
+		httpReq, err := buildRequest(reqCtx)
 		if err != nil {
 			return "", "", 0, err
 		}
@@ -405,15 +418,12 @@ func (s *ReaderService) executeWithState(ctx context.Context, req *rule.Request,
 		body = string(data)
 	}
 	finalURL := resp.Request.URL.String()
-	// 记录 Set-Cookie（书源 JS 的 cookie.getCookie 可读取）
-	var cookieStrs []string
-	for _, ck := range resp.Cookies() {
-		cookieStrs = append(cookieStrs, ck.Name+"="+ck.Value)
-	}
-	if len(cookieStrs) > 0 && state != nil && captureCookies {
-		for _, ck := range cookieStrs {
-			state.SetCookie(finalURL, ck)
-		}
+	// 记录 Set-Cookie（书源 JS 的 cookie.getCookie 可读取）。
+	// sink 里已含重定向各跳的 Cookie，这里再把最终响应补进去，
+	// 归属域按 Cookie 自己的 Domain 优先、否则按该跳地址（见 cookies.go）。
+	if sink != nil {
+		sink.add(resp.Request.URL, resp)
+		sink.apply(state)
 	}
 	// bodyJs 二次处理
 	if req.BodyJsFn != nil {
@@ -606,6 +616,11 @@ func (sess *sourceSession) runner(key string, page int) *rule.JSRunner {
 			sourceURL: sess.srcURL(),
 			sourceID:  sess.srcID(),
 			userID:    sess.userID,
+			// state 交出去，让面板里页面自己发起的请求也能把 Set-Cookie
+			// 写回这次会话（见 browser_panel.go / cookies.go）。
+			state: sess.state,
+			// capture 对应 enabledCookieJar：关掉时面板同样不自动累积 Cookie。
+			capture: sess.captureCookies(),
 		}
 	}
 	return rule.NewJSRunner(rule.JSConfig{

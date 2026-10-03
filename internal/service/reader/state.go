@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 
 	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/service/reader/rule"
@@ -23,8 +24,12 @@ type sourceState struct {
 	variable    string
 	loginInfo   string
 	loginHeader string
-	cookies     map[string]string // domain → "k=v; k=v"
-	loaded      bool
+	// cookies / cookieMu：domain → "k=v; k=v"。
+	// cookieMu 保护这张表：浏览器面板里的多个资源/接口代理请求会并发回写
+	// Cookie（见 browser_panel.go），而书源 JS 同时在读，不加锁会 data race。
+	cookies  map[string]string
+	cookieMu sync.Mutex
+	loaded   bool
 
 	toasts   []string
 	browsers []rule.BrowserRequest
@@ -119,6 +124,13 @@ func (st *sourceState) SetLoginHeader(v string) {
 func (st *sourceState) GetCookie(rawURL string) string { return st.GetCookieKey(rawURL, "") }
 
 func (st *sourceState) GetCookieKey(rawURL, key string) string {
+	st.cookieMu.Lock()
+	defer st.cookieMu.Unlock()
+	return st.getCookieKeyLocked(rawURL, key)
+}
+
+// getCookieKeyLocked 的调用方需持有 cookieMu。
+func (st *sourceState) getCookieKeyLocked(rawURL, key string) string {
 	domain := rule.CookieDomain(rawURL)
 	if domain == "" {
 		return ""
@@ -138,6 +150,8 @@ func (st *sourceState) SetCookie(rawURL, cookie string) {
 	if domain == "" || strings.TrimSpace(cookie) == "" {
 		return
 	}
+	st.cookieMu.Lock()
+	defer st.cookieMu.Unlock()
 	merged := rule.MergeCookie(st.cookies[domain], cookie)
 	if merged == st.cookies[domain] {
 		return
@@ -151,6 +165,8 @@ func (st *sourceState) RemoveCookie(rawURL string) {
 	if domain == "" {
 		return
 	}
+	st.cookieMu.Lock()
+	defer st.cookieMu.Unlock()
 	if _, ok := st.cookies[domain]; !ok {
 		return
 	}
@@ -197,12 +213,14 @@ func (st *sourceState) flush() {
 	if !st.dirty || st.svc == nil || st.svc.repo == nil || st.sourceURL == "" {
 		return
 	}
+	st.cookieMu.Lock()
 	cookiesJSON := ""
 	if len(st.cookies) > 0 {
 		if b, err := json.Marshal(st.cookies); err == nil {
 			cookiesJSON = string(b)
 		}
 	}
+	st.cookieMu.Unlock()
 	rec := &model.ReaderSourceState{
 		SourceURL:   st.sourceURL,
 		Variable:    st.variable,
@@ -221,6 +239,8 @@ func (st *sourceState) flush() {
 
 // snapshotCookies 返回 Cookie 副本（domain → cookie 串）。
 func (st *sourceState) snapshotCookies() map[string]string {
+	st.cookieMu.Lock()
+	defer st.cookieMu.Unlock()
 	out := make(map[string]string, len(st.cookies))
 	for d, c := range st.cookies {
 		out[d] = c
@@ -230,6 +250,8 @@ func (st *sourceState) snapshotCookies() map[string]string {
 
 // clearCookies 清空全部 Cookie 并标记待落库（对应 legado removeAllCookies）。
 func (st *sourceState) clearCookies() {
+	st.cookieMu.Lock()
+	defer st.cookieMu.Unlock()
 	if len(st.cookies) == 0 {
 		return
 	}

@@ -201,7 +201,7 @@ func TestBrowserPanelInjectsSourceCookies(t *testing.T) {
 	st.flush()
 
 	// 直接驱动服务层：等价于书源调用 startBrowser 打开用户后台
-	if err := svc.openBrowser(ctx, srv.URL, sourceID, readerTestUserID, rule.BrowserTask{
+	if err := svc.openBrowser(ctx, srv.URL, sourceID, readerTestUserID, browserCookieTarget{}, rule.BrowserTask{
 		URL: srv.URL + "/user", Title: "用户后台",
 	}); err != nil {
 		t.Fatalf("打开用户后台失败: %v", err)
@@ -266,7 +266,7 @@ func TestBrowserPanelInjectsSourceCookies(t *testing.T) {
 	if gotSourceURL != srv.URL {
 		t.Fatalf("资源关联的书源 = %q", gotSourceURL)
 	}
-	contentType, status, data, err := svc.FetchBrowserAsset(ctx, gotSourceURL, target)
+	contentType, status, data, err := svc.FetchBrowserAsset(ctx, page.ID, target)
 	if err != nil {
 		t.Fatalf("拉取资源失败: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestBrowserPanelXHRProxy(t *testing.T) {
 	st.SetCookie(srv.URL, "qttoken=SESSION_abcdef123456")
 	st.flush()
 
-	if err := svc.openBrowser(ctx, srv.URL, sourceID, readerTestUserID, rule.BrowserTask{
+	if err := svc.openBrowser(ctx, srv.URL, sourceID, readerTestUserID, browserCookieTarget{}, rule.BrowserTask{
 		URL: srv.URL + "/user", Title: "用户后台",
 	}); err != nil {
 		t.Fatalf("打开用户后台失败: %v", err)
@@ -403,7 +403,7 @@ func TestBrowserPanelOpenPageDroppedAfterResolve(t *testing.T) {
 	sourceID := prepareLoginSource(t, svc, browserPanelSourceJSON(t, "https://panel.example.com"))
 
 	// 等价于书源的 renderVersionPage()：java.startBrowser(data:..., '光遇书源更新')
-	if err := svc.openBrowser(ctx, "https://panel.example.com", sourceID, readerTestUserID,
+	if err := svc.openBrowser(ctx, "https://panel.example.com", sourceID, readerTestUserID, browserCookieTarget{},
 		rule.BrowserTask{URL: "data:text/html,<html><body>更新</body></html>", Title: "光遇书源更新"}); err != nil {
 		t.Fatalf("登记 open 页面失败: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestBrowserPanelOpenPageDroppedAfterResolve(t *testing.T) {
 	}
 
 	// 再点别的按钮：待办表里只应剩新页面，且序号更大
-	if err := svc.openBrowser(ctx, "https://panel.example.com", sourceID, readerTestUserID,
+	if err := svc.openBrowser(ctx, "https://panel.example.com", sourceID, readerTestUserID, browserCookieTarget{},
 		rule.BrowserTask{URL: "data:text/html,<html><body>设置</body></html>", Title: "光遇书源设置"}); err != nil {
 		t.Fatalf("登记新页面失败: %v", err)
 	}
