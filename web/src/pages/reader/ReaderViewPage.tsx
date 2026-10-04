@@ -271,6 +271,10 @@ export default function ReaderViewPage() {
     // 响应，换源后还可能把旧源的正文塞进新书的缓存。
     const ac = new AbortController()
     ;(async () => {
+      // 每次重新取正文都先清掉上一次的报错。换源时的典型情形：服务端章节缓存刚被清空、
+      // 而本地 chapters 还是旧源的，这一次请求必然失败（「章节缓存为空」）；等新源目录
+      // 落地后正文 effect 会再来一次并且成功，但不清这里的话，旧错误会一直压在正文上。
+      setError('')
       setContent(null)
       setLoadingStage('content')
       try {
@@ -556,6 +560,12 @@ export default function ReaderViewPage() {
         await readerAPI.switchOrigin(book.id, origin)
         toast.success(`已切换到「${origin.origin_name || origin.origin}」`)
         contentCache.current.clear()
+        // 换源后服务端已清空章节缓存，而本地的 chapters 还是旧源的目录：不清理的话，
+        // 重新加载书籍期间（listBooks 已返回、新目录还没抓回来）正文 effect 会拿旧目录
+        // 去打新源，撞上「章节缓存为空」。这里先把正文/目录清空，等新源目录到位再取。
+        setError('')
+        setContent(null)
+        setChapters([])
         setReloadKey((v) => v + 1)
       } catch (e) {
         toast.error((e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '换源失败')

@@ -375,6 +375,12 @@ func (s *ReaderService) prepareBrowserPage(ctx context.Context, sourceURL, id st
 	if err != nil {
 		return "", "", fmt.Errorf("打开页面失败: %w", err)
 	}
+	// 空响应没有可展示的内容：以前照样包一层空 <pre> 交给 iframe，面板就是一片白，
+	// 用户看不出是地址有问题还是自己没登录。这里直接报错（如段评地址参数被改写、
+	// 上游按缺参数返回空 body 的情形）。
+	if strings.TrimSpace(body) == "" {
+		return "", "", fmt.Errorf("目标地址没有返回任何内容: %s", truncateForLog(req.URL, 120))
+	}
 	cookie := s.browserCookieHeader(ctx, sourceURL, finalURL)
 	if !strings.Contains(strings.ToLower(contentType), "html") {
 		// 非 HTML（如 JSON 接口）：包一层 <pre>，至少让用户看到内容

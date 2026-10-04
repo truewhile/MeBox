@@ -2,6 +2,7 @@ package rule
 
 import (
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/PaesslerAG/jsonpath"
@@ -450,10 +451,7 @@ func (a *AnalyzeRule) getStringRules(ruleList []*SourceRule, mContent any, isUrl
 	if result == nil {
 		result = ""
 	}
-	str := resultString(result)
-	if strings.Contains(str, "&") {
-		str = html.UnescapeString(str)
-	}
+	str := unescapeRuleEntities(resultString(result))
 	if isUrl {
 		if strings.TrimSpace(str) == "" {
 			// 对应 legado：取值为空时回退 baseUrl，让相对地址还能解析。
@@ -595,6 +593,49 @@ func applyReplaceRegex(result string, r ResolvedSourceRule) string {
 		return regexReplaceFirstOnFirstMatch(r.ReplaceRegex, result, r.Replacement)
 	}
 	return regexReplaceAll(r.ReplaceRegex, result, r.Replacement)
+}
+
+// entityRefRe 匹配一个 HTML 字符引用：命名实体（&amp;、&nbsp;）、十进制（&#39;）、
+// 十六进制（&#x27;）。分号可选——旧式简写（&nbsp、&amp）在 HTML 文本里同样成立。
+var entityRefRe = regexp.MustCompile(`&(?:[a-zA-Z][a-zA-Z0-9]{1,31}|#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6});?`)
+
+// unescapeRuleEntities 还原规则结果里的 HTML 实体（`&amp;` → `&`、`&#39;` → `'`）。
+//
+// 唯一的例外是「不带分号的旧式简写后面紧跟 = 或字母数字」这一种：HTML5 里这类写法
+// 属于历史匹配，而规则结果并不是纯 HTML 文本——正文、地址、查询串都在同一份字符串里。
+// 按浏览器语义无差别还原会把查询串吃掉：光遇聚合的段评地址
+// `…?item_id=X&para=1&source=QQ阅读` 会变成 `…?item_id=X¶=1&source=QQ阅读`，
+// 上游按缺参数处理返回空页面，段评面板就只剩一片空白（见 reader/comment.go）。
+func unescapeRuleEntities(s string) string {
+	if !strings.Contains(s, "&") {
+		return s
+	}
+	var b strings.Builder
+	last := 0
+	for _, loc := range entityRefRe.FindAllStringIndex(s, -1) {
+		match := s[loc[0]:loc[1]]
+		if !strings.HasSuffix(match, ";") && loc[1] < len(s) && isEntityStopByte(s[loc[1]]) {
+			continue
+		}
+		decoded := html.UnescapeString(match)
+		if decoded == match {
+			continue // 不是已知实体，原样保留
+		}
+		b.WriteString(s[last:loc[0]])
+		b.WriteString(decoded)
+		last = loc[1]
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// isEntityStopByte 判断旧式简写实体后面这个字符是否让它失去实体语义
+// （HTML5 规定不带分号的引用后跟 = 或字母数字时按普通文本处理）。
+func isEntityStopByte(c byte) bool {
+	return c == '=' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
 // resultString 对应 Kotlin 的 result.toString()。
