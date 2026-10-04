@@ -5,6 +5,7 @@ import { ArrowLeft, ArrowLeftRight, BookOpen, ChevronDown, ChevronUp, Loader2, R
 
 import { readerAPI, type ReaderBook, type ReaderBookInfo, type ReaderSearchOrigin, type ReaderTocChapter } from '../../api/reader'
 import ReaderBookCover from '../../components/ReaderBookCover'
+import { pickChapterIndex } from './bookDetailModel'
 import { SourcePickerDialog } from './SourcePickerDialog'
 
 // 书籍详情页（仿 legado BookInfoActivity：封面 + 信息 + 简介 + 目录入口 + 加书架/开始阅读）。
@@ -86,7 +87,16 @@ export default function ReaderBookPage() {
 
   const firstReadableChapter = useMemo(() => chapters?.find((c) => !c.is_volume && c.url) ?? null, [chapters])
 
-  const startReading = async () => {
+  /**
+   * 目录点章：把点中的章节换算成阅读器要的序号（换算规则与理由见 bookDetailModel）。
+   */
+  const resolveChapterIndex = async (bookID: string, chapter: ReaderTocChapter): Promise<number> => {
+    const cached = await readerAPI.listChapters(bookID).catch(() => [])
+    return pickChapterIndex(cached, chapter)
+  }
+
+  // chapter 为空＝开始/继续阅读（沿用服务端进度）；给了章节＝目录点章跳读。
+  const startReading = async (chapter?: ReaderTocChapter) => {
     setBusy(true)
     try {
       let book = shelfBook
@@ -105,7 +115,9 @@ export default function ReaderBookPage() {
           cover_url: cover,
         })
       }
-      navigate(`/reader/view/${book.id}`)
+      // 目录点章：带上阅读器认识的 chapter 序号跳进去（没有它阅读器就用服务端进度）。
+      const index = chapter ? await resolveChapterIndex(book.id, chapter) : null
+      navigate(index === null ? `/reader/view/${book.id}` : `/reader/view/${book.id}?chapter=${index}`)
     } catch (e) {
       toast.error((e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '操作失败')
     } finally {
@@ -273,11 +285,11 @@ export default function ReaderBookPage() {
             <Trash2 size={13} className="mr-1 inline" /> 移出书架
           </button>
         ) : (
-          <button type="button" onClick={startReading} disabled={busy} className="btn-outline flex-1 text-xs disabled:opacity-50">
+          <button type="button" onClick={() => startReading()} disabled={busy} className="btn-outline flex-1 text-xs disabled:opacity-50">
             <BookOpen size={13} className="mr-1 inline" /> 加入书架
           </button>
         )}
-        <button type="button" onClick={startReading} disabled={busy || !firstReadableChapter} className="btn-primary flex-1 text-xs disabled:opacity-50">
+        <button type="button" onClick={() => startReading()} disabled={busy || !firstReadableChapter} className="btn-primary flex-1 text-xs disabled:opacity-50">
           {busy ? <Loader2 size={13} className="mr-1 inline animate-spin" /> : null}
           {shelfBook?.dur_chapter_title ? '继续阅读' : '开始阅读'}
         </button>
@@ -318,6 +330,16 @@ export default function ReaderBookPage() {
               <div key={c.index} className="px-1 py-1.5 text-xs text-[var(--app-muted)]">
                 {c.is_volume ? (
                   <p className="font-bold text-[var(--app-text)]">{c.title}</p>
+                ) : c.url ? (
+                  // 点章节＝跳到阅读器并从这一章开始（听书源会自动起播这一章）。
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => startReading(c)}
+                    className="block w-full truncate text-left transition-colors hover:text-brand-600 disabled:opacity-50"
+                  >
+                    {c.title}
+                  </button>
                 ) : (
                   c.title
                 )}

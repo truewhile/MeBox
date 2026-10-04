@@ -220,7 +220,10 @@ export default function ReaderViewPage() {
         else if (b.dur_chapter_index > 0 && chs[b.dur_chapter_index] && !chs[b.dur_chapter_index].is_volume) {
           idx = b.dur_chapter_index
         }
-        pendingPosRef.current = b.dur_chapter_pos ?? 0
+        // 位置只在「接着上次那一章读」时恢复：URL 显式跳到别的章时，b.dur_chapter_pos
+        // 属于另一章，套到新章上会从中间开始（音频表现为一进去就从错的时间点续播）。
+        const resumingSavedChapter = !explicitChapter || idx === b.dur_chapter_index
+        pendingPosRef.current = resumingSavedChapter ? (b.dur_chapter_pos ?? 0) : 0
         // 听书：引擎是常驻的，可能已经自动播到更靠后的章，而服务端的进度还停在
         // 上一次落库的位置。这种「续听」场景要以引擎的实时章节为准，否则回到本书
         // 会把正在播的章节往回拽。URL 显式指定 chapter 时尊重 URL（那是明确的跳转）。
