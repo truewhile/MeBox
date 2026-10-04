@@ -64,6 +64,14 @@ class ReaderAudioEngine {
   private detaching = false
   /** 加载批次号：动态 import hls.js 期间被新的加载打断时用来丢弃旧结果。 */
   private loadToken = 0
+  /** 预取缓存：章序号 → 已解析的音轨。命中的切章可以同步开播，不用等网络。 */
+  private prefetched = new Map<number, { track: string; transcoding: boolean }>()
+  /** 预取在途的章序号，避免同一章重复请求。 */
+  private prefetching = new Set<number>()
+  /** 预热下一章字节的隐藏播放器（只下载，从不 play()）。 */
+  private warmer: HTMLAudioElement | null = null
+  /** warmer 当前装载的音轨，避免重复赋值。 */
+  private warmedTrack = ''
 
   constructor() {
     const audio = new Audio()
@@ -93,7 +101,13 @@ class ReaderAudioEngine {
     }
     // 换章前把上一章的最后位置补报掉（此时 store 里还是上一章的上下文）
     this.commitProgress()
+    // 换书：预取的音轨属于上一本，全部作废
+    if (s.bookId !== input.bookId) this.clearPrefetch()
+    this.applyChapter(input)
+  }
 
+  /** 真正把一章装上播放器（同步部分）：预取命中的续播也走这里。 */
+  private applyChapter(input: LoadChapterInput): void {
     const chapterTitle = input.chapters[input.chapterIndex]?.title ?? ''
     useReaderAudioStore.setState({
       bookId: input.bookId,
@@ -128,6 +142,9 @@ class ReaderAudioEngine {
     }
 
     void this.attachSource(input.track)
+    // 提前解析下一章的音轨并在后台预热字节：息屏自动续播时才能立刻接上
+    const nextIndex = this.neighborChapterIndex(1)
+    if (nextIndex !== null) this.prefetchChapter(nextIndex)
   }
 
   play(): void {
@@ -222,6 +239,7 @@ class ReaderAudioEngine {
   stop(): void {
     this.commitProgress()
     this.detachSource()
+    this.clearPrefetch()
     this.timerDeadline = 0
     this.pausedAt = 0
     // 下一次开播重新套用「上次的定时设置」，否则关掉再听一本书时定时不会自动开
@@ -242,12 +260,22 @@ class ReaderAudioEngine {
 
   private async attachSource(src: string): Promise<void> {
     const token = ++this.loadToken
-    this.detachSource()
-    this.setSessionMetadata(src)
+    // 只销毁上一章的 hls，不再 removeAttribute('src') + load()。load() 会把媒体
+    // 元素彻底卸载、释放系统音频会话，息屏时紧接着的 play() 就会被浏览器当成
+    // 「无用户手势」拦下——表现正是切章卡住、解锁后必须手动点播放。直接覆盖 src，
+    // 元素始终持有媒体，会话才接得上。
+    this.hls?.destroy()
+    this.hls = null
     if (!src) {
+      this.audio.removeAttribute('src')
+      this.audio.load()
+      this.setSessionMetadata(null)
       this.fail('本章没有可播放的音频')
       return
     }
+    // 先停住上一章：HLS 分支要 await 动态 import，不先停会有一小段两章叠播
+    if (!this.audio.paused) this.audio.pause()
+    this.setSessionMetadata(src)
     if (src.includes('.m3u8')) {
       const mod = await import('hls.js')
       // 动态 import 期间可能已经切到别的章：丢弃这次结果
@@ -270,6 +298,7 @@ class ReaderAudioEngine {
     this.audio.src = src
   }
 
+  /** 彻底卸载音源（停止播放时用）。换章不走这里，见 attachSource 的说明。 */
   private detachSource(): void {
     this.detaching = true
     this.hls?.destroy()
@@ -279,9 +308,117 @@ class ReaderAudioEngine {
     this.detaching = false
   }
 
+  // ─── 预取与续播 ───────────────────────────────────────────────────────
+
+  /**
+   * 提前解析某章的音轨并预热字节。息屏时 ended 与 play() 之间不能有网络空档，
+   * 否则系统收走音频会话、标签页被冻结，浏览器就拒绝自动播放了。
+   */
+  private prefetchChapter(index: number): void {
+    const { bookId, chapters } = useReaderAudioStore.getState()
+    if (!bookId || index < 0 || index >= chapters.length || chapters[index].is_volume) return
+    if (this.prefetched.has(index) || this.prefetching.has(index)) return
+    // 反复跳章时旧的预取会变成垃圾，做个上限兜底
+    if (this.prefetched.size > 32) this.prefetched.clear()
+    this.prefetching.add(index)
+    const forBook = bookId
+    readerAPI
+      .bookContent(bookId, index)
+      .then((ct) => {
+        // 期间换了书：结果作废
+        if (useReaderAudioStore.getState().bookId !== forBook) return
+        const track = ct.tracks?.[0]
+        if (ct.type !== 'audio' || !track) return
+        this.prefetched.set(index, { track, transcoding: ct.transcoding ?? false })
+        // 要服务端转码的音轨立刻预热（把转码提前跑掉）；直链等到本章快播完再拉字节，
+        // 避免用户中途停下时白下整章的流量。
+        if (ct.transcoding) this.warmNextBytes(track)
+      })
+      .catch(() => undefined)
+      .finally(() => this.prefetching.delete(index))
+  }
+
+  /** 用隐藏播放器把下一章的字节（以及服务端转码）提前拉起来，减少切章等待。 */
+  private warmNextBytes(track: string): void {
+    // HLS 交给 hls.js 按需拉流，二次下载没有意义
+    if (!track || track.includes('.m3u8') || this.warmedTrack === track) return
+    this.warmedTrack = track
+    if (!this.warmer) {
+      const a = new Audio()
+      a.preload = 'auto'
+      this.warmer = a
+    }
+    this.warmer.src = track
+  }
+
+  /** 本章快播完时把下一章的字节预热起来（30 秒足够开头缓冲）。 */
+  private maybeWarmNext(): void {
+    const audio = this.audio
+    if (!Number.isFinite(audio.duration) || audio.duration <= 0) return
+    if (audio.duration - audio.currentTime > 30) return
+    const nextIndex = this.neighborChapterIndex(1)
+    if (nextIndex === null) return
+    const hit = this.prefetched.get(nextIndex)
+    if (hit) this.warmNextBytes(hit.track)
+  }
+
+  /** 用预取结果接续下一章；命中返回 true（未命中由调用方走异步加载兜底）。 */
+  private playPrefetched(index: number): boolean {
+    const hit = this.prefetched.get(index)
+    if (!hit) return false
+    this.prefetched.delete(index)
+    const s = useReaderAudioStore.getState()
+    this.applyChapter({
+      bookId: s.bookId,
+      bookName: s.bookName,
+      cover: s.cover,
+      chapters: s.chapters,
+      chapterIndex: index,
+      track: hit.track,
+      transcoding: hit.transcoding,
+      openCredits: s.openCredits,
+      closeCredits: s.closeCredits,
+      initialPos: 0,
+    })
+    // 立刻在 ended 的同一次事件里发起 play()，保证没有空档。片头跳转由
+    // loadedmetadata 处理器完成：音频在 loadedmetadata 之前不会出声，所以
+    // 先 play() 也不会漏出片头。HLS 交给 hls.js 承载，无法同帧开播。
+    if (!hit.track.includes('.m3u8')) this.play()
+    return true
+  }
+
+  private clearPrefetch(): void {
+    this.prefetched.clear()
+    this.prefetching.clear()
+    this.warmedTrack = ''
+    if (this.warmer) {
+      this.warmer.removeAttribute('src')
+      this.warmer.load()
+    }
+  }
+
   private async goToChapter(index: number, initialPos: number): Promise<void> {
     const { bookId, chapters } = useReaderAudioStore.getState()
     if (!bookId || index < 0 || index >= chapters.length || chapters[index].is_volume) return
+    // 命中预取：直接装，不等网络（片尾自动续播大多走这里）
+    const hit = this.prefetched.get(index)
+    if (hit) {
+      useReaderAudioStore.setState({ status: 'loading', error: '' })
+      const s = useReaderAudioStore.getState()
+      this.loadChapter({
+        bookId,
+        bookName: s.bookName,
+        cover: s.cover,
+        chapters,
+        chapterIndex: index,
+        track: hit.track,
+        transcoding: hit.transcoding,
+        openCredits: s.openCredits,
+        closeCredits: s.closeCredits,
+        initialPos,
+      })
+      return
+    }
     useReaderAudioStore.setState({ status: 'loading', error: '' })
     try {
       const ct = await readerAPI.bookContent(bookId, index)
@@ -344,6 +481,10 @@ class ReaderAudioEngine {
       this.lastTime = Number.isFinite(audio.duration) ? audio.duration : this.lastTime
       this.commitProgress()
       if (useReaderAudioStore.getState().hasNext) {
+        // 预取命中：在 ended 的同一次事件里同步接上下一章。息屏时这段「零空档」
+        // 很关键——空太久系统会收走音频会话、冻结标签页，浏览器随后拒绝自动播放。
+        const nextIndex = this.neighborChapterIndex(1)
+        if (nextIndex !== null && this.playPrefetched(nextIndex)) return
         this.next()
         return
       }
@@ -389,6 +530,7 @@ class ReaderAudioEngine {
       this.checkCreditsEnd()
       // 后台播放时 timeupdate 仍会触发，这是「到点暂停」最可靠的位置
       this.checkTimer()
+      this.maybeWarmNext()
     })
 
     audio.addEventListener('error', () => {
