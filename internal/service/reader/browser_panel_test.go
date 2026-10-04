@@ -167,6 +167,51 @@ func TestBrowserPanelCancelReleasesBlock(t *testing.T) {
 	}
 }
 
+// TestBrowserPageURLKeepsTargetQuery 承载地址必须原样带上目标地址的 query。
+//
+// 光遇聚合的段评页从 location.search 读 item_id/para/source，再据此请求评论接口。
+// 承载地址若只剩我们自己的 id/s，页面就按缺参数去请求：段评气泡上的数字照常有，
+// 点开却一条评论都没有。
+func TestBrowserPageURLKeepsTargetQuery(t *testing.T) {
+	svc, _ := newLoginTestService(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<html><body>comment page</body></html>`))
+	}))
+	defer srv.Close()
+
+	// 目标地址里故意带上与我们同名的 s/id：它们不能顶掉签名参数。
+	target := srv.URL + "/get_para_review?item_id=abc&para=1&source=QQ%E9%98%85%E8%AF%BB&s=decoy&id=decoy"
+	entry, err := svc.registerBrowser(t.Context(), srv.URL, "src-1", readerTestUserID,
+		browserCookieTarget{}, rule.BrowserTask{URL: target, Title: "段评"}, browserModeOpen)
+	if err != nil {
+		t.Fatalf("登记承载页面失败: %v", err)
+	}
+
+	page := svc.browserPageOf(entry)
+	u, err := url.Parse(page.PageURL)
+	if err != nil {
+		t.Fatalf("承载地址不合法: %q", page.PageURL)
+	}
+	q := u.Query()
+	if q.Get("item_id") != "abc" || q.Get("para") != "1" || q.Get("source") != "QQ阅读" {
+		t.Fatalf("承载地址丢了目标参数（段评页会因此取不到评论）: %q", page.PageURL)
+	}
+	// 路由按 id/s 取承载的页面快照，同名参数必须仍指向我们自己的待办
+	if q.Get("id") != entry.id || q.Get("s") != svc.browserPageSig(entry.id) {
+		t.Fatalf("同名参数顶掉了签名参数: %q", page.PageURL)
+	}
+	if _, err := svc.VerifyBrowserPage(q.Get("id"), q.Get("s")); err != nil {
+		t.Fatalf("带业务参数后签名校验失败: %v", err)
+	}
+	// 没有 query 的地址（含 data: 页面）不该多出参数
+	for _, plain := range []string{"https://panel.example.com/plain", "data:text/html;base64,AAA"} {
+		if got := svc.browserPageURL("id1", plain); strings.Count(got, "&") != 1 {
+			t.Fatalf("无 query 的地址被拼进了多余参数: %q", got)
+		}
+	}
+}
+
 // TestBrowserPanelInjectsSourceCookies http(s) 页面必须由服务端带书源 Cookie
 // 抓取，否则「用户后台」在浏览器里永远是未登录状态。
 func TestBrowserPanelInjectsSourceCookies(t *testing.T) {

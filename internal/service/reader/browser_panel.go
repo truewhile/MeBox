@@ -729,8 +729,34 @@ func (s *ReaderService) browserAssetSig(id, target string) string {
 	return s.browserSign("asset|" + id + "|" + target)
 }
 
-func (s *ReaderService) browserPageURL(id string) string {
-	return "/api/reader/browser/page?id=" + url.QueryEscape(id) + "&s=" + s.browserPageSig(id)
+// browserPageURL 生成 iframe 承载地址。
+//
+// 承载页面常常靠 location.search 取值：光遇聚合的段评页就是从 ?item_id&para&source
+// 读出「哪本书的哪一段、哪个来源」，再据此请求 /para_review。承载地址是我们自己的
+// 代理路径，页面看到的 query 只有 id/s，原地址的参数全丢了——页面于是按缺参数去
+// 请求评论接口，气泡数照样显示，点开却一条段评都没有。
+//
+// 所以把原地址的 query 原样拼在签名参数之后：页面看到的 search 与原站一致。
+// 我们自己的 id/s 放最前，Gin 取同名的第一个值，不会被原地址里的同名参数顶掉。
+func (s *ReaderService) browserPageURL(id, target string) string {
+	u := "/api/reader/browser/page?id=" + url.QueryEscape(id) + "&s=" + s.browserPageSig(id)
+	if q := browserTargetQuery(target); q != "" {
+		u += "&" + q
+	}
+	return u
+}
+
+// browserTargetQuery 取原地址的 query（不含 `?`）；data: 地址或解析失败时返回空串。
+func browserTargetQuery(target string) string {
+	target = strings.TrimSpace(target)
+	if target == "" || strings.HasPrefix(strings.ToLower(target), "data:") {
+		return ""
+	}
+	parsed, err := url.Parse(target)
+	if err != nil {
+		return ""
+	}
+	return parsed.RawQuery
 }
 
 // browserAssetProxyURL 生成资源代理地址（iframe 页面内引用用）。
@@ -888,7 +914,7 @@ func (s *ReaderService) pageOfLocked(e *pendingBrowser) BrowserPage {
 		Title:     e.request.Title,
 		Mode:      e.mode,
 		Seq:       e.seq,
-		PageURL:   s.browserPageURL(e.id),
+		PageURL:   s.browserPageURL(e.id, e.request.URL),
 		Refetch:   e.request.Refetch,
 		SourceID:  e.sourceID,
 		TargetURL: target,
