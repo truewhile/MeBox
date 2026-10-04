@@ -1,6 +1,7 @@
-import { memo, useEffect, useRef, type ReactNode } from 'react'
+import { memo, type ReactNode } from 'react'
 import { Film } from 'lucide-react'
 
+import { LoadMoreSentinel } from '../components/LoadMoreSentinel'
 import { MediaCard } from '../components/MediaCard'
 import { MEDIA_GRID_CLASS, VirtualMediaGrid } from '../components/VirtualMediaGrid'
 import type { Media } from '../types'
@@ -67,54 +68,8 @@ export function LibraryMediaSections({
         <LibraryEmptyState message="该库尚未发现任何剧集，触发一次扫描后再来看看" />
       )}
 
-      <LoadMoreSentinel
-        hasMore={hasMore}
-        loadingMore={loadingMore}
-        onLoadMore={onLoadMore}
-      />
+      <LoadMoreSentinel hasMore={hasMore} loadingMore={loadingMore} onLoadMore={onLoadMore} />
     </>
-  )
-}
-
-function LoadMoreSentinel({
-  hasMore,
-  loadingMore,
-  onLoadMore,
-}: {
-  hasMore: boolean
-  loadingMore: boolean
-  onLoadMore: () => void
-}) {
-  const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    const element = ref.current
-    if (!element || !hasMore) return
-    const root = document.getElementById('app-main-scroll')
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (!loadingMore && entries.some((entry) => entry.isIntersecting)) {
-          onLoadMore()
-        }
-      },
-      { root, rootMargin: '600px 0px', threshold: 0 },
-    )
-    observer.observe(element)
-    return () => observer.disconnect()
-  }, [hasMore, loadingMore, onLoadMore])
-
-  if (!hasMore) return null
-  return (
-    <div ref={ref} className="flex justify-center py-8">
-      <button
-        type="button"
-        disabled={loadingMore}
-        onClick={onLoadMore}
-        className="rounded-xl border border-[var(--app-border)] bg-[var(--app-panel)] px-4 py-2 text-sm font-bold text-[var(--app-subtle)] transition-colors hover:bg-[var(--app-hover)] hover:text-[var(--app-text)] disabled:cursor-wait disabled:opacity-60"
-      >
-        {loadingMore ? '加载中…' : '加载更多'}
-      </button>
-    </div>
   )
 }
 

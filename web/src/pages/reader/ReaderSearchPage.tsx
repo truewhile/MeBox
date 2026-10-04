@@ -4,26 +4,26 @@ import toast from 'react-hot-toast'
 import { AlertTriangle, ArrowLeft, ChevronDown, ChevronRight, ListFilter, Loader2, Plus, Search } from 'lucide-react'
 
 import { readerAPI, type ReaderSearchBook, type ReaderSearchSkipped, type ReaderSource } from '../../api/reader'
+import { LoadMoreSentinel } from '../../components/LoadMoreSentinel'
 import ReaderBookCover from '../../components/ReaderBookCover'
 import { useReaderSettingsStore } from '../../stores/readerSettings'
 import { splitKindTags } from '../../utils/kindTags'
+import { mergeSearchBooks, mergeSearchSkipped, searchBookKey } from '../../utils/searchBooks'
 import { SearchScopeDialog } from './SearchScopeDialog'
 import { SourcePickerDialog } from './SourcePickerDialog'
 
 // 多源聚合搜索页（仿 legado SearchActivity：结果流 + 失败书源列表）。
 // 搜索前可按书源收敛范围（对应 legado 的搜索范围）：默认全选已启用书源。
 // 搜索结果会剔除已在书架里的书——这里的搜索是用来发现新书的。
+// 结果按页取：滚到底自动请求下一页并增量合并，直到某一页不再带来新书。
 
-/** 书架命中键：与搜索结果一致按「书名 + 作者」聚合；作者缺省时只用书名（同 legado isInBookShelf）。 */
-function shelfBookKey(name: string, author: string): string {
-  const n = name.trim()
-  const a = author.trim()
-  return a ? `${n}|${a}` : n
-}
+/** 单次搜索最多翻到第几页。书源分页规则千奇百怪，个别源会一直返回新条目，
+ *  不设上限时用户一直往下滚就会一直发请求（每次都要把所有源再搜一遍）。 */
+const MAX_SEARCH_PAGES = 20
 
-/** 这本书是否已在书架：优先按书名+作者，其次按书本身/任一命中书源的地址（换源后地址会变）。 */
+/** 这本搜索结果是否已在书架：优先按书名+作者，其次按书本身/任一命中书源的地址（换源后地址会变）。 */
 function isOnShelf(book: ReaderSearchBook, shelf: Set<string>): boolean {
-  if (shelf.has(shelfBookKey(book.name, book.author))) return true
+  if (shelf.has(searchBookKey(book.name, book.author))) return true
   if (book.book_url && shelf.has(book.book_url)) return true
   return book.origins.some((o) => !!o.book_url && shelf.has(o.book_url))
 }
@@ -39,6 +39,16 @@ export default function ReaderSearchPage() {
   const [skipped, setSkipped] = useState<ReaderSearchSkipped[]>([])
   const [showSkipped, setShowSkipped] = useState(false)
   const [adding, setAdding] = useState('')
+  // 滚动加载：page 是已加载到的页码；hasMore 为 false 表示到底了（或还没搜过）。
+  const [page, setPage] = useState(0)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [hasMore, setHasMore] = useState(false)
+  const [moreError, setMoreError] = useState('')
+  // loadMore 的在途标记（见 loadMore 里的说明），比 loadingMore 状态更早生效。
+  const loadingMoreRef = useRef(false)
+  // 每次新搜索 +1：在飞的 loadMore 回来时若已经换了关键词（searchSeq 已变），
+  // 就把那一页结果丢掉，避免旧关键词的第 N 页被并进新列表。
+  const searchSeq = useRef(0)
   const inputRef = useRef<HTMLInputElement>(null)
 
   // 搜索范围（设备级持久化，见 readerSettings store）：空数组 = 全部启用书源。
@@ -69,7 +79,7 @@ export default function ReaderSearchPage() {
       .then((books) => {
         const keys = new Set<string>()
         for (const b of books) {
-          keys.add(shelfBookKey(b.name, b.author))
+          keys.add(searchBookKey(b.name, b.author))
           if (b.book_url) keys.add(b.book_url)
         }
         setShelfKeys(keys)
@@ -89,22 +99,72 @@ export default function ReaderSearchPage() {
   const doSearch = async () => {
     const kw = key.trim()
     if (!kw || searching) return
+    searchSeq.current++
     setSearching(true)
     setShowSkipped(false)
+    setLoadingMore(false)
+    setMoreError('')
     try {
       // 直接把已保存范围交给后端：它只搜其中仍启用的书源，全部失效时退回全部启用，
       // 因此这里不必等书源列表加载完，也能正确处理「换设备后书源尚未同步」的情况。
-      const res = await readerAPI.search(kw, scopeIds)
-      setBooks(res.books ?? [])
+      const res = await readerAPI.search(kw, scopeIds, 1)
+      const list = res.books ?? []
+      setBooks(list)
       // 后端在「没有书源失败」时会把空列表编码成 null，这里兜底成数组，
       // 否则下面 skipped.length 会直接抛 TypeError 把整页打崩。
       setSkipped(res.skipped ?? [])
-      if ((res.books ?? []).length === 0) toast.error('所有书源都没有找到结果')
+      setPage(1)
+      // 首页一条都没有 → 后面也不会有；有结果就先假定还有下一页。
+      // 书源是否支持分页只有它自己知道（{{page}} 也可能藏在 URL 的 <js> 里），
+      // 所以这里不预判：多花一次「第 2 页」请求，由 loadMore 发现这一页没带来新书时收口。
+      setHasMore(list.length > 0)
+      if (list.length === 0) toast.error('所有书源都没有找到结果')
     } catch (e) {
       const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '搜索失败'
       toast.error(msg)
     } finally {
       setSearching(false)
+    }
+  }
+
+  // 滚动到底加载下一页。每页都会把范围内的书源重新搜一遍（后端按页下发），
+  // 因此这里要注意两件事：
+  //   1. 结果必须增量合并而不是替换——不支持 {{page}} 的源会在每一页重复返回首页结果；
+  //   2. 合并后没有新书（重复内容或该页为空）就说明到底了，否则用户会一直滚一直转圈。
+  const loadMore = async () => {
+    const kw = key.trim()
+    if (!kw || !hasMore || loadingMore || searching || books === null) return
+    // loadingMore 是渲染后才生效的状态：同一帧里观察器可能回调两次，用 ref 兜住，
+    // 避免把同一页请求两次（每次翻页都要把所有源再搜一遍，重复请求不便宜）。
+    if (loadingMoreRef.current) return
+    loadingMoreRef.current = true
+    const next = page + 1
+    if (next > MAX_SEARCH_PAGES) {
+      setHasMore(false)
+      loadingMoreRef.current = false
+      return
+    }
+    setLoadingMore(true)
+    setMoreError('')
+    const seq = searchSeq.current
+    try {
+      const res = await readerAPI.search(kw, scopeIds, next)
+      // 期间用户又发起了一次搜索：这一页属于旧关键词，直接丢弃。
+      if (searchSeq.current !== seq) return
+      const incoming = res.books ?? []
+      const merged = mergeSearchBooks(books, incoming)
+      setBooks(merged)
+      setSkipped((prev) => mergeSearchSkipped(prev, res.skipped ?? []))
+      setPage(next)
+      if (merged.length === books.length) setHasMore(false)
+    } catch (e) {
+      if (searchSeq.current !== seq) return
+      // 不弹 toast 打断浏览：把失败原因挂在哨兵上，改由用户点重试。
+      const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '加载下一页失败'
+      setMoreError(msg)
+    } finally {
+      loadingMoreRef.current = false
+      setLoadingMore(false)
     }
   }
 
@@ -127,7 +187,7 @@ export default function ReaderSearchPage() {
       // 立刻并入书架命中集合：这本「刚加的书」应从「搜索新书」的结果里消失。
       setShelfKeys((prev) => {
         const next = new Set(prev)
-        next.add(shelfBookKey(book.name, book.author))
+        next.add(searchBookKey(book.name, book.author))
         if (origin.book_url) next.add(origin.book_url)
         return next
       })
@@ -276,6 +336,19 @@ export default function ReaderSearchPage() {
               </div>
             </div>
           ))}
+
+          {/* 滚动到底自动加载下一页；失败时改成手动重试（见 LoadMoreSentinel）。 */}
+          <LoadMoreSentinel
+            hasMore={hasMore}
+            loadingMore={loadingMore}
+            onLoadMore={loadMore}
+            error={moreError}
+            onRetry={loadMore}
+            loadingLabel={`正在搜索第 ${page + 1} 页…`}
+          />
+          {!hasMore && !moreError && visibleBooks.length > 0 && (
+            <p className="py-2 text-center text-2xs text-[var(--app-subtle)]">已经到底了</p>
+          )}
 
           {skipped.length > 0 && (
             <div className="rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel-soft)]">

@@ -766,7 +766,14 @@ type searchHit struct {
 // 空表示「全部书源」——所有已启用书源；非空则只搜其中仍存在、仍启用的书源。
 // 范围内一个可搜书源都不剩时退回全部启用（对应 legado 范围失效时的兜底），
 // 这样删源/停源后不会因为残留的旧选择把搜索变成「什么都搜不到」。
-func (s *ReaderService) Search(ctx context.Context, key string, sourceIDs []string) ([]SearchBook, []SearchSkipped, error) {
+//
+// page 是页码（从 1 开始，对应书源 searchUrl 里的 {{page}}）：搜索按页下发，
+// 前端滚到底再请求下一页并做增量合并。搜索范围内的所有源共用同一个页码；
+// searchUrl 里没有 {{page}} 的源会重复返回首页结果，由调用方按「书名+作者」去重。
+func (s *ReaderService) Search(ctx context.Context, key string, sourceIDs []string, page int) ([]SearchBook, []SearchSkipped, error) {
+	if page < 1 {
+		page = 1
+	}
 	sources, err := s.repo.ListSources(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -790,7 +797,7 @@ func (s *ReaderService) Search(ctx context.Context, key string, sourceIDs []stri
 		g.Go(func() error {
 			gctxSrc, cancel := context.WithTimeout(gctx, perSourceTimeout)
 			defer cancel()
-			books, err := s.searchInSource(gctxSrc, &src, nil, key, 1)
+			books, err := s.searchInSource(gctxSrc, &src, nil, key, page)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {

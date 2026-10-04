@@ -268,11 +268,12 @@ export const readerAPI = {
   // ── 搜索 / 详情 / 目录 / 正文 ──
   // 多源聚合搜索。sourceIds 为空表示搜索范围＝全部启用书源（默认）；
   // 非空则只搜这些书源（后端会忽略其中已删除/停用的，全部失效时退回全部启用）。
-  search: (key: string, sourceIds: string[] = []) =>
+  // page 从 1 开始：书源 searchUrl 里的 {{page}}，前端滚到底逐页取再增量合并。
+  search: (key: string, sourceIds: string[] = [], page = 1) =>
     api
       .post<{ books: ReaderSearchBook[] | null; skipped: ReaderSearchSkipped[] | null }>(
         '/reader/search',
-        { key, source_ids: sourceIds },
+        { key, source_ids: sourceIds, page },
         longOpts,
       )
       .then((r) => r.data),

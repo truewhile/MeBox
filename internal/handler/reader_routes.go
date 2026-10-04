@@ -362,13 +362,15 @@ func readerSearchHandler(svc *service.Container) gin.HandlerFunc {
 		Key string `json:"key" binding:"required"`
 		// SourceIDs 搜索范围：空表示全部启用书源（默认），非空则只搜这些书源。
 		SourceIDs []string `json:"source_ids"`
+		// Page 页码（从 1 开始）：书源 searchUrl 支持 {{page}} 时，前端滚到底逐页取。
+		Page int `json:"page"`
 	}
 	return func(c *gin.Context) {
 		if err := c.ShouldBindJSON(&body); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		books, skipped, err := svc.Reader.Search(c.Request.Context(), body.Key, body.SourceIDs)
+		books, skipped, err := svc.Reader.Search(c.Request.Context(), body.Key, body.SourceIDs, body.Page)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
