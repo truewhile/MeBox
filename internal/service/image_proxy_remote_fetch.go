@@ -71,6 +71,8 @@ func (p *ImageProxy) fetchRemoteImageOnce(ctx context.Context, raw, host string,
 		return remoteImageFetchResult{}, errImageProxyRequestSetup
 	}
 	applyRemoteImageHeaders(req, host, raw)
+	// 已挂载的远程 Emby：用账号当前 token 覆盖旧凭据，返回头形式对端优先采纳。
+	p.applyRemoteEmbyAuth(ctx, req, host)
 
 	resp, err := candidate.client.Do(req)
 	if err != nil {
@@ -80,6 +82,9 @@ func (p *ImageProxy) fetchRemoteImageOnce(ctx context.Context, raw, host string,
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		p.log.Warn("imageproxy: upstream returned non-OK", zap.String("host", host), zap.String("client", candidate.name), zap.String("status", resp.Status))
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return remoteImageFetchResult{}, errImageProxyUnauthorized
+		}
 		return remoteImageFetchResult{}, errors.New("upstream returned " + resp.Status)
 	}
 	if err := p.streamImageToCache(cachePath, failPath, resp.Body); err != nil {

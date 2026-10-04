@@ -237,6 +237,15 @@ func (b *serviceContainerBuilder) initImageProxy() {
 		b.c.ImageProxy.SetAllowedRemoteHostsProvider(func() []string {
 			return b.c.EmbyRemote.ConfiguredRemoteHosts(context.Background())
 		})
+		// 远程 Emby 的图片 URL 会带着签发时的 api_key 长期缓存/下发；轮换后
+		// URL 里的旧值必然过期。回源时改用账号当前 token，并在上游 401/403 时
+		// 重新登录一次再重试，封面图不再依赖人工改账号。
+		b.c.ImageProxy.SetRemoteEmbyAuthProvider(func(ctx context.Context, host string) (string, bool) {
+			return b.c.EmbyRemote.RemoteEmbyImageTokenForHost(ctx, host)
+		})
+		b.c.ImageProxy.SetRemoteEmbyAuthRefresher(func(ctx context.Context, host string) (string, error) {
+			return b.c.EmbyRemote.RefreshRemoteEmbyImageTokenForHost(ctx, host)
+		})
 	}
 	b.c.Scan.SetImageProxy(b.c.ImageProxy)
 	b.c.Scraper.SetImageProxy(b.c.ImageProxy)

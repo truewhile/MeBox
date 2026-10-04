@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -235,6 +236,88 @@ func (r *EmbyRemoteService) ConfiguredRemoteHosts(ctx context.Context) []string 
 		}
 	}
 	return hosts
+}
+
+// findAccountByHost 返回某条线路主机名匹配 host 的启用远程 Emby 账号（无则 nil）。
+func (r *EmbyRemoteService) findAccountByHost(ctx context.Context, host string) *model.StrmAccount {
+	host = normalizeHostKey(host)
+	if host == "" || r == nil || r.repo == nil || r.repo.StrmAccount == nil {
+		return nil
+	}
+	accounts, err := r.ListAccounts(ctx)
+	if err != nil {
+		return nil
+	}
+	for i := range accounts {
+		lines, _, err := r.LinesOf(&accounts[i])
+		if err != nil {
+			continue
+		}
+		for _, line := range lines {
+			u, err := url.Parse(line.URL)
+			if err != nil {
+				continue
+			}
+			if normalizeHostKey(u.Hostname()) == host {
+				return &accounts[i]
+			}
+		}
+	}
+	return nil
+}
+
+// normalizeHostKey 去掉端口并小写化，便于主机名字符串比较。
+func normalizeHostKey(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return ""
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return strings.ToLower(strings.TrimSpace(h))
+	}
+	return host
+}
+
+// RemoteEmbyImageTokenForHost 返回图片代理回源某个远程 Emby 主机所需的当前
+// api_key。host 不属于任何已配置账号时返回 ok=false。
+func (r *EmbyRemoteService) RemoteEmbyImageTokenForHost(ctx context.Context, host string) (string, bool) {
+	if r == nil || r.repo == nil {
+		return "", false
+	}
+	acct := r.findAccountByHost(ctx, host)
+	if acct == nil {
+		return "", false
+	}
+	cfg, err := r.configOf(acct)
+	if err != nil || strings.TrimSpace(cfg.Token) == "" {
+		return "", false
+	}
+	return cfg.Token, true
+}
+
+// RefreshRemoteEmbyImageTokenForHost 强制用用户名/密码重新登录拥有该主机的账号
+// 并持久化新 token，供图片代理在上游 401 时自愈。仅配置了 api_key、没有登录
+// 凭据的账号无法自动刷新，返回错误由调用方按原失败处理。
+func (r *EmbyRemoteService) RefreshRemoteEmbyImageTokenForHost(ctx context.Context, host string) (string, error) {
+	if r == nil || r.repo == nil {
+		return "", errors.New("远程 Emby 服务不可用")
+	}
+	acct := r.findAccountByHost(ctx, host)
+	if acct == nil {
+		return "", fmt.Errorf("未找到主机 %s 对应的远程 Emby 账号", host)
+	}
+	cfg, err := r.configOf(acct)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(cfg.Username) == "" || strings.TrimSpace(cfg.Password) == "" {
+		return "", errors.New("远程 Emby 账号未配置用户名/密码，无法自动刷新 api_key")
+	}
+	cfg.Token = "" // 强制走登录流程，忽略已失效的 api_key
+	if err := r.ensureToken(ctx, acct, cfg); err != nil {
+		return "", err
+	}
+	return cfg.Token, nil
 }
 
 // AccountByID 按 ID 查找远程 Emby 挂载账号（不存在或类型不符返回 nil）。
@@ -699,17 +782,23 @@ func (r *EmbyRemoteService) doGetOnLine(ctx context.Context, acct *model.StrmAcc
 			return err
 		}
 		if status == http.StatusUnauthorized && attempt == 0 {
-			// 401：只清当前线路的内存 token 并立即重认证；不在此时删除
-			// DB 里的 api_key——①外层还会按线路故障转移（其他线路可能
-			// 存有自己的 token）；②纯 api_key 账号删除后无法再认证，一次
-			// 线路误报就会把账号“砖化”。重认证成功后 persistToken 会用
-			// 新 token 覆盖 api_key。
+			// 401：只清当前线路的内存 token 并立即重认证；不先删 DB 里的
+			// api_key——纯 api_key 账号删除后无法再认证，一次线路误报就会
+			// 把账号“砖化”。重认证成功后把新 token 写回：既让重试用上正确
+			// 凭据，也避免每个后续请求都重新登录一次。
+			previous := cfg.Token
 			cfg.Token = ""
 			if err := r.ensureTokenOnLine(ctx, acct, cfg); err != nil {
 				return fmt.Errorf("认证重试失败: %w", err)
 			}
+			if q != nil {
+				q.Set("api_key", cfg.Token)
+			}
 			master.Token = cfg.Token
 			master.RemoteUserID = cfg.RemoteUserID
+			if cfg.Token != "" && cfg.Token != previous {
+				_ = r.persistToken(ctx, acct, cfg)
+			}
 			continue
 		}
 		if status >= 300 {

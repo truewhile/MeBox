@@ -13,6 +13,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -65,6 +66,16 @@ type ImageProxy struct {
 	allowedHostsMu       sync.Mutex
 	allowedHostsCache    map[string]bool
 	allowedHostsAt       time.Time
+
+	// remoteEmbyTokenFn / refreshRemoteEmbyTokenFn let the proxy carry a fresh
+	// credential for configured remote-Emby mounts. Image URLs are minted from
+	// whatever token the account had when the payload was built, so a URL can
+	// outlive its api_key; these hooks re-supply the current one and force a
+	// re-login when the mount rejects it.
+	remoteEmbyTokenFn        func(ctx context.Context, host string) (string, bool)
+	refreshRemoteEmbyTokenFn func(ctx context.Context, host string) (string, error)
+	remoteEmbyTokenMu        sync.Mutex
+	remoteEmbyTokenCache     map[string]remoteEmbyImageToken
 }
 
 const (
