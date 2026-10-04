@@ -103,6 +103,9 @@ type pendingBrowser struct {
 	finalURL string
 	mode     string
 	expires  time.Time
+	// comments 段落评论接口的翻页适配（上游页面按 page 翻页，接口只认 cursor，
+	// 见 browser_comment_page.go）。
+	comments *commentPager
 
 	done     chan struct{}
 	mu       sync.Mutex
@@ -218,6 +221,7 @@ func (s *ReaderService) registerBrowser(ctx context.Context, sourceURL, sourceID
 		mode:      mode,
 		expires:   time.Now().Add(browserPageTTL),
 		done:      make(chan struct{}),
+		comments:  newCommentPager(),
 	}
 
 	s.browserMu.Lock()
@@ -511,6 +515,13 @@ func (s *ReaderService) ProxyBrowserXHR(ctx context.Context, id, method, target 
 	if method == "" {
 		method = http.MethodGet
 	}
+	// 段落评论接口：评论页按 page=N 翻页，而接口只认 cursor（见
+	// browser_comment_page.go）。改写发生在补书源凭据之前，Cookie/Referer
+	// 仍然按目标站点选取。
+	pagerKey := ""
+	if entry.comments != nil {
+		target, pagerKey = entry.comments.rewriteRequest(target)
+	}
 	reqCtx, cancel := context.WithTimeout(ctx, browserFetchTimeout)
 	defer cancel()
 	// 挂上 sink：页面自己发起的请求（如扫码登录的轮询/取票跳转）下发的
@@ -577,6 +588,9 @@ func (s *ReaderService) ProxyBrowserXHR(ctx context.Context, id, method, target 
 	out := &BrowserXHRResult{Status: resp.StatusCode, ContentType: contentType}
 	if isTextualContent(contentType) {
 		out.Body = string(data)
+		if entry.comments != nil && pagerKey != "" {
+			out.Body = entry.comments.observeResponse(pagerKey, out.Body)
+		}
 	} else {
 		out.Body = base64.StdEncoding.EncodeToString(data)
 		out.Base64 = true
