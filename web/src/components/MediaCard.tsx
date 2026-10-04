@@ -41,10 +41,10 @@ export const MediaCard = memo(function MediaCard({
   const card = (
       <div
         ref={ref}
-        className="relative overflow-hidden rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel)] shadow-[0_1px_3px_rgba(0,0,0,0.01),0_1px_2px_rgba(0,0,0,0.015)] transition-all duration-300 hover:scale-[1.04] hover:-translate-y-1.5 hover:border-brand-500/40 hover:shadow-[0_12px_32px_var(--app-shadow)]"
+        className="relative flex h-full flex-col overflow-hidden rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel)] shadow-[0_1px_3px_rgba(0,0,0,0.01),0_1px_2px_rgba(0,0,0,0.015)] transition-all duration-300 hover:scale-[1.04] hover:-translate-y-1.5 hover:border-brand-500/40 hover:shadow-[0_12px_32px_var(--app-shadow)]"
       >
         {/* Poster Wrapper */}
-        <div className="relative aspect-[2/3] w-full overflow-hidden bg-[var(--app-panel-soft)]">
+        <div className="relative aspect-[2/3] w-full shrink-0 overflow-hidden bg-[var(--app-panel-soft)]">
           {media.poster_url ? (
             <>
               {posterFit === 'contain' && (
@@ -120,26 +120,34 @@ export const MediaCard = memo(function MediaCard({
 
         {/* Media Metadata Info */}
         <div className={`space-y-1 border-t border-[var(--app-border)] bg-[var(--app-panel)] ${
-          compact ? 'p-2' : 'p-4'
+          compact ? 'p-2' : 'p-2.5 sm:p-4'
         }`}>
-          <p className={`truncate font-bold text-[var(--app-text)] transition-colors duration-200 group-hover:text-brand-500 ${
-            compact ? 'text-xs' : 'text-sm'
+          {/* 手机端一张卡只有 ~100px 宽：标题放开到两行，并预留两行高度，
+              这样同一行的卡片不会因为标题行数不同而参差不齐。 */}
+          <p className={`font-bold text-[var(--app-text)] transition-colors duration-200 group-hover:text-brand-500 ${
+            compact
+              ? 'truncate text-xs'
+              : 'line-clamp-2 min-h-[2.75em] text-[13px] leading-snug sm:line-clamp-none sm:min-h-0 sm:truncate sm:text-sm sm:leading-normal'
           }`}>
             {media.title}
           </p>
-          <div className="flex items-center justify-between gap-2 text-[11px] font-bold uppercase tracking-wider text-[var(--app-muted)]">
-            <span>{media.year > 0 ? media.year : "未知年份"}</span>
-            <span className="flex items-center gap-1.5">
+          {/* 单行、不折行：年份可截断，徽标永不压缩。折行会让同一行里各卡片的
+              徽标落位高低不一，看起来就是「错位」，所以宁可极窄屏上截断年份。
+              min-h 统一行高，避免有/无徽标的卡片年份基线差几像素。 */}
+          <div className="flex min-h-[21px] items-center text-[10px] font-bold uppercase text-[var(--app-muted)] sm:min-h-0 sm:gap-x-2 sm:text-[11px] sm:tracking-wider">
+            <span className="truncate">{media.year > 0 ? media.year : "未知年份"}</span>
+            <span className="ml-auto flex shrink-0 items-center gap-0.5 sm:gap-1.5">
               {/* 集数/版本数徽标：放在海报下方的信息行而不是压在画面上。海报底部通常
                   自带片名，角标会盖住它（Game of Thrones / Breaking Bad 都很明显）。 */}
               {(count !== undefined && count > 1) || (count === undefined && versionCount > 1) ? (
-                <span className="inline-flex items-center gap-1 rounded-xl border border-[var(--app-border)] bg-[var(--app-panel-soft)] px-1.5 py-0.5 text-[var(--app-subtle)]">
+                <span className="inline-flex items-center gap-0.5 whitespace-nowrap rounded-xl border border-[var(--app-border)] bg-[var(--app-panel-soft)] px-1 py-0.5 text-[var(--app-subtle)] sm:gap-1 sm:px-1.5">
                   <Layers size={10} className="shrink-0 text-[#c9954a]" />
                   <span>{count !== undefined && count > 1 ? `${count} 集` : `${versionCount} 版本`}</span>
                 </span>
               ) : null}
+              {/* 编码格式在小卡片上没有信息价值，手机上直接隐藏，避免挤掉集数徽标。 */}
               {media.video_codec && (
-                <span className="rounded-xl border border-[var(--app-border)] bg-[var(--app-panel-soft)] px-1.5 py-0.5 text-[var(--app-subtle)]">
+                <span className="hidden whitespace-nowrap rounded-xl border border-[var(--app-border)] bg-[var(--app-panel-soft)] px-1.5 py-0.5 text-[var(--app-subtle)] sm:inline-block">
                   {media.video_codec}
                 </span>
               )}
@@ -151,8 +159,8 @@ export const MediaCard = memo(function MediaCard({
 
   if (onClick) {
     return (
-      <div className="group relative block w-full">
-        <button type="button" onClick={onClick} className="block w-full text-left">
+      <div className="group relative block h-full w-full">
+        <button type="button" onClick={onClick} className="block h-full w-full text-left">
           {card}
         </button>
         {actionContent && (
@@ -166,8 +174,8 @@ export const MediaCard = memo(function MediaCard({
 
   if (actionContent) {
     return (
-      <div className="group relative block">
-        <Link to={href} state={linkState} className="block">
+      <div className="group relative block h-full">
+        <Link to={href} state={linkState} className="block h-full">
           {card}
         </Link>
         <div className={ACTION_OVERLAY_CLASS}>
@@ -178,7 +186,7 @@ export const MediaCard = memo(function MediaCard({
   }
 
   return (
-    <Link to={href} state={linkState} className="group block">
+    <Link to={href} state={linkState} className="group block h-full">
         {card}
     </Link>
   )
