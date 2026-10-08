@@ -55,6 +55,11 @@ const COMIC_SAVE_INTERVAL_MS = 2_000
 /** 菜单打开时正文下移过渡（与顶栏动画同节奏）。 */
 const MENU_SHIFT = 'transition-transform duration-200'
 
+/** 翻页动画时长。正文列的平移过渡，以及跟手拖拽松手后的回弹/滑完，都用这一条。 */
+const PAGE_TRANSITION = 'transform 220ms ease'
+/** 跟手拖拽要翻页所需的最小位移（px）。 */
+const DRAG_TURN_DISTANCE = 45
+
 // 滚轮翻页参数（deltaY 已按 deltaMode 归一化成像素）
 /** 单次 deltaY 达到这个量视为鼠标滚轮的一格（一格一页）。 */
 const WHEEL_NOTCH = 40
@@ -86,6 +91,25 @@ function firstReadableIndex(chapters: ReaderChapter[]): number {
   // 本地导入的章节没有 url，退回第一个非卷名章
   const j = chapters.findIndex((c) => !c.is_volume)
   return j === -1 ? 0 : j
+}
+
+/**
+ * 漫画跟手拖拽松手后「滑完这一页」。
+ *
+ * 舞台两侧各摆着相邻的一页，手指拖到哪儿舞台就平移到哪儿。松手要翻页时，
+ * 先把新页瞬移到手指离开的位置（这一步必须关掉过渡，否则会先反着滑一段），
+ * 读一次布局把这一帧定成过渡起点，再打开过渡滑回 0；与此同时页码 +1/-1，
+ * ReaderComic 那边单元格的 left 偏移在同一次提交里跟着换，两者相抵，
+ * 屏幕上看到的就是新页从手指离开的位置平滑归位。
+ */
+function settleComicDrag(el: HTMLDivElement, turn: 1 | -1, dx: number, turnPage: () => void): void {
+  const width = el.clientWidth || 1
+  el.style.transition = 'none'
+  el.style.transform = `translateX(${turn > 0 ? width + dx : -width + dx}px)`
+  void el.offsetWidth
+  el.style.transition = PAGE_TRANSITION
+  el.style.transform = 'translateX(0px)'
+  turnPage()
 }
 
 export default function ReaderViewPage() {
@@ -171,6 +195,13 @@ export default function ReaderViewPage() {
     comicDoublePage && comicSpreads.length > 0
       ? Math.min(comicSpreadIndexOf[comicPage] ?? 0, comicSpreads.length - 1)
       : 0
+  /** 当前这一屏是不是并排两页（桌面端双页铺开）。 */
+  const comicPaired = comicDoublePage && (comicSpreads[comicSpreadIndex]?.length ?? 0) > 1
+  /**
+   * 漫画翻页模式且单页显示时接跟手拖拽：舞台左右各摆一页，手指横滑整条舞台跟着走。
+   * 并排两页时不接——两侧要摆的是「下一屏」而不是下一张，交给原来的滑动判定即可。
+   */
+  const comicDragSinglePage = contentType === 'image' && settings.pageMode === 'page' && !comicPaired
 
   // ── 漫画滚动模式的图片显示尺寸 ──
   // 档位只在上下滚动模式生效：翻页模式是整页缩放进视口，没有「太大/太小」的问题，
@@ -636,11 +667,66 @@ export default function ReaderViewPage() {
   // （只能点左右），所以滚动模式改在滚动容器自身的 onClick 上按 x 坐标分区：
   // 纵向拖动不会产生 click，浏览器原生滚动照常工作。
   //
-  // 手机上再补一层横向滑动翻页：从左往右滑=上一页、从右往左滑=下一页。
-  // 滑动的判定与「滑动后浏览器补发的 click」的去重都在 useHorizontalSwipe 里。
-  const { onTouchStart, onTouchEnd, onTouchCancel, consumeSwipe } = useHorizontalSwipe({
+  // 手机上再补一层横向滑动：从左往右滑=上一页、从右往左滑=下一页，并且跟手——
+  // 滑动途中内容就跟着手指走，松手再决定翻页还是回弹（判定、跟手位移与
+  // 「滑动后浏览器补发的 click」的去重都在 useHorizontalSwipe 里）。
+  //
+  // 跟手拖拽平移的是两个不同的元素：
+  // - 文本：正文列外面单独挂一层「跟手层」（pageDragRef）。分页平移仍旧由 React 写在
+  //   里层，跟手层只管手指位移；松手时两层同时动——跟手位移归零 + 页码变化——
+  //   合起来就是一次连续滑动。分两层而不是直接改里层，是为了避免「跟手位移把 DOM
+  //   改成了 React 不知道的值、React 又认为 transform 没变而不去写」把页面留在拖动位置。
+  // - 漫画：平移 ReaderComic 的舞台（comicStageRef）。舞台两侧摆着上一页/下一页
+  //   （见那边的 carousel 分支），翻页时单元格的 left 偏移与舞台位移在同一次提交里
+  //   相抵，画面看不出切换。
+  const pageDragRef = useRef<HTMLDivElement>(null)
+  const comicStageRef = useRef<HTMLDivElement>(null)
+  const pageDragEnabled = settings.pageMode === 'page' && (contentType === 'text' || comicDragSinglePage)
+
+  const onPageDrag = useCallback(
+    (dx: number) => {
+      const el = contentType === 'image' ? comicStageRef.current : pageDragRef.current
+      if (!el) return
+      el.style.transition = 'none'
+      el.style.transform = `translateX(${dx}px)`
+    },
+    [contentType],
+  )
+
+  const onPageDragEnd = useCallback(
+    (dx: number) => {
+      if (contentType === 'image') {
+        const el = comicStageRef.current
+        if (!el) return
+        if (dx <= -DRAG_TURN_DISTANCE) {
+          settleComicDrag(el, 1, dx, goNext)
+          return
+        }
+        if (dx >= DRAG_TURN_DISTANCE) {
+          settleComicDrag(el, -1, dx, goPrev)
+          return
+        }
+        el.style.transition = PAGE_TRANSITION
+        el.style.transform = 'translateX(0px)'
+        return
+      }
+      const el = pageDragRef.current
+      if (!el) return
+      // 跟手层归零与页码平移同时进行，合成一次连续滑动（位移不够时就是回弹）。
+      el.style.transition = PAGE_TRANSITION
+      el.style.transform = 'translateX(0px)'
+      if (dx <= -DRAG_TURN_DISTANCE) goNext()
+      else if (dx >= DRAG_TURN_DISTANCE) goPrev()
+    },
+    [contentType, goNext, goPrev],
+  )
+
+  const { onTouchStart, onTouchMove, onTouchEnd, onTouchCancel, consumeSwipe } = useHorizontalSwipe({
     onSwipeRight: goPrev,
     onSwipeLeft: goNext,
+    minDistance: DRAG_TURN_DISTANCE,
+    onDrag: pageDragEnabled ? onPageDrag : undefined,
+    onDragEnd: pageDragEnabled ? onPageDragEnd : undefined,
   })
   const handleZoneTap = useCallback(
     (clientX: number, rect: DOMRect) => {
@@ -909,6 +995,8 @@ export default function ReaderViewPage() {
               page={comicPage}
               imageFit={comicScrollFit}
               spread={comicDoublePage ? (comicSpreads[comicSpreadIndex] ?? null) : null}
+              draggable={comicDragSinglePage}
+              stageRef={comicStageRef}
               onZone={(zone) => {
                 if (zone === 'center') setMenuOpen((v) => !v)
               }}
@@ -934,20 +1022,23 @@ export default function ReaderViewPage() {
               style={menuShiftStyle}
             >
               <div ref={viewportRef} className="relative h-full overflow-hidden">
-                <div
-                  ref={contentRef}
-                  className="h-full"
-                  style={{
-                    columnWidth: `${Math.max(vw, 1)}px`,
-                    columnGap: `${COLUMN_GAP}px`,
-                    columnFill: 'auto',
-                    transform: `translateX(-${page * (vw + COLUMN_GAP)}px)`,
-                    transition: 'transform 220ms ease',
-                    fontSize: settings.fontSize,
-                    lineHeight: settings.lineHeight,
-                  }}
-                >
-                  {blocks.map((b, i) => renderParagraph(b, i))}
+                {/* 跟手层：跟手拖拽的位移写在这一层，分页平移仍旧写在里层（React 管）。 */}
+                <div ref={pageDragRef} className="h-full">
+                  <div
+                    ref={contentRef}
+                    className="h-full"
+                    style={{
+                      columnWidth: `${Math.max(vw, 1)}px`,
+                      columnGap: `${COLUMN_GAP}px`,
+                      columnFill: 'auto',
+                      transform: `translateX(-${page * (vw + COLUMN_GAP)}px)`,
+                      transition: PAGE_TRANSITION,
+                      fontSize: settings.fontSize,
+                      lineHeight: settings.lineHeight,
+                    }}
+                  >
+                    {blocks.map((b, i) => renderParagraph(b, i))}
+                  </div>
                 </div>
               </div>
             </div>
@@ -1016,6 +1107,7 @@ export default function ReaderViewPage() {
           <div
             className="absolute inset-0 z-[1] grid grid-cols-[30%_40%_30%]"
             onTouchStart={onTouchStart}
+            onTouchMove={onTouchMove}
             onTouchEnd={onTouchEnd}
             onTouchCancel={onTouchCancel}
           >

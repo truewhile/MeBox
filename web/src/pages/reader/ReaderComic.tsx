@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type RefObject } from 'react'
 import { Loader2 } from 'lucide-react'
 
 import { useSmoothWheelScroll } from '../../hooks/useSmoothWheelScroll'
@@ -27,6 +27,13 @@ interface ReaderComicProps {
   spread?: number[] | null
   /** 滚动模式的图片显示尺寸档位（翻页模式不适用，传 default 即可）。 */
   imageFit?: ComicImageFit
+  /**
+   * 翻页模式的跟手拖拽：把当前页左右各摆一页到舞台两侧，整条舞台由外层按
+   * stageRef 直接平移（见 ReaderViewPage 的 onPageDrag）。并排铺开两页时关闭。
+   */
+  draggable?: boolean
+  /** 跟手拖拽要平移的舞台元素（由外层拿着直接写 transform，不走 React state）。 */
+  stageRef?: RefObject<HTMLDivElement>
 }
 
 function ComicImage({
@@ -36,6 +43,7 @@ function ComicImage({
   half = false,
   imageFit = 'default',
   viewportHeight = 0,
+  eager = false,
 }: {
   src: string
   theme: { bg: string; text: string; accent: string }
@@ -47,6 +55,10 @@ function ComicImage({
   imageFit?: ComicImageFit
   // viewportHeight：滚动容器高度（px），height/long 档位按它换算。
   viewportHeight?: number
+  // eager：跟手拖拽摆在舞台两侧的那两页。它们被 overflow-hidden 裁在屏幕外，
+  // 浏览器的懒加载认为「离视口还远」而不去取，横滑过去就会看到转圈，
+  // 所以这两页立刻加载（顺带把下一页提前拉好，翻页不用现等）。
+  eager?: boolean
 }) {
   const [state, setState] = useState<'loading' | 'ok' | 'error'>('loading')
 
@@ -82,7 +94,7 @@ function ComicImage({
     >
       <img
         src={src}
-        loading="lazy"
+        loading={eager ? 'eager' : 'lazy'}
         alt=""
         onLoad={(e) => {
           const el = e.currentTarget
@@ -114,7 +126,7 @@ function ComicImage({
   )
 }
 
-export function ReaderComic({ images, theme, mode, page, onZone, initialImage, onProgress, scrollTo, onScrolled, spread, imageFit = 'default' }: ReaderComicProps) {
+export function ReaderComic({ images, theme, mode, page, onZone, initialImage, onProgress, scrollTo, onScrolled, spread, imageFit = 'default', draggable = false, stageRef }: ReaderComicProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const imgRefs = useRef<(HTMLDivElement | null)[]>([])
   const restoredRef = useRef(false)
@@ -174,11 +186,39 @@ export function ReaderComic({ images, theme, mode, page, onZone, initialImage, o
     const group = (spread ?? []).filter((i) => i >= 0 && i < images.length)
     const idxs = group.length > 0 ? group : [Math.min(Math.max(page, 0), images.length - 1)]
     const paired = idxs.length > 1
+
+    if (!draggable) {
+      return (
+        <div className="flex h-full items-center justify-center">
+          {idxs.map((i) => (
+            <ComicImage key={images[i]} src={images[i]} theme={theme} fit half={paired} />
+          ))}
+        </div>
+      )
+    }
+
+    // 跟手拖拽：当前页左右各摆一页，整条舞台由外层直接平移（stageRef），
+    // 于是手指横滑时左右两页就在屏幕边上，滑到一半松手能接着滑完。
+    // 外面再套一层 overflow-hidden：桌面端正文列限宽 900px 居中，两侧那两页要是
+    // 溢出到窗口里会在留白处露出来。
+    //
+    // 单元格按图片序号做 key、位置用 left 百分比铺开，而不是固定三个「上一页/当前/下一页」
+    // 槽位换内容：翻页时变的只是 left 偏移，<img> 的 src 不变，浏览器不会重新解码、
+    // 也不会先闪一下转圈。两侧那两页同时充当下一页/上一页的预取。
+    const cells = [page - 1, page, page + 1].filter((i) => i >= 0 && i < images.length)
     return (
-      <div className="flex h-full items-center justify-center">
-        {idxs.map((i) => (
-          <ComicImage key={images[i]} src={images[i]} theme={theme} fit half={paired} />
-        ))}
+      <div className="relative h-full w-full overflow-hidden">
+        <div ref={stageRef} className="relative h-full w-full">
+          {cells.map((i) => (
+            <div
+              key={images[i]}
+              className="absolute inset-y-0 flex items-center justify-center"
+              style={{ left: `${(i - page) * 100}%`, width: '100%' }}
+            >
+              <ComicImage src={images[i]} theme={theme} fit eager={i !== page} />
+            </div>
+          ))}
+        </div>
       </div>
     )
   }
