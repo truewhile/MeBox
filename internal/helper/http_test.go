@@ -12,6 +12,18 @@ import (
 // 背景：预设头里曾显式写 `Accept-Encoding: gzip, deflate, br`，导致 net/http
 // 不再自动解压（它只在调用方没设置该头时才解压），压缩字节直接进入规则层。
 
+// TestHeaderPresetsAcceptIsWildcard 预设 Accept 不得首选 text/html。
+//
+// 背景：DRF（Django REST framework）等会做内容协商的后端，在 Accept 首选
+// text/html 时返回「可浏览 HTML 页面」而不是 JSON，书源 JSONPath 因此永远
+// 解析出 0 条（拷贝轻小说源在 MeBox 搜不到、在阅读 App 能搜到的根因）。
+func TestHeaderPresetsAcceptIsWildcard(t *testing.T) {
+	got := HTTPHeaderPresets()["Accept"]
+	if got != "*/*" {
+		t.Fatalf("Accept 预设应为 */*（对齐 legado/OkHttp），实际 %q", got)
+	}
+}
+
 // TestHeaderPresetsDoNotSetAcceptEncoding 预设头不得设置 Accept-Encoding。
 // 一旦设置，net/http 的透明解压就失效，压缩响应会以原始字节交给上层。
 func TestHeaderPresetsDoNotSetAcceptEncoding(t *testing.T) {

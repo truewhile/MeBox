@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -404,6 +405,12 @@ func (s *ReaderService) executeWithState(ctx context.Context, req *rule.Request,
 		break
 	}
 	data = helper.DecompressBody(resp, data)
+	// Raw：按原始字节返回（书源文件落盘用），不做 charset 解码。
+	// 必须先于 HexBody 判断之外处理：GBK 文本一旦按 UTF-8 解码就变成 U+FFFD，
+	// 落盘的文件会坏掉。
+	if req.Raw {
+		return string(data), resp.Request.URL.String(), resp.StatusCode, nil
+	}
 	// 声明了 type 的请求按「原始字节的 hex」返回（对应 legado AnalyzeUrl.type），
 	// 不做 charset 解码——书源会自己 hexDecodeToString 取回内容。
 	if req.HexBody {
@@ -641,8 +648,27 @@ func (sess *sourceSession) runner(key string, page int) *rule.JSRunner {
 		JSLib:   SPtr(sess.bs.JSLib),
 		Ctx:     sess.ctx,
 		Browser: host,
+		// 书源文件缓存根目录：java.downloadFile / cacheFile 落盘用。
+		CacheDir: sess.svc.readerFileCacheDir(),
 	})
 }
+
+// readerFileCacheDir 书源文件缓存根目录（java.downloadFile / cacheFile）。
+// 优先用配置的 cache_dir，退回 data_dir/cache；都不可用时返回空串，
+// 此时文件类 JS 接口会抛出「未配置缓存目录」而不是写到进程当前目录。
+func (s *ReaderService) readerFileCacheDir() string {
+	if s == nil || s.cfg == nil {
+		return ""
+	}
+	if base := strings.TrimSpace(s.cfg.Cache.CacheDir); base != "" {
+		return base
+	}
+	if dataDir := strings.TrimSpace(s.cfg.App.DataDir); dataDir != "" {
+		return filepath.Join(dataDir, "cache")
+	}
+	return ""
+}
+
 
 // srcID 书源记录 ID（登录界面待办按书源隔离）。
 func (sess *sourceSession) srcID() string {

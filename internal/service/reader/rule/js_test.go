@@ -332,14 +332,51 @@ func TestJSUnsupportedStillWorks(t *testing.T) {
 
 // ─── 沙箱边界 ───────────────────────────────────────────────────────────────
 
+// TestJSSandboxUnsupported 服务端不接受书源读取宿主任意文件。
+//
+// 文件类接口（cacheFile/downloadFile/readTxtFile/...）已实现，但路径被限制在
+// 书源自己的缓存目录内：越权路径安全地返回空，而不是把 /etc/passwd 交出去，
+// 也不应因为越权路径抛异常（否则书源会误判为「线路故障」反复重试）。
+// 真正无实现的能力（解压包、无头浏览器等）继续明确抛「不支持」。
 func TestJSSandboxUnsupported(t *testing.T) {
 	r := newTestRunner()
 	a := NewAnalyzeRule()
 	a.SetJSRunner(r.ForAnalyzer(a))
 	a.SetContent("", "")
-	_, err := a.GetString(`@js:java.readTxtFile('/etc/passwd')`, nil, false)
-	if err == nil || !strings.Contains(err.Error(), "不支持") {
-		t.Fatalf("expected sandbox error, got %v", err)
+	got, err := a.GetString(`@js:java.readTxtFile('/etc/passwd')`, nil, false)
+	if err != nil {
+		t.Fatalf("越权路径应安全返回空而不是抛异常: %v", err)
+	}
+	if strings.Contains(got, "root:") || strings.Contains(got, "/bin/") {
+		t.Fatalf("沙箱被突破，读到了宿主文件: %q", got)
+	}
+	for _, call := range []string{`java.unzipFile('/tmp/a.zip')`, `java.webView('x')`} {
+		if _, err := a.GetString(`@js:`+call, nil, false); err == nil || !strings.Contains(err.Error(), "不支持") {
+			t.Fatalf("%s 应继续抛「不支持」，实际 %v", call, err)
+		}
+	}
+}
+
+// TestRuleJSTopLevelReturn legado 允许规则 JS 顶层 return；无 return 时仍取最后
+// 一条语句的值（`@js:1+2` → 3）。
+func TestRuleJSTopLevelReturn(t *testing.T) {
+	r := NewJSRunner(JSConfig{})
+	ar := NewAnalyzeRule()
+
+	v, err := r.Run(ar, "if (1) { return '早退'; }\nreturn '兜底';", nil, "")
+	if err != nil {
+		t.Fatalf("顶层 return 应可用: %v", err)
+	}
+	if got := anyToString(v); got != "早退" {
+		t.Fatalf("top-level return = %q, want 早退", got)
+	}
+
+	v2, err := r.Run(ar, "1 + 2", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := anyToString(v2); got != "3" {
+		t.Fatalf("最后一条语句的值 = %q, want 3", got)
 	}
 }
 

@@ -32,11 +32,51 @@ func jsonRead(root any, path string) any {
 	if root == nil || path == "" {
 		return nil
 	}
-	v, err := jsonpathGet(path, root)
+	v, err := jsonpathGet(normalizeJSONPath(path), root)
 	if err != nil {
 		return nil
 	}
 	return v
+}
+
+// normalizeJSONPath 把 legado（Jayway）允许、而 PaesslerAG/jsonpath 拒绝的写法
+// 归一化成合法路径，共两处差异：
+//
+//  1. 缺根 `$`：Jayway 要求路径以 `$`/`@` 开头，legado 书源却常直接写
+//     `results.list`、`results.list.[*]`。PaesslerAG 对「不含 `[]`/`*` 的裸路径」
+//     恰好能容忍（内部按 `$.` 解析），但一旦出现 `[*]` 就报
+//     `unexpected "*" while scanning extensions`。这里统一补根。
+//  2. 点后紧跟方括号：`results.list.[*]`、`$.a.[0]`、`$.a.['k']`。Jayway 里
+//     `.[` 等价于 `[`，PaesslerAG 会报 `unexpected "[" while scanning field`。
+//
+// 两处都会让整条规则静默返回空——表现为「书源明明有效却搜不出任何结果」
+// （拷贝轻小说源的搜索列表规则就是 `results.list.[*]`）。
+func normalizeJSONPath(path string) string {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return path
+	}
+	switch {
+	case strings.HasPrefix(p, "$"), strings.HasPrefix(p, "@"):
+		// 已有根，保持
+	case strings.HasPrefix(p, "."):
+		p = "$" + p // `..a` 这类递归写法，补 `$` 而不是 `$.`
+	default:
+		p = "$." + p
+	}
+	if !strings.Contains(p, ".[") {
+		return p
+	}
+	var b strings.Builder
+	b.Grow(len(p))
+	for i := 0; i < len(p); i++ {
+		// 丢掉 `[` 前多余的点；递归下降 `..[` 保持原样。
+		if p[i] == '.' && i+1 < len(p) && p[i+1] == '[' && i > 0 && p[i-1] != '.' {
+			continue
+		}
+		b.WriteByte(p[i])
+	}
+	return b.String()
 }
 
 // jsonValueToString 对应 Kotlin 的 ob.toString() / joinToString("\n")。

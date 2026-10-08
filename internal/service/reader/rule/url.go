@@ -43,6 +43,10 @@ type Request struct {
 	// 返回而不是解码成文本（对应 legado AnalyzeUrl.type）。
 	// 书源用它配合 data: 地址当参数信封，见 datauri.go。
 	HexBody bool
+	// Raw 请求响应按「原始字节」返回，跳过 charset 解码。
+	// 供 java.downloadFile / java.cacheFile 这类需要保真落盘的调用使用：
+	// 一旦按 UTF-8 解码，GBK 字节会被替换成 U+FFFD，写出来的文件就坏了。
+	Raw bool
 	// BodyJsFn 对应 UrlOption.bodyJs：响应体二次处理（JS 执行闭包）。
 	BodyJsFn func(body string) string
 	// Unsupported 非 nil 表示该请求依赖当前阶段不支持的能力，

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -76,7 +77,15 @@ func main() {
 		fatal("未从输入中识别到书源")
 	}
 
-	svc := reader.NewReaderService(&config.Config{}, zap.NewNop(), &repository.Container{})
+	// 书源文件缓存根目录：java.downloadFile / cacheFile 需要它才能落盘，
+	// 否则「拷贝轻小说」这类把整卷文本缓存到本地再读的源会被判为不支持。
+	// 用固定子目录而不是每次 MkdirTemp，避免反复运行在临时目录里留一堆垃圾。
+	cfg := &config.Config{}
+	cacheDir := filepath.Join(os.TempDir(), "reader-smoke-cache")
+	if err := os.MkdirAll(cacheDir, 0o750); err == nil {
+		cfg.Cache.CacheDir = cacheDir
+	}
+	svc := reader.NewReaderService(cfg, zap.NewNop(), &repository.Container{})
 	ctx := context.Background()
 
 	results := make([]*reader.SmokeChainResult, len(sources))
