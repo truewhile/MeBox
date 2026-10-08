@@ -28,6 +28,7 @@ import {
   type ReaderSearchOrigin,
 } from '../../api/reader'
 import { useComicSpreads } from '../../hooks/useComicSpreads'
+import { useHorizontalSwipe } from '../../hooks/useHorizontalSwipe'
 import { useSmoothWheelScroll } from '../../hooks/useSmoothWheelScroll'
 import { useReaderAudioStore } from '../../stores/readerAudio'
 import { COMIC_IMAGE_FITS, READER_THEMES, getReaderTheme, useReaderSettingsStore } from '../../stores/readerSettings'
@@ -634,6 +635,13 @@ export default function ReaderViewPage() {
   // 覆盖层不是滚动容器的子节点，手机上手指落在它上面会让纵向滑动失效
   // （只能点左右），所以滚动模式改在滚动容器自身的 onClick 上按 x 坐标分区：
   // 纵向拖动不会产生 click，浏览器原生滚动照常工作。
+  //
+  // 手机上再补一层横向滑动翻页：从左往右滑=上一页、从右往左滑=下一页。
+  // 滑动的判定与「滑动后浏览器补发的 click」的去重都在 useHorizontalSwipe 里。
+  const { onTouchStart, onTouchEnd, onTouchCancel, consumeSwipe } = useHorizontalSwipe({
+    onSwipeRight: goPrev,
+    onSwipeLeft: goNext,
+  })
   const handleZoneTap = useCallback(
     (clientX: number, rect: DOMRect) => {
       const x = rect.width > 0 ? (clientX - rect.left) / rect.width : 0.5
@@ -1005,15 +1013,39 @@ export default function ReaderViewPage() {
             原生纵向滚动（手指落在覆盖层上时找不到可滚动的祖先节点），
             所以滚动模式由正文容器的 onClick 分区（见 handleZoneTap）。 */}
         {settings.pageMode === 'page' && (contentType === 'text' || contentType === 'image') && (
-          <div className="absolute inset-0 z-[1] grid grid-cols-[30%_40%_30%]">
-            <button type="button" aria-label="上一页" onClick={goPrev} className="cursor-w-resize" />
+          <div
+            className="absolute inset-0 z-[1] grid grid-cols-[30%_40%_30%]"
+            onTouchStart={onTouchStart}
+            onTouchEnd={onTouchEnd}
+            onTouchCancel={onTouchCancel}
+          >
+            <button
+              type="button"
+              aria-label="上一页"
+              onClick={() => {
+                if (consumeSwipe()) return
+                goPrev()
+              }}
+              className="cursor-w-resize"
+            />
             <button
               type="button"
               aria-label="菜单"
-              onClick={() => setMenuOpen((v) => !v)}
+              onClick={() => {
+                if (consumeSwipe()) return
+                setMenuOpen((v) => !v)
+              }}
               className="cursor-default"
             />
-            <button type="button" aria-label="下一页" onClick={goNext} className="cursor-e-resize" />
+            <button
+              type="button"
+              aria-label="下一页"
+              onClick={() => {
+                if (consumeSwipe()) return
+                goNext()
+              }}
+              className="cursor-e-resize"
+            />
           </div>
         )}
       </div>
