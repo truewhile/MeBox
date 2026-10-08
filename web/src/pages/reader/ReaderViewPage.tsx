@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { useParams } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import {
@@ -109,9 +109,15 @@ const ReaderTextPageBody = memo(function ReaderTextPageBody({
     <>
       {blocks.map((block, key) => {
         const { text, comments } = block
+        // content-visibility：跳过视口外段落的绘制。长章翻页时否则每次 transform
+        // 都要重绘整章（实测可到数百毫秒）。auto 尺寸会记住上次渲染高度，减少分页抖动。
+        const skipPaint: CSSProperties = {
+          contentVisibility: 'auto',
+          containIntrinsicSize: 'auto 4em',
+        }
         if (text.startsWith(IMG_MARK)) {
           return (
-            <p key={key} style={{ marginBottom: paragraphSpacing, textAlign: 'center' }}>
+            <p key={key} style={{ marginBottom: paragraphSpacing, textAlign: 'center', ...skipPaint }}>
               <img
                 src={text.slice(IMG_MARK.length)}
                 alt=""
@@ -129,6 +135,7 @@ const ReaderTextPageBody = memo(function ReaderTextPageBody({
               textIndent: text ? '2em' : undefined,
               marginBottom: paragraphSpacing,
               textAlign: standalone && comments.every((c) => c.block) ? 'center' : undefined,
+              ...skipPaint,
             }}
           >
             {text}
@@ -190,6 +197,21 @@ function settleComicDrag(el: HTMLDivElement, turn: 1 | -1, dx: number, turnPage:
   turnPage()
 }
 
+/**
+ * 文本滑动松手后的跟手层归位。正文多栏已瞬移，这里只把跟手层从「画面连续」的
+ * 位移滑回 0。不用 void offsetWidth 强刷布局——长章多栏一强制回流就要几百毫秒。
+ * turn=1 下一页，turn=-1 上一页；dx 为松手时的跟手位移。
+ */
+function settleTextDrag(dragEl: HTMLDivElement, turn: 1 | -1, dx: number): void {
+  const width = dragEl.clientWidth || 1
+  dragEl.style.transition = 'none'
+  dragEl.style.transform = `translate3d(${turn > 0 ? width + dx : -width + dx}px,0,0)`
+  requestAnimationFrame(() => {
+    dragEl.style.transition = 'transform 140ms ease-out'
+    dragEl.style.transform = 'translate3d(0,0,0)'
+  })
+}
+
 export default function ReaderViewPage() {
   const { bookId = '' } = useParams()
   const settings = useReaderSettingsStore()
@@ -232,16 +254,28 @@ export default function ReaderViewPage() {
   const viewportRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
+  /** 文本跟手层：滑动动画也写在这一层，避免给整章多栏做 transition。 */
+  const pageDragRef = useRef<HTMLDivElement>(null)
   const [page, setPage] = useState(0)
   const [pageCount, setPageCount] = useState(1)
   const [vw, setVw] = useState(0)
-  // 文本翻页位移走命令式 transform（见 applyTextPageTransform）：先改 DOM 再 setPage，
-  // 避免长章重渲染把翻页动画堵在主线程后面。下面几个 ref 用来去重 / 换章时关掉过渡。
+  // 文本翻页：位移与页脚先走 DOM，React 的 page state 等到过渡结束后再同步。
+  // 若在同一次点击/触摸里同步 setPage，整页重渲染会堵住下一次绘制，
+  // 命令式 transform 也要等卡完才开始——点按和滑动都会顿一下。
   const vwRef = useRef(0)
+  const pageRef = useRef(0)
+  const pageCountRef = useRef(1)
+  const chapterTitleRef = useRef('')
+  const pageLabelRef = useRef<HTMLDivElement>(null)
   const appliedTextPageRef = useRef(-1)
   const appliedTextVwRef = useRef(-1)
   const snapTextPageRef = useRef(false)
+  /** 把 pageRef 同步回 React state 的防抖定时器；翻页热路径上绝不同步 setPage。 */
+  const textPageSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** 首次分页完成后锁住 pageCount，避免 content-visibility 改变 scrollWidth 后反复 setPageCount。 */
+  const pageCountLockedRef = useRef(false)
   vwRef.current = vw
+  pageCountRef.current = pageCount
   // 音频/漫画媒体状态
   const [media, setMedia] = useState<ReaderChapterContent | null>(null)
   const [restorePos, setRestorePos] = useState(0) // 音频秒数 / 漫画图片序号
@@ -410,6 +444,8 @@ export default function ReaderViewPage() {
         // 换章瞬移到目标页，不要带着上一章的翻页过渡滑过去。
         snapTextPageRef.current = true
         appliedTextPageRef.current = -1
+        pageCountLockedRef.current = false
+        pageRef.current = 0
         setPage(0)
         setComicPage(0)
         setCurrentImage(0)
@@ -475,34 +511,108 @@ export default function ReaderViewPage() {
     const width = vwRef.current > 0 ? vwRef.current : (viewportRef.current?.clientWidth ?? 0)
     const stride = Math.max(width, 1) + COLUMN_GAP
     el.style.transition = animate ? PAGE_TRANSITION : 'none'
+    // 正文多栏可能极宽，不要 translate3d / will-change，免得整章被提成巨大合成层。
     el.style.transform = `translateX(-${nextPage * stride}px)`
     appliedTextPageRef.current = nextPage
     appliedTextVwRef.current = width
   }, [])
 
+  const updateTextPageLabel = useCallback((nextPage: number) => {
+    const label = pageLabelRef.current
+    if (!label) return
+    const title = chapterTitleRef.current
+    label.textContent = title ? `${nextPage + 1} / ${pageCountRef.current} · ${title}` : `${nextPage + 1} / ${pageCountRef.current}`
+  }, [])
+
+  /**
+   * 把 pageRef 写回 React。长章每次 setPage 都会让整页重渲染卡住 1s+，
+   * 所以阅读翻页热路径绝不调用；只在打开菜单 / 换章 / 卸载时同步。
+   */
+  const flushTextPageReactSync = useCallback(() => {
+    if (textPageSyncTimerRef.current !== null) {
+      clearTimeout(textPageSyncTimerRef.current)
+      textPageSyncTimerRef.current = null
+    }
+    setPage((p) => (p === pageRef.current ? p : pageRef.current))
+  }, [])
+
+  /**
+   * 文本翻到指定页（热路径零 setState）。
+   * - 正文多栏瞬移 + 页脚 DOM 更新
+   * - 点按/滚轮：无动画
+   * - 滑动松手：只动画跟手层
+   * dragDx 有值表示来自滑动松手。
+   */
+  const commitTextPage = useCallback(
+    (nextPage: number, opts?: { dragDx?: number }) => {
+      const from = pageRef.current
+      const dragDx = opts?.dragDx
+      const fromSwipe = typeof dragDx === 'number'
+      const turn: 1 | -1 = nextPage >= from ? 1 : -1
+
+      pageRef.current = nextPage
+      applyTextPageTransform(nextPage, false)
+      updateTextPageLabel(nextPage)
+
+      const dragEl = pageDragRef.current
+      if (fromSwipe && dragEl && nextPage !== from) {
+        settleTextDrag(dragEl, turn, dragDx)
+      } else if (dragEl) {
+        dragEl.style.transition = 'none'
+        dragEl.style.transform = 'translate3d(0,0,0)'
+      }
+    },
+    [applyTextPageTransform, updateTextPageLabel],
+  )
+
   const relayout = useCallback(() => {
     const vp = viewportRef.current
     if (!vp) return
     const width = vp.clientWidth
-    setVw(width)
-    const total = vp.scrollWidth
+    // 用正文列自己的 scrollWidth；视口在子元素 transform 时 scrollWidth 会抖，
+    // 导致翻一页就重新 setPageCount → 整页重渲染卡 1s+。
+    const total = contentRef.current?.scrollWidth ?? vp.scrollWidth
     const count = Math.max(1, Math.ceil((total + COLUMN_GAP) / (width + COLUMN_GAP)))
-    setPageCount(count)
-    // 恢复进度 / 夹紧页码属于排版结果，不是用户翻页——关掉过渡，免得整章闪滑。
-    snapTextPageRef.current = true
-    setPage((p) => {
-      if (pendingEndRef.current && count > 0) {
-        pendingEndRef.current = false
-        return count - 1
-      }
-      if (pendingPosRef.current > 0) {
-        const pos = Math.min(pendingPosRef.current, count - 1)
-        pendingPosRef.current = 0
-        return pos
-      }
-      return Math.min(p, count - 1)
-    })
-  }, [])
+
+    const pendingEnd = pendingEndRef.current && count > 0
+    const pendingPos = pendingPosRef.current > 0
+    const clamped = Math.min(pageRef.current, Math.max(0, count - 1))
+    const nextPage = pendingEnd
+      ? count - 1
+      : pendingPos
+        ? Math.min(pendingPosRef.current, count - 1)
+        : clamped
+
+    if (pendingEnd) pendingEndRef.current = false
+    if (pendingPos) pendingPosRef.current = 0
+
+    const widthChanged = width !== vwRef.current
+    // 窗口宽度变了要重新分页；锁住后忽略 scrollWidth 抖动（content-visibility 估算高度）。
+    if (widthChanged) pageCountLockedRef.current = false
+    const countChanged = !pageCountLockedRef.current && count !== pageCountRef.current
+    const pageChanged = nextPage !== pageRef.current
+
+    // 热路径上尺寸没变就别 setState——否则每次翻页都会重渲染 2000+ 段正文。
+    if (!widthChanged && !countChanged && !pageChanged && !pendingEnd && !pendingPos) {
+      if (count > 1) pageCountLockedRef.current = true
+      return
+    }
+
+    vwRef.current = width
+    if (!pageCountLockedRef.current) pageCountRef.current = count
+    pageRef.current = nextPage
+    if (widthChanged) setVw(width)
+    if (countChanged) {
+      setPageCount(count)
+      if (count > 1) pageCountLockedRef.current = true
+    }
+    if (pageChanged || pendingEnd || pendingPos) {
+      snapTextPageRef.current = true
+      setPage(nextPage)
+      updateTextPageLabel(nextPage)
+      applyTextPageTransform(nextPage, false)
+    }
+  }, [applyTextPageTransform, updateTextPageLabel])
 
   useLayoutEffect(() => {
     relayout()
@@ -514,16 +624,34 @@ export default function ReaderViewPage() {
     if (appliedTextPageRef.current === page && appliedTextVwRef.current === vw) return
     const animate = !snapTextPageRef.current && appliedTextPageRef.current !== page
     snapTextPageRef.current = false
+    pageRef.current = page
     applyTextPageTransform(page, animate)
-  }, [page, vw, contentType, settings.pageMode, applyTextPageTransform])
+    updateTextPageLabel(page)
+  }, [page, vw, contentType, settings.pageMode, applyTextPageTransform, updateTextPageLabel])
 
   useEffect(() => {
     const vp = viewportRef.current
     if (!vp) return
-    const ro = new ResizeObserver(() => relayout())
+    // 合并同一帧里多次 resize，避免字体/滚动条抖动连带 relayout→setState。
+    let raf = 0
+    const ro = new ResizeObserver(() => {
+      if (raf) cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(() => {
+        raf = 0
+        relayout()
+      })
+    })
     ro.observe(vp)
-    return () => ro.disconnect()
+    return () => {
+      if (raf) cancelAnimationFrame(raf)
+      ro.disconnect()
+    }
   }, [relayout, content, settings.pageMode])
+
+  // 打开菜单时把 pageRef 写回 state，进度条才不会停在旧页。
+  useEffect(() => {
+    if (menuOpen) flushTextPageReactSync()
+  }, [menuOpen, flushTextPageReactSync])
 
   // 滚动模式恢复进度
   useEffect(() => {
@@ -558,13 +686,22 @@ export default function ReaderViewPage() {
     [book, chapterIndex, chapters],
   )
 
+  // 文本翻页进度：不依赖 React page（翻页热路径不 setPage），定时读 pageRef。
   useEffect(() => {
-    // 只处理文本：听书/漫画的正文为空串（不是 null），不能落到页码保存逻辑里，
-    // 否则打开音频章 1.5 秒后就会把页码 0 写成进度，覆盖掉刚才恢复的秒数。
     if (contentType !== 'text' || settings.pageMode !== 'page' || content === null || chapterIndex === null) return
-    const t = setTimeout(() => savePos(page), 1500)
-    return () => clearTimeout(t)
-  }, [page, content, chapterIndex, settings.pageMode, contentType, savePos])
+    let last = -1
+    const tick = () => {
+      const pos = pageRef.current
+      if (pos === last) return
+      last = pos
+      savePos(pos)
+    }
+    const t = setInterval(tick, 2000)
+    return () => {
+      clearInterval(t)
+      tick()
+    }
+  }, [content, chapterIndex, settings.pageMode, contentType, savePos])
 
   // 漫画单页进度保存
   useEffect(() => {
@@ -742,14 +879,10 @@ export default function ReaderViewPage() {
       scrollRef.current?.scrollBy({ top: -window.innerHeight * 0.9, behavior: 'auto' })
       return
     }
-    // 文本翻页：先命令式挪正文列，再 setPage 更新页脚。顺序不能反——
-    // 否则长章重渲染会把过渡堵到卡顿结束才开始。
-    if (page > 0) {
-      const next = page - 1
-      applyTextPageTransform(next, true)
-      setPage(next)
-    } else goChapter(-1, true)
-  }, [contentType, settings.pageMode, comicDoublePage, comicSpreads, comicSpreadIndex, comicPage, page, goChapter, applyTextPageTransform])
+    // 文本翻页读 pageRef：动画期间 React page 可能还没跟上，连点不能被旧 state 卡住。
+    if (pageRef.current > 0) commitTextPage(pageRef.current - 1)
+    else goChapter(-1, true)
+  }, [contentType, settings.pageMode, comicDoublePage, comicSpreads, comicSpreadIndex, comicPage, goChapter, commitTextPage])
 
   const goNext = useCallback(() => {
     if (contentType === 'audio') {
@@ -773,12 +906,9 @@ export default function ReaderViewPage() {
       else el?.scrollBy({ top: window.innerHeight * 0.9, behavior: 'auto' })
       return
     }
-    if (page < pageCount - 1) {
-      const next = page + 1
-      applyTextPageTransform(next, true)
-      setPage(next)
-    } else goChapter(1)
-  }, [contentType, settings.pageMode, comicDoublePage, comicSpreads, comicSpreadIndex, media, comicPage, page, pageCount, goChapter, applyTextPageTransform])
+    if (pageRef.current < pageCountRef.current - 1) commitTextPage(pageRef.current + 1)
+    else goChapter(1)
+  }, [contentType, settings.pageMode, comicDoublePage, comicSpreads, comicSpreadIndex, media, comicPage, goChapter, commitTextPage])
 
   // ── 点击分区（左 30% 上一页 / 中间呼出菜单 / 右 30% 下一页） ──
   // 翻页模式用覆盖层上的三个按钮驱动；滚动模式不能再用覆盖层——
@@ -791,14 +921,11 @@ export default function ReaderViewPage() {
   // 「滑动后浏览器补发的 click」的去重都在 useHorizontalSwipe 里）。
   //
   // 跟手拖拽平移的是两个不同的元素：
-  // - 文本：正文列外面单独挂一层「跟手层」（pageDragRef）。分页平移由 applyTextPageTransform
-  //   写在里层（contentRef），跟手层只管手指位移；松手时两层同时动——跟手位移归零 +
-  //   页码变化——合起来就是一次连续滑动。分两层是为了避免跟手位移和 React/命令式页码
-  //   位移互相覆盖；页码不再经 React style 下发，长章翻页才不会先卡主线程再开动画。
+  // - 文本：正文列外面单独挂一层「跟手层」（pageDragRef）。正文多栏只瞬移，
+  //   滑页动画全在跟手层（settleTextDrag）；长章不能给多栏做 transition。
   // - 漫画：平移 ReaderComic 的舞台（comicStageRef）。舞台两侧摆着上一页/下一页
   //   （见那边的 carousel 分支），翻页时单元格的 left 偏移与舞台位移在同一次提交里
   //   相抵，画面看不出切换。
-  const pageDragRef = useRef<HTMLDivElement>(null)
   const comicStageRef = useRef<HTMLDivElement>(null)
   const pageDragEnabled = settings.pageMode === 'page' && (contentType === 'text' || comicDragSinglePage)
 
@@ -807,7 +934,7 @@ export default function ReaderViewPage() {
       const el = contentType === 'image' ? comicStageRef.current : pageDragRef.current
       if (!el) return
       el.style.transition = 'none'
-      el.style.transform = `translateX(${dx}px)`
+      el.style.transform = `translate3d(${dx}px,0,0)`
     },
     [contentType],
   )
@@ -831,13 +958,31 @@ export default function ReaderViewPage() {
       }
       const el = pageDragRef.current
       if (!el) return
-      // 跟手层归零与页码平移同时进行，合成一次连续滑动（位移不够时就是回弹）。
+      if (dx <= -DRAG_TURN_DISTANCE) {
+        if (pageRef.current < pageCountRef.current - 1) {
+          commitTextPage(pageRef.current + 1, { dragDx: dx })
+        } else {
+          el.style.transition = PAGE_TRANSITION
+          el.style.transform = 'translate3d(0,0,0)'
+          goChapter(1)
+        }
+        return
+      }
+      if (dx >= DRAG_TURN_DISTANCE) {
+        if (pageRef.current > 0) {
+          commitTextPage(pageRef.current - 1, { dragDx: dx })
+        } else {
+          el.style.transition = PAGE_TRANSITION
+          el.style.transform = 'translate3d(0,0,0)'
+          goChapter(-1, true)
+        }
+        return
+      }
+      // 位移不够：回弹，不翻页。
       el.style.transition = PAGE_TRANSITION
-      el.style.transform = 'translateX(0px)'
-      if (dx <= -DRAG_TURN_DISTANCE) goNext()
-      else if (dx >= DRAG_TURN_DISTANCE) goPrev()
+      el.style.transform = 'translate3d(0,0,0)'
     },
-    [contentType, goNext, goPrev],
+    [contentType, goNext, goPrev, commitTextPage, goChapter],
   )
 
   const { onTouchStart, onTouchMove, onTouchEnd, onTouchCancel, consumeSwipe } = useHorizontalSwipe({
@@ -925,6 +1070,7 @@ export default function ReaderViewPage() {
   }, [settings.pageMode, menuOpen, contentType, goPrev, goNext])
 
   const currentChapter = chapterIndex !== null ? chapters[chapterIndex] : null
+  chapterTitleRef.current = currentChapter?.title ?? ''
 
   // 顶栏高度量一次：菜单打开时正文下移，开头几行不被顶栏压住。
   // 用 transform 而不是 padding，避免改变视口高度触发重新分页。
@@ -972,10 +1118,10 @@ export default function ReaderViewPage() {
             ),
       onChange: (v: number) => {
         if (settings.pageMode === 'page') {
-          const next = v - 1
-          applyTextPageTransform(next, true)
-          setPage(next)
-        } else {
+          commitTextPage(v - 1)
+          flushTextPageReactSync()
+        }
+        else {
           const el = scrollRef.current
           if (el) el.scrollTop = (v / 1000) * (el.scrollHeight - el.clientHeight)
         }
@@ -1227,7 +1373,11 @@ export default function ReaderViewPage() {
 
       {/* 页脚页码（翻页模式） */}
       {settings.pageMode === 'page' && contentType === 'text' && content !== null && (
-        <div className="pointer-events-none pb-2 text-center text-2xs opacity-50" style={{ color: theme.text }}>
+        <div
+          ref={pageLabelRef}
+          className="pointer-events-none pb-2 text-center text-2xs opacity-50"
+          style={{ color: theme.text }}
+        >
           {page + 1} / {pageCount} · {currentChapter?.title ?? ''}
         </div>
       )}
