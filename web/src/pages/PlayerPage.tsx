@@ -81,6 +81,10 @@ type PlaybackProgressSession = {
 // 自动跳过片头后，「已跳过 · 撤销」提示停留的时长。
 const SKIP_NOTICE_MS = 6000
 
+// 115 云 HLS 中途断流后，允许在窗口内重建几次会话再退回本地转码。
+const CLOUD_HLS_RELOAD_MAX = 3
+const CLOUD_HLS_RELOAD_WINDOW_MS = 10 * 60 * 1000
+
 function normalizePlayerVolume(value: unknown): number {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) return 1
@@ -185,6 +189,17 @@ export function PlayerPage() {
   const cloudPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const cloudRetryRef = useRef(5)
   const pendingSeekRef = useRef<number | null>(null)
+  // 云 HLS 会话重建计数（时间戳）。115 云转码的会话只存在服务端内存里：服务
+  // 重新部署、会话过期（30 分钟无活动）、上游地址失效都会让播放中途拿到
+  // 404/410。这种情况下重新拉一次 master.m3u8 建个新会话即可续播，没必要直接
+  // 掉到本地转码（这台机器本地转码只有 0.6x，等于播放报废）。窗口内限制次数，
+  // 避免上游真的坏了时无限重连。
+  const cloudReloadsRef = useRef<number[]>([])
+  const [cloudReloadNonce, setCloudReloadNonce] = useState(0)
+  // 切回直连/原画时把当前位置带过去：HLS 卸载会把 video.currentTime 归零，
+  // 必须在切换前先记下来，等直连 loadedmetadata 后再跳。
+  const pendingDirectStartRef = useRef(0)
+  const hlsSourceRef = useRef<'cloud' | 'local'>('local')
 
   // 弹幕控制：状态来自 /api/danmaku/config 初始值，用户在面板里实时调整。
   const [danmakuOpen, setDanmakuOpen] = useState(false)
@@ -488,6 +503,8 @@ export function PlayerPage() {
     setCloudWaitMessage('')
     setCloudWaitStartedAt(0)
     pendingSeekRef.current = null
+    cloudReloadsRef.current = []
+    pendingDirectStartRef.current = 0
     if (cloudPollTimerRef.current) {
       clearTimeout(cloudPollTimerRef.current)
       cloudPollTimerRef.current = null
@@ -953,6 +970,38 @@ export function PlayerPage() {
     [playbackInfo, setPlaybackMode],
   )
 
+  /**
+   * 115 云 HLS 中途断流后重建会话。
+   *
+   * 115 的云端转码会话只存在服务端内存里：服务重新部署、会话到期（30 分钟无活动）、
+   * 上游分片地址失效，都会让正在播放的客户端在后续分片上拿到 404/410。重新请求一次
+   * master.m3u8 就会建出新会话，从当前位置继续播即可——比直接退回本地转码好得多
+   * （低配宿主机本地转码往往追不上播放速度，等于不能看）。
+   *
+   * 窗口内超过次数上限返回 false，由调用方走本地转码兜底，避免上游真的坏了时无限重连。
+   */
+  const reloadCloudHls = useCallback(
+    (position: number): boolean => {
+      const now = Date.now()
+      const recent = cloudReloadsRef.current.filter((at) => now - at < CLOUD_HLS_RELOAD_WINDOW_MS)
+      if (recent.length >= CLOUD_HLS_RELOAD_MAX) {
+        cloudReloadsRef.current = recent
+        return false
+      }
+      recent.push(now)
+      cloudReloadsRef.current = recent
+      // 云 HLS 是整条时间轴，起播后按绝对位置跳一下，别让用户回到片头。
+      pendingSeekRef.current = position > 2 ? position : null
+      setCloudWaiting(false)
+      setCloudWaitMessage('')
+      setHlsSource('cloud')
+      setPlaybackMode('hls')
+      setCloudReloadNonce((v) => v + 1)
+      return true
+    },
+    [setPlaybackMode],
+  )
+
   const startCloudTranscode = useCallback(
     async (definition: number) => {
       if (!mediaId) return
@@ -1126,7 +1175,10 @@ export function PlayerPage() {
             // hosts and remote STRM sources regularly need more than hls.js's
             // 10s default, which otherwise aborts a healthy transcode.
             manifestLoadingTimeOut: 60_000,
-            manifestLoadingMaxRetry: 1,
+            // 115 云 HLS 的 master.m3u8 每次都要现调 115 接口（实测 0.5–1.3s），
+            // 还可能撞上 409「正在转码」。只重试 1 次的话，一次抖动就判死刑，
+            // 直接掉到本地转码。
+            manifestLoadingMaxRetry: 4,
           })
           try {
             video.currentTime = 0
@@ -1160,6 +1212,11 @@ export function PlayerPage() {
             if (data.fatal) {
               if (hlsSource === 'cloud') {
                 const position = ref.current?.currentTime || 0
+                // 先尝试重建云会话续播；只有连着失败到上限才退回本地转码。
+                if (reloadCloudHls(position)) {
+                  toast('115 云端播放中断，正在重新连接…', { duration: 2200 })
+                  return
+                }
                 setHlsUnavailable(false)
                 switchToLocalHLS(position)
                 toast.error('115 云端播放失败，切换本地转码')
@@ -1211,12 +1268,24 @@ export function PlayerPage() {
       if (video.src !== absoluteURL) {
         directRetryRef.current = false
         clearFallbackTimer()
-        // 进出 VR 会切换播放源地址，这里保住当前播放位置。
-        const resumeAt = video.currentTime > 2 ? video.currentTime : 0
+        // 保住当前位置。两个来源：显式切回直连/原画时提前记下的目标位置
+        // （HLS 卸载会把 video.currentTime 归零，所以不能只读 video.currentTime），
+        // 以及 VR 进出时切换播放源地址的情形。
+        const resumeAt = Math.max(
+          pendingDirectStartRef.current,
+          video.currentTime > 2 ? video.currentTime : 0,
+        )
+        pendingDirectStartRef.current = 0
         if (resumeAt > 0) {
           video.addEventListener(
             'loadedmetadata',
             () => {
+              // STRM/115 直链要等 seekable 覆盖目标位置再写 currentTime（否则会被
+              // 钳回 0），并顺带打开误报宽限期，避免这次跳转被当成播放失败又弹回 HLS。
+              if (isStrmMedia(currentMedia)) {
+                seekStrmDirectTo(resumeAt)
+                return
+              }
               try {
                 video.currentTime = resumeAt
               } catch {
@@ -1243,6 +1312,7 @@ export function PlayerPage() {
   }, [
     activeBurnedSubtitleStream,
     clearFallbackTimer,
+    cloudReloadNonce,
     cloudWaiting,
     hlsSource,
     hlsUnavailable,
@@ -1250,6 +1320,8 @@ export function PlayerPage() {
     mediaId,
     mode,
     playbackProvider,
+    reloadCloudHls,
+    seekStrmDirectTo,
     selectedQuality,
     setPlaybackMode,
     switchToLocalHLS,
@@ -1398,8 +1470,9 @@ export function PlayerPage() {
   const modeRef = useRef(mode)
   useEffect(() => {
     hlsStartSecRef.current = hlsStartSec
+    hlsSourceRef.current = hlsSource
     modeRef.current = mode
-  }, [hlsStartSec, mode])
+  }, [hlsStartSec, hlsSource, mode])
 
   // Persist resume position every 10 seconds while playing, and immediately upon
   // pause/page hide/unmount. Bind after mediaId is available because
@@ -1412,16 +1485,21 @@ export function PlayerPage() {
       lastSentRef.current = 0
     }
 
+    // 本地 HLS 的播放列表 t=0 对应 hlsStartSec，云 HLS 的播放列表本身就是整条
+    // 时间轴（起点恒为 0）。以前两种模式都叠加 hlsStartSec：只要本地转码残留过
+    // 一个非 0 起点再切到云端，上报的进度和总时长就会被整体抬高（实测把 7624s
+    // 的片子记成 8346s 并直接标成「已看完」）。
+    const timelineOffsetSec = () =>
+      modeRef.current === 'hls' && hlsSourceRef.current === 'local' ? hlsStartSecRef.current : 0
+
     const absolutePositionMs = () => {
-      const currentStartSec = modeRef.current === 'hls' ? hlsStartSecRef.current : 0
-      const absolute = currentStartSec + (video.currentTime || 0)
+      const absolute = timelineOffsetSec() + (video.currentTime || 0)
       return Number.isFinite(absolute) ? Math.max(0, Math.floor(absolute * 1000)) : 0
     }
     const absoluteDurationMs = () => {
-      const currentStartSec = modeRef.current === 'hls' ? hlsStartSecRef.current : 0
       const mediaDur = mediaRef.current?.duration_sec || 0
       const streamDur = Number.isFinite(video.duration) ? video.duration : 0
-      const totalSec = Math.max(mediaDur, currentStartSec + streamDur)
+      const totalSec = Math.max(mediaDur, timelineOffsetSec() + streamDur)
       return Number.isFinite(totalSec) && totalSec > 0 ? Math.floor(totalSec * 1000) : 0
     }
     const send = (keepalive: boolean) => {
@@ -1782,16 +1860,27 @@ export function PlayerPage() {
       toast('该媒体为直连播放，无需且不支持转码')
       return
     }
+    const video = ref.current
+    // HLS 卸载会把 video.currentTime 归零，所以先按当前模式换算成绝对秒数记下来。
+    const position = video
+      ? mode === 'hls' && hlsSource === 'local'
+        ? hlsStartSec + video.currentTime
+        : video.currentTime
+      : 0
     const next = mode === 'hls' ? 'direct' : 'hls'
     if (next === 'hls') {
       // 带着当前位置切过去：云 HLS 跳一下、本地 HLS 从该点重开转码，都不从头播。
-      enterHlsPlayback(ref.current?.currentTime || 0)
+      enterHlsPlayback(position)
     } else {
       setCloudWaiting(false)
+      // 直连要等 loadedmetadata 再跳（见播放方式接线 effect），这里先把目标位置存下来。
+      pendingDirectStartRef.current = position
     }
     setPlaybackMode(next)
   }, [
     enterHlsPlayback,
+    hlsSource,
+    hlsStartSec,
     isDirectStream,
     mode,
     setPlaybackMode,
@@ -1989,16 +2078,22 @@ export function PlayerPage() {
   const selectPlaybackQuality = useCallback(
     (quality: PlaybackQuality) => {
       const video = ref.current
-      const position = video?.currentTime || 0
+      const localTime = video?.currentTime || 0
+      // 云 HLS 的 currentTime 本来就在绝对时间轴上；本地 HLS 的 t=0 对应 hlsStartSec。
+      const position = mode === 'hls' && hlsSource === 'local' ? hlsStartSec + localTime : localTime
       if (quality.source === 'original') {
         setCloudWaiting(false)
         setHlsSource('local')
+        // 切回原始文件直连：位置由直连分支的 loadedmetadata 跳转负责带过去。
+        pendingDirectStartRef.current = position
         setPlaybackMode('direct')
         return
       }
       if (quality.source === 'cloud') {
         setSelectedQuality(quality.id)
         setHlsSource('cloud')
+        // 用户手动选了云端档位：这是一次明确的重新尝试，重置自动重连的次数窗口。
+        cloudReloadsRef.current = []
         if (quality.available) {
           setCloudWaiting(false)
           setCloudWaitMessage('')
@@ -2025,7 +2120,7 @@ export function PlayerPage() {
       if (position > 2) setHlsStartSec(position)
       setPlaybackMode('hls')
     },
-    [setPlaybackMode, startCloudTranscode],
+    [hlsSource, hlsStartSec, mode, setPlaybackMode, startCloudTranscode],
   )
 
   const changeSubtitleChineseMode = useCallback(

@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/truewhile/MeBox/internal/service/cloud115"
 )
@@ -24,6 +28,10 @@ const (
 	cloud115HLSSessionTTL  = 30 * time.Minute
 	cloud115HLSMaxSessions = 256
 	cloud115HLSMaxManifest = 8 << 20
+	// cloud115HLSMaxEntries 单个会话最多记住多少个上游地址。key 由上游地址
+	// 派生（见 cloud115HLSKeyForURL），所以条目数只随「实际出现过的地址」增长，
+	// 正常一部片子就是几千条；这个上限只是防御异常/恶意播放列表的兜底。
+	cloud115HLSMaxEntries = 20000
 )
 
 type cloud115HLSSession struct {
@@ -35,7 +43,17 @@ type cloud115HLSSession struct {
 
 	mu      sync.Mutex
 	entries map[string]string
-	next    int
+}
+
+// cloud115HLSKeyForURL 由上游地址派生稳定的分片 key。
+//
+// 早期实现用自增序号（e1、e2…）在每次重写播放列表时重新编号：同一分片每次
+// 重写都会拿到新 key，entries 随重写次数线性膨胀（实测一个 762 段的列表反复
+// 重写后 key 已经涨到 e2288…e3049），客户端拿到的分片编号也会无谓漂移。
+// 改成地址哈希后，同一分片在任何一次重写里都是同一个 key。
+func cloud115HLSKeyForURL(upstream string) string {
+	sum := sha256.Sum256([]byte(upstream))
+	return hex.EncodeToString(sum[:12])
 }
 
 // Cloud115HLSProxy 把 115 云端 HLS 转成 MeBox 同源 HLS。
@@ -302,12 +320,19 @@ func (p *Cloud115HLSProxy) rewriteManifest(session *cloud115HLSSession, text, ba
 }
 
 func (p *Cloud115HLSProxy) proxyURL(session *cloud115HLSSession, upstream, rawQuery string) string {
+	key := cloud115HLSKeyForURL(upstream)
 	session.mu.Lock()
-	session.next++
-	key := "e" + strconv.Itoa(session.next)
-	session.entries[key] = upstream
+	_, known := session.entries[key]
+	if !known && len(session.entries) < cloud115HLSMaxEntries {
+		session.entries[key] = upstream
+		known = true
+	}
 	mediaID := session.MediaID
 	session.mu.Unlock()
+	if !known && p != nil && p.service != nil && p.service.log != nil {
+		p.service.log.Warn("cloud115 hls: session entry cap reached, segment will not resolve",
+			zap.String("session", session.ID), zap.Int("cap", cloud115HLSMaxEntries))
+	}
 
 	query := childProxyQuery(rawQuery, mediaID)
 	return "/api/cloud115/hls/" + url.PathEscape(session.ID) + "/" + url.PathEscape(key) + "?" + query

@@ -25,7 +25,8 @@ func TestCloud115HLSProxyRewriteManifest(t *testing.T) {
 	if strings.Contains(rewritten, "cpats01.115.com") {
 		t.Fatalf("upstream URL leaked into rewritten manifest: %s", rewritten)
 	}
-	if !strings.Contains(rewritten, "/api/cloud115/hls/sess/e1?") {
+	wantKey := cloud115HLSKeyForURL("https://cpats01.115.com/a.m3u8?u=1&se=2")
+	if !strings.Contains(rewritten, "/api/cloud115/hls/sess/"+wantKey+"?") {
 		t.Fatalf("proxy URL missing: %s", rewritten)
 	}
 	if !strings.Contains(rewritten, "media_id=media-1") || !strings.Contains(rewritten, "token=t") {
@@ -33,6 +34,32 @@ func TestCloud115HLSProxyRewriteManifest(t *testing.T) {
 	}
 	if len(session.entries) != 1 {
 		t.Fatalf("session entries = %d, want 1", len(session.entries))
+	}
+}
+
+func TestCloud115HLSProxyRewriteIsStableAcrossRewrites(t *testing.T) {
+	proxy := &Cloud115HLSProxy{sessions: map[string]*cloud115HLSSession{}}
+	session := &cloud115HLSSession{
+		ID:      "sess",
+		MediaID: "media-1",
+		entries: map[string]string{},
+	}
+	manifest := "#EXTM3U\n#EXT-X-TARGETDURATION:10\n" +
+		"https://cpats01.115.com/seg0.ts?x=0\nhttps://cpats01.115.com/seg1.ts?x=1\n"
+
+	first := proxy.rewriteManifest(session, manifest, "https://cpats01.115.com/v.m3u8", "media_id=media-1")
+	entriesAfterFirst := len(session.entries)
+	second := proxy.rewriteManifest(session, manifest, "https://cpats01.115.com/v.m3u8", "media_id=media-1")
+
+	// 同一分片在每次重写里都必须是同一个 key，客户端拿到的地址才不会无谓漂移。
+	if first != second {
+		t.Fatalf("rewrite is not stable:\nfirst  = %s\nsecond = %s", first, second)
+	}
+	if len(session.entries) != entriesAfterFirst {
+		t.Fatalf("entries grew on rewrite: %d -> %d", entriesAfterFirst, len(session.entries))
+	}
+	if entriesAfterFirst != 2 {
+		t.Fatalf("session entries = %d, want 2", entriesAfterFirst)
 	}
 }
 
@@ -151,7 +178,6 @@ func TestCloud115HLSProxyServeChildRewritesVariant(t *testing.T) {
 		MediaID:   "media-1",
 		ExpiresAt: time.Now().Add(time.Hour),
 		entries:   map[string]string{"e1": "https://cpats01.115.com/v.m3u8"},
-		next:      1,
 	}
 	proxy.sessions[session.ID] = session
 	req := httptest.NewRequest(http.MethodGet, "/api/cloud115/hls/sess/e1?media_id=media-1&token=t", nil)
@@ -162,7 +188,8 @@ func TestCloud115HLSProxyServeChildRewritesVariant(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "/api/cloud115/hls/sess/e2?") {
+	wantKey := cloud115HLSKeyForURL("https://cpats01.115.com/seg.ts?x=1")
+	if !strings.Contains(rec.Body.String(), "/api/cloud115/hls/sess/"+wantKey+"?") {
 		t.Fatalf("rewritten variant missing proxy segment: %s", rec.Body.String())
 	}
 	if strings.Contains(rec.Body.String(), "cpats01.115.com") {
@@ -192,7 +219,6 @@ func TestCloud115HLSProxyServeChildStreamsRange(t *testing.T) {
 		MediaID:   "media-1",
 		ExpiresAt: time.Now().Add(time.Hour),
 		entries:   map[string]string{"e1": "https://cpats01.115.com/seg.ts?x=1"},
-		next:      1,
 	}
 	proxy.sessions[session.ID] = session
 	req := httptest.NewRequest(http.MethodGet, "/api/cloud115/hls/sess/e1?media_id=media-1&token=t", nil)

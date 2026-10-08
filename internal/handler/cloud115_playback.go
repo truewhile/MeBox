@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -136,11 +137,21 @@ func cloud115HLSSessionHandler(svc *service.Container) gin.HandlerFunc {
 		if err == nil || c.Writer.Written() {
 			return
 		}
+		// 客户端主动断开（播放器 seek、切切清晰度、关页面时取消在途请求）会让
+		// 上游请求以 context.Canceled 结束。这是正常现象，不是网关故障；以前
+		// 统一记成 502，既污染监控又和 nginx 的 499 对不上，这里按 499 记。
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+			c.Request.Context().Err() != nil {
+			c.AbortWithStatus(499)
+			return
+		}
 		switch {
 		case errors.Is(err, service.ErrCloud115HLSSessionNotFound):
-			c.JSON(http.StatusNotFound, gin.H{"error": "hls session not found"})
+			// code 供前端判断「会话没了，需要重新拉一次 master.m3u8 建会话」，
+			// 而不是直接放弃云端播放退回本地转码。
+			c.JSON(http.StatusNotFound, gin.H{"code": "hls_session_not_found", "error": "hls session not found"})
 		case errors.Is(err, service.ErrCloud115HLSUpstreamExpired):
-			c.JSON(http.StatusGone, gin.H{"error": "hls upstream expired"})
+			c.JSON(http.StatusGone, gin.H{"code": "hls_session_expired", "error": "hls upstream expired"})
 		default:
 			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		}
