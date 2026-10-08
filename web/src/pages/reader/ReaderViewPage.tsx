@@ -618,14 +618,28 @@ export default function ReaderViewPage() {
     relayout()
   }, [relayout, content, settings.fontSize, settings.lineHeight, settings.paragraphSpacing, settings.pageMode, vw])
 
-  // 页码或列宽变了：若翻页回调里已经写过 transform 则跳过，避免把正在播的过渡重开一遍。
+  // 列宽变化或换章恢复时对齐位移。
+  // 阅读热路径以 pageRef 为权威页码（不走 setPage）；这里绝不能用滞后的 React page
+  // 反写 pageRef，否则会出现「翻到下一页又被拉回上一页」的来回抖动。
   useLayoutEffect(() => {
     if (contentType !== 'text' || settings.pageMode !== 'page') return
+    if (snapTextPageRef.current) {
+      snapTextPageRef.current = false
+      pageRef.current = page
+      applyTextPageTransform(page, false)
+      updateTextPageLabel(page)
+      return
+    }
+    // React page 还没跟上热路径：只在宽度变了时按 pageRef 重算位移。
+    if (page !== pageRef.current) {
+      if (appliedTextVwRef.current !== vw) {
+        applyTextPageTransform(pageRef.current, false)
+        updateTextPageLabel(pageRef.current)
+      }
+      return
+    }
     if (appliedTextPageRef.current === page && appliedTextVwRef.current === vw) return
-    const animate = !snapTextPageRef.current && appliedTextPageRef.current !== page
-    snapTextPageRef.current = false
-    pageRef.current = page
-    applyTextPageTransform(page, animate)
+    applyTextPageTransform(page, false)
     updateTextPageLabel(page)
   }, [page, vw, contentType, settings.pageMode, applyTextPageTransform, updateTextPageLabel])
 
