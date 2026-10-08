@@ -33,6 +33,12 @@ interface HorizontalSwipeOptions {
   dominance?: number
   /** 手势超过这个时长不算滑动（毫秒）。只对非跟手的滑动判定生效。 */
   maxDuration?: number
+  /**
+   * 跟手拖拽开始（方向判定通过、第一次 onDrag 之前）调一次。
+   * 宿主在这里记下跟手层当前的实际位移：上一次翻页的归位动画可能还没滑完，
+   * 新手势要接着那点残余位移继续，否则中途接管会把残余一笔抹掉，画面跳一格。
+   */
+  onDragStart?: () => void
   /** 跟手拖拽中的位移（px，向右为正）。传了才启用跟手。 */
   onDrag?: (dx: number) => void
   /** 跟手松手：宿主在这里回弹或翻页（随后浏览器补发的 click 会被吞掉）。 */
@@ -54,6 +60,7 @@ export function useHorizontalSwipe({
   minDistance = 45,
   dominance = 1.2,
   maxDuration = 800,
+  onDragStart,
   onDrag,
   onDragEnd,
 }: HorizontalSwipeOptions): HorizontalSwipeHandlers {
@@ -88,11 +95,12 @@ export function useHorizontalSwipe({
           return
         }
         draggingRef.current = true
+        onDragStart?.()
       }
       lastDxRef.current = dx
       onDrag?.(dx)
     },
-    [onDrag, dominance],
+    [onDragStart, onDrag, dominance],
   )
 
   const onTouchEnd = useCallback(
