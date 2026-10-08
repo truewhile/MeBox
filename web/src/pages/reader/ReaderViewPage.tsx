@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import {
@@ -85,6 +85,84 @@ interface ReaderParagraphBlock {
   comments: ReaderContentComment[]
 }
 
+/**
+ * 翻页模式正文列：与页码 state 解耦。
+ *
+ * 长章（几百页 CSS 多栏）里，若每次 setPage 都把整棵段落树再调和一遍，
+ * 手机主线程会卡数百毫秒，表现为「松手停一下才翻到下一页」。
+ * 分页位移改走 contentRef 命令式写入；这里用 memo，页码变时跳过段落重渲染。
+ */
+const ReaderTextPageBody = memo(function ReaderTextPageBody({
+  blocks,
+  paragraphSpacing,
+  fontSize,
+  accent,
+  onOpenComment,
+}: {
+  blocks: ReaderParagraphBlock[]
+  paragraphSpacing: number
+  fontSize: number
+  accent: string
+  onOpenComment: (comment: ReaderContentComment) => void
+}) {
+  return (
+    <>
+      {blocks.map((block, key) => {
+        const { text, comments } = block
+        if (text.startsWith(IMG_MARK)) {
+          return (
+            <p key={key} style={{ marginBottom: paragraphSpacing, textAlign: 'center' }}>
+              <img
+                src={text.slice(IMG_MARK.length)}
+                alt=""
+                referrerPolicy="no-referrer"
+                style={{ maxWidth: '100%', maxHeight: '70vh', margin: '0 auto', objectFit: 'contain' }}
+              />
+            </p>
+          )
+        }
+        const standalone = text === '' && comments.length > 0
+        return (
+          <p
+            key={key}
+            style={{
+              textIndent: text ? '2em' : undefined,
+              marginBottom: paragraphSpacing,
+              textAlign: standalone && comments.every((c) => c.block) ? 'center' : undefined,
+            }}
+          >
+            {text}
+            {comments.map((c, ci) => (
+              <button
+                key={`${c.line}-${ci}`}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onOpenComment(c)
+                }}
+                title={c.label || '段评'}
+                className="relative z-10 mx-1 inline-flex items-center gap-0.5 rounded-full border align-middle"
+                style={{
+                  borderColor: accent,
+                  color: accent,
+                  fontSize: Math.max(10, fontSize - 4),
+                  lineHeight: 1,
+                  padding: '2px 6px',
+                  verticalAlign: 'middle',
+                  pointerEvents: 'auto',
+                }}
+              >
+                <MessageSquare size={11} />
+                {c.count > 0 && <span>{c.count}</span>}
+              </button>
+            ))}
+          </p>
+        )
+      })}
+    </>
+  )
+})
+
 function firstReadableIndex(chapters: ReaderChapter[]): number {
   const i = chapters.findIndex((c) => !c.is_volume && c.url)
   if (i !== -1) return i
@@ -157,6 +235,13 @@ export default function ReaderViewPage() {
   const [page, setPage] = useState(0)
   const [pageCount, setPageCount] = useState(1)
   const [vw, setVw] = useState(0)
+  // 文本翻页位移走命令式 transform（见 applyTextPageTransform）：先改 DOM 再 setPage，
+  // 避免长章重渲染把翻页动画堵在主线程后面。下面几个 ref 用来去重 / 换章时关掉过渡。
+  const vwRef = useRef(0)
+  const appliedTextPageRef = useRef(-1)
+  const appliedTextVwRef = useRef(-1)
+  const snapTextPageRef = useRef(false)
+  vwRef.current = vw
   // 音频/漫画媒体状态
   const [media, setMedia] = useState<ReaderChapterContent | null>(null)
   const [restorePos, setRestorePos] = useState(0) // 音频秒数 / 漫画图片序号
@@ -322,6 +407,9 @@ export default function ReaderViewPage() {
         setContentType(ct.type)
         setMedia(ct)
         setContent(ct.content ?? '')
+        // 换章瞬移到目标页，不要带着上一章的翻页过渡滑过去。
+        snapTextPageRef.current = true
+        appliedTextPageRef.current = -1
         setPage(0)
         setComicPage(0)
         setCurrentImage(0)
@@ -380,6 +468,18 @@ export default function ReaderViewPage() {
   }, [chapterIndex, book, chapters, contentCacheKey, contentReloadKey])
 
   // ── 分页排版（CSS 多栏 + 平移） ──
+  /** 把正文列平移到指定页。animate=true 时走 220ms 过渡；换章/重排传 false。 */
+  const applyTextPageTransform = useCallback((nextPage: number, animate: boolean) => {
+    const el = contentRef.current
+    if (!el) return
+    const width = vwRef.current > 0 ? vwRef.current : (viewportRef.current?.clientWidth ?? 0)
+    const stride = Math.max(width, 1) + COLUMN_GAP
+    el.style.transition = animate ? PAGE_TRANSITION : 'none'
+    el.style.transform = `translateX(-${nextPage * stride}px)`
+    appliedTextPageRef.current = nextPage
+    appliedTextVwRef.current = width
+  }, [])
+
   const relayout = useCallback(() => {
     const vp = viewportRef.current
     if (!vp) return
@@ -388,6 +488,8 @@ export default function ReaderViewPage() {
     const total = vp.scrollWidth
     const count = Math.max(1, Math.ceil((total + COLUMN_GAP) / (width + COLUMN_GAP)))
     setPageCount(count)
+    // 恢复进度 / 夹紧页码属于排版结果，不是用户翻页——关掉过渡，免得整章闪滑。
+    snapTextPageRef.current = true
     setPage((p) => {
       if (pendingEndRef.current && count > 0) {
         pendingEndRef.current = false
@@ -405,6 +507,15 @@ export default function ReaderViewPage() {
   useLayoutEffect(() => {
     relayout()
   }, [relayout, content, settings.fontSize, settings.lineHeight, settings.paragraphSpacing, settings.pageMode, vw])
+
+  // 页码或列宽变了：若翻页回调里已经写过 transform 则跳过，避免把正在播的过渡重开一遍。
+  useLayoutEffect(() => {
+    if (contentType !== 'text' || settings.pageMode !== 'page') return
+    if (appliedTextPageRef.current === page && appliedTextVwRef.current === vw) return
+    const animate = !snapTextPageRef.current && appliedTextPageRef.current !== page
+    snapTextPageRef.current = false
+    applyTextPageTransform(page, animate)
+  }, [page, vw, contentType, settings.pageMode, applyTextPageTransform])
 
   useEffect(() => {
     const vp = viewportRef.current
@@ -631,9 +742,14 @@ export default function ReaderViewPage() {
       scrollRef.current?.scrollBy({ top: -window.innerHeight * 0.9, behavior: 'auto' })
       return
     }
-    if (page > 0) setPage((p) => p - 1)
-    else goChapter(-1, true)
-  }, [contentType, settings.pageMode, comicDoublePage, comicSpreads, comicSpreadIndex, comicPage, page, goChapter])
+    // 文本翻页：先命令式挪正文列，再 setPage 更新页脚。顺序不能反——
+    // 否则长章重渲染会把过渡堵到卡顿结束才开始。
+    if (page > 0) {
+      const next = page - 1
+      applyTextPageTransform(next, true)
+      setPage(next)
+    } else goChapter(-1, true)
+  }, [contentType, settings.pageMode, comicDoublePage, comicSpreads, comicSpreadIndex, comicPage, page, goChapter, applyTextPageTransform])
 
   const goNext = useCallback(() => {
     if (contentType === 'audio') {
@@ -657,9 +773,12 @@ export default function ReaderViewPage() {
       else el?.scrollBy({ top: window.innerHeight * 0.9, behavior: 'auto' })
       return
     }
-    if (page < pageCount - 1) setPage((p) => p + 1)
-    else goChapter(1)
-  }, [contentType, settings.pageMode, comicDoublePage, comicSpreads, comicSpreadIndex, media, comicPage, page, pageCount, goChapter])
+    if (page < pageCount - 1) {
+      const next = page + 1
+      applyTextPageTransform(next, true)
+      setPage(next)
+    } else goChapter(1)
+  }, [contentType, settings.pageMode, comicDoublePage, comicSpreads, comicSpreadIndex, media, comicPage, page, pageCount, goChapter, applyTextPageTransform])
 
   // ── 点击分区（左 30% 上一页 / 中间呼出菜单 / 右 30% 下一页） ──
   // 翻页模式用覆盖层上的三个按钮驱动；滚动模式不能再用覆盖层——
@@ -672,10 +791,10 @@ export default function ReaderViewPage() {
   // 「滑动后浏览器补发的 click」的去重都在 useHorizontalSwipe 里）。
   //
   // 跟手拖拽平移的是两个不同的元素：
-  // - 文本：正文列外面单独挂一层「跟手层」（pageDragRef）。分页平移仍旧由 React 写在
-  //   里层，跟手层只管手指位移；松手时两层同时动——跟手位移归零 + 页码变化——
-  //   合起来就是一次连续滑动。分两层而不是直接改里层，是为了避免「跟手位移把 DOM
-  //   改成了 React 不知道的值、React 又认为 transform 没变而不去写」把页面留在拖动位置。
+  // - 文本：正文列外面单独挂一层「跟手层」（pageDragRef）。分页平移由 applyTextPageTransform
+  //   写在里层（contentRef），跟手层只管手指位移；松手时两层同时动——跟手位移归零 +
+  //   页码变化——合起来就是一次连续滑动。分两层是为了避免跟手位移和 React/命令式页码
+  //   位移互相覆盖；页码不再经 React style 下发，长章翻页才不会先卡主线程再开动画。
   // - 漫画：平移 ReaderComic 的舞台（comicStageRef）。舞台两侧摆着上一页/下一页
   //   （见那边的 carousel 分支），翻页时单元格的 left 偏移与舞台位移在同一次提交里
   //   相抵，画面看不出切换。
@@ -852,8 +971,11 @@ export default function ReaderViewPage() {
                 1000,
             ),
       onChange: (v: number) => {
-        if (settings.pageMode === 'page') setPage(v - 1)
-        else {
+        if (settings.pageMode === 'page') {
+          const next = v - 1
+          applyTextPageTransform(next, true)
+          setPage(next)
+        } else {
           const el = scrollRef.current
           if (el) el.scrollTop = (v / 1000) * (el.scrollHeight - el.clientHeight)
         }
@@ -905,62 +1027,13 @@ export default function ReaderViewPage() {
     [book],
   )
 
-  // 正文段落块：普通段落按缩进排版，[img] 行渲染成居中图片，段评在段末挂气泡
-  const renderParagraph = (block: ReaderParagraphBlock, key: number) => {
-    const { text, comments } = block
-    if (text.startsWith(IMG_MARK)) {
-      return (
-        <p key={key} style={{ marginBottom: settings.paragraphSpacing, textAlign: 'center' }}>
-          <img
-            src={text.slice(IMG_MARK.length)}
-            alt=""
-            referrerPolicy="no-referrer"
-            style={{ maxWidth: '100%', maxHeight: '70vh', margin: '0 auto', objectFit: 'contain' }}
-          />
-        </p>
-      )
-    }
-    const standalone = text === '' && comments.length > 0
-    return (
-      <p
-        key={key}
-        style={{
-          textIndent: text ? '2em' : undefined,
-          marginBottom: settings.paragraphSpacing,
-          textAlign: standalone && comments.every((c) => c.block) ? 'center' : undefined,
-        }}
-      >
-        {text}
-        {comments.map((c, ci) => (
-          <button
-            key={`${c.line}-${ci}`}
-            type="button"
-            onClick={(e) => {
-              // 滚动容器的分区点击与翻页覆盖层都在上层，不拦住冒泡，
-              // 点气泡会顺带翻页或呼出菜单。
-              e.stopPropagation()
-              void openComment(c)
-            }}
-            title={c.label || '段评'}
-            // 外层正文档关掉了指针事件（见上面的层叠说明），气泡自己开关。
-            className="relative z-10 mx-1 inline-flex items-center gap-0.5 rounded-full border align-middle"
-            style={{
-              borderColor: theme.accent,
-              color: theme.accent,
-              fontSize: Math.max(10, settings.fontSize - 4),
-              lineHeight: 1,
-              padding: '2px 6px',
-              verticalAlign: 'middle',
-              pointerEvents: 'auto',
-            }}
-          >
-            <MessageSquare size={11} />
-            {c.count > 0 && <span>{c.count}</span>}
-          </button>
-        ))}
-      </p>
-    )
-  }
+  // 段评点击：ReaderTextPageBody 要稳定回调，否则 memo 每次都失效。
+  const handleOpenComment = useCallback(
+    (comment: ReaderContentComment) => {
+      void openComment(comment)
+    },
+    [openComment],
+  )
 
   // ── 渲染 ──
   if (error && !book) {
@@ -1022,7 +1095,7 @@ export default function ReaderViewPage() {
               style={menuShiftStyle}
             >
               <div ref={viewportRef} className="relative h-full overflow-hidden">
-                {/* 跟手层：跟手拖拽的位移写在这一层，分页平移仍旧写在里层（React 管）。 */}
+                {/* 跟手层：跟手位移写这里；分页平移由 applyTextPageTransform 写在 contentRef 上。 */}
                 <div ref={pageDragRef} className="h-full">
                   <div
                     ref={contentRef}
@@ -1031,13 +1104,17 @@ export default function ReaderViewPage() {
                       columnWidth: `${Math.max(vw, 1)}px`,
                       columnGap: `${COLUMN_GAP}px`,
                       columnFill: 'auto',
-                      transform: `translateX(-${page * (vw + COLUMN_GAP)}px)`,
-                      transition: PAGE_TRANSITION,
                       fontSize: settings.fontSize,
                       lineHeight: settings.lineHeight,
                     }}
                   >
-                    {blocks.map((b, i) => renderParagraph(b, i))}
+                    <ReaderTextPageBody
+                      blocks={blocks}
+                      paragraphSpacing={settings.paragraphSpacing}
+                      fontSize={settings.fontSize}
+                      accent={theme.accent}
+                      onOpenComment={handleOpenComment}
+                    />
                   </div>
                 </div>
               </div>
@@ -1062,7 +1139,13 @@ export default function ReaderViewPage() {
               style={{ fontSize: settings.fontSize, lineHeight: settings.lineHeight, ...menuShiftStyle }}
             >
               <div className="py-4">
-                {blocks.map((b, i) => renderParagraph(b, i))}
+                <ReaderTextPageBody
+                  blocks={blocks}
+                  paragraphSpacing={settings.paragraphSpacing}
+                  fontSize={settings.fontSize}
+                  accent={theme.accent}
+                  onOpenComment={handleOpenComment}
+                />
               </div>
             </div>
           )}
