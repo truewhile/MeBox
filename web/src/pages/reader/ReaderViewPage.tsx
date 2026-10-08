@@ -9,7 +9,9 @@ import {
   LayoutList,
   ListEnd,
   Loader2,
+  Maximize,
   MessageSquare,
+  Minimize,
   Minus,
   Moon,
   Plus,
@@ -269,6 +271,9 @@ export default function ReaderViewPage() {
 
   const [menuOpen, setMenuOpen] = useState(false)
   const [panel, setPanel] = useState<'none' | 'toc' | 'style'>('none')
+  // 浏览器全屏（沉浸式）：把阅读层整个铺满屏幕，连浏览器的地址栏/状态栏一起让出来。
+  // 页面本身是 fixed inset-0，所以这里要解决的是浏览器自身的界面，而不是页面内的留白。
+  const [fullscreen, setFullscreen] = useState(false)
   /** 目录面板顶部「区间下拉」选中的组号，随列表滚动同步。 */
   const [tocGroupIndex, setTocGroupIndex] = useState(0)
   // 换源：候选源来自按书名重新搜索的结果；reloadKey 变化时整本书重新加载
@@ -344,6 +349,39 @@ export default function ReaderViewPage() {
     const onResize = () => setWindowWidth(window.innerWidth)
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  // ── 浏览器全屏（沉浸式） ──
+  // 只认标准 API：iOS 上的 Safari 至今不支持元素全屏（只有 <video> 能全屏），
+  // 所以那里不显示按钮（不是灰掉——按钮点了没反应会被当成坏了）。
+  const fullscreenSupported = useMemo(
+    () => typeof document !== 'undefined' && document.fullscreenEnabled === true,
+    [],
+  )
+  useEffect(() => {
+    const onFullscreenChange = () => setFullscreen(Boolean(document.fullscreenElement))
+    document.addEventListener('fullscreenchange', onFullscreenChange)
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange)
+  }, [])
+  // 离开阅读页时退出全屏：否则返回书架后浏览器仍停在全屏，整站都被罩住。
+  useEffect(
+    () => () => {
+      if (document.fullscreenElement) void document.exitFullscreen()
+    },
+    [],
+  )
+  const toggleFullscreen = useCallback(() => {
+    const el = readerRef.current
+    if (!el) return
+    if (document.fullscreenElement) {
+      void document.exitFullscreen()
+      return
+    }
+    // 进全屏是为了看正文，菜单还压在上面就没意义了，先收起来。
+    setMenuOpen(false)
+    setPanel('none')
+    // 浏览器可能以权限策略等理由拒绝，静默忽略即可（按钮状态由 fullscreenchange 回写）。
+    void el.requestFullscreen?.().catch(() => {})
   }, [])
 
   const comicImages = contentType === 'image' && media?.images ? media.images : NO_IMAGES
@@ -1656,6 +1694,16 @@ export default function ReaderViewPage() {
                         icon: <Columns2 size={18} />,
                         label: settings.comicDoublePage ? '单页' : '双页',
                         action: () => settings.setComicDoublePage(!settings.comicDoublePage),
+                      },
+                    ]
+                  : []),
+                // 全屏：只在浏览器支持元素全屏时出现（iOS Safari 不支持，见上方注释）。
+                ...(fullscreenSupported
+                  ? [
+                      {
+                        icon: fullscreen ? <Minimize size={18} /> : <Maximize size={18} />,
+                        label: fullscreen ? '还原' : '全屏',
+                        action: toggleFullscreen,
                       },
                     ]
                   : []),
