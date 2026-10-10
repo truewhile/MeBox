@@ -46,7 +46,7 @@ func TestGetTocFollowsNextTocUrl(t *testing.T) {
 
 	svc, _ := newLoginTestService(t)
 	tocURL := srv.URL + "/toc?limit=2&offset=0"
-	chapters, _, err := svc.getTocFrom(t.Context(), src, bs, srv.URL+"/book/1", tocURL)
+	chapters, _, err := svc.getTocFrom(t.Context(), src, bs, srv.URL+"/book/1", tocURL, nil)
 	if err != nil {
 		t.Fatalf("取目录失败: %v", err)
 	}
@@ -106,7 +106,7 @@ list
 	}
 
 	svc, _ := newLoginTestService(t)
-	chapters, _, err := svc.getTocFrom(t.Context(), src, bs, srv.URL+"/book/1", srv.URL+"/toc?limit=2&offset=0")
+	chapters, _, err := svc.getTocFrom(t.Context(), src, bs, srv.URL+"/book/1", srv.URL+"/toc?limit=2&offset=0", nil)
 	if err != nil {
 		t.Fatalf("取目录失败: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestGetTocNextTocUrlSelfReferenceStops(t *testing.T) {
 	}
 
 	svc, _ := newLoginTestService(t)
-	chapters, _, err := svc.getTocFrom(t.Context(), src, bs, srv.URL+"/book/1", srv.URL+"/toc")
+	chapters, _, err := svc.getTocFrom(t.Context(), src, bs, srv.URL+"/book/1", srv.URL+"/toc", nil)
 	if err != nil {
 		t.Fatalf("取目录失败: %v", err)
 	}

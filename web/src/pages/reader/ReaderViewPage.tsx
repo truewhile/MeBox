@@ -37,6 +37,7 @@ import { useSmoothWheelScroll } from '../../hooks/useSmoothWheelScroll'
 import { useReaderAudioStore } from '../../stores/readerAudio'
 import { COMIC_IMAGE_FITS, READER_THEMES, getReaderTheme, useReaderSettingsStore } from '../../stores/readerSettings'
 import { buildChapterGroups, chapterGroupIndexOf } from '../../utils/chapterGroups'
+import { formatScrollPct, shouldSaveScrollProgress } from '../../utils/readerScrollProgress'
 import BrowserPanel from './BrowserPanel'
 import { ReaderAudioPanel } from './ReaderAudioPanel'
 import { ReaderComic } from './ReaderComic'
@@ -66,6 +67,13 @@ const IMG_MARK = '[img]'
 
 /** 听书进度上报节流（毫秒）：按秒记忆，退出最多丢 5 秒。 */
 const AUDIO_SAVE_INTERVAL_MS = 5_000
+
+/**
+ * 正文窗口预取章数：当前章之后预取 3 章。
+ * 单章串行预取在高延迟书源上常常赶不上连续翻章；批量接口在服务端并发抓取并落
+ * 持久缓存（对应 legado CacheBook），翻到后续章时直接命中。
+ */
+const PREFETCH_WINDOW = 3
 /** 漫画进度上报节流（毫秒）：按图片序号记忆。 */
 const COMIC_SAVE_INTERVAL_MS = 2_000
 
@@ -567,6 +575,7 @@ export default function ReaderViewPage() {
             chapters,
             chapterIndex,
             track: ct.tracks[0],
+            hls: ct.hls ?? false,
             transcoding: ct.transcoding ?? false,
             openCredits: book.open_credits ?? 0,
             closeCredits: book.close_credits ?? 0,
@@ -579,14 +588,34 @@ export default function ReaderViewPage() {
         readerAPI
           .saveProgress(book.id, { chapter_index: chapterIndex, pos: savedPos, chapter_title: ch.title })
           .catch(() => undefined)
-        // 预取下一章
-        if (!contentCache.current.has(contentCacheKey(chapterIndex + 1))) {
+        // 窗口预取：往后取几章（默认 3），一次批量请求由服务端并发抓取并落持久缓存。
+        // 批量接口单章失败不影响其它章，命中的章节在服务端零网络开销。
+        const prefetchIndexes: number[] = []
+        for (let i = 1; i <= PREFETCH_WINDOW; i++) {
+          const idx = chapterIndex + i
+          if (idx >= chapters.length) break
+          if (chapters[idx]?.is_volume) continue
+          if (contentCache.current.has(contentCacheKey(idx))) continue
+          prefetchIndexes.push(idx)
+        }
+        if (prefetchIndexes.length > 0) {
           readerAPI
-            .bookContent(book.id, chapterIndex + 1, ac.signal)
-            .then((c) => {
+            .bookContentBatch(book.id, prefetchIndexes, ac.signal)
+            .then((result) => {
               // 预取是在「旧源」发起、在换源后才回来的话，结果属于脏数据，丢掉。
               if (cancelled) return
-              contentCache.current.set(contentCacheKey(chapterIndex + 1), c)
+              for (const item of result.items) {
+                if (item.error || !item.type) continue
+                contentCache.current.set(contentCacheKey(item.chapter_index), {
+                  type: item.type as 'text' | 'audio' | 'image',
+                  content: item.content,
+                  tracks: item.tracks,
+                  images: item.images,
+                  image_style: item.image_style,
+                  hls: item.hls,
+                  comments: item.comments,
+                })
+              }
             })
             .catch(() => undefined)
         }
@@ -881,15 +910,22 @@ export default function ReaderViewPage() {
     if (menuOpen) flushTextPageReactSync()
   }, [menuOpen, flushTextPageReactSync])
 
-  // 滚动模式恢复进度
+  // 滚动模式恢复进度。
+  //
+  // 同时清掉 dataset.last：它是「上次保存的滚动百分比」，换章后必须重算。
+  // 否则新章首屏若与上一章末尾的百分比差值不到 2%，首次滚动会被节流掉，
+  // 退出后进度又回到旧位置。
   useEffect(() => {
     if (settings.pageMode !== 'scroll' || content === null) return
     const el = scrollRef.current
-    if (el && pendingPosRef.current > 0) {
-      el.scrollTop = pendingPosRef.current
-      pendingPosRef.current = 0
+    if (el) {
+      delete el.dataset.last
+      if (pendingPosRef.current > 0) {
+        el.scrollTop = pendingPosRef.current
+        pendingPosRef.current = 0
+      }
     }
-  }, [content, settings.pageMode])
+  }, [content, chapterIndex, settings.pageMode])
 
   // 滚动模式的滚轮改成「类手机滑动」：把滚轮格数累加成目标位置再逐帧逼近，
   // 滚动连续、松手后自己滑行一段，而不是浏览器整格跳变。
@@ -902,6 +938,8 @@ export default function ReaderViewPage() {
   const savePos = useCallback(
     (pos: number) => {
       if (!book || chapterIndex === null) return
+      // 滚动位置读自 DOM，异常时可能是 NaN；落库前挡掉，避免把进度写坏。
+      if (!Number.isFinite(pos)) return
       const ch = chapters[chapterIndex]
       readerAPI
         .saveProgress(book.id, {
@@ -1531,8 +1569,8 @@ export default function ReaderViewPage() {
                 const max = el.scrollHeight - el.clientHeight
                 if (max > 0) {
                   const pct = el.scrollTop / max
-                  if (Math.abs(pct * 1000 - (Number(el.dataset.last) ?? -1) * 1000) > 20) {
-                    el.dataset.last = String(pct)
+                  if (shouldSaveScrollProgress(pct, el.dataset.last)) {
+                    el.dataset.last = formatScrollPct(pct)
                     savePos(Math.round(el.scrollTop))
                   }
                 }

@@ -210,6 +210,10 @@ func (b *serviceContainerBuilder) initAccessAndStorageServices() {
 		}
 		return policy
 	})
+	// 阅读正文缓存清理：由阅读模块自己按 TTL + 容量 LRU 淘汰（见 reader_content_cache.go）。
+	if b.c.Reader != nil {
+		b.c.Scheduler.SetReaderContentCleaner(b.c.Reader.PruneContentCache)
+	}
 }
 
 func (b *serviceContainerBuilder) initIdentityServices() {

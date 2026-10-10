@@ -5,6 +5,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -171,6 +174,9 @@ func newBookObject(vm *goja.Runtime, a *AnalyzeRule) *goja.Object {
 			a.bookCustom = map[string]string{}
 		}
 		a.bookCustom[stringArg(call, 0)] = stringArgOr(call, 1, "")
+		if a.bookVarPutter != nil {
+			a.bookVarPutter()
+		}
 		return goja.Null()
 	})
 	return o
@@ -381,16 +387,183 @@ func initLoginInfoFromUI(props map[string]any) map[string]string {
 // 这类临时状态——光遇聚合的 paraForAndroid 每一段带段评的文字都会调
 // cache.putMemory(url, 0)，缺了它整条正文规则会抛 TypeError 直接失败。
 // 两套存储分开，否则 getFromMemory 会读到 put 写进去的持久值。
-var jsCache = struct {
-	mu  sync.Mutex
-	m   map[string]string
-	mem map[string]string
-}{m: map[string]string{}, mem: map[string]string{}}
+//
+// 持久层按书源（bookSourceUrl）命名空间隔离，并落到 CacheDir/reader-js-cache：
+// 之前是包级全局 map，任何书源的 put/get 全局可见，多个源用同一个 key 会互相串值，
+// 一个源写满 4096 条还会把别的源的缓存一起清掉；重启后也全部丢失。
 
-// jsCacheMaxEntries 单套存储的条目上限：超了整体清空，避免书源把内存吃满。
+// jsCacheMaxEntries 单个书源命名空间的条目上限：超了按写入时间淘汰最旧的一半，
+// 只影响本命名空间，不再波及其它书源。
 const jsCacheMaxEntries = 4096
 
-func newCacheObject(vm *goja.Runtime) *goja.Object {
+// jsCacheNamespace 一个书源的持久/内存缓存命名空间。
+type jsCacheNamespace struct {
+	mu   sync.Mutex
+	data map[string]string
+	seq  map[string]int64
+	next int64
+	path string
+}
+
+// jsCacheRegistry 按命名空间持有 cache，命名空间取书源 URL。
+var jsCacheRegistry = struct {
+	mu sync.Mutex
+	m  map[string]*jsCacheNamespace
+}{m: map[string]*jsCacheNamespace{}}
+
+// jsCacheFor 取（或创建）命名空间；cacheDir 非空时尝试从磁盘恢复。
+func jsCacheFor(namespace, cacheDir string) *jsCacheNamespace {
+	if namespace == "" {
+		namespace = "__global__"
+	}
+	jsCacheRegistry.mu.Lock()
+	ns, ok := jsCacheRegistry.m[namespace]
+	if !ok {
+		ns = &jsCacheNamespace{data: map[string]string{}, seq: map[string]int64{}}
+		if cacheDir != "" {
+			ns.path = filepath.Join(cacheDir, "reader-js-cache", md5Hex(namespace, true)+".json")
+		}
+		ns.load()
+		jsCacheRegistry.m[namespace] = ns
+	}
+	jsCacheRegistry.mu.Unlock()
+	return ns
+}
+
+// load 从磁盘恢复命名空间（仅供 jsCacheFor 在注册表锁内首次调用）。
+func (n *jsCacheNamespace) load() {
+	if n.path == "" {
+		return
+	}
+	raw, err := os.ReadFile(n.path) // #nosec G304 -- 路径由服务端生成
+	if err != nil || len(raw) == 0 {
+		return
+	}
+	var stored struct {
+		Data map[string]string `json:"data"`
+		Seq  map[string]int64  `json:"seq"`
+	}
+	if json.Unmarshal(raw, &stored) != nil {
+		return
+	}
+	if stored.Data != nil {
+		n.data = stored.Data
+	}
+	if stored.Seq != nil {
+		n.seq = stored.Seq
+		for _, v := range stored.Seq {
+			if v > n.next {
+				n.next = v
+			}
+		}
+	}
+}
+
+// persist 把命名空间写回磁盘（临时文件 + 原子 rename）。
+func (n *jsCacheNamespace) persist() {
+	if n.path == "" {
+		return
+	}
+	payload, err := json.Marshal(struct {
+		Data map[string]string `json:"data"`
+		Seq  map[string]int64  `json:"seq"`
+	}{n.data, n.seq})
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(n.path), 0o750); err != nil {
+		return
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(n.path), ".js-cache-*")
+	if err != nil {
+		return
+	}
+	name := tmp.Name()
+	if _, err := tmp.Write(payload); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(name)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(name)
+		return
+	}
+	_ = os.Rename(name, n.path)
+}
+
+// put 写一个持久键值（返回最终值）。
+func (n *jsCacheNamespace) put(key, value string) string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if _, exists := n.data[key]; !exists && len(n.data) >= jsCacheMaxEntries {
+		n.evictOldestLocked()
+	}
+	n.next++
+	n.data[key] = value
+	n.seq[key] = n.next
+	n.persist()
+	return value
+}
+
+// evictOldestLocked 淘汰最旧的一半条目（调用方需持锁）。
+func (n *jsCacheNamespace) evictOldestLocked() {
+	type entry struct {
+		key string
+		seq int64
+	}
+	entries := make([]entry, 0, len(n.data))
+	for k := range n.data {
+		entries = append(entries, entry{k, n.seq[k]})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].seq < entries[j].seq })
+	drop := len(entries)/2 + 1
+	for i := 0; i < drop && i < len(entries); i++ {
+		delete(n.data, entries[i].key)
+		delete(n.seq, entries[i].key)
+	}
+}
+
+// get 读一个持久键。
+func (n *jsCacheNamespace) get(key string) (string, bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	v, ok := n.data[key]
+	return v, ok
+}
+
+// del 删除一个持久键。
+func (n *jsCacheNamespace) del(key string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	delete(n.data, key)
+	delete(n.seq, key)
+	n.persist()
+}
+
+// memoryStore 进程内内存缓存（putMemory/getFromMemory），同样按命名空间隔离。
+var jsMemoryRegistry = struct {
+	mu sync.Mutex
+	m  map[string]map[string]string
+}{m: map[string]map[string]string{}}
+
+func jsMemoryFor(namespace string) map[string]string {
+	if namespace == "" {
+		namespace = "__global__"
+	}
+	jsMemoryRegistry.mu.Lock()
+	defer jsMemoryRegistry.mu.Unlock()
+	store, ok := jsMemoryRegistry.m[namespace]
+	if !ok {
+		store = map[string]string{}
+		jsMemoryRegistry.m[namespace] = store
+	}
+	return store
+}
+
+// newCacheObject 构造 JS 的 `cache` 对象。
+// namespace 取书源 URL；cacheDir 非空时 put/get 持久化到磁盘。
+func newCacheObject(vm *goja.Runtime, namespace, cacheDir string) *goja.Object {
+	ns := jsCacheFor(namespace, cacheDir)
 	o := vm.NewObject()
 	set := func(k string, v any) {
 		if err := o.Set(k, v); err != nil {
@@ -398,51 +571,50 @@ func newCacheObject(vm *goja.Runtime) *goja.Object {
 		}
 	}
 
-	// 两套存储共用同一份读写实现，只有落点不同。
-	putTo := func(store *map[string]string) func(goja.FunctionCall) goja.Value {
-		return func(call goja.FunctionCall) goja.Value {
-			key := stringArg(call, 0)
-			val := ""
-			if len(call.Arguments) > 1 && !goja.IsUndefined(call.Arguments[1]) && !goja.IsNull(call.Arguments[1]) {
-				val = call.Arguments[1].String()
-			}
-			jsCache.mu.Lock()
-			if len(*store) >= jsCacheMaxEntries {
-				*store = map[string]string{}
-			}
-			(*store)[key] = val
-			jsCache.mu.Unlock()
-			return vm.ToValue(val)
+	set("put", func(call goja.FunctionCall) goja.Value {
+		key := stringArg(call, 0)
+		val := ""
+		if len(call.Arguments) > 1 && !goja.IsUndefined(call.Arguments[1]) && !goja.IsNull(call.Arguments[1]) {
+			val = call.Arguments[1].String()
 		}
-	}
-	getFrom := func(store *map[string]string) func(goja.FunctionCall) goja.Value {
-		return func(call goja.FunctionCall) goja.Value {
-			key := stringArg(call, 0)
-			jsCache.mu.Lock()
-			v, ok := (*store)[key]
-			jsCache.mu.Unlock()
-			if !ok {
-				return goja.Null()
-			}
+		return vm.ToValue(ns.put(key, val))
+	})
+	set("get", func(call goja.FunctionCall) goja.Value {
+		if v, ok := ns.get(stringArg(call, 0)); ok {
 			return vm.ToValue(v)
 		}
-	}
-	deleteFrom := func(store *map[string]string) func(goja.FunctionCall) goja.Value {
-		return func(call goja.FunctionCall) goja.Value {
-			key := stringArg(call, 0)
-			jsCache.mu.Lock()
-			delete(*store, key)
-			jsCache.mu.Unlock()
+		return goja.Null()
+	})
+	set("delete", func(call goja.FunctionCall) goja.Value {
+		ns.del(stringArg(call, 0))
+		return goja.Null()
+	})
+	// 内存缓存（legado Cache.getFromMemory / putMemory）：进程内、不落盘。
+	mem := jsMemoryFor(namespace)
+	set("putMemory", func(call goja.FunctionCall) goja.Value {
+		key := stringArg(call, 0)
+		val := ""
+		if len(call.Arguments) > 1 && !goja.IsUndefined(call.Arguments[1]) && !goja.IsNull(call.Arguments[1]) {
+			val = call.Arguments[1].String()
+		}
+		jsMemoryRegistry.mu.Lock()
+		if _, exists := mem[key]; !exists && len(mem) >= jsCacheMaxEntries {
+			mem = map[string]string{}
+			jsMemoryRegistry.m[namespace] = mem
+		}
+		mem[key] = val
+		jsMemoryRegistry.mu.Unlock()
+		return vm.ToValue(val)
+	})
+	set("getFromMemory", func(call goja.FunctionCall) goja.Value {
+		jsMemoryRegistry.mu.Lock()
+		v, ok := mem[stringArg(call, 0)]
+		jsMemoryRegistry.mu.Unlock()
+		if !ok {
 			return goja.Null()
 		}
-	}
-
-	set("put", putTo(&jsCache.m))
-	set("get", getFrom(&jsCache.m))
-	set("delete", deleteFrom(&jsCache.m))
-	// 内存缓存（legado Cache.getFromMemory / putMemory）
-	set("putMemory", putTo(&jsCache.mem))
-	set("getFromMemory", getFrom(&jsCache.mem))
+		return vm.ToValue(v)
+	})
 	return o
 }
 

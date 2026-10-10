@@ -177,6 +177,15 @@ func (s *SchedulerService) jobTelegramExpiryWarning(ctx context.Context) error {
 	return s.expiryWatcher.RunOnce(ctx)
 }
 
+// jobCleanReaderContentCache 触发阅读正文缓存的 TTL / 容量淘汰。
+func (s *SchedulerService) jobCleanReaderContentCache(ctx context.Context) error {
+	if s.readerContentCleaner == nil {
+		return nil
+	}
+	s.readerContentCleaner(ctx)
+	return nil
+}
+
 // jobCleanTranscodeCache deletes HLS artefacts older than 24h.
 func (s *SchedulerService) jobCleanTranscodeCache(ctx context.Context) error {
 	if s.cacheDir == "" {

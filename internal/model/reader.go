@@ -98,6 +98,45 @@ type ReaderChapter struct {
 	Tag      string `gorm:"type:varchar(255)" json:"tag"`
 }
 
+// ReaderContentCache 正文持久缓存的索引行（内容本体在磁盘上，见 reader_content_cache.go）。
+//
+// 与 legado BookHelp 的章节正文缓存对应：缓存的是「书源侧产物」（书源 replaceRegex
+// 之后、用户替换规则与代理改写之前），因此可以跨用户共享；用户维度的处理在读出后
+// 逐请求应用，规则改动即时生效。
+//
+// 章节身份不落库为外键，而是 BookKey（书源 + 书本地址）与 ChapterKey（绝对化章节
+// 地址或标题）的哈希：目录刷新（ReplaceChapters 物理重建、行 ID 会变）与书源更新
+// 之后仍然能按同一身份命中或迁移。
+type ReaderContentCache struct {
+	Base
+	// OriginHash 书源地址哈希（磁盘目录的第一层，清理时定位文件用）。
+	OriginHash string `gorm:"type:varchar(64)" json:"origin_hash"`
+	// BookKey 书源身份哈希（sha256(origin + "\0" + bookURL) 前 16 字节 hex）。
+	BookKey string `gorm:"type:varchar(64);index:idx_reader_content_book" json:"book_key"`
+	// ChapterKey 章节身份哈希（绝对化 URL 优先，退化为 title）。
+	ChapterKey string `gorm:"type:varchar(64);index:idx_reader_content_chapter" json:"chapter_key"`
+	// ChapterIdentity 章节身份原文（便于诊断与 remap 时的标题兜底匹配）。
+	ChapterIdentity string `gorm:"type:varchar(512)" json:"chapter_identity"`
+	// ChapterIndex 保存时的章节序号（remap 时更新）。
+	ChapterIndex int `json:"chapter_index"`
+	// ContentType text / audio / image。
+	ContentType string `gorm:"type:varchar(16)" json:"content_type"`
+	// SourceHash 书源内容指纹（RawJSON 哈希）：书源更新后自然失效。
+	SourceHash string `gorm:"type:varchar(64)" json:"source_hash"`
+	// FormatVersion 缓存载荷格式版本：解析管线语义变化时递增，旧条目自然失效。
+	FormatVersion int `json:"format_version"`
+	// SizeBytes 载荷字节数（容量统计用）。
+	SizeBytes int64 `json:"size_bytes"`
+	// AssetCount 音频轨/图片张数（清单类内容的完整性统计）。
+	AssetCount int `json:"asset_count"`
+	// ExpiresAt 过期时间（unix 秒）；0 表示不过期。
+	ExpiresAt int64 `json:"expires_at"`
+	// LastAccessAt 最近命中时间（unix 秒），LRU 淘汰依据。
+	LastAccessAt int64 `json:"last_access_at"`
+	// Hits 命中次数（诊断用）。
+	Hits int `json:"hits"`
+}
+
 // ReaderReplaceRule 替换净化规则（对应 legado ReplaceRule）。
 type ReaderReplaceRule struct {
 	Base

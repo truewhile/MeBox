@@ -65,6 +65,7 @@ func AllModels() []interface{} {
 		&ReaderSourceState{},
 		&ReaderBook{},
 		&ReaderChapter{},
+		&ReaderContentCache{},
 		&ReaderReplaceRule{},
 		&ReaderProfile{},
 		&ReaderBookGroups{},

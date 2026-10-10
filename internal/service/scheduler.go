@@ -43,6 +43,9 @@ type SchedulerService struct {
 
 	imagesPolicyProvider func() ImageCachePolicy
 
+	// readerContentCleaner 阅读正文缓存的清理钩子（由阅读模块注入）。
+	readerContentCleaner func(context.Context)
+
 	segments *MediaSegmentService
 
 	mu     sync.Mutex
@@ -84,6 +87,13 @@ func (s *SchedulerService) imageCachePolicy() ImageCachePolicy {
 		return s.imagesPolicyProvider()
 	}
 	return ImageCachePolicy{}
+}
+
+// SetReaderContentCleaner 注入阅读正文缓存的清理钩子（TTL 过期 + 容量 LRU）。
+// 阅读模块自身持有缓存目录与索引（见 reader 包的 pruneReaderContentCache），
+// 调度器只负责按小时触发；未注入时不注册该任务。
+func (s *SchedulerService) SetReaderContentCleaner(fn func(context.Context)) {
+	s.readerContentCleaner = fn
 }
 
 // scheduledJob is one recurring task.
@@ -147,6 +157,14 @@ func (s *SchedulerService) Start(ctx context.Context) {
 			interval: 1 * time.Hour,
 			run:      s.jobCleanImageCache,
 		},
+	}
+	// 阅读正文缓存清理只在注入钩子后注册（见 SetReaderContentCleaner）。
+	if s.readerContentCleaner != nil {
+		s.jobs = append(s.jobs, &scheduledJob{
+			name:     "reader_content_cleanup",
+			interval: 1 * time.Hour,
+			run:      s.jobCleanReaderContentCache,
+		})
 	}
 	// 片头预热只在注入了 Segments 时注册，避免测试跑无转外网任务。
 	if s.segments != nil {

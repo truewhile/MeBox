@@ -131,6 +131,15 @@ func (r *ReaderRepository) FindBookByURL(ctx context.Context, userID, origin, bo
 	return &out, nil
 }
 
+// ListBooksByOriginAndURL 按书源 + 书本地址查所有用户的书架记录。
+// 目录链路的 book.putVariable 需要写回变量，而目录抓取是跨用户共享的
+// （同一本书可能被多个用户收藏），所以这里不带 userID 过滤。
+func (r *ReaderRepository) ListBooksByOriginAndURL(ctx context.Context, origin, bookURL string) ([]model.ReaderBook, error) {
+	var out []model.ReaderBook
+	err := r.db.WithContext(ctx).Where("origin = ? AND book_url = ?", origin, bookURL).Find(&out).Error
+	return out, err
+}
+
 // CreateBook / UpdateBook / DeleteBook。
 func (r *ReaderRepository) CreateBook(ctx context.Context, b *model.ReaderBook) error {
 	return r.db.WithContext(ctx).Create(b).Error
@@ -163,10 +172,124 @@ func (r *ReaderRepository) ReplaceChapters(ctx context.Context, bookID string, c
 	})
 }
 
+// SwitchBookOrigin 换源：清空旧源章节与更新书籍信息在同一事务内完成。
+// 分开提交时若第二步失败，会留下「仍指向旧源、但目录已清空」的中间状态。
+func (r *ReaderRepository) SwitchBookOrigin(ctx context.Context, book *model.ReaderBook) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Unscoped().Delete(&model.ReaderChapter{}, "book_id = ?", book.ID).Error; err != nil {
+			return err
+		}
+		return tx.Save(book).Error
+	})
+}
+
 // ListChapters 按序取章节。
 func (r *ReaderRepository) ListChapters(ctx context.Context, bookID string) ([]model.ReaderChapter, error) {
 	var out []model.ReaderChapter
 	err := r.db.WithContext(ctx).Where("book_id = ?", bookID).Order("`index` ASC").Find(&out).Error
+	return out, err
+}
+
+// ─── 正文持久缓存索引 ──────────────────────────────────────────────────────
+
+// GetContentCache 按 (bookKey, chapterKey, contentType) 取缓存索引行。
+func (r *ReaderRepository) GetContentCache(ctx context.Context, bookKey, chapterKey, contentType string) (*model.ReaderContentCache, error) {
+	var out model.ReaderContentCache
+	err := r.db.WithContext(ctx).
+		Where("book_key = ? AND chapter_key = ? AND content_type = ?", bookKey, chapterKey, contentType).
+		First(&out).Error
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetContentCacheByChapter 按 (bookKey, chapterKey) 取缓存索引行。
+// contentType 为空表示不限类型（正文链路不需要预知类型）；给出类型时精确匹配。
+func (r *ReaderRepository) GetContentCacheByChapter(ctx context.Context, bookKey, chapterKey, contentType string) (*model.ReaderContentCache, error) {
+	q := r.db.WithContext(ctx).Where("book_key = ? AND chapter_key = ?", bookKey, chapterKey)
+	if contentType != "" {
+		q = q.Where("content_type = ?", contentType)
+	}
+	var out model.ReaderContentCache
+	if err := q.Order("last_access_at DESC").First(&out).Error; err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// UpsertContentCache 写入或更新缓存索引行（按 bookKey + chapterKey + contentType 去重）。
+func (r *ReaderRepository) UpsertContentCache(ctx context.Context, row *model.ReaderContentCache) error {
+	existing, err := r.GetContentCache(ctx, row.BookKey, row.ChapterKey, row.ContentType)
+	if err == nil && existing != nil {
+		existing.ChapterIdentity = row.ChapterIdentity
+		existing.ChapterIndex = row.ChapterIndex
+		existing.SourceHash = row.SourceHash
+		existing.FormatVersion = row.FormatVersion
+		existing.SizeBytes = row.SizeBytes
+		existing.AssetCount = row.AssetCount
+		existing.ExpiresAt = row.ExpiresAt
+		existing.LastAccessAt = row.LastAccessAt
+		return r.db.WithContext(ctx).Save(existing).Error
+	}
+	return r.db.WithContext(ctx).Create(row).Error
+}
+
+// TouchContentCache 记录一次命中（更新命中时间与次数）。
+func (r *ReaderRepository) TouchContentCache(ctx context.Context, id string, hits int, lastAccess int64) error {
+	return r.db.WithContext(ctx).Model(&model.ReaderContentCache{}).
+		Where("id = ?", id).
+		Updates(map[string]any{"last_access_at": lastAccess, "hits": hits}).Error
+}
+
+// ListContentCacheByBook 列出某本书的全部缓存索引（目录刷新后的 remap 用）。
+func (r *ReaderRepository) ListContentCacheByBook(ctx context.Context, bookKey string) ([]model.ReaderContentCache, error) {
+	var out []model.ReaderContentCache
+	err := r.db.WithContext(ctx).Where("book_key = ?", bookKey).Find(&out).Error
+	return out, err
+}
+
+// DeleteContentCacheByBook 删除某本书的缓存索引，返回被删除的条目（调用方据此清理磁盘文件）。
+func (r *ReaderRepository) DeleteContentCacheByBook(ctx context.Context, bookKey string) ([]model.ReaderContentCache, error) {
+	rows, err := r.ListContentCacheByBook(ctx, bookKey)
+	if err != nil || len(rows) == 0 {
+		return nil, err
+	}
+	if err := r.db.WithContext(ctx).Where("book_key = ?", bookKey).Delete(&model.ReaderContentCache{}).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// DeleteContentCacheRow 删除单条缓存索引（remap 迁移旧键时用）。
+func (r *ReaderRepository) DeleteContentCacheRow(ctx context.Context, id string) error {
+	return r.db.WithContext(ctx).Delete(&model.ReaderContentCache{}, "id = ?", id).Error
+}
+
+// ListContentCacheExpired 按 TTL 取过期条目。
+func (r *ReaderRepository) ListContentCacheExpired(ctx context.Context, now int64, limit int) ([]model.ReaderContentCache, error) {
+	var out []model.ReaderContentCache
+	err := r.db.WithContext(ctx).
+		Where("expires_at > 0 AND expires_at < ?", now).
+		Order("last_access_at ASC").Limit(limit).Find(&out).Error
+	return out, err
+}
+
+// ContentCacheStats 返回条目数与总字节数（容量淘汰用）。
+func (r *ReaderRepository) ContentCacheStats(ctx context.Context) (int64, int64, error) {
+	var row struct {
+		Count int64
+		Bytes int64
+	}
+	err := r.db.WithContext(ctx).Model(&model.ReaderContentCache{}).
+		Select("COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS bytes").Scan(&row).Error
+	return row.Count, row.Bytes, err
+}
+
+// ListContentCacheOldest 按最近命中时间取最旧的一批（LRU 淘汰用）。
+func (r *ReaderRepository) ListContentCacheOldest(ctx context.Context, limit int) ([]model.ReaderContentCache, error) {
+	var out []model.ReaderContentCache
+	err := r.db.WithContext(ctx).Order("last_access_at ASC").Limit(limit).Find(&out).Error
 	return out, err
 }
 

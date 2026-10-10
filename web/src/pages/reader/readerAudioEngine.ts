@@ -31,6 +31,12 @@ export interface LoadChapterInput {
   chapterIndex: number
   /** 当前章的音轨地址（已签名）。 */
   track: string
+  /**
+   * 音轨是否为 HLS 播放列表（服务端下发）。
+   * 代理地址是 base64 的 /api/reader/media?u=...，前端无法再从后缀判断格式，
+   * 必须用这个标志决定走 hls.js 还是原生 <audio>。
+   */
+  hls?: boolean
   transcoding: boolean
   openCredits: number
   closeCredits: number
@@ -65,7 +71,7 @@ class ReaderAudioEngine {
   /** 加载批次号：动态 import hls.js 期间被新的加载打断时用来丢弃旧结果。 */
   private loadToken = 0
   /** 预取缓存：章序号 → 已解析的音轨。命中的切章可以同步开播，不用等网络。 */
-  private prefetched = new Map<number, { track: string; transcoding: boolean }>()
+  private prefetched = new Map<number, { track: string; transcoding: boolean; hls: boolean }>()
   /** 预取在途的章序号，避免同一章重复请求。 */
   private prefetching = new Set<number>()
   /** 预热下一章字节的隐藏播放器（只下载，从不 play()）。 */
@@ -141,7 +147,7 @@ class ReaderAudioEngine {
       if (preset > 0) this.applyTimer(preset)
     }
 
-    void this.attachSource(input.track)
+    void this.attachSource(input.track, input.hls === true)
     // 提前解析下一章的音轨并在后台预热字节：息屏自动续播时才能立刻接上
     const nextIndex = this.neighborChapterIndex(1)
     if (nextIndex !== null) this.prefetchChapter(nextIndex)
@@ -258,7 +264,11 @@ class ReaderAudioEngine {
 
   // ─── 音源装载 ─────────────────────────────────────────────────────────
 
-  private async attachSource(src: string): Promise<void> {
+  /**
+   * 装上音源。isHLS 由服务端判定（见 LoadChapterInput.hls）——
+   * 代理地址不含 .m3u8 后缀，前端不能再用地址猜格式。
+   */
+  private async attachSource(src: string, isHLS: boolean): Promise<void> {
     const token = ++this.loadToken
     // 只销毁上一章的 hls，不再 removeAttribute('src') + load()。load() 会把媒体
     // 元素彻底卸载、释放系统音频会话，息屏时紧接着的 play() 就会被浏览器当成
@@ -276,7 +286,7 @@ class ReaderAudioEngine {
     // 先停住上一章：HLS 分支要 await 动态 import，不先停会有一小段两章叠播
     if (!this.audio.paused) this.audio.pause()
     this.setSessionMetadata(src)
-    if (src.includes('.m3u8')) {
+    if (isHLS) {
       const mod = await import('hls.js')
       // 动态 import 期间可能已经切到别的章：丢弃这次结果
       if (token !== this.loadToken) return
@@ -329,19 +339,19 @@ class ReaderAudioEngine {
         if (useReaderAudioStore.getState().bookId !== forBook) return
         const track = ct.tracks?.[0]
         if (ct.type !== 'audio' || !track) return
-        this.prefetched.set(index, { track, transcoding: ct.transcoding ?? false })
+        this.prefetched.set(index, { track, transcoding: ct.transcoding ?? false, hls: ct.hls ?? false })
         // 要服务端转码的音轨立刻预热（把转码提前跑掉）；直链等到本章快播完再拉字节，
         // 避免用户中途停下时白下整章的流量。
-        if (ct.transcoding) this.warmNextBytes(track)
+        if (ct.transcoding) this.warmNextBytes(track, ct.hls ?? false)
       })
       .catch(() => undefined)
       .finally(() => this.prefetching.delete(index))
   }
 
   /** 用隐藏播放器把下一章的字节（以及服务端转码）提前拉起来，减少切章等待。 */
-  private warmNextBytes(track: string): void {
+  private warmNextBytes(track: string, isHLS: boolean): void {
     // HLS 交给 hls.js 按需拉流，二次下载没有意义
-    if (!track || track.includes('.m3u8') || this.warmedTrack === track) return
+    if (!track || isHLS || this.warmedTrack === track) return
     this.warmedTrack = track
     if (!this.warmer) {
       const a = new Audio()
@@ -359,7 +369,7 @@ class ReaderAudioEngine {
     const nextIndex = this.neighborChapterIndex(1)
     if (nextIndex === null) return
     const hit = this.prefetched.get(nextIndex)
-    if (hit) this.warmNextBytes(hit.track)
+    if (hit) this.warmNextBytes(hit.track, hit.hls)
   }
 
   /** 用预取结果接续下一章；命中返回 true（未命中由调用方走异步加载兜底）。 */
@@ -375,6 +385,7 @@ class ReaderAudioEngine {
       chapters: s.chapters,
       chapterIndex: index,
       track: hit.track,
+      hls: hit.hls,
       transcoding: hit.transcoding,
       openCredits: s.openCredits,
       closeCredits: s.closeCredits,
@@ -383,7 +394,7 @@ class ReaderAudioEngine {
     // 立刻在 ended 的同一次事件里发起 play()，保证没有空档。片头跳转由
     // loadedmetadata 处理器完成：音频在 loadedmetadata 之前不会出声，所以
     // 先 play() 也不会漏出片头。HLS 交给 hls.js 承载，无法同帧开播。
-    if (!hit.track.includes('.m3u8')) this.play()
+    if (!hit.hls) this.play()
     return true
   }
 

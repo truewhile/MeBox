@@ -133,6 +133,10 @@ type CacheConfig struct {
 	// 并发），缓存过短会让这批请求同时穿透并各自重建 payload，在低配主机
 	// 上造成秒级延迟。默认 300 秒，新入库内容最迟 5 分钟后出现在最新列表。
 	EmbyLatestTTLSeconds int `mapstructure:"emby_latest_ttl_seconds"`
+	// ReaderContentMaxSizeMB 阅读正文持久缓存的总容量（MB），0 表示不限制。
+	ReaderContentMaxSizeMB int `mapstructure:"reader_content_max_size_mb"`
+	// ReaderContentTTLHours 阅读正文缓存的保留时长（小时），0 表示不过期。
+	ReaderContentTTLHours int `mapstructure:"reader_content_ttl_hours"`
 }
 
 type SearchConfig struct {

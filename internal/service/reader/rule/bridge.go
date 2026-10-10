@@ -247,6 +247,12 @@ func newJavaObject(vm *goja.Runtime, r *JSRunner, a *AnalyzeRule) *goja.Object {
 		if len(call.Arguments) == 0 || goja.IsUndefined(call.Arguments[0]) || goja.IsNull(call.Arguments[0]) {
 			return vm.ToValue("")
 		}
+		// 字节参数可能是 ArrayBuffer / typed array：这类值的 Export() 返回属性 map，
+		// 只有 ExportTo 才能取回字节，旧写法会退化成 String(value) 得到 "[object ArrayBuffer]"。
+		var buf []byte
+		if err := vm.ExportTo(call.Arguments[0], &buf); err == nil {
+			return vm.ToValue(string(buf))
+		}
 		if buf, ok := call.Arguments[0].Export().([]byte); ok {
 			return vm.ToValue(string(buf))
 		}
@@ -640,6 +646,9 @@ func newJavaObject(vm *goja.Runtime, r *JSRunner, a *AnalyzeRule) *goja.Object {
 	// importScript 在 legado 里是「下载 JS 文件并 eval」，服务端可做但会引入
 	// 任意脚本执行面，暂不支持，保持明确报错。
 	set("importScript", unsupported("importScript", "服务端不支持动态加载外部脚本"))
+
+	// 字体混淆还原（queryTTF / queryBase64TTF / replaceFont）。
+	r.installFontBridge(vm, set)
 
 	return o
 }

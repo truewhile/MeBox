@@ -10,6 +10,23 @@ import (
 // 本文件对应 AnalyzeByRegex.kt。Java 正则语义用 regexp2 对齐
 // （支持前向后向断言与反向引用），匹配循环对齐 Matcher.find()。
 
+// regexMatchTimeout 书源正则的匹配预算。
+//
+// regexp2 默认永不超时（DefaultMatchTimeout 是 MaxInt64），而书源正则来自
+// 不可信内容：灾难性回溯会永久占住一个 goroutine 和一颗 CPU 核。这里统一
+// 设一个短预算，语义与 ApplyUserReplace 的缺省值保持一致。
+const regexMatchTimeout = 3 * time.Second
+
+// compileRegex 编译一条 Java 语义正则并设置匹配超时。
+func compileRegex(pattern string) (*regexp2.Regexp, error) {
+	re, err := regexp2.Compile(pattern, regexp2.None)
+	if err != nil {
+		return nil, err
+	}
+	re.MatchTimeout = regexMatchTimeout
+	return re, nil
+}
+
 // splitNotBlankAndTrim 对应 String.splitNotBlank("&&")：切分并去空白项。
 func splitNotBlankAndTrim(s, sep string) []string {
 	var out []string
@@ -27,7 +44,7 @@ func regexGetElement(res string, regs []string, index int) []string {
 	if index >= len(regs) {
 		return nil
 	}
-	re, err := regexp2.Compile(regs[index], regexp2.None)
+	re, err := compileRegex(regs[index])
 	if err != nil {
 		return nil
 	}
@@ -60,7 +77,7 @@ func regexGetElements(res string, regs []string, index int) [][]string {
 	if index >= len(regs) {
 		return nil
 	}
-	re, err := regexp2.Compile(regs[index], regexp2.None)
+	re, err := compileRegex(regs[index])
 	if err != nil {
 		return nil
 	}
@@ -95,7 +112,7 @@ func regexGetElements(res string, regs []string, index int) [][]string {
 // regexReplaceAll 对应 Kotlin Regex.replace(result, replacement)
 // （Java $N 分组替换语义，regexp2 的 Replace 原生支持）。
 func regexReplaceAll(pattern, result, replacement string) string {
-	re, err := regexp2.Compile(pattern, regexp2.None)
+	re, err := compileRegex(pattern)
 	if err != nil {
 		return strings.ReplaceAll(result, pattern, replacement)
 	}
@@ -116,14 +133,12 @@ func ApplyUserReplace(content, pattern, replacement string, isRegex bool, timeou
 	if !isRegex {
 		return strings.ReplaceAll(content, pattern, replacement)
 	}
-	re, err := regexp2.Compile(pattern, regexp2.None)
+	re, err := compileRegex(pattern)
 	if err != nil {
 		return strings.ReplaceAll(content, pattern, replacement)
 	}
 	if timeoutMS > 0 {
 		re.MatchTimeout = time.Duration(timeoutMS) * time.Millisecond
-	} else {
-		re.MatchTimeout = 3 * time.Second
 	}
 	out, err := re.Replace(content, replacement, 0, -1)
 	if err != nil {
@@ -160,7 +175,7 @@ func ApplyReplaceRegexString(content, replaceRegex string) string {
 // regexReplaceFirstOnFirstMatch 对应 replaceRegex 的 replaceFirst 分支：
 // 找到第一个匹配（无匹配返回 ""），在匹配文本上做首次替换。
 func regexReplaceFirstOnFirstMatch(pattern, result, replacement string) string {
-	re, err := regexp2.Compile(pattern, regexp2.None)
+	re, err := compileRegex(pattern)
 	if err != nil {
 		return replacement
 	}

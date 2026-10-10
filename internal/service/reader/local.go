@@ -143,6 +143,11 @@ func parseLocalBookPayload(name string, data []byte) (*localBookPayload, error) 
 		return nil, fmt.Errorf("文件内容为空或无法解码")
 	}
 	out.ext, out.charset = ".txt", charset
+	// 章节区间是按「解码后的 UTF-8 文本」算的字节下标，托管副本就必须落盘这份
+	// UTF-8 文本：原始字节若是 GBK/Big5/UTF-16，按 UTF-8 区间去读会整章错位。
+	// 外部原地引用不能改写源文件（见 importLocalBook 的 externalPath 分支），
+	// 由读取侧按 charset 整文件解码后再切片。
+	out.payload = []byte(decoded)
 	for i, c := range splitTXTChapters(decoded) {
 		out.chaps = append(out.chaps, model.ReaderChapter{
 			Index: i, Title: c.Title, Tag: fmt.Sprintf("%d:%d", c.Start, c.End),
@@ -275,9 +280,19 @@ func (s *ReaderService) ImportLocalBook(
 		ext:        parsed.ext,
 		charset:    parsed.charset,
 		chaps:      parsed.chaps,
-		payload:    data,
+		payload:    managedPayload(parsed, data),
 		coverEntry: parsed.coverEntry,
 	})
+}
+
+// managedPayload 托管副本实际落盘的字节。
+//
+// TXT 走 out.payload（已解码的 UTF-8，与章节下标的基准一致）；EPUB 原样落盘。
+func managedPayload(parsed *localBookPayload, raw []byte) []byte {
+	if parsed != nil && len(parsed.payload) > 0 {
+		return parsed.payload
+	}
+	return raw
 }
 
 // ImportLocalBookFromPath 从服务器上已有的文件导入书籍（TXT / EPUB）。
@@ -590,19 +605,55 @@ func (s *ReaderService) readLocalChapter(book *model.ReaderBook, ch model.Reader
 	if !ok {
 		return "", fmt.Errorf("章节定位信息损坏，请重新导入该书")
 	}
+	if end <= start {
+		return "", nil
+	}
+	// 外部原地引用的非 UTF-8 文件：章节区间是按导入时解码出的 UTF-8 文本算的，
+	// 必须整文件解码后再切片，直接读原始字节会错位（GBK 一字 2 字节、UTF-16 更多）。
+	// 托管副本在导入时已统一落盘 UTF-8，这里不会走这条分支。
+	if book.LocalExternal && needsDecodeBeforeSlice(book.Charset) {
+		return readLocalChapterDecoded(path, start, end)
+	}
 	f, err := os.Open(path) // #nosec G304 -- path 由服务端按书籍 ID 生成
 	if err != nil {
 		return "", fmt.Errorf("本地书籍文件已丢失: %w", err)
 	}
 	defer f.Close()
-	if end <= start {
-		return "", nil
-	}
 	buf := make([]byte, end-start)
 	if _, err := f.ReadAt(buf, int64(start)); err != nil && err != io.EOF {
 		return "", fmt.Errorf("读取章节失败: %w", err)
 	}
 	return strings.TrimSpace(string(buf)), nil
+}
+
+// needsDecodeBeforeSlice 该字符集的文件是否需要在切片前整文件解码。
+func needsDecodeBeforeSlice(charset string) bool {
+	switch strings.ToLower(strings.TrimSpace(charset)) {
+	case "", "utf-8", "utf8":
+		return false
+	}
+	return true
+}
+
+// readLocalChapterDecoded 整文件解码为 UTF-8 后按字节区间取章节（外部引用模式）。
+func readLocalChapterDecoded(path string, start, end int) (string, error) {
+	f, err := os.Open(path) // #nosec G304 -- path 来自书籍记录，导入时已校验允许根目录
+	if err != nil {
+		return "", fmt.Errorf("本地书籍文件已丢失: %w", err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, LocalBookMaxBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("读取章节失败: %w", err)
+	}
+	decoded, _ := decodeTextFile(data)
+	if start > len(decoded) {
+		return "", nil
+	}
+	if end > len(decoded) {
+		end = len(decoded)
+	}
+	return strings.TrimSpace(decoded[start:end]), nil
 }
 
 // DeleteLocalBookFile 移出书架时删除本地文件（网络书籍无文件，直接返回）。

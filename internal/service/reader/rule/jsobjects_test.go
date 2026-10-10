@@ -51,3 +51,44 @@ func TestCacheMemoryRoundTrip(t *testing.T) {
 		t.Fatalf("cache.get 读到了内存缓存的值: %q", got)
 	}
 }
+
+// cache 必须按书源隔离：旧实现是包级全局 map，任一源的 put/get 对所有源可见，
+// 多个源用同一个 key 会互相串值，一个源写满还会清掉别的源的缓存。
+func TestCacheIsolatedPerSource(t *testing.T) {
+	srcA := map[string]any{"bookSourceUrl": "https://a.example.com"}
+	srcB := map[string]any{"bookSourceUrl": "https://b.example.com"}
+	ar := NewAnalyzeRule()
+
+	runnerA := NewJSRunner(JSConfig{SourceProps: srcA})
+	if _, err := runnerA.Run(ar, `cache.put('shared-key', 'from-a')`, nil, ""); err != nil {
+		t.Fatalf("源 A 写入失败: %v", err)
+	}
+	runnerB := NewJSRunner(JSConfig{SourceProps: srcB})
+	v, err := runnerB.Run(ar, `String(cache.get('shared-key'))`, nil, "")
+	if err != nil {
+		t.Fatalf("源 B 读取失败: %v", err)
+	}
+	if got := anyToString(v); got != "null" {
+		t.Fatalf("源 B 读到了源 A 的缓存: %q", got)
+	}
+	// 源 A 自己重开运行时仍应读到（落到 CacheDir 之外的进程内持久层）。
+	runnerA2 := NewJSRunner(JSConfig{SourceProps: srcA})
+	v, err = runnerA2.Run(ar, `String(cache.get('shared-key'))`, nil, "")
+	if err != nil {
+		t.Fatalf("源 A 二次读取失败: %v", err)
+	}
+	if got := anyToString(v); got != "from-a" {
+		t.Fatalf("源 A 应读到自己的缓存: %q", got)
+	}
+	// 内存缓存同样按源隔离。
+	if _, err := runnerA.Run(ar, `cache.putMemory('mem-key', 'a')`, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	v, err = runnerB.Run(ar, `String(cache.getFromMemory('mem-key'))`, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := anyToString(v); got != "null" {
+		t.Fatalf("内存缓存跨源串值: %q", got)
+	}
+}

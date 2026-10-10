@@ -62,6 +62,12 @@ func (c *Config) normalize() error {
 	if c.Cache.MediaTTLSeconds < 1 {
 		c.Cache.MediaTTLSeconds = 90
 	}
+	if c.Cache.ReaderContentMaxSizeMB < 0 {
+		c.Cache.ReaderContentMaxSizeMB = 0
+	}
+	if c.Cache.ReaderContentTTLHours < 0 {
+		c.Cache.ReaderContentTTLHours = 0
+	}
 	c.Search.Backend = strings.ToLower(strings.TrimSpace(c.Search.Backend))
 	if c.Search.Index == "" {
 		c.Search.Index = "mebox_media"

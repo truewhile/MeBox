@@ -28,7 +28,10 @@ type BookSource struct {
 	LoginCheckJS      *string        `json:"loginCheckJs"`
 	JSLib             *string        `json:"jsLib"`
 	BookSourceComment *string        `json:"bookSourceComment"`
-	LastUpdateTime    *int64         `json:"lastUpdateTime"`
+	// CoverDecodeJs 封面 bytes 二次解密 JS（返回解密后的字节），
+	// 对应 legado BookSource.coverDecodeJs。规则为空时封面零开销直通。
+	CoverDecodeJs  *string        `json:"coverDecodeJs"`
+	LastUpdateTime *int64         `json:"lastUpdateTime"`
 	RespondTime       *int64         `json:"respondTime"`
 	Weight            *int           `json:"weight"`
 	ExploreURL        *string        `json:"exploreUrl"`
@@ -151,7 +154,10 @@ type ContentRule struct {
 	SourceRegex    *string `json:"sourceRegex"`
 	ReplaceRegex   *string `json:"replaceRegex"`
 	ImageStyle     *string `json:"imageStyle"`
-	PayAction      *string `json:"payAction"`
+	// ImageDecode 正文图片 bytes 二次解密 JS（返回解密后的字节），
+	// 对应 legado ContentRule.imageDecode。
+	ImageDecode *string `json:"imageDecode"`
+	PayAction   *string `json:"payAction"`
 }
 
 // ExploreRule 发现规则。

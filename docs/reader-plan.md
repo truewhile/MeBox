@@ -38,7 +38,7 @@ web/src/
   components/reader/
 ```
 
-**基建复用**：`internal/helper/http.go`（浏览器 UA + 代理回退 HTTP 客户端）、`internal/service/runtime_cache.go`（正文/目录/搜索缓存，内存+Redis）、`internal/service/image_proxy*`（封面与漫画图片代理）、`internal/handler/ws.go` 的 WSHub（搜索进度、追更任务推送，新增 `reader:*` topic）。
+**基建复用**：`internal/helper/http.go`（浏览器 UA + 代理回退 HTTP 客户端）、`internal/service/runtime_cache.go`（影视侧 JSON/对象缓存）、`internal/service/image_proxy*`（封面与漫画图片代理）、`internal/handler/ws.go` 的 WSHub（搜索进度、追更任务推送，新增 `reader:*` topic）。
 
 **数据流**：书源 JSON 存库 → 搜索/发现时按启用的源并发抓取（errgroup + 信号量限流，超时熔断）→ 结果聚合 → 前端。正文、播放地址、图片列表由服务端组装（含 `nextContentUrl` 翻页合并）后带 TTL 缓存下发；音频流与漫画图片按需经服务端代理补 UA/Referer 头。
 
@@ -126,7 +126,19 @@ web/src/
 | P4 漫画/图片源 ✅ | 图片列表绝对化 + 经签名代理（带书源 Referer 防盗链头）+ 漫画阅读器（上下滚动/左右单页双模式、图片懒加载与加载失败占位、点击分区翻页/呼菜单、菜单进度条按图片序号、进度按图片序号记忆、下一章预取）+ imageStyle 透传 | 漫画源可看 |
 | P4.5 书源登录 ✅ | `jsLib` 一次装载（对应 legado SharedJsScope）+ `source.*` 会话方法（getVariable/setVariable/getLoginInfo/putLoginInfo/getLoginHeader/putLoginHeader/get/put）+ `cookie.*`（getCookie/setCookie/replaceCookie/removeCookie/getKey，按 eTLD+1 隔离）+ 请求自动携带 Cookie 与 loginHeader + `loginUrl`/`loginUi`（解析表单 → 按钮 action 拼在 loginUrl 后执行 → result 为表单值）+ `loginCheckJs`（会话失效自动重登/重取）+ 源变量落库 + 登录信息/Cookie 加密存储 + 服务端 toast/startBrowser 回传前端 + 登录面板与变量编辑器 | 登录类书源可登录、可留存登录态 |
 | P4.6 本地书籍 ✅ | `POST /api/reader/local/books` 上传 TXT / EPUB（上限 64MB）→ 落盘 `data/reader/local/<bookID>.<txt\|epub>` + 解析目录入 `reader_chapters` + 落库为 `origin=""`、`is_local=true` 的书架条目；TXT 自动识别 BOM/UTF-8/GBK/Big5/UTF-16 并按 legado 默认 TXT 目录规则切章（RE2 无 lookbehind，改行首锚定 + 句子启发式过滤），章定位信息存字节区间 `start:end`，读章只读该区间；EPUB 走 container.xml → OPF spine，标题优先取 NCX/NAV，正文去标签与实体；移出书架同步删落盘文件；同名重复导入覆盖更新并尽量保留进度 | 本地书可上传、可读、可删 |
+| P4.7 正文持久缓存 ✅ | 服务端正文持久缓存（`reader_content_cache.go`：书源侧产物 + 索引落库 + 内容落盘 `cache_dir/reader-content/`、TTL/容量 LRU、目录刷新 remap、换源/移出书架清理、读穿透 singleflight）+ 批量取正文接口 `POST /api/reader/books/:id/content-batch`（对应 CacheBook 协议）+ 前端窗口预取（默认 3 章） | 慢源连续翻章不再每章等待；重复阅读零网络 |
+| P4.8 图片/字体兼容 ✅ | `coverDecodeJs`（封面解密代理，含搜索结果未入库场景）/ `ruleContent.imageDecode`（正文图片解密）+ 图片 URL 尾部 `,{headers}` options 逐图应用（options 优先于书源 header 与 Cookie）+ `java.queryTTF` / `queryBase64TTF` / `replaceFont`（sfnt cmap 0/4/6、loca 短/长、glyf 简单+复合字形） | 加密图与字体混淆正文可读 |
+| P4.9 规则稳定性 ✅ | `@put` 回写书源变量（修复跨请求丢失）；`book.getVariable/putVariable` 真正注入书籍上下文并落库（对应 Book.upVariable）；全部书源 `regexp2` 统一 3s 匹配超时；解压输出 32MB 上限；非 UTF-8 TXT 托管副本按 UTF-8 落盘（外部引用读时解码）；换源单事务；JS `cache` 按书源命名空间隔离并落盘；HLS 双端识别（服务端 `#EXTM3U` 嗅探 + `hls` 标志下发） | 与阅读 App 行为对齐，坏源不再拖死服务 |
 | P5 体验完善 | 换源（ChangeBookSourceDialog 四档排序）、追更（定时刷新目录 + 缓存清理）、发现页（exploreUrl 标签条）、阅读器高级设置（页眉页脚提示、点击区域自定义）、书源编辑器六 Tab、备份导出 | 完整体验 |
+
+### 实施记录：关于「宽松 @put 触发 panic」的复核
+
+前期评估曾报告 `sourcerule.go` 的宽松 `@put` 回退正则含 RE2 不支持的反向引用、可能 panic。
+逐行复核后该结论**不成立**：`splitPutRule` 的下标全部由固定捕获分组数保证。
+真实缺陷是另外两个并已修复：
+
+- `AnalyzeRule.Put` 没有 `sourcePutter` 分支，`@put` 只写进一次性的 `bookVars`，跨请求丢失；
+- `applyBookContext` 的三处调用点都在传 `book=nil`，`book.getVariable/putVariable` 与 `book.name` 长期是死代码。
 
 P0–P2 是主体（约全部工作量 60–70%），P3/P4 相对独立可并行。
 

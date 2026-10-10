@@ -122,6 +122,29 @@ export interface ReaderChapterContent {
   comments?: ReaderContentComment[]
   /** 该音轨走了服务端转码（源格式浏览器解不了），首次播放需要等转码完成。 */
   transcoding?: boolean
+  /** 该音轨是 HLS 播放列表（m3u8），前端据此走 hls.js 而不是原生 audio。 */
+  hls?: boolean
+}
+
+/** 批量取正文的单章结果（对应服务端 ContentBatchItem）。 */
+export interface ReaderContentBatchItem {
+  chapter_index: number
+  type?: 'text' | 'audio' | 'image'
+  content?: string
+  tracks?: string[]
+  images?: string[]
+  image_style?: string
+  hls?: boolean
+  comments?: ReaderContentComment[]
+  /** 由服务端持久缓存直接命中（本次未访问书源）。 */
+  cached?: boolean
+  error?: string
+}
+
+/** 批量取正文的汇总（对应服务端 ContentBatchResult）。 */
+export interface ReaderContentBatchResult {
+  items: ReaderContentBatchItem[]
+  stats: { hit: number; miss: number; failed: number }
 }
 
 /** 正文里的一条段评（服务端从 <comment> / 内嵌评论图里解析出来）。 */
@@ -376,6 +399,16 @@ export const readerAPI = {
         timeout: LONG_REQUEST_TIMEOUT,
         signal,
       })
+      .then((r) => r.data),
+
+  // 批量取正文（窗口预取 / 离线缓存）：单章失败不中断整批，命中持久缓存的章节零网络开销。
+  bookContentBatch: (id: string, chapterIndexes: number[], signal?: AbortSignal) =>
+    api
+      .post<ReaderContentBatchResult>(
+        `/reader/books/${id}/content-batch`,
+        { chapter_indexes: chapterIndexes },
+        { timeout: LONG_REQUEST_TIMEOUT, signal },
+      )
       .then((r) => r.data),
 
   // ── 替换净化规则 ──

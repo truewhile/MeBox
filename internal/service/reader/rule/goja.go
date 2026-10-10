@@ -75,6 +75,9 @@ type JSConfig struct {
 	// CacheDir 书源文件缓存根目录（java.downloadFile / cacheFile 落盘用）。
 	// 为空时这些函数抛出明确错误。
 	CacheDir string
+	// FetchBytes 拉原始字节（queryTTF 的 URL 形态、图片解密前的取图）。
+	// 由服务层注入，复用书源 header / Cookie / 限速 / 重试。
+	FetchBytes func(absURL string) ([]byte, error)
 	// Ctx 本次执行的可取消上下文，透传给 BrowserHost 的等待。
 	Ctx context.Context
 }
@@ -196,6 +199,18 @@ func (r *JSRunner) fetch(req *Request) (string, string, int, error) {
 	return r.cfg.Fetch(req)
 }
 
+// cacheNamespace cache 对象的命名空间：优先取书源 URL，退回 BaseURL。
+func (c JSConfig) cacheNamespace() string {
+	if c.SourceProps != nil {
+		if v, ok := c.SourceProps["bookSourceUrl"]; ok {
+			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+				return s
+			}
+		}
+	}
+	return c.BaseURL
+}
+
 // NewJSRunner 创建运行时：注入全局对象 cookie / cache / source，并执行 jsLib。
 func NewJSRunner(cfg JSConfig) *JSRunner {
 	vm := goja.New()
@@ -208,7 +223,8 @@ func NewJSRunner(cfg JSConfig) *JSRunner {
 	}
 	r := &JSRunner{vm: vm, cfg: cfg, vars: map[string]string{}, state: state}
 	vm.Set("cookie", newCookieObject(vm, state))
-	vm.Set("cache", newCacheObject(vm))
+	// cache 按书源命名空间隔离：namespace 取书源 URL，持久层落 CacheDir/reader-js-cache。
+	vm.Set("cache", newCacheObject(vm, cfg.cacheNamespace(), cfg.CacheDir))
 	// source 必须在 jsLib 之前注入：jsLib 的 getVariable/BaseUrl 依赖它。
 	srcObj := newSourceObject(vm, state, cfg.SourceProps)
 	vm.Set("source", srcObj)
@@ -558,6 +574,55 @@ func compileRuleJS(js string) (*goja.Program, error) {
 	return nil, err // 两种形式都编译不过，返回块形式的错误（更贴近书源原文）
 }
 
+// RunImageDecode 执行图片字节二次解密 JS（coverDecodeJs / ruleContent.imageDecode）。
+//
+// 对应 legado ImageUtils.getDecodeResult：绑定 result=图片字节、src=图片地址，
+// 规则返回解密后的字节（ArrayBuffer / typed array）。执行失败返回 error，
+// 调用方决定是回 502 还是原样透传。
+func (r *JSRunner) RunImageDecode(js string, data []byte, src string) ([]byte, error) {
+	vm := r.vm
+	r.installJava(nil)
+	vm.Set("book", nil)
+	vm.Set("chapter", nil)
+	vm.Set("title", nil)
+	vm.Set("baseUrl", r.cfg.BaseURL)
+	vm.Set("result", vm.ToValue(vm.NewArrayBuffer(data)))
+	vm.Set("src", src)
+	vm.Set("key", nil)
+	vm.Set("page", nil)
+	vm.Set("nextChapterUrl", nil)
+
+	prog, err := compileRuleJS(stripRuleJSWrapper(js))
+	if err != nil {
+		return nil, fmt.Errorf("图片解密 JS 编译失败: %w", err)
+	}
+	g := newInterruptGuard(vm, r.cfg.Timeout, "图片解密超时")
+	r.setGuard(g)
+	defer func() {
+		g.Stop()
+		r.setGuard(nil)
+	}()
+	v, err := vm.RunProgram(prog)
+	if err != nil {
+		return nil, fmt.Errorf("图片解密失败: %v", err)
+	}
+	out, ok := exportBytes(vm, v)
+	if !ok {
+		return nil, fmt.Errorf("图片解密规则没有返回字节")
+	}
+	return out, nil
+}
+
+// FetchBytes 用书源的网络栈拉原始字节（queryTTF 的 URL 形态、图片解密前的取图）。
+func (r *JSRunner) FetchBytes(absURL string) ([]byte, error) {
+	if r.cfg.FetchBytes == nil {
+		return nil, ErrJsUnsupported
+	}
+	resume := r.pauseTimeout()
+	defer resume()
+	return r.cfg.FetchBytes(absURL)
+}
+
 // exportValue 把 JS 返回值转为 Go 值（字符串/数值/映射/切片）。
 func exportValue(v goja.Value) any {
 	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
@@ -569,6 +634,41 @@ func exportValue(v goja.Value) any {
 	default:
 		return v.Export()
 	}
+}
+
+// stripRuleJSWrapper 去掉 JS 规则的 @js: / <js>…</js> 包裹。
+// 与 reader 包的 stripJSWrapper 同语义；规则包不能反向依赖 reader 包，故此处保留一份。
+func stripRuleJSWrapper(s string) string {
+	trimmed := strings.TrimSpace(s)
+	lower := strings.ToLower(trimmed)
+	switch {
+	case strings.HasPrefix(lower, "@js:"):
+		return strings.TrimSpace(trimmed[len("@js:"):])
+	case strings.HasPrefix(lower, "<js>"):
+		body := trimmed[len("<js>"):]
+		body = strings.TrimSuffix(strings.TrimSpace(body), "</js>")
+		body = strings.TrimSuffix(strings.TrimSpace(body), "<")
+		return body
+	default:
+		return trimmed
+	}
+}
+
+// exportBytes 把 JS 返回值按字节取出：ArrayBuffer / typed array / 字符串。
+// 图片与字体解密规则返回的都是字节，ArrayBuffer 的 Export() 只给出属性 map，
+// 必须走 ExportTo 才能拿到真正的字节。
+func exportBytes(vm *goja.Runtime, v goja.Value) ([]byte, bool) {
+	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
+		return nil, false
+	}
+	var buf []byte
+	if err := vm.ExportTo(v, &buf); err == nil {
+		return buf, true
+	}
+	if s, ok := v.Export().(string); ok {
+		return []byte(s), true
+	}
+	return nil, false
 }
 
 // toJSValue 把引擎内部结果转为可注入 JS 的值。

@@ -26,14 +26,20 @@ type AnalyzeRule struct {
 	chapterVars map[string]string
 	bookVars    map[string]string
 	vars        map[string]string
-	chapterTitle string
-	chapterIndex int
-	bookName     string
+	// sourceDefaults 书源 JSON 的 variables 字段（作者设定的默认值）。
+	// 它只作为 @get 的兜底：显式保存过的书源变量与会话内 @put 的值优先级更高。
+	sourceDefaults map[string]string
+	chapterTitle   string
+	chapterIndex   int
+	bookName       string
 	// bookMeta 书籍元数据（对应 legado 规则 JS 里的 Book 实体字段）。
 	bookMeta map[string]any
 	// bookCustom 书籍自定义变量（对应 legado Book.variableMap），
 	// 由规则 JS 的 book.getVariable / book.putVariable 读写。
 	bookCustom map[string]string
+	// bookVarPutter 由服务层注册：book.putVariable 写入后触发，
+	// 用于把变量变更持久化回书架记录（对应 legado 的 Book.upVariable）。
+	bookVarPutter func()
 	// bookTypeOverride 书源在规则 JS 里给 book.type 赋的值
 	// （听书/漫画/短剧源靠它声明书籍类型），由服务层读回。
 	bookTypeOverride *int
@@ -120,6 +126,17 @@ func (a *AnalyzeRule) SetBookCustomVars(vars map[string]string) {
 	}
 }
 
+// BookCustomVars 返回书籍自定义变量的当前值（可能被 book.putVariable 改过），
+// 服务层据此把变更写回书架记录。没有书籍上下文时为 nil。
+func (a *AnalyzeRule) BookCustomVars() map[string]string {
+	return a.bookCustom
+}
+
+// RegisterBookVariablePutter 注册书籍变量变更回调（book.putVariable 写入后触发）。
+func (a *AnalyzeRule) RegisterBookVariablePutter(putter func()) {
+	a.bookVarPutter = putter
+}
+
 // SetBookType 记录书源声明的书籍类型（legado Book.type）。
 func (a *AnalyzeRule) SetBookType(t int) {
 	v := t
@@ -154,6 +171,14 @@ func (a *AnalyzeRule) SetBookContext(name string, vars map[string]string) {
 	}
 }
 
+// SetSourceDefaults 注入书源 variables 字段的默认值（@get 的兜底）。
+// 显式保存过的源变量与会话内 @put 的值优先级都高于它。
+func (a *AnalyzeRule) SetSourceDefaults(vars map[string]string) {
+	if len(vars) > 0 {
+		a.sourceDefaults = vars
+	}
+}
+
 // SetSourceVariables 注入书源级变量读写（source.variableMap）。
 func (a *AnalyzeRule) SetSourceVariables(getter func(key string) string, putter func(key, value string)) {
 	a.sourceGetter = getter
@@ -172,13 +197,19 @@ func jsonpathGet(path string, root any) (v any, err error) {
 
 // ─── 变量存取（对应 put/get） ───────────────────────────────────────────────
 
-// Put 对应 put(key, value)：chapter → book → 局部 → source。
+// Put 对应 put(key, value)：chapter → book → 局部 → 书源持久变量。
+//
+// 「书源持久变量」是 @put 在 legado 里的真实落点（BaseSource.putVariable）：
+// 写进去的值跨请求可见。书源默认变量（variables 字段）与书籍自定义变量都
+// 不是这个通道，所以最后才回退到 sourcePutter，而不是写一次性的 bookVars。
 func (a *AnalyzeRule) Put(key, value string) string {
 	switch {
 	case a.chapterVars != nil:
 		a.chapterVars[key] = value
 	case a.bookVars != nil:
 		a.bookVars[key] = value
+	case a.sourcePutter != nil:
+		a.sourcePutter(key, value)
 	default:
 		if a.vars == nil {
 			a.vars = map[string]string{}
@@ -189,6 +220,7 @@ func (a *AnalyzeRule) Put(key, value string) string {
 }
 
 // Get 对应 get(key)：特殊键 bookName/title 优先取上下文。
+// 查找顺序 chapter → book → book 变量之上的显式源变量 → 书源默认变量。
 func (a *AnalyzeRule) Get(key string) string {
 	switch key {
 	case "bookName":
@@ -211,6 +243,9 @@ func (a *AnalyzeRule) Get(key string) string {
 		if v := a.sourceGetter(key); v != "" {
 			return v
 		}
+	}
+	if v, ok := a.sourceDefaults[key]; ok {
+		return v
 	}
 	return ""
 }
