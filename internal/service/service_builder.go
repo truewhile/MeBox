@@ -214,6 +214,9 @@ func (b *serviceContainerBuilder) initAccessAndStorageServices() {
 	if b.c.Reader != nil {
 		b.c.Scheduler.SetReaderContentCleaner(b.c.Reader.PruneContentCache)
 	}
+	if b.cfg != nil {
+		b.c.Scheduler.SetReaderFilesTTL(b.cfg.Cache.ReaderFilesTTLHours)
+	}
 }
 
 func (b *serviceContainerBuilder) initIdentityServices() {

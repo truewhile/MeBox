@@ -39,7 +39,9 @@ const (
 	// audioTranscodeDirName 缓存目录名，位于 cache.cache_dir 之下。
 	audioTranscodeDirName = "reader-audio"
 	// maxAudioTranscodeCacheBytes 转码缓存上限，超出按修改时间淘汰最旧的。
-	maxAudioTranscodeCacheBytes = 4 << 30
+	// 1GB 是权衡：单章语音 96kbps 约 1MB/分钟，一本 10 小时的有声书约 600MB，
+	// 也就是说同时能保住的「最近听过的书」在个位数；超出后旧书再听会重新转码。
+	maxAudioTranscodeCacheBytes = 1 << 30
 	// audioTranscodeKeepRatio 触发淘汰后回落到上限的比例，避免每次写入都淘汰。
 	audioTranscodeKeepRatio = 0.9
 	// maxAudioTranscodeDuration 单章转码超时。

@@ -137,6 +137,9 @@ type CacheConfig struct {
 	ReaderContentMaxSizeMB int `mapstructure:"reader_content_max_size_mb"`
 	// ReaderContentTTLHours 阅读正文缓存的保留时长（小时），0 表示不过期。
 	ReaderContentTTLHours int `mapstructure:"reader_content_ttl_hours"`
+	// ReaderFilesTTLHours 书源文件缓存（java.cacheFile / downloadFile）的保留时长（小时）。
+	// 0 表示使用内置兜底值（30 天）。
+	ReaderFilesTTLHours int `mapstructure:"reader_files_ttl_hours"`
 }
 
 type SearchConfig struct {

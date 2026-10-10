@@ -54,6 +54,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("cache.emby_latest_ttl_seconds", 300)
 	v.SetDefault("cache.reader_content_max_size_mb", 1024)
 	v.SetDefault("cache.reader_content_ttl_hours", 168)
+	v.SetDefault("cache.reader_files_ttl_hours", 720)
 
 	v.SetDefault("search.backend", "")
 	v.SetDefault("search.opensearch_url", "")

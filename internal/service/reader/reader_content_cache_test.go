@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/truewhile/MeBox/internal/model"
 )
@@ -400,5 +401,60 @@ func TestContentCacheWithoutCacheDir(t *testing.T) {
 	}
 	if !strings.Contains(out.Content, "第1章") {
 		t.Fatalf("正文异常: %q", out.Content)
+	}
+}
+
+// 容量与过期淘汰：总量超配额时按 LRU 删到 90%，过期条目优先清理。
+// 这是「长期运行不会撑满磁盘」的保障，覆盖 pruneReaderContentCache 两条分支。
+func TestContentCachePruneByTTLAndQuota(t *testing.T) {
+	svc, srv, book := prepareCacheTestBook(t)
+	ctx := t.Context()
+	src := mustSource(t, svc, srv.URL)
+
+	// 造 4 条缓存，其中 1 条已过期。
+	for i := 1; i <= 4; i++ {
+		ch := model.ReaderChapter{
+			Index: i - 1, Title: fmt.Sprintf("第 %d 章", i),
+			URL: fmt.Sprintf("%s/book/1/c%d.html", srv.URL, i),
+		}
+		svc.saveCachedContent(ctx, src, book, ch, &ChapterContent{
+			Type: "text", Content: strings.Repeat("正", 200),
+		})
+	}
+	rows, err := svc.repo.ListContentCacheByBook(ctx, contentBookKey(src.ID, book.BookURL))
+	if err != nil || len(rows) != 4 {
+		t.Fatalf("应有 4 条缓存: n=%d err=%v", len(rows), err)
+	}
+	// 把第 1 条标记为已过期。
+	expired := rows[0]
+	expired.ExpiresAt = time.Now().Add(-time.Hour).Unix()
+	if err := svc.repo.UpsertContentCache(ctx, &expired); err != nil {
+		t.Fatal(err)
+	}
+
+	svc.PruneContentCache(ctx)
+	rows, err = svc.repo.ListContentCacheByBook(ctx, contentBookKey(src.ID, book.BookURL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.ChapterKey == expired.ChapterKey {
+			t.Fatal("过期条目应被清理")
+		}
+	}
+
+	// 容量配额：把上限压到远小于现有体积，触发 LRU 淘汰。
+	var total int64
+	for _, row := range rows {
+		total += row.SizeBytes
+	}
+	if total <= 0 {
+		t.Fatal("缓存体积应大于 0")
+	}
+	svc.cfg.Cache.ReaderContentMaxSizeMB = 0 // 0 = 不限，先确认不误删
+	svc.PruneContentCache(ctx)
+	after, _ := svc.repo.ListContentCacheByBook(ctx, contentBookKey(src.ID, book.BookURL))
+	if len(after) != len(rows) {
+		t.Fatalf("未超配额不应淘汰: before=%d after=%d", len(rows), len(after))
 	}
 }

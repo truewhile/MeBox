@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -184,6 +185,62 @@ func (s *SchedulerService) jobCleanReaderContentCache(ctx context.Context) error
 	}
 	s.readerContentCleaner(ctx)
 	return nil
+}
+
+// readerFilesRetentionMax 书源文件缓存（java.cacheFile / downloadFile）的保底保留时长。
+// 未配置 TTL 时用它兜底：字体、静态 JS 这类文件会被书源长期复用，不能删太早。
+const readerFilesRetentionMax = 30 * 24 * time.Hour
+
+// readerTempOrphanAge 临时产物的清理阈值：正常写入是「临时文件 + 立刻 rename」，
+// 存活超过这个时长的只可能是进程被杀/断电留下的孤儿（正在写的文件 mtime 始终在刷新）。
+const readerTempOrphanAge = 24 * time.Hour
+
+// jobCleanReaderFiles 清理阅读相关缓存里没有其它机制管的部分：
+//   - cache/reader/files：书源 java.cacheFile / java.downloadFile 落盘的文件
+//     （字体、静态 JS 等），按保留时长淘汰——此前完全没有清理，会无限增长；
+//   - 孤儿临时文件：转码的 *.mp3.part 与正文缓存的 .content-*，写入中断后会残留。
+func (s *SchedulerService) jobCleanReaderFiles(ctx context.Context) error {
+	if s.cacheDir == "" {
+		return nil
+	}
+	retention := s.readerFilesTTLHours
+	if retention <= 0 {
+		retention = int(readerFilesRetentionMax / time.Hour)
+	}
+	if err := walkAndPrune(filepath.Join(s.cacheDir, "reader", "files"),
+		time.Now().Add(-time.Duration(retention)*time.Hour)); err != nil {
+		return err
+	}
+	// 转码缓存的 tmp 是 <目标>.mp3.part，与成品同目录。
+	if err := pruneOrphanTempFiles(filepath.Join(s.cacheDir, "reader-audio")); err != nil {
+		return err
+	}
+	// 正文缓存的临时文件有固定前缀。
+	return pruneOrphanTempFiles(filepath.Join(s.cacheDir, "reader-content"))
+}
+
+// pruneOrphanTempFiles 删除缓存目录里超龄的临时文件（*.part / .content-*）。
+func pruneOrphanTempFiles(root string) error {
+	if root == "" {
+		return nil
+	}
+	if _, err := os.Stat(root); err != nil {
+		return nil
+	}
+	cutoff := time.Now().Add(-readerTempOrphanAge)
+	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		name := info.Name()
+		if !strings.HasSuffix(name, ".part") && !strings.HasPrefix(name, ".content-") {
+			return nil
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(path) // #nosec G122 -- 缓存目录内的孤儿临时文件，尽力清理
+		}
+		return nil
+	})
 }
 
 // jobCleanTranscodeCache deletes HLS artefacts older than 24h.
