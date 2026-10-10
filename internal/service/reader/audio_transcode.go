@@ -269,7 +269,7 @@ func (s *ReaderService) transcodeInputHeaders(ctx context.Context, bookID, sourc
 	if err != nil || book == nil || strings.TrimSpace(book.Origin) == "" {
 		return headers
 	}
-	if src, err := s.repo.GetSourceByURL(ctx, book.Origin); err == nil && src != nil && src.Header != "" {
+	if src, err := s.repo.GetSourceAnyByURL(ctx, book.Origin); err == nil && src != nil && src.Header != "" {
 		var extra map[string]any
 		if json.Unmarshal([]byte(src.Header), &extra) == nil {
 			for k, v := range extra {

@@ -15,10 +15,11 @@ type ReaderRepository struct {
 	db *gorm.DB
 }
 
-// ListSources 书源列表（按 customOrder 排序）。
-func (r *ReaderRepository) ListSources(ctx context.Context) ([]model.ReaderBookSource, error) {
+// ListSources 用户的书源列表（书源按用户独立，按 customOrder 排序）。
+func (r *ReaderRepository) ListSources(ctx context.Context, userID string) ([]model.ReaderBookSource, error) {
 	var out []model.ReaderBookSource
-	err := r.db.WithContext(ctx).Order("custom_order ASC, updated_at DESC").Find(&out).Error
+	err := r.db.WithContext(ctx).Where("user_id = ?", userID).
+		Order("custom_order ASC, updated_at DESC").Find(&out).Error
 	return out, err
 }
 
@@ -31,14 +32,44 @@ func (r *ReaderRepository) GetSource(ctx context.Context, id string) (*model.Rea
 	return &out, nil
 }
 
-// GetSourceByURL 按书源 URL 取书源（导入去重用）。
-func (r *ReaderRepository) GetSourceByURL(ctx context.Context, sourceURL string) (*model.ReaderBookSource, error) {
+// GetSourceForUser 按 ID 取书源并校验归属用户。
+func (r *ReaderRepository) GetSourceForUser(ctx context.Context, userID, id string) (*model.ReaderBookSource, error) {
+	var out model.ReaderBookSource
+	if err := r.db.WithContext(ctx).First(&out, "id = ? AND user_id = ?", id, userID).Error; err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetSourceByURL 按用户 + 书源 URL 取书源（导入去重用）。
+func (r *ReaderRepository) GetSourceByURL(ctx context.Context, userID, sourceURL string) (*model.ReaderBookSource, error) {
+	var out model.ReaderBookSource
+	err := r.db.WithContext(ctx).First(&out, "user_id = ? AND source_url = ?", userID, sourceURL).Error
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetSourceAnyByURL 按书源 URL 取任意一份副本（不限定用户）。
+//
+// 媒体代理、目录刷新等路径只拿得到书籍的 origin（书源 URL）而没有用户上下文；
+// 请求目标由 URL 决定，任一副本都够用。多个用户各自改过规则/header 时，
+// 取到哪一份只影响「用谁的默认 header」，不影响书籍本身的定位。
+func (r *ReaderRepository) GetSourceAnyByURL(ctx context.Context, sourceURL string) (*model.ReaderBookSource, error) {
 	var out model.ReaderBookSource
 	err := r.db.WithContext(ctx).First(&out, "source_url = ?", sourceURL).Error
 	if err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// ListSourceRowsByURL 取某书源 URL 的全部副本（判断是否仍有其他用户引用）。
+func (r *ReaderRepository) ListSourceRowsByURL(ctx context.Context, sourceURL string) ([]model.ReaderBookSource, error) {
+	var out []model.ReaderBookSource
+	err := r.db.WithContext(ctx).Where("source_url = ?", sourceURL).Find(&out).Error
+	return out, err
 }
 
 // CreateSource 新增书源。
@@ -52,20 +83,34 @@ func (r *ReaderRepository) UpdateSource(ctx context.Context, src *model.ReaderBo
 }
 
 // DeleteSource 删除书源（连带清理其会话状态）。
+//
+// 用物理删除而不是软删：唯一键是 (user_id, source_url)，而索引会覆盖软删行——
+// 软删后再导入同一书源会撞唯一约束（表现为「导入失败」），删掉再导入是本模块的
+// 正常操作。书源本身是可重新导入的数据，不需要软删保留。
+//
+// 会话状态表仍按 source_url 一源一条（跨用户共享），因此只有在该 URL 已无任何
+// 其他用户的书源副本时才连带清理，否则会把别人的登录态一起删掉。
 func (r *ReaderRepository) DeleteSource(ctx context.Context, id string) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		src := &model.ReaderBookSource{}
 		if err := tx.First(src, "id = ?", id).Error; err == nil && src.SourceURL != "" {
-			// 会话状态是「一源一条」，而 source_url 上有覆盖软删行的唯一索引：
-			// 软删会让这一行继续占着 source_url，之后 SaveSourceState 的
-			// First（默认排除软删行）查不到、Create 就会撞唯一约束，
-			// 表现为「保存书源会话状态失败: UNIQUE constraint failed」，
-			// cookie / 登录态从此再也存不进去。这里必须硬删。
-			if err := tx.Unscoped().Delete(&model.ReaderSourceState{}, "source_url = ?", src.SourceURL).Error; err != nil {
+			var others int64
+			if err := tx.Model(&model.ReaderBookSource{}).
+				Where("source_url = ? AND id <> ?", src.SourceURL, id).Count(&others).Error; err != nil {
 				return err
 			}
+			if others == 0 {
+				// 会话状态是「一源一条」，而 source_url 上有覆盖软删行的唯一索引：
+				// 软删会让这一行继续占着 source_url，之后 SaveSourceState 的
+				// First（默认排除软删行）查不到、Create 就会撞唯一约束，
+				// 表现为「保存书源会话状态失败: UNIQUE constraint failed」，
+				// cookie / 登录态从此再也存不进去。这里必须硬删。
+				if err := tx.Unscoped().Delete(&model.ReaderSourceState{}, "source_url = ?", src.SourceURL).Error; err != nil {
+					return err
+				}
+			}
 		}
-		return tx.Delete(&model.ReaderBookSource{}, "id = ?", id).Error
+		return tx.Unscoped().Delete(&model.ReaderBookSource{}, "id = ?", id).Error
 	})
 }
 

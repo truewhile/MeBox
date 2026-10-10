@@ -11,10 +11,10 @@ import (
 // importTestSource 导入一个测试书源并按书源 URL 找到它（同包测试可能导入多个源）。
 func importTestSource(t *testing.T, svc *ReaderService, raw, sourceURL string) string {
 	t.Helper()
-	if _, err := svc.ImportSources(t.Context(), raw); err != nil {
+	if _, err := svc.ImportSources(t.Context(), "u1", raw); err != nil {
 		t.Fatalf("导入书源失败: %v", err)
 	}
-	srcs, err := svc.ListSources(t.Context())
+	srcs, err := svc.ListSources(t.Context(), "u1")
 	if err != nil {
 		t.Fatal(err)
 	}

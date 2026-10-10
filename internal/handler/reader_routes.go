@@ -90,7 +90,8 @@ func registerReaderRoutes(authed *gin.RouterGroup, svc *service.Container) {
 
 func readerListSourcesHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		sources, err := svc.Reader.ListSources(c.Request.Context())
+		userID := c.GetString(middleware.CtxUserID)
+		sources, err := svc.Reader.ListSources(c.Request.Context(), userID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -108,7 +109,8 @@ func readerImportSourcesHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		imported, err := svc.Reader.ImportSources(c.Request.Context(), body.Text)
+		userID := c.GetString(middleware.CtxUserID)
+		imported, err := svc.Reader.ImportSources(c.Request.Context(), userID, body.Text)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -126,7 +128,8 @@ func readerUpdateSourceHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "enabled 字段必填"})
 			return
 		}
-		if err := svc.Reader.UpdateSourceEnabled(c.Request.Context(), c.Param("id"), *body.Enabled); err != nil {
+		userID := c.GetString(middleware.CtxUserID)
+		if err := svc.Reader.UpdateSourceEnabled(c.Request.Context(), userID, c.Param("id"), *body.Enabled); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -136,7 +139,8 @@ func readerUpdateSourceHandler(svc *service.Container) gin.HandlerFunc {
 
 func readerDeleteSourceHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if err := svc.Reader.DeleteSource(c.Request.Context(), c.Param("id")); err != nil {
+		userID := c.GetString(middleware.CtxUserID)
+		if err := svc.Reader.DeleteSource(c.Request.Context(), userID, c.Param("id")); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -153,7 +157,8 @@ func readerDebugSourceHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		logs, err := svc.Reader.Debug(c.Request.Context(), c.Param("id"), body.Key)
+		userID := c.GetString(middleware.CtxUserID)
+		logs, err := svc.Reader.Debug(c.Request.Context(), userID, c.Param("id"), body.Key)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -318,7 +323,8 @@ func readerBrowserAssetHandler(svc *service.Container) gin.HandlerFunc {
 
 func readerSourceLogoutHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if err := svc.Reader.ClearSourceLogin(c.Request.Context(), c.Param("id")); err != nil {
+		userID := c.GetString(middleware.CtxUserID)
+		if err := svc.Reader.ClearSourceLogin(c.Request.Context(), userID, c.Param("id")); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -335,7 +341,8 @@ func readerSetSourceVariableHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		if err := svc.Reader.SetSourceVariable(c.Request.Context(), c.Param("id"), body.Variable); err != nil {
+		userID := c.GetString(middleware.CtxUserID)
+		if err := svc.Reader.SetSourceVariable(c.Request.Context(), userID, c.Param("id"), body.Variable); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
@@ -352,7 +359,8 @@ func readerSetSourceLoginInfoHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		if err := svc.Reader.SetSourceLoginInfo(c.Request.Context(), c.Param("id"), body.Fields); err != nil {
+		userID := c.GetString(middleware.CtxUserID)
+		if err := svc.Reader.SetSourceLoginInfo(c.Request.Context(), userID, c.Param("id"), body.Fields); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
@@ -373,7 +381,8 @@ func readerSearchHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		books, skipped, err := svc.Reader.Search(c.Request.Context(), body.Key, body.SourceIDs, body.Page)
+		userID := c.GetString(middleware.CtxUserID)
+		books, skipped, err := svc.Reader.Search(c.Request.Context(), userID, body.Key, body.SourceIDs, body.Page)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return

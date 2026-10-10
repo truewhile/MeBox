@@ -57,7 +57,7 @@ func TestSearchUsesRequestedPage(t *testing.T) {
 		{0, "1"},  // 非法页码退回第 1 页
 		{-3, "1"}, // 负数同理
 	} {
-		books, skipped, err := svc.Search(t.Context(), "关键词", nil, tc.in)
+		books, skipped, err := svc.Search(t.Context(), "u1", "关键词", nil, tc.in)
 		if err != nil {
 			t.Fatalf("page=%d 搜索失败: %v", tc.in, err)
 		}
@@ -88,7 +88,7 @@ func TestSearchWithoutPagePlaceholderStillWorks(t *testing.T) {
 	svc, _ := newLoginTestService(t)
 	_ = prepareLoginSource(t, svc, scopeEchoSourceJSON(t, "单页源", srv.URL))
 
-	books, _, err := svc.Search(t.Context(), "书", nil, 3)
+	books, _, err := svc.Search(t.Context(), "u1", "书", nil, 3)
 	if err != nil {
 		t.Fatalf("搜索失败: %v", err)
 	}

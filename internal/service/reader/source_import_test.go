@@ -38,7 +38,7 @@ func TestImportSourcesAcceptsMessySource(t *testing.T) {
 	svc, _ := newLoginTestService(t)
 	ctx := t.Context()
 
-	imported, err := svc.ImportSources(ctx, messySourceJSON)
+	imported, err := svc.ImportSources(ctx, "u1", messySourceJSON)
 	if err != nil {
 		t.Fatalf("导入失败: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestImportSourcesAcceptsMessySource(t *testing.T) {
 		t.Fatalf("导入数量 = %d，期望 1", imported)
 	}
 
-	bs, err := svc.repo.GetSourceByURL(ctx, "https://www.mangacopy.com/")
+	bs, err := svc.repo.GetSourceByURL(ctx, "u1", "https://www.mangacopy.com/")
 	if err != nil || bs == nil {
 		t.Fatalf("按 URL 查不到导入的书源: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestParseBookSourceRejectsGarbage(t *testing.T) {
 func TestImportSourcesReportsReasonWhenNothingImported(t *testing.T) {
 	svc, _ := newLoginTestService(t)
 
-	_, err := svc.ImportSources(t.Context(), `[{"bookSourceUrl":123,"bookSourceName":"坏源"}]`)
+	_, err := svc.ImportSources(t.Context(), "u1", `[{"bookSourceUrl":123,"bookSourceName":"坏源"}]`)
 	if err == nil {
 		t.Fatal("一条都没导入时应当返回错误")
 	}

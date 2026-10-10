@@ -21,11 +21,14 @@ import (
 //
 // 设计要点：
 //   - 缓存「书源侧产物」：getContentFrom 的输出（书源 replaceRegex 之后，
-//     用户替换规则、签名代理改写之前）。因此同一本书多用户共享同一份缓存，
+//     用户替换规则、签名代理改写之前）。因此缓存里不含任何用户维度的处理结果，
 //     用户替换规则在读出后逐请求应用，规则改动即时生效。
-//   - 索引落库（ReaderContentCache），内容落盘（cache_dir/reader-content/<origin>/<bookKey>/<key>.json）。
-//   - 缓存键只包含书源身份、章节身份、内容类型、书源指纹与格式版本：不含书籍行 ID
-//     （目录刷新会重建行）、不含用户（用户维度在读出后处理）。
+//   - 缓存键按书源行组织（书源按用户独立，见 contentBookKey 的说明），
+//     不同用户即使持有同一 URL 的书源也各自一份缓存。
+//   - 索引落库（ReaderContentCache），内容落盘
+//     （cache_dir/reader-content/<sourceKey>/<bookKey>/<chapterKey>.json）。
+//   - 缓存键只包含书源行、章节身份、书源指纹与格式版本：不含书籍行 ID
+//     （目录刷新会重建行，见 RemapContentCacheOnTocChange）。
 
 // readerContentFormatVersion 载荷格式版本。解析管线（正文归一 / 段评提取 / 图片标记）
 // 语义变化时必须递增：旧版本条目会被当作未命中并重抓，避免读到旧结构的缓存。
@@ -60,10 +63,19 @@ type contentFlight struct {
 
 // ─── 键与身份 ──────────────────────────────────────────────────────────────
 
-// contentBookKey 书源身份哈希：origin + 书本地址。
-// 用「文件地址」而不是书源显示名：聚合源的 origin 是显示名，多本同源书会撞在一起。
-func contentBookKey(origin, bookURL string) string {
-	sum := sha256.Sum256([]byte(origin + "\x00" + strings.TrimSpace(bookURL)))
+// contentBookKey 书源身份哈希：书源行 ID + 书本地址。
+//
+// 用书源行 ID 而不是 origin（书源 URL）：书源按用户独立，不同用户可以持有同一
+// URL 但规则/header 不同的副本，按 URL 共享缓存会把别人书源的产物喂进来。
+// 用「行 ID + 书本地址」而不是书源显示名：聚合源的 origin 是显示名，多本同源书会撞。
+func contentBookKey(sourceID, bookURL string) string {
+	sum := sha256.Sum256([]byte(sourceID + "\x00" + strings.TrimSpace(bookURL)))
+	return hex.EncodeToString(sum[:16])
+}
+
+// contentOriginKey 书源行维度的磁盘目录名（同一书源的不同书共享这一层）。
+func contentOriginKey(sourceID string) string {
+	sum := sha256.Sum256([]byte(sourceID))
 	return hex.EncodeToString(sum[:16])
 }
 
@@ -116,24 +128,23 @@ func (s *ReaderService) readerContentDir() string {
 	return filepath.Join(base, "reader-content")
 }
 
-// contentFilePath 单条缓存的磁盘路径：<root>/<originHash>/<bookKey>/<chapterKey>.json。
+// contentFilePath 单条缓存的磁盘路径：<root>/<sourceKey>/<bookKey>/<chapterKey>.json。
 // chapterKey 已是 hex 哈希，不含路径分隔符。
-func (s *ReaderService) contentFilePath(origin, bookURL, chapterKey string) string {
+func (s *ReaderService) contentFilePath(sourceID, bookURL, chapterKey string) string {
 	root := s.readerContentDir()
 	if root == "" {
 		return ""
 	}
-	originHash := contentBookKey(origin, "")
-	return filepath.Join(root, originHash, contentBookKey(origin, bookURL), chapterKey+".json")
+	return filepath.Join(root, contentOriginKey(sourceID), contentBookKey(sourceID, bookURL), chapterKey+".json")
 }
 
 // contentBookDir 某本书的缓存目录（整本清理用）。
-func (s *ReaderService) contentBookDir(origin, bookURL string) string {
+func (s *ReaderService) contentBookDir(sourceID, bookURL string) string {
 	root := s.readerContentDir()
 	if root == "" {
 		return ""
 	}
-	return filepath.Join(root, contentBookKey(origin, ""), contentBookKey(origin, bookURL))
+	return filepath.Join(root, contentOriginKey(sourceID), contentBookKey(sourceID, bookURL))
 }
 
 // writeContentFile 原子写入缓存文件（临时文件 + rename）。
@@ -175,6 +186,22 @@ func removeContentFile(path string) {
 
 // ─── 读写 ──────────────────────────────────────────────────────────────────
 
+// contentSourceID 缓存键用的书源行 ID。src 缺失时按 origin 兜底查一次：
+// 直接调用（测试、诊断路径）可能只拿到书籍与 origin。
+func (s *ReaderService) contentSourceID(ctx context.Context, src *model.ReaderBookSource, book *model.ReaderBook) string {
+	if src != nil && src.ID != "" {
+		return src.ID
+	}
+	if s == nil || s.repo == nil || book == nil {
+		return ""
+	}
+	found, err := s.repo.GetSourceAnyByURL(ctx, book.Origin)
+	if err != nil || found == nil {
+		return ""
+	}
+	return found.ID
+}
+
 // loadCachedContent 读取一章节的缓存：命中返回内容与 true。
 //
 // contentType 为空表示「按章节取任意类型」（正文链路不需要预知类型）；给出具体类型时
@@ -185,7 +212,11 @@ func (s *ReaderService) loadCachedContent(ctx context.Context, src *model.Reader
 	if s == nil || s.repo == nil || book == nil {
 		return nil, false
 	}
-	bookKey := contentBookKey(book.Origin, book.BookURL)
+	sourceID := s.contentSourceID(ctx, src, book)
+	if sourceID == "" {
+		return nil, false
+	}
+	bookKey := contentBookKey(sourceID, book.BookURL)
 	chapterKey := contentChapterKey(book, ch)
 	row, err := s.repo.GetContentCacheByChapter(ctx, bookKey, chapterKey, contentType)
 	if err != nil || row == nil {
@@ -205,7 +236,7 @@ func (s *ReaderService) loadCachedContent(ctx context.Context, src *model.Reader
 		s.dropContentCacheRow(ctx, row)
 		return nil, false
 	}
-	path := s.contentFilePath(book.Origin, book.BookURL, chapterKey)
+	path := s.contentFilePath(sourceID, book.BookURL, chapterKey)
 	raw, err := os.ReadFile(path) // #nosec G304 -- 路径由服务端生成
 	if err != nil {
 		s.dropContentCacheRow(ctx, row)
@@ -253,7 +284,11 @@ func (s *ReaderService) saveCachedContent(ctx context.Context, src *model.Reader
 	if err != nil || len(raw) > readerContentMaxEntryBytes {
 		return
 	}
-	path := s.contentFilePath(book.Origin, book.BookURL, contentChapterKey(book, ch))
+	sourceID := s.contentSourceID(ctx, src, book)
+	if sourceID == "" {
+		return
+	}
+	path := s.contentFilePath(sourceID, book.BookURL, contentChapterKey(book, ch))
 	if err := writeContentFile(path, raw); err != nil {
 		if s.log != nil {
 			s.log.Warn("reader: 写入正文缓存失败", zap.String("path", path), zap.Error(err))
@@ -262,8 +297,8 @@ func (s *ReaderService) saveCachedContent(ctx context.Context, src *model.Reader
 	}
 	now := time.Now().Unix()
 	row := &model.ReaderContentCache{
-		OriginHash:      contentBookKey(book.Origin, ""),
-		BookKey:         contentBookKey(book.Origin, book.BookURL),
+		OriginHash:      contentOriginKey(sourceID),
+		BookKey:         contentBookKey(sourceID, book.BookURL),
 		ChapterKey:      contentChapterKey(book, ch),
 		ChapterIdentity: contentChapterIdentity(book, ch),
 		ChapterIndex:    ch.Index,
@@ -318,17 +353,19 @@ func (s *ReaderService) pruneContentDirIfEmpty(dir string) {
 	}
 }
 
-// ClearContentCacheForBook 清理一本书的全部正文缓存（换源/移出书架时调用）。
-// 同源同书可能被多个用户收藏：仍被引用时不删（见 DeleteBook/ClearBookOrigin）。
-func (s *ReaderService) ClearContentCacheForBook(ctx context.Context, origin, bookURL string) {
-	if s == nil || s.repo == nil || origin == "" || bookURL == "" {
+// ClearContentCacheForBook 清理某书源行下一本书的全部正文缓存（换源/移出书架时调用）。
+//
+// sourceID 是书源行 ID：书源按用户独立，缓存也随之按书源行隔离，所以删除
+// 自己那份书源或换源不会影响其他用户的同名书源缓存。
+func (s *ReaderService) ClearContentCacheForBook(ctx context.Context, sourceID, bookURL string) {
+	if s == nil || s.repo == nil || sourceID == "" || bookURL == "" {
 		return
 	}
-	bookKey := contentBookKey(origin, bookURL)
+	bookKey := contentBookKey(sourceID, bookURL)
 	if _, err := s.repo.DeleteContentCacheByBook(ctx, bookKey); err != nil {
 		return
 	}
-	if dir := s.contentBookDir(origin, bookURL); dir != "" {
+	if dir := s.contentBookDir(sourceID, bookURL); dir != "" {
 		_ = os.RemoveAll(dir)
 		s.pruneContentDirIfEmpty(filepath.Dir(dir))
 	}
@@ -403,7 +440,11 @@ func (s *ReaderService) RemapContentCacheOnTocChange(ctx context.Context, book *
 	if s == nil || s.repo == nil || book == nil || len(oldChapters) == 0 || len(newChapters) == 0 {
 		return
 	}
-	bookKey := contentBookKey(book.Origin, book.BookURL)
+	sourceID := s.contentSourceID(ctx, nil, book)
+	if sourceID == "" {
+		return
+	}
+	bookKey := contentBookKey(sourceID, book.BookURL)
 	rows, err := s.repo.ListContentCacheByBook(ctx, bookKey)
 	if err != nil || len(rows) == 0 {
 		return
@@ -445,7 +486,7 @@ func (s *ReaderService) RemapContentCacheOnTocChange(ctx context.Context, book *
 			continue // 身份未变，只更新序号
 		}
 		oldPath := s.contentPathFromRow(&row)
-		newPath := s.contentFilePath(book.Origin, book.BookURL, newKey)
+		newPath := s.contentFilePath(sourceID, book.BookURL, newKey)
 		if oldPath != "" && newPath != "" {
 			if err := os.MkdirAll(filepath.Dir(newPath), 0o750); err == nil {
 				// 文件不在（只留下索引）时忽略：新条目下次读取会自动重抓。

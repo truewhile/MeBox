@@ -19,7 +19,7 @@ func TestDecodeImageBytesRunsRuleJS(t *testing.T) {
 		`"ruleContent": {"content": "id.content@textNodes", "imageDecode": "var src = new Uint8Array(result); var out = new Uint8Array(src.length); for (var i=0;i<src.length;i++){ out[i] = src[i] ^ 0x55; } out"}`,
 		1,
 	)
-	if _, err := svc.ImportSources(ctx, raw); err != nil {
+	if _, err := svc.ImportSources(ctx, "u1", raw); err != nil {
 		t.Fatalf("更新书源失败: %v", err)
 	}
 	rule := svc.ImageDecodeRule(ctx, book)
@@ -64,7 +64,7 @@ func TestDecodeImageBytesFallsBackOnBadRule(t *testing.T) {
 		`"ruleContent": {"content": "id.content@textNodes", "imageDecode": "throw new Error('bad rule')"}`,
 		1,
 	)
-	if _, err := svc.ImportSources(ctx, raw); err != nil {
+	if _, err := svc.ImportSources(ctx, "u1", raw); err != nil {
 		t.Fatalf("更新书源失败: %v", err)
 	}
 	data := []byte("still-an-image")
@@ -87,7 +87,7 @@ func TestDecodeCoverBytes(t *testing.T) {
 		`"bookSourceType": 0, "coverDecodeJs": "var src = new Uint8Array(result); var out = new Uint8Array(src.length); for (var i=0;i<src.length;i++){ out[i] = src[i] ^ 0x33; } out",`,
 		1,
 	)
-	if _, err := svc.ImportSources(ctx, raw); err != nil {
+	if _, err := svc.ImportSources(ctx, "u1", raw); err != nil {
 		t.Fatalf("更新书源失败: %v", err)
 	}
 	if !svc.SourceHasCoverDecode(srv.URL) {

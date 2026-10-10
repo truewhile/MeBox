@@ -22,7 +22,7 @@ import (
 // 覆盖「登录 → Cookie 落库 → 后续请求自动携带 Cookie → 登出清理」。
 
 // readerTestUserID 登录接口按用户隔离浏览器待办，测试里统一用一个固定用户。
-const readerTestUserID = "test-user"
+const readerTestUserID = "u1"
 
 // loginTestServer 模拟一个需要登录的书源站点：
 //   - POST /login_api 校验账号密码并下发会话 Cookie
@@ -129,10 +129,10 @@ func newLoginTestService(t *testing.T) (*ReaderService, *repository.Container) {
 // prepareLoginSource 导入测试书源并返回其 ID。
 func prepareLoginSource(t *testing.T, svc *ReaderService, sourceJSON string) string {
 	t.Helper()
-	if _, err := svc.ImportSources(t.Context(), sourceJSON); err != nil {
+	if _, err := svc.ImportSources(t.Context(), "u1", sourceJSON); err != nil {
 		t.Fatal(err)
 	}
-	srcs, err := svc.ListSources(t.Context())
+	srcs, err := svc.ListSources(t.Context(), "u1")
 	if err != nil || len(srcs) == 0 {
 		t.Fatalf("导入后应能读到书源: %v", err)
 	}
@@ -151,14 +151,14 @@ func TestSourceLoginEndToEnd(t *testing.T) {
 	sourceID := prepareLoginSource(t, svc, loginTestSourceJSON(t, srv.URL))
 
 	// ── 登录前：未鉴权，站点返回未登录页 → 搜不到书 ──
-	if books, _, err := svc.Search(ctx, "会员", nil, 1); err != nil {
+	if books, _, err := svc.Search(ctx, "u1", "会员", nil, 1); err != nil {
 		t.Fatal(err)
 	} else if len(books) != 0 {
 		t.Fatalf("未登录时不应搜到结果: %+v", books)
 	}
 
 	// ── 登录 ──
-	res, err := svc.RunLoginAction(ctx, readerTestUserID, sourceID, "", map[string]string{
+	res, err := svc.RunLoginAction(ctx, "u1", sourceID, "", map[string]string{
 		"邮箱": "user@example.com", "密码": "pw123456",
 	})
 	if err != nil {
@@ -176,7 +176,7 @@ func TestSourceLoginEndToEnd(t *testing.T) {
 
 	// ── 登录态应落库（换一个 service 实例仍可读到）──
 	svc2 := NewReaderService(svc.cfg, zap.NewNop(), repos)
-	info, err := svc2.GetSourceLogin(ctx, readerTestUserID, sourceID)
+	info, err := svc2.GetSourceLogin(ctx, "u1", sourceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestSourceLoginEndToEnd(t *testing.T) {
 	}
 
 	// ── 登录后搜索：应携带 Cookie 并成功 ──
-	books, skipped, err := svc.Search(ctx, "会员", nil, 1)
+	books, skipped, err := svc.Search(ctx, "u1", "会员", nil, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,17 +200,17 @@ func TestSourceLoginEndToEnd(t *testing.T) {
 	}
 
 	// ── 登出：Cookie 清除，搜索重新未登录 ──
-	if err := svc.ClearSourceLogin(ctx, sourceID); err != nil {
+	if err := svc.ClearSourceLogin(ctx, "u1", sourceID); err != nil {
 		t.Fatal(err)
 	}
-	info, err = svc.GetSourceLogin(ctx, readerTestUserID, sourceID)
+	info, err = svc.GetSourceLogin(ctx, "u1", sourceID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if info.LoggedIn || len(info.Cookies) != 0 {
 		t.Fatalf("登出后不应残留登录态: %+v", info)
 	}
-	if books, _, err := svc.Search(ctx, "会员", nil, 1); err != nil {
+	if books, _, err := svc.Search(ctx, "u1", "会员", nil, 1); err != nil {
 		t.Fatal(err)
 	} else if len(books) != 0 {
 		t.Fatalf("登出后不应还能搜到结果: %+v", books)
@@ -224,7 +224,7 @@ func TestSourceLoginWrongPassword(t *testing.T) {
 	svc, _ := newLoginTestService(t)
 	sourceID := prepareLoginSource(t, svc, loginTestSourceJSON(t, srv.URL))
 
-	res, err := svc.RunLoginAction(t.Context(), readerTestUserID, sourceID, "", map[string]string{
+	res, err := svc.RunLoginAction(t.Context(), "u1", sourceID, "", map[string]string{
 		"邮箱": "user@example.com", "密码": "wrong",
 	})
 	if err != nil {
@@ -248,7 +248,7 @@ func TestSourceLoginInfo_ExposesUIFields(t *testing.T) {
 	svc, _ := newLoginTestService(t)
 	sourceID := prepareLoginSource(t, svc, loginTestSourceJSON(t, srv.URL))
 
-	info, err := svc.GetSourceLogin(t.Context(), readerTestUserID, sourceID)
+	info, err := svc.GetSourceLogin(t.Context(), "u1", sourceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestSourceStateEncryptedAtRest(t *testing.T) {
 	ctx := t.Context()
 	sourceID := prepareLoginSource(t, svc, loginTestSourceJSON(t, srv.URL))
 
-	if _, err := svc.RunLoginAction(ctx, readerTestUserID, sourceID, "", map[string]string{
+	if _, err := svc.RunLoginAction(ctx, "u1", sourceID, "", map[string]string{
 		"邮箱": "user@example.com", "密码": "pw123456",
 	}); err != nil {
 		t.Fatal(err)
@@ -313,10 +313,10 @@ func TestSourceVariableRoundTrip(t *testing.T) {
 	ctx := t.Context()
 	sourceID := prepareLoginSource(t, svc, loginTestSourceJSON(t, srv.URL))
 
-	if err := svc.SetSourceVariable(ctx, sourceID, `{"线路":"https://v2.example.com"}`); err != nil {
+	if err := svc.SetSourceVariable(ctx, "u1", sourceID, `{"线路":"https://v2.example.com"}`); err != nil {
 		t.Fatal(err)
 	}
-	info, err := svc.GetSourceLogin(ctx, readerTestUserID, sourceID)
+	info, err := svc.GetSourceLogin(ctx, "u1", sourceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +329,7 @@ func TestSourceVariableRoundTrip(t *testing.T) {
 	}
 
 	// 非法 JSON 应被拒绝
-	if err := svc.SetSourceVariable(ctx, sourceID, "not-json"); err == nil {
+	if err := svc.SetSourceVariable(ctx, "u1", sourceID, "not-json"); err == nil {
 		t.Fatal("非法 JSON 变量应被拒绝")
 	}
 }
@@ -367,7 +367,7 @@ func TestEnabledCookieJarGating(t *testing.T) {
 }`
 	sourceID := prepareLoginSource(t, svc, srcJSON)
 
-	if _, _, err := svc.Search(ctx, "任意", nil, 1); err != nil {
+	if _, _, err := svc.Search(ctx, "u1", "任意", nil, 1); err != nil {
 		t.Fatal(err)
 	}
 	// 自动捕获被关闭：不应出现 auto=from-response
@@ -386,10 +386,10 @@ func TestEnabledCookieJarGating(t *testing.T) {
 	defer srv2.Close()
 	srcJSONOn = strings.ReplaceAll(srcJSONOn, srv.URL, srv2.URL)
 	// prepareLoginSource 返回列表首个书源，这里按 URL 精确定位刚导入的对照源
-	if _, err := svc.ImportSources(ctx, srcJSONOn); err != nil {
+	if _, err := svc.ImportSources(ctx, "u1", srcJSONOn); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := svc.Search(ctx, "任意", nil, 1); err != nil {
+	if _, _, err := svc.Search(ctx, "u1", "任意", nil, 1); err != nil {
 		t.Fatal(err)
 	}
 	if got := svc.newSourceState(ctx, srv2.URL).GetCookie(srv2.URL); !strings.Contains(got, "auto=from-response") {

@@ -444,7 +444,7 @@ func (s *ReaderService) OpenContentComment(ctx context.Context, userID, bookID, 
 		return nil, fmt.Errorf("书籍不存在或已移出书架")
 	}
 	sourceID := ""
-	if src, findErr := s.repo.GetSourceByURL(ctx, book.Origin); findErr == nil && src != nil {
+	if src, findErr := s.repo.GetSourceAnyByURL(ctx, book.Origin); findErr == nil && src != nil {
 		sourceID = src.ID
 	}
 	if strings.TrimSpace(title) == "" {

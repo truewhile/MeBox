@@ -123,7 +123,7 @@ func (s *ReaderService) SourceHasCoverDecode(origin string) bool {
 
 // ImportSources 导入书源：支持 JSON 数组 / 单对象 / Base64 / 网络URL。
 // 返回导入数量。
-func (s *ReaderService) ImportSources(ctx context.Context, text string) (int, error) {
+func (s *ReaderService) ImportSources(ctx context.Context, userID, text string) (int, error) {
 	text = strings.TrimSpace(text)
 	// 去 UTF-8 BOM（Windows 记事本导出的书源文件常见），否则 URL 检测和 JSON 解析都会失败
 	text = strings.TrimPrefix(text, "\uFEFF")
@@ -155,10 +155,11 @@ func (s *ReaderService) ImportSources(ctx context.Context, text string) (int, er
 		}
 		// 记录该源是否声明封面解密：搜索结果（尚未入库）据此决定封面代理形态。
 		s.markSourceCoverDecode(bs.BookSourceURL, strings.TrimSpace(SPtr(bs.CoverDecodeJs)) != "")
-		// 已存在则更新，否则新建（按书源 URL 去重）
-		existing, err := s.repo.GetSourceByURL(ctx, bs.BookSourceURL)
+		// 已存在则更新，否则新建（按「用户 + 书源 URL」去重：书源按用户独立）
+		existing, err := s.repo.GetSourceByURL(ctx, userID, bs.BookSourceURL)
 		now := time.Now()
 		record := &model.ReaderBookSource{
+			UserID:         userID,
 			Name:           bs.BookSourceName,
 			GroupName:      strings.TrimSpace(SPtr(bs.BookSourceGroup)),
 			Type:           bs.Type(),
@@ -275,9 +276,9 @@ func ParseSourcePayload(text string) []string {
 	return out
 }
 
-// ListSources 书源列表（标注是否支持登录，供前端决定是否显示登录入口）。
-func (s *ReaderService) ListSources(ctx context.Context) ([]model.ReaderBookSource, error) {
-	sources, err := s.repo.ListSources(ctx)
+// ListSources 当前用户的书源列表（标注是否支持登录，供前端决定是否显示登录入口）。
+func (s *ReaderService) ListSources(ctx context.Context, userID string) ([]model.ReaderBookSource, error) {
+	sources, err := s.repo.ListSources(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -311,9 +312,9 @@ func rawSourceHasLogin(rawJSON string) bool {
 	return strings.TrimSpace(SPtr(probe.LoginURL)) != "" || strings.TrimSpace(SPtr(probe.LoginUI)) != ""
 }
 
-// UpdateSourceEnabled 启停书源。
-func (s *ReaderService) UpdateSourceEnabled(ctx context.Context, id string, enabled bool) error {
-	src, err := s.repo.GetSource(ctx, id)
+// UpdateSourceEnabled 启停书源（限当前用户自己的书源）。
+func (s *ReaderService) UpdateSourceEnabled(ctx context.Context, userID, id string, enabled bool) error {
+	src, err := s.repo.GetSourceForUser(ctx, userID, id)
 	if err != nil {
 		return err
 	}
@@ -321,8 +322,11 @@ func (s *ReaderService) UpdateSourceEnabled(ctx context.Context, id string, enab
 	return s.repo.UpdateSource(ctx, src)
 }
 
-// DeleteSource 删除书源。
-func (s *ReaderService) DeleteSource(ctx context.Context, id string) error {
+// DeleteSource 删除书源（限当前用户自己的书源）。
+func (s *ReaderService) DeleteSource(ctx context.Context, userID, id string) error {
+	if _, err := s.repo.GetSourceForUser(ctx, userID, id); err != nil {
+		return err
+	}
 	return s.repo.DeleteSource(ctx, id)
 }
 
@@ -790,7 +794,6 @@ func (s *ReaderService) readerFileCacheDir() string {
 	return ""
 }
 
-
 // srcID 书源记录 ID（登录界面待办按书源隔离）。
 func (sess *sourceSession) srcID() string {
 	if sess.src != nil {
@@ -917,11 +920,11 @@ type searchHit struct {
 // page 是页码（从 1 开始，对应书源 searchUrl 里的 {{page}}）：搜索按页下发，
 // 前端滚到底再请求下一页并做增量合并。搜索范围内的所有源共用同一个页码；
 // searchUrl 里没有 {{page}} 的源会重复返回首页结果，由调用方按「书名+作者」去重。
-func (s *ReaderService) Search(ctx context.Context, key string, sourceIDs []string, page int) ([]SearchBook, []SearchSkipped, error) {
+func (s *ReaderService) Search(ctx context.Context, userID, key string, sourceIDs []string, page int) ([]SearchBook, []SearchSkipped, error) {
 	if page < 1 {
 		page = 1
 	}
-	sources, err := s.repo.ListSources(ctx)
+	sources, err := s.repo.ListSources(ctx, userID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1867,7 +1870,7 @@ func (s *ReaderService) FetchMediaWithOptions(ctx context.Context, book *model.R
 		helper.StripAcceptEncoding(httpReq.Header)
 		// 书源级请求头
 		if s.repo != nil {
-			if found, findErr := s.repo.GetSourceByURL(ctx, book.Origin); findErr == nil && found != nil && found.Header != "" {
+			if found, findErr := s.repo.GetSourceAnyByURL(ctx, book.Origin); findErr == nil && found != nil && found.Header != "" {
 				var headers map[string]any
 				if json.Unmarshal([]byte(found.Header), &headers) == nil {
 					for k, v := range headers {
@@ -2406,7 +2409,7 @@ func (s *ReaderService) DecodeImageBytes(ctx context.Context, book *model.Reader
 	if js == "" {
 		return data, nil
 	}
-	srcModel, err := s.repo.GetSourceByURL(ctx, book.Origin)
+	srcModel, err := s.repo.GetSourceAnyByURL(ctx, book.Origin)
 	if err != nil {
 		return data, nil
 	}
@@ -2467,7 +2470,7 @@ func (s *ReaderService) fetchSourceResource(ctx context.Context, sourceURL, rawU
 	if err != nil || bs == nil {
 		return nil, fmt.Errorf("书源不存在")
 	}
-	srcModel, err := s.repo.GetSourceByURL(ctx, sourceURL)
+	srcModel, err := s.repo.GetSourceAnyByURL(ctx, sourceURL)
 	if err != nil {
 		return nil, err
 	}
@@ -2605,8 +2608,10 @@ func (s *ReaderService) SwitchOrigin(ctx context.Context, userID, bookID string,
 	return book, nil
 }
 
-// ClearBookOriginCacheIfUnreferenced 清理 (origin, bookURL) 的正文缓存，
+// ClearBookOriginCacheIfUnreferenced 清理某本网络书的正文缓存，
 // 但仅当没有其他书架记录仍在引用它时（同一本书可能被多个用户收藏）。
+//
+// 缓存按「书源行 + 书本地址」组织：换源后旧地址的缓存不会再命中，这里负责回收空间。
 func (s *ReaderService) ClearBookOriginCacheIfUnreferenced(ctx context.Context, origin, bookURL, excludeBookID string) {
 	if s == nil || s.repo == nil || origin == "" || bookURL == "" {
 		return
@@ -2619,7 +2624,11 @@ func (s *ReaderService) ClearBookOriginCacheIfUnreferenced(ctx context.Context, 
 			}
 		}
 	}
-	s.ClearContentCacheForBook(ctx, origin, bookURL)
+	sourceID := s.contentSourceID(ctx, nil, &model.ReaderBook{Origin: origin})
+	if sourceID == "" {
+		return
+	}
+	s.ClearContentCacheForBook(ctx, sourceID, bookURL)
 }
 
 // GetBook 按 ID 取书（媒体代理等使用）。
@@ -3134,13 +3143,13 @@ func deepCopyChapterContent(in *ChapterContent) *ChapterContent {
 
 // ContentBatchItem 批量取正文的单章结果。
 type ContentBatchItem struct {
-	ChapterIndex int    `json:"chapter_index"`
-	Type         string `json:"type,omitempty"`
-	Content      string `json:"content,omitempty"`
-	Tracks       []string `json:"tracks,omitempty"`
-	Images       []string `json:"images,omitempty"`
-	ImageStyle   string `json:"image_style,omitempty"`
-	IsHLS        bool   `json:"hls,omitempty"`
+	ChapterIndex int              `json:"chapter_index"`
+	Type         string           `json:"type,omitempty"`
+	Content      string           `json:"content,omitempty"`
+	Tracks       []string         `json:"tracks,omitempty"`
+	Images       []string         `json:"images,omitempty"`
+	ImageStyle   string           `json:"image_style,omitempty"`
+	IsHLS        bool             `json:"hls,omitempty"`
 	Comments     []ContentComment `json:"comments,omitempty"`
 	// Cached 为 true 表示这次由持久缓存直接命中（未访问书源）。
 	Cached bool   `json:"cached"`
@@ -3418,8 +3427,8 @@ func (s *ReaderService) SmokeSource(ctx context.Context, raw string, key string)
 }
 
 // Debug 书源调试接口：返回逐条日志字符串（前端展示用）。
-func (s *ReaderService) Debug(ctx context.Context, sourceID, key string) ([]string, error) {
-	src, bs, err := s.loadSource(ctx, sourceID)
+func (s *ReaderService) Debug(ctx context.Context, userID, sourceID, key string) ([]string, error) {
+	src, bs, err := s.loadSourceForUser(ctx, userID, sourceID)
 	if err != nil {
 		return nil, err
 	}
@@ -3448,6 +3457,19 @@ func (s *ReaderService) loadSource(ctx context.Context, sourceID string) (*model
 	return src, bs, nil
 }
 
+// loadSourceForUser 加载书源并校验归属：书源管理/登录/调试等「用户接口」必须走这条。
+func (s *ReaderService) loadSourceForUser(ctx context.Context, userID, sourceID string) (*model.ReaderBookSource, *BookSource, error) {
+	src, err := s.repo.GetSourceForUser(ctx, userID, sourceID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("书源不存在或不属于当前用户")
+	}
+	bs, err := ParseBookSource(src.RawJSON)
+	if err != nil {
+		return nil, nil, fmt.Errorf("书源 JSON 解析失败: %w", err)
+	}
+	return src, bs, nil
+}
+
 // loadSourceFlexible 按 ID 或 URL 加载书源（书架上只存 origin URL，
 // 前端阅读链路用 source_url 定位书源）。
 func (s *ReaderService) loadSourceFlexible(ctx context.Context, sourceID, sourceURL string) (*model.ReaderBookSource, *BookSource, error) {
@@ -3457,7 +3479,7 @@ func (s *ReaderService) loadSourceFlexible(ctx context.Context, sourceID, source
 	if sourceURL == "" {
 		return nil, nil, fmt.Errorf("缺少书源标识（source_id 或 source_url）")
 	}
-	src, err := s.repo.GetSourceByURL(ctx, sourceURL)
+	src, err := s.repo.GetSourceAnyByURL(ctx, sourceURL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("书源不存在或已被删除")
 	}

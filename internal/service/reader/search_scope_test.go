@@ -53,11 +53,11 @@ func TestSearchRespectsSourceScope(t *testing.T) {
 		scopeEchoSourceJSON(t, "源A", srvA.URL),
 		scopeEchoSourceJSON(t, "源B", srvB.URL),
 	} {
-		if _, err := svc.ImportSources(t.Context(), raw); err != nil {
+		if _, err := svc.ImportSources(t.Context(), "u1", raw); err != nil {
 			t.Fatal(err)
 		}
 	}
-	sources, err := svc.ListSources(t.Context())
+	sources, err := svc.ListSources(t.Context(), "u1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestSearchRespectsSourceScope(t *testing.T) {
 	}
 
 	// 指定单个源：只应搜到该源的结果
-	books, skipped, err := svc.Search(t.Context(), "书", []string{idByName["源A"]}, 1)
+	books, skipped, err := svc.Search(t.Context(), "u1", "书", []string{idByName["源A"]}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestSearchRespectsSourceScope(t *testing.T) {
 	}
 
 	// 空范围：默认全部启用书源，两个源都应命中
-	books, _, err = svc.Search(t.Context(), "书", nil, 1)
+	books, _, err = svc.Search(t.Context(), "u1", "书", nil, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestSearchRespectsSourceScope(t *testing.T) {
 	}
 
 	// 范围里的源已不存在（删源/换设备）时退回全部启用，而不是搜不到
-	books, _, err = svc.Search(t.Context(), "书", []string{"not-a-real-source"}, 1)
+	books, _, err = svc.Search(t.Context(), "u1", "书", []string{"not-a-real-source"}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

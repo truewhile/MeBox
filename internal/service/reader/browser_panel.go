@@ -450,7 +450,7 @@ func (s *ReaderService) requestBrowserResource(ctx context.Context, sourceURL st
 	}
 	// 书源级请求头（含 Referer / UA），与阅读请求保持一致
 	if s.repo != nil {
-		if src, findErr := s.repo.GetSourceByURL(reqCtx, sourceURL); findErr == nil && src != nil && src.Header != "" {
+		if src, findErr := s.repo.GetSourceAnyByURL(reqCtx, sourceURL); findErr == nil && src != nil && src.Header != "" {
 			var headers map[string]any
 			if json.Unmarshal([]byte(src.Header), &headers) == nil {
 				for k, v := range headers {
@@ -557,7 +557,7 @@ func (s *ReaderService) ProxyBrowserXHR(ctx context.Context, id, method, target 
 		}
 	}
 	if s.repo != nil {
-		if src, findErr := s.repo.GetSourceByURL(reqCtx, entry.sourceURL); findErr == nil && src != nil && src.Header != "" {
+		if src, findErr := s.repo.GetSourceAnyByURL(reqCtx, entry.sourceURL); findErr == nil && src != nil && src.Header != "" {
 			var extra map[string]any
 			if json.Unmarshal([]byte(src.Header), &extra) == nil {
 				for k, v := range extra {

@@ -8,12 +8,19 @@ import (
 )
 
 // ReaderBookSource 书源：原始 JSON 全量存储 + 常用字段冗余列出便于筛选排序。
+//
+// 书源按用户独立：同一份书源不同用户可以各存一份（各自启停、排序、修改规则与变量），
+// 互不可见。唯一键是 (user_id, source_url)；跨用户的「同一本书」靠
+// ReaderBook.Origin（书源 URL）而不是书源行 ID 关联。
 type ReaderBookSource struct {
 	Base
+	// UserID 归属用户。历史数据迁移时会回填；值为空表示「旧版全局书源」，
+	// 只在没有任何用户引用时才会出现。
+	UserID         string     `gorm:"type:varchar(36);uniqueIndex:uniq_reader_source_user_url;index" json:"user_id"`
 	Name           string     `gorm:"type:varchar(255);index" json:"name"`
 	GroupName      string     `gorm:"type:varchar(255);index" json:"group"`
 	Type           int        `gorm:"default:0" json:"type"` // 0文本 1音频 2图片 3文件 4视频
-	SourceURL      string     `gorm:"type:varchar(512);index" json:"source_url"`
+	SourceURL      string     `gorm:"type:varchar(512);uniqueIndex:uniq_reader_source_user_url;index" json:"source_url"`
 	RawJSON        string     `gorm:"type:text" json:"-"`
 	Enabled        bool       `gorm:"default:true" json:"enabled"`
 	EnabledExplore bool       `gorm:"default:true" json:"enabled_explore"`

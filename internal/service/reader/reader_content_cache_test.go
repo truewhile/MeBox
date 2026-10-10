@@ -144,8 +144,12 @@ func TestContentCacheHitAndPersist(t *testing.T) {
 		t.Fatalf("缓存命中不应再访问书源，实际 %d 次", got)
 	}
 
-	// 缓存文件确实落盘
-	path := svc.contentFilePath(book.Origin, book.BookURL, contentChapterKey(book, model.ReaderChapter{
+	// 缓存文件确实落盘（键按书源行 ID 组织）。
+	sourceID := svc.contentSourceID(ctx, nil, book)
+	if sourceID == "" {
+		t.Fatal("找不到书源行")
+	}
+	path := svc.contentFilePath(sourceID, book.BookURL, contentChapterKey(book, model.ReaderChapter{
 		Index: 0, Title: "第 1 章", URL: srv.URL + "/book/1/c1.html",
 	}))
 	if path == "" {
@@ -279,7 +283,7 @@ func TestContentCacheInvalidatedOnSourceUpdate(t *testing.T) {
 	}
 	// 重新导入同一书源（RawJSON 变化）→ 指纹变化。
 	updated := strings.Replace(cacheTestSourceJSON(srv.URL), "缓存测试源", "缓存测试源v2", 1)
-	if _, err := svc.ImportSources(ctx, updated); err != nil {
+	if _, err := svc.ImportSources(ctx, "u1", updated); err != nil {
 		t.Fatalf("更新书源失败: %v", err)
 	}
 	if _, err := svc.GetContentForBook(ctx, "u1", book.ID, 0); err != nil {
@@ -297,7 +301,8 @@ func TestContentCacheClearedOnRemoveBook(t *testing.T) {
 	if _, err := svc.GetContentForBook(ctx, "u1", book.ID, 0); err != nil {
 		t.Fatalf("读取失败: %v", err)
 	}
-	dir := svc.contentBookDir(book.Origin, book.BookURL)
+	sourceID := svc.contentSourceID(ctx, nil, book)
+	dir := svc.contentBookDir(sourceID, book.BookURL)
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("缓存目录应存在: %v", err)
 	}
@@ -307,7 +312,7 @@ func TestContentCacheClearedOnRemoveBook(t *testing.T) {
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("移出书架后缓存目录应被清理，err=%v", err)
 	}
-	if rows, err := svc.repo.ListContentCacheByBook(ctx, contentBookKey(book.Origin, book.BookURL)); err != nil || len(rows) != 0 {
+	if rows, err := svc.repo.ListContentCacheByBook(ctx, contentBookKey(sourceID, book.BookURL)); err != nil || len(rows) != 0 {
 		t.Fatalf("缓存索引应清空: rows=%d err=%v", len(rows), err)
 	}
 }
@@ -318,10 +323,12 @@ func TestContentCacheAudioShortTTL(t *testing.T) {
 	ctx := t.Context()
 
 	ch := model.ReaderChapter{Index: 0, Title: "第 1 章", URL: srv.URL + "/book/1/c1.html"}
-	svc.saveCachedContent(ctx, mustSource(t, svc, srv.URL), book, ch, &ChapterContent{
+	src := mustSource(t, svc, srv.URL)
+	bookKey := contentBookKey(src.ID, book.BookURL)
+	svc.saveCachedContent(ctx, src, book, ch, &ChapterContent{
 		Type: "audio", Tracks: []string{srv.URL + "/a.mp3"},
 	})
-	row, err := svc.repo.GetContentCache(ctx, contentBookKey(book.Origin, book.BookURL), contentChapterKey(book, ch), "audio")
+	row, err := svc.repo.GetContentCache(ctx, bookKey, contentChapterKey(book, ch), "audio")
 	if err != nil {
 		t.Fatalf("音频缓存未写入: %v", err)
 	}
@@ -333,10 +340,10 @@ func TestContentCacheAudioShortTTL(t *testing.T) {
 	if err := svc.repo.UpsertContentCache(ctx, row); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := svc.loadCachedContent(ctx, mustSource(t, svc, srv.URL), nil, book, ch, "audio"); ok {
+	if _, ok := svc.loadCachedContent(ctx, src, nil, book, ch, "audio"); ok {
 		t.Fatal("过期缓存不应命中")
 	}
-	if _, err := svc.repo.GetContentCache(ctx, contentBookKey(book.Origin, book.BookURL), contentChapterKey(book, ch), "audio"); err == nil {
+	if _, err := svc.repo.GetContentCache(ctx, bookKey, contentChapterKey(book, ch), "audio"); err == nil {
 		t.Fatal("过期条目应被删除")
 	}
 }
@@ -344,7 +351,7 @@ func TestContentCacheAudioShortTTL(t *testing.T) {
 // mustSource 取（并解析）指定书源记录，供直接调用缓存方法的测试使用。
 func mustSource(t *testing.T, svc *ReaderService, sourceURL string) *model.ReaderBookSource {
 	t.Helper()
-	src, err := svc.repo.GetSourceByURL(context.Background(), sourceURL)
+	src, err := svc.repo.GetSourceByURL(context.Background(), "u1", sourceURL)
 	if err != nil {
 		t.Fatalf("取书源失败: %v", err)
 	}
