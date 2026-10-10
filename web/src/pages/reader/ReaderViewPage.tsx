@@ -30,7 +30,9 @@ import {
   type ReaderSearchOrigin,
 } from '../../api/reader'
 import { useComicSpreads } from '../../hooks/useComicSpreads'
+import { useDoubleTap } from '../../hooks/useDoubleTap'
 import { useHorizontalSwipe } from '../../hooks/useHorizontalSwipe'
+import { useIsTouchDevice } from '../../hooks/useIsTouchDevice'
 import { useSmoothWheelScroll } from '../../hooks/useSmoothWheelScroll'
 import { useReaderAudioStore } from '../../stores/readerAudio'
 import { COMIC_IMAGE_FITS, READER_THEMES, getReaderTheme, useReaderSettingsStore } from '../../stores/readerSettings'
@@ -383,6 +385,19 @@ export default function ReaderViewPage() {
     // 浏览器可能以权限策略等理由拒绝，静默忽略即可（按钮状态由 fullscreenchange 回写）。
     void el.requestFullscreen?.().catch(() => {})
   }, [])
+
+  // ── 手机端：中间区域双击进出全屏 ──
+  // 只在「触摸设备 + 浏览器支持元素全屏」时启用：桌面端不装这套（点击不带任何延迟，
+  // 保持原来的操作手感），iOS Safari 不支持元素全屏（见上）也照旧只留单击呼出菜单。
+  // 区分单击/双击的等待与「第二下同步调 requestFullscreen」的约束都在 useDoubleTap 里。
+  const touchDevice = useIsTouchDevice()
+  const doubleTapFullscreen = fullscreenSupported && touchDevice
+  const { tap: centerTap, arm: armCenterDoubleTap, cancel: cancelCenterTap } = useDoubleTap({
+    // 单击仍是呼出/收起菜单，双击改成进出浏览器全屏。
+    onSingleTap: () => setMenuOpen((v) => !v),
+    onDoubleTap: toggleFullscreen,
+    enabled: doubleTapFullscreen,
+  })
 
   const comicImages = contentType === 'image' && media?.images ? media.images : NO_IMAGES
   const comicDoublePage =
@@ -1221,11 +1236,18 @@ export default function ReaderViewPage() {
   const handleZoneTap = useCallback(
     (clientX: number, rect: DOMRect) => {
       const x = rect.width > 0 ? (clientX - rect.left) / rect.width : 0.5
-      if (x < 0.3) goPrev()
-      else if (x > 0.7) goNext()
-      else setMenuOpen((v) => !v)
+      if (x < 0.3) {
+        cancelCenterTap()
+        goPrev()
+      } else if (x > 0.7) {
+        cancelCenterTap()
+        goNext()
+      } else {
+        // 中间单击=菜单、双击=全屏，区分逻辑在 useDoubleTap（桌面端原样单击）。
+        centerTap()
+      }
     },
-    [goPrev, goNext],
+    [goPrev, goNext, centerTap, cancelCenterTap],
   )
 
   // ── 键盘（桌面端） ──
@@ -1420,7 +1442,13 @@ export default function ReaderViewPage() {
   }
 
   return (
-    <div ref={readerRef} className="fixed inset-0 z-40 flex flex-col" style={{ backgroundColor: theme.bg, color: theme.text }}>
+    <div
+      ref={readerRef}
+      className="fixed inset-0 z-40 flex flex-col"
+      // 手机上双击中间切全屏时，别让浏览器把自己的「双击缩放」也做一遍：
+      // touch-action:manipulation 关掉双击缩放，纵向滚动与双指缩放照常。
+      style={{ backgroundColor: theme.bg, color: theme.text, touchAction: doubleTapFullscreen ? 'manipulation' : undefined }}
+    >
       {/* 正文视口 */}
       <div className="relative flex-1 overflow-hidden">
         <div className={`mx-auto h-full w-full ${comicFullWidth ? '' : 'max-w-[900px]'}`}>
@@ -1443,7 +1471,9 @@ export default function ReaderViewPage() {
               draggable={comicDragSinglePage}
               stageRef={comicStageRef}
               onZone={(zone) => {
-                if (zone === 'center') setMenuOpen((v) => !v)
+                if (zone === 'center') centerTap()
+                // 点了左右分区（翻屏）就丢掉待判定的中间单击，别让它在窗口期满时弹菜单。
+                else cancelCenterTap()
               }}
               initialImage={restorePos}
               onProgress={(idx) => {
@@ -1571,6 +1601,7 @@ export default function ReaderViewPage() {
               aria-label="上一页"
               onClick={() => {
                 if (consumeSwipe()) return
+                cancelCenterTap()
                 goPrev()
               }}
               className="cursor-w-resize"
@@ -1580,7 +1611,8 @@ export default function ReaderViewPage() {
               aria-label="菜单"
               onClick={() => {
                 if (consumeSwipe()) return
-                setMenuOpen((v) => !v)
+                // 中间单击=菜单、双击=全屏，区分逻辑在 useDoubleTap（桌面端原样单击）。
+                centerTap()
               }}
               className="cursor-default"
             />
@@ -1589,6 +1621,7 @@ export default function ReaderViewPage() {
               aria-label="下一页"
               onClick={() => {
                 if (consumeSwipe()) return
+                cancelCenterTap()
                 goNext()
               }}
               className="cursor-e-resize"
@@ -1614,7 +1647,16 @@ export default function ReaderViewPage() {
             type="button"
             aria-label="关闭菜单"
             className="fixed inset-0 z-40 cursor-default bg-black/30"
-            onClick={() => setMenuOpen(false)}
+            onClick={(e) => {
+              // 关菜单要立刻生效，不套单击延迟。
+              setMenuOpen(false)
+              // 但若这一下关在中间区域，就顺手开个双击窗口：菜单开着时双击中间
+              // 也能切全屏（第二下落在刚关掉菜单的正文上，见 useDoubleTap.arm）。
+              // 点在左右三分区（本意是翻页）时不开窗口，免得被下一拍误判成双击。
+              const rect = e.currentTarget.getBoundingClientRect()
+              const x = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0.5
+              if (x >= 0.3 && x <= 0.7) armCenterDoubleTap()
+            }}
           />
           {/* 顶栏 */}
           <div

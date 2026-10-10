@@ -252,8 +252,10 @@ export function ReaderComic({ images, theme, mode, page, onZone, initialImage, o
             const rect = e.currentTarget.getBoundingClientRect()
             const x = (e.clientX - rect.left) / rect.width
             if (x < 0.3) {
+              onZone('left')
               scrollRef.current?.scrollBy({ top: -window.innerHeight * 0.9, behavior: 'auto' })
             } else if (x > 0.7) {
+              onZone('right')
               scrollRef.current?.scrollBy({ top: window.innerHeight * 0.9, behavior: 'auto' })
             } else {
               onZone('center')
