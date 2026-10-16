@@ -1,5 +1,5 @@
-import type { ReaderBook } from '../../api/reader'
-import { formatRelativeTime, sortShelfBooks, unreadChapters } from './bookshelfModel'
+import type { ReaderBook } from '../../api/reader.ts'
+import { formatRelativeTime, sortShelfBooks, unreadChapters } from './bookshelfModel.ts'
 
 function check(name: string, condition: boolean) {
   if (!condition) throw new Error(`bookshelfModel: ${name}`)

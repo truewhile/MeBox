@@ -10,7 +10,7 @@ import {
   normalizeBookGroups,
   reorderBookGroups,
   resolveSelectedGroupId,
-} from './readerBookGroups'
+} from './readerBookGroups.ts'
 
 // 书架分组的纯逻辑回归测试（对齐 utils/libraryTags.test.ts 的写法）。
 

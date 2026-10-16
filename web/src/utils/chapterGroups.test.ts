@@ -1,4 +1,4 @@
-import { CHAPTER_GROUP_SIZE, buildChapterGroups, chapterGroupIndexOf } from './chapterGroups'
+import { CHAPTER_GROUP_SIZE, buildChapterGroups, chapterGroupIndexOf } from './chapterGroups.ts'
 
 // 目录分段分组的纯逻辑回归测试（对齐 utils/readerBookGroups.test.ts 的写法）。
 

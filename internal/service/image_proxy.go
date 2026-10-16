@@ -111,16 +111,19 @@ func NewImageProxy(cfg *config.Config, log *zap.Logger) *ImageProxy {
 		// 仅 URL 解析层的 isPrivateHost 可被十进制/十六进制 IP、解析到
 		// 私网的域名与 DNS rebinding 绕过；在拨号层对最终连接 IP 做二次
 		// 校验（含重定向后的每条连接）堵住该旁路。
-		// 用户明确配置的远程挂载源（如内网 Emby）豁免该私网限制。
-		dialer := &net.Dialer{
+		//
+		// 用户明确配置的远程挂载源（如内网 Emby）与显式配置的服务（如
+		// MetaTube）豁免该私网限制。豁免必须在 DialContext 这一层判断：
+		// Control 回调收到的 address 已经是**解析后的 IP**，而放行名单里
+		// 存的是主机名（mebox-metatube-1、NAS 名），在 Control 里比较永远
+		// 不相等——那段分支对主机名条目是死代码，现场表现就是「名单里有
+		// 这个主机，回源依然被拒」。
+		guardDialer := &net.Dialer{
 			Timeout: 15 * time.Second,
 			Control: func(_, address string, _ syscall.RawConn) error {
 				host, _, err := net.SplitHostPort(address)
 				if err != nil {
 					return err
-				}
-				if proxy.isAllowedRemoteHost(host) {
-					return nil
 				}
 				ip := net.ParseIP(host)
 				if ip == nil {
@@ -132,7 +135,19 @@ func NewImageProxy(cfg *config.Config, log *zap.Logger) *ImageProxy {
 				return nil
 			},
 		}
-		transport.DialContext = dialer.DialContext
+		// 放行目标的专用拨号器：不再做私网校验，但仍然只连到请求里的那个
+		// 主机（豁免的是私网限制，不是「任意目标」）。
+		allowlistedDialer := &net.Dialer{Timeout: 15 * time.Second}
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, err
+			}
+			if proxy.isAllowedRemoteHost(host) {
+				return allowlistedDialer.DialContext(ctx, network, address)
+			}
+			return guardDialer.DialContext(ctx, network, address)
+		}
 	}
 
 	proxy.client = &http.Client{Timeout: 30 * time.Second, Transport: transport}

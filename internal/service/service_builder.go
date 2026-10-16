@@ -253,10 +253,21 @@ func (b *serviceContainerBuilder) initIdentityServices() {
 func (b *serviceContainerBuilder) initImageProxy() {
 	b.c.ImageProxy = NewImageProxy(b.cfg, b.log)
 	b.c.ImageProxy.SetLibraryRootsProvider(b.libraryRoots)
+	// 放行名单 = 远程 Emby 挂载主机 + 用户显式配置的内网服务地址。
+	//
+	// 只放行挂载主机是不够的：MetaTube 这类刮削后端会把「容器服务名」写进
+	// poster_url（现场：http://mebox-metatube-1:8081），连接层 SSRF 校验会把
+	// 每一次封面回源都拒掉，前端长期只拿到占位图。名单本身有 30s 缓存，
+	// 所以管理员改完设置无需重启即可生效。
+	b.c.ImageProxy.SetAllowedRemoteHostsProvider(func() []string {
+		var mounts []string
+		if b.c.EmbyRemote != nil {
+			mounts = b.c.EmbyRemote.ConfiguredRemoteHosts(context.Background())
+		}
+		services := configuredServiceImageHostsFromRepo(context.Background(), b.repos)
+		return mergeImageProxyAllowedHosts(mounts, services)
+	})
 	if b.c.EmbyRemote != nil {
-		b.c.ImageProxy.SetAllowedRemoteHostsProvider(func() []string {
-			return b.c.EmbyRemote.ConfiguredRemoteHosts(context.Background())
-		})
 		// 远程 Emby 的图片 URL 会带着签发时的 api_key 长期缓存/下发；轮换后
 		// URL 里的旧值必然过期。回源时改用账号当前 token，并在上游 401/403 时
 		// 重新登录一次再重试，封面图不再依赖人工改账号。

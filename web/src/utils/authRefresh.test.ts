@@ -5,6 +5,9 @@ import {
   RefreshRequestError,
   createRefreshCoordinator,
   createSingleFlightRunner,
+  createTokenPreflight,
+  decodeJwtExpiryMs,
+  isAccessTokenStale,
   refreshFailureOutcome,
   type RefreshOutcome,
   type RefreshTokens,
@@ -29,6 +32,149 @@ check('503 gateway is transient', refreshFailureOutcome(503) === 'transient')
 check('timeout is transient', refreshFailureOutcome(408) === 'transient')
 check('429 is transient', refreshFailureOutcome(429) === 'transient')
 check('unexpected status is transient', refreshFailureOutcome(418) === 'transient')
+
+// ── JWT 过期判定：首屏放行前必须能识别出「已经过期的 access token」 ────────
+// 现场（2026-10-16 12:49）：刷新页面时本地 token 已过期，React 首屏并发发出
+// 7 个受保护请求，全部 401，控制台一次性刷出 7 行红字；约 2 秒后才由拦截器
+// 刷新成功并重放。修复要求首屏就认得过期 token，先刷新再放行。
+function jwtWithExp(exp: number | string | null): string {
+  const encode = (value: unknown) =>
+    Buffer.from(JSON.stringify(value)).toString('base64url')
+  const claims: Record<string, unknown> = { uid: 'u1' }
+  if (exp !== null) claims.exp = exp
+  return `${encode({ alg: 'HS256', typ: 'JWT' })}.${encode(claims)}.signature`
+}
+
+const NOW = 1_700_000_000_000
+
+check('jwt expiry is decoded to milliseconds',
+  decodeJwtExpiryMs(jwtWithExp(NOW / 1000 + 3600)) === NOW + 3600_000)
+check('jwt without exp decodes to null', decodeJwtExpiryMs(jwtWithExp(null)) === null)
+check('jwt with non-numeric exp decodes to null', decodeJwtExpiryMs(jwtWithExp('soon')) === null)
+check('opaque token decodes to null', decodeJwtExpiryMs('not-a-jwt') === null)
+check('empty token decodes to null', decodeJwtExpiryMs('') === null)
+check('malformed payload decodes to null', decodeJwtExpiryMs('aaa.!!!.ccc') === null)
+
+// 已过期 / 即将过期的 token 必须在首屏就被拦下。
+check('expired token is stale', isAccessTokenStale(jwtWithExp(NOW / 1000 - 1), NOW))
+check('token expiring inside the skew is stale',
+  isAccessTokenStale(jwtWithExp(NOW / 1000 + 20), NOW))
+check('token outside the skew is fresh',
+  isAccessTokenStale(jwtWithExp(NOW / 1000 + 3600), NOW) === false)
+// 边界：正好落在 skew 上算过期（留出余量，避免刷新途中再次过期）。
+check('token exactly at the skew boundary is stale',
+  isAccessTokenStale(jwtWithExp(NOW / 1000 + 30), NOW))
+
+// 没有 token 或 token 无法解析时不能判定为「过期」：
+// 前者由路由守卫处理，后者强行刷新会变成无休止的刷新循环。
+check('missing token is not stale', isAccessTokenStale(null, NOW) === false)
+check('opaque token is not stale', isAccessTokenStale('opaque', NOW) === false)
+
+// ── 发送前预检：本地 token 已过期就先刷新，再让请求带新令牌出去 ────────────
+// 现场（2026-10-16 12:49）：刷新页面时本地 token 已过期，React 首屏并发发出
+// 7 个受保护请求，全部 401，控制台一次刷出 7 行红字；约 2 秒后才由 401 拦截器
+// 刷新成功并重放。修复要求请求在发出前就认得过期 token，先刷新再发送。
+async function expectPreflight(
+  name: string,
+  run: Promise<void>,
+  want: 'resolved' | 'rejected',
+) {
+  let outcome: 'resolved' | 'rejected' = 'resolved'
+  try {
+    await run
+  } catch {
+    outcome = 'rejected'
+  }
+  if (outcome !== want) throw new Error(`authRefresh: ${name} = ${outcome}, want ${want}`)
+}
+
+function preflightHarness(overrides: {
+  accessToken?: string | null
+  refresh?: () => Promise<RefreshOutcome>
+}) {
+  const state = { token: overrides.accessToken === undefined ? 'at-1' : overrides.accessToken }
+  const calls = { refresh: 0 }
+  const ensure = createTokenPreflight({
+    readAccessToken: () => state.token,
+    refreshSession: async () => {
+      calls.refresh += 1
+      if (overrides.refresh) return overrides.refresh()
+      state.token = jwtWithExp(Date.now() / 1000 + 3600)
+      return 'refreshed'
+    },
+    now: () => NOW,
+  })
+  return { state, calls, ensure }
+}
+
+{
+  // 令牌新鲜：不得产生任何刷新请求。
+  const { calls, ensure } = preflightHarness({ accessToken: jwtWithExp(NOW / 1000 + 3600) })
+  await expectPreflight('fresh token passes straight through', ensure(), 'resolved')
+  check('fresh token skips the refresh', calls.refresh === 0)
+}
+
+{
+  // 核心回归：过期令牌必须先刷新，且刷新完成后才返回（调用方据此发请求）。
+  const { state, calls, ensure } = preflightHarness({ accessToken: jwtWithExp(NOW / 1000 - 60) })
+  await expectPreflight('stale token refreshes before sending', ensure(), 'resolved')
+  check('stale token refreshed exactly once', calls.refresh === 1)
+  check('preflight handed out a fresh token',
+    !isAccessTokenStale(state.token, NOW))
+}
+
+{
+  // 并发首屏：7 个请求同时预检，只允许刷新一次（协调器本身是单飞，
+  // 这里确认预检不会绕过它）。
+  const { calls, ensure } = preflightHarness({ accessToken: jwtWithExp(NOW / 1000 - 60) })
+  await Promise.all([ensure(), ensure(), ensure(), ensure(), ensure(), ensure(), ensure()])
+  check('concurrent preflight refreshes once', calls.refresh === 1)
+}
+
+{
+  // 瞬时故障（部署/重启窗口）：保留会话，照常发出请求——
+  // 页面自己会重试，不该把人挡在门外。
+  const { ensure } = preflightHarness({
+    accessToken: jwtWithExp(NOW / 1000 - 60),
+    refresh: async () => 'transient',
+  })
+  await expectPreflight('transient failure still sends the request', ensure(), 'resolved')
+}
+
+{
+  // 服务端明确判定凭证失效：不发请求，直接失败，避免刷出无意义的 401。
+  const { ensure } = preflightHarness({
+    accessToken: jwtWithExp(NOW / 1000 - 60),
+    refresh: async () => 'invalid',
+  })
+  await expectPreflight('revoked session refuses to send', ensure(), 'rejected')
+}
+
+{
+  // 未登录：交给路由守卫和 401 路径处理，预检不替它们做决定。
+  const { calls, ensure } = preflightHarness({ accessToken: null })
+  await expectPreflight('anonymous request is not preflighted', ensure(), 'resolved')
+  check('anonymous request does not refresh', calls.refresh === 0)
+}
+
+{
+  // 非 JWT 令牌（Emby 等外部客户端签发）：读不出 exp，按新鲜处理，
+  // 绝不能因此陷入刷新循环。
+  const { calls, ensure } = preflightHarness({ accessToken: 'opaque-token' })
+  await expectPreflight('opaque token passes through', ensure(), 'resolved')
+  check('opaque token does not refresh', calls.refresh === 0)
+}
+
+{
+  // 刷新抛出异常（网络不可达）：按瞬时故障处理，请求照发。
+  const { ensure } = preflightHarness({
+    accessToken: jwtWithExp(NOW / 1000 - 60),
+    refresh: async () => {
+      throw new Error('network down')
+    },
+  })
+  await expectPreflight('throwing refresh still sends the request', ensure(), 'resolved')
+}
 
 // ── 单飞：并发调用共享同一次执行，结束后可重新执行 ────────────────────────
 {

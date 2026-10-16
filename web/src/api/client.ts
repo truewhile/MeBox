@@ -2,7 +2,7 @@ import axios, { AxiosError, type InternalAxiosRequestConfig } from 'axios'
 
 import { useAuthStore } from '../stores/auth'
 import { getActivePlayProfileId, getActivePlayProfilePinToken } from '../stores/playProfile'
-import type { RefreshOutcome } from '../utils/authRefresh'
+import { createTokenPreflight, type RefreshOutcome } from '../utils/authRefresh'
 
 // Single axios instance used by every API helper. Adds the JWT to outgoing
 // requests and refreshes it on 401. Only an explicit server-side rejection of
@@ -48,8 +48,27 @@ function isRefreshRequest(config?: InternalAxiosRequestConfig | null): boolean {
   return Boolean(config?.url?.includes('/auth/refresh'))
 }
 
+// 请求发出前的令牌预检。本地持久化的 token 往往已经过期，而首屏有多个各自
+// 独立的 useEffect 会并发发请求；不预检的话它们会一起拿到 401，控制台刷出
+// 一整屏红字（现场：2026-10-16 12:49，7 个请求同时 401），用户还要等拦截器
+// 刷新完才看到内容。预检把刷新提到请求之前，且刷新协调器本身是单飞的。
+const preflightAccessToken = createTokenPreflight({
+  readAccessToken: () => useAuthStore.getState().token,
+  refreshSession: () => useAuthStore.getState().refreshSession(),
+})
+
 // Add auth token to requests
-api.interceptors.request.use((config) => {
+api.interceptors.request.use(async (config) => {
+  // 刷新请求自己绝不能走预检，否则会递归刷新。
+  if (!isRefreshRequest(config)) {
+    try {
+      await preflightAccessToken()
+    } catch {
+      // 会话已被服务端判定失效：直接失败，不发无意义的 401 请求。
+      // 清空会话与跳转登录页由刷新协调器和 401 拦截器负责，保持一致。
+      throw new axios.Cancel('session expired')
+    }
+  }
   const token = useAuthStore.getState().token
   if (token) {
     config.headers = config.headers ?? {}

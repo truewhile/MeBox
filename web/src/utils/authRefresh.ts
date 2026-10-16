@@ -15,6 +15,46 @@
 /** 一次刷新尝试的结果。 */
 export type RefreshOutcome = 'refreshed' | 'invalid' | 'transient'
 
+/**
+ * access token 过期前多久就视为失效。刷新要留出余量：刚好卡在 exp 上
+ * 刷新，重放的原请求可能在服务端又已经过期。
+ */
+export const TOKEN_EXPIRY_SKEW_MS = 30_000
+
+/**
+ * 解析 JWT 的 exp 声明并换算成毫秒时间戳。
+ *
+ * 解析失败（非 JWT、base64url 损坏、缺少 exp、exp 不是数字）一律返回 null：
+ * 调用方据此放行，绝不能把「读不懂」当成「已过期」，否则不透明的令牌会导致
+ * 无休止的刷新循环。
+ */
+export function decodeJwtExpiryMs(token: string | null | undefined): number | null {
+  if (!token) return null
+  const segment = token.split('.')[1]
+  if (!segment) return null
+  try {
+    // JWT 使用 base64url 编码，需先还原字符集并补齐 padding。
+    const normalized = segment.replace(/-/g, '+').replace(/_/g, '/')
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')
+    const claims = JSON.parse(atob(padded)) as { exp?: unknown }
+    return typeof claims.exp === 'number' ? claims.exp * 1000 : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * token 是否已过期或即将过期。
+ *
+ * 首屏放行前用它做一次判断：本地持久化的 token 往往已经过期，直接发请求只
+ * 会一次性刷出一屏 401。读不出 exp 的令牌按「新鲜」处理（见 decodeJwtExpiryMs）。
+ */
+export function isAccessTokenStale(token: string | null | undefined, nowMs = Date.now()): boolean {
+  const expiry = decodeJwtExpiryMs(token)
+  if (expiry === null) return false
+  return nowMs >= expiry - TOKEN_EXPIRY_SKEW_MS
+}
+
 /** 刷新接口返回的令牌对。 */
 export interface RefreshTokens {
   token: string
@@ -97,6 +137,44 @@ export function createBrowserExclusiveRunner(
       return locks.request(lockName, () => task()) as Promise<T>
     } catch {
       return task()
+    }
+  }
+}
+
+export interface SessionGateDeps {
+  /** 读取当前 access token（可能来自持久化存储，往往已经过期）。 */
+  readAccessToken: () => string | null
+  /** 刷新会话；语义与 useAuthStore.refreshSession 一致。 */
+  refreshSession: () => Promise<RefreshOutcome>
+  /** 可注入的时间源，便于测试。 */
+  now?: () => number
+}
+
+/**
+ * 构造请求前预检：每个请求发出前调用，必要时先把过期的令牌换新。
+ *
+ * 本地持久化的 access token 常常已经过期。此时若直接发请求，首屏那些各自
+ * 独立的 useEffect 会在同一帧里并发打出受保护请求，全部拿到 401，控制台
+ * 一次刷出一整屏红字，用户还要等 401 拦截器刷新完才能看到内容
+ * （现场：2026-10-16 12:49，7 个请求同时 401）。
+ *
+ * 预检把「先刷新、再发送」放在请求发出之前：
+ *   - token 新鲜（或无法解析 exp）→ 立即返回；
+ *   - token 已过期 → 等待刷新（刷新协调器自带单飞，并发请求只发一次）；
+ *   - 刷新遇到瞬时故障 → 照常发送（页面自己会重试）；
+ *   - 服务端明确判定凭证失效 → 抛出，请求根本不发出去。
+ *
+ * 未登录（没有 token）直接返回：跳登录页是路由守卫的职责。
+ */
+export function createTokenPreflight(deps: SessionGateDeps): () => Promise<void> {
+  return async () => {
+    const token = deps.readAccessToken()
+    if (!token) return
+    const now = deps.now ?? Date.now
+    if (!isAccessTokenStale(token, now())) return
+    const outcome = await deps.refreshSession().catch((): RefreshOutcome => 'transient')
+    if (outcome === 'invalid') {
+      throw new Error('session expired')
     }
   }
 }
