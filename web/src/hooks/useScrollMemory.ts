@@ -63,6 +63,7 @@ function writeScrollPosition(key: string, value: number): void {
 export function shouldRememberScroll(pathname: string): boolean {
   return (
     pathname === '/' ||
+    pathname === '/search' ||
     pathname === '/libraries' ||
     pathname.startsWith('/library/') ||
     pathname.startsWith('/media/')

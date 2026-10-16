@@ -74,7 +74,7 @@ export const MOBILE_BOTTOM_NAV_ITEMS: MobileBottomNavItem[] = [
   },
 ]
 
-const ROOT_MEDIA_PATHS = new Set(['/', '/libraries', '/favourites', '/playlists', '/history'])
+const ROOT_MEDIA_PATHS = new Set(['/', '/search', '/libraries', '/favourites', '/playlists', '/history'])
 
 /** True only for the fullscreen player route (`/play` or `/play/:id`), not `/playlists`. */
 export function isPlayerRoute(pathname: string): boolean {
@@ -131,7 +131,7 @@ export function resolveHeaderBack(pathname: string): HeaderBackTarget | null {
   if (pathname === '/history/stats') {
     return { to: '/history', label: '观看历史' }
   }
-  if (pathname === '/playlists' || pathname === '/favourites' || pathname === '/history') {
+  if (pathname === '/search' || pathname === '/playlists' || pathname === '/favourites' || pathname === '/history') {
     return { to: '/', label: '首页' }
   }
   if (pathname.startsWith('/playlist/')) {
@@ -171,6 +171,7 @@ export function shouldShowMobileBottomNav(pathname: string): boolean {
   if (isPlayerRoute(pathname)) return false
   return (
     pathname === '/' ||
+    pathname === '/search' ||
     pathname === '/libraries' ||
     pathname.startsWith('/library') ||
     pathname.startsWith('/media') ||

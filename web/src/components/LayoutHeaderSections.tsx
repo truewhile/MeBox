@@ -7,7 +7,9 @@ import { ARTWORK, imageURL } from '../api/client'
 import { mediaAPI } from '../api/library'
 import { readerAPI, type ReaderBook } from '../api/reader'
 import type { Media, PlayProfile, User } from '../types'
-import { favouriteMediaLink } from '../utils/mediaNavigation'
+import { favouriteMediaLink, mediaSearchLink, mediaSearchReturnPath } from '../utils/mediaNavigation'
+import { useAuthStore } from '../stores/auth'
+import { usePlayProfileStore } from '../stores/playProfile'
 import { resolveHeaderBack } from './layoutNavigation'
 import { LayoutThemeToggle } from './LayoutThemeToggle'
 import { LayoutUserMenu } from './LayoutUserMenu'
@@ -56,7 +58,11 @@ export function LayoutHeader({
   pathname = '',
 }: LayoutHeaderProps) {
   const navigate = useNavigate()
-  const headerBack = resolveHeaderBack(pathname)
+  const location = useLocation()
+  const searchFrom = mediaSearchReturnPath(location.state)
+  const headerBack = searchFrom && (pathname.startsWith('/library/') || pathname.startsWith('/media/'))
+    ? { to: searchFrom, label: '搜索结果' }
+    : resolveHeaderBack(pathname)
 
   return (
     <header className="relative z-30 flex h-16 shrink-0 items-center justify-between gap-2 border-b border-[var(--app-border)] bg-[var(--app-header-bg)] px-3 backdrop-blur-md sm:h-20 sm:gap-4 sm:px-4 md:px-8">
@@ -295,7 +301,12 @@ function LayoutHeaderBookSearch() {
 const SEARCH_PAGE_SIZE = 8
 
 function LayoutHeaderSearch() {
-  const [query, setQuery] = useState('')
+  const location = useLocation()
+  const userId = useAuthStore((s) => s.user?.id)
+  const profileId = usePlayProfileStore((s) => s.activeProfileId)
+  const [query, setQuery] = useState(() =>
+    location.pathname === '/search' ? new URLSearchParams(location.search).get('q') ?? '' : '',
+  )
   const [isOpen, setIsOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
@@ -312,7 +323,6 @@ function LayoutHeaderSearch() {
   const resultsRef = useRef<Media[]>([])
   const hasMoreRef = useRef(false)
   const navigate = useNavigate()
-  const location = useLocation()
   const locationKey = `${location.pathname}${location.search}`
   const prevLocationKeyRef = useRef(locationKey)
 
@@ -392,14 +402,21 @@ function LayoutHeaderSearch() {
       }
     }, 250)
 
-    return () => clearTimeout(timer)
-  }, [query])
+    return () => {
+      clearTimeout(timer)
+      // 卸载或关键词变化时，已发出的旧请求也不能覆盖当前结果。
+      searchSeqRef.current += 1
+    }
+  }, [query, userId, profileId])
 
   useLayoutEffect(() => {
     if (prevLocationKeyRef.current === locationKey) return
     prevLocationKeyRef.current = locationKey
-    dismissSearchRef.current(true)
-  }, [locationKey])
+    dismissSearchRef.current(false)
+    if (location.pathname === '/search') {
+      setQuery(new URLSearchParams(location.search).get('q') ?? '')
+    }
+  }, [locationKey, location.pathname, location.search])
 
   useEffect(() => {
     function handlePointerDown(e: PointerEvent) {
@@ -446,28 +463,34 @@ function LayoutHeaderSearch() {
     }
   }
 
-  const handleSelect = (item: Media) => {
+  const openSearchPage = () => {
     if (suppressInputRef.current) return
-    const to = favouriteMediaLink(item)
-    dismissSearch(true)
-    navigate(to)
+    const trimmed = query.trim()
+    if (!trimmed) return
+    dismissSearch(false)
+    navigate(mediaSearchLink(trimmed))
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
       dismissSearch(false)
-    } else if (e.key === 'Enter' && results.length > 0) {
-      handleSelect(results[0])
+    } else if (e.key === 'Enter' && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+      e.preventDefault()
+      openSearchPage()
     }
   }
 
   return (
     <div ref={containerRef} className="relative w-full">
       <div className="relative flex items-center">
-        <Search
-          size={15}
-          className="absolute left-3 text-[var(--app-muted)] pointer-events-none transition-colors group-focus-within:text-brand-500 sm:left-3.5 sm:text-[16px]"
-        />
+        <button
+          type="button"
+          onClick={openSearchPage}
+          aria-label="搜索媒体"
+          className="absolute left-3 rounded text-[var(--app-muted)] transition-colors hover:text-brand-500 sm:left-3.5"
+        >
+          <Search size={15} />
+        </button>
         <input
           ref={inputRef}
           type="text"
@@ -488,6 +511,7 @@ function LayoutHeaderSearch() {
           }}
           onKeyDown={handleKeyDown}
           placeholder="搜索媒体…"
+          aria-label="搜索媒体关键词"
           className="w-full h-9 sm:h-10 pl-8 sm:pl-10 pr-8 sm:pr-9 rounded-xl sm:rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel)] text-xs sm:text-sm text-[var(--app-text)] placeholder:text-[var(--app-muted)] shadow-sm outline-none transition-all duration-200 focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 focus:bg-[var(--app-panel-elevated)]"
         />
         {loading ? (
@@ -498,6 +522,7 @@ function LayoutHeaderSearch() {
             onClick={() => {
               dismissSearch(true)
             }}
+            aria-label="清空媒体搜索"
             className="absolute right-3 text-[var(--app-muted)] hover:text-[var(--app-text)] p-0.5 rounded-lg"
           >
             <X size={15} />
@@ -538,15 +563,11 @@ function LayoutHeaderSearch() {
             ) : (
               <div className="space-y-1">
                 {results.map((item) => (
-                  <button
+                  <Link
                     key={item.id}
-                    type="button"
-                    onPointerDown={(e) => {
-                      if (e.button !== 0) return
-                      e.preventDefault()
-                      handleSelect(item)
-                    }}
-                    onClick={() => handleSelect(item)}
+                    to={favouriteMediaLink(item)}
+                    state={{ from: locationKey }}
+                    onClick={() => dismissSearch(false)}
                     className="flex w-full items-center gap-3 rounded-xl p-2 text-left transition-colors hover:bg-[var(--app-hover)] group"
                   >
                     <div className="relative h-12 w-9 shrink-0 overflow-hidden rounded-lg bg-[var(--app-panel-soft)]">
@@ -590,7 +611,7 @@ function LayoutHeaderSearch() {
                         )}
                       </div>
                     </div>
-                  </button>
+                  </Link>
                 ))}
                 {loadingMore && (
                   <div className="flex items-center justify-center gap-2 py-3 text-[10px] text-[var(--app-muted)]">
@@ -605,6 +626,15 @@ function LayoutHeaderSearch() {
                 )}
               </div>
             )}
+            <Link
+              to={mediaSearchLink(query)}
+              onClick={() => dismissSearch(false)}
+              className="sticky -bottom-2 flex items-center justify-center gap-2 border-t border-[var(--app-border)] bg-[var(--app-panel)] px-3 py-3 text-xs font-bold text-brand-500 hover:bg-[var(--app-hover)]"
+            >
+              <Search size={14} />
+              查看全部搜索结果
+              <span className="hidden text-[10px] font-normal text-[var(--app-muted)] sm:inline">按回车搜索</span>
+            </Link>
           </div>
         ) : null}
     </div>
