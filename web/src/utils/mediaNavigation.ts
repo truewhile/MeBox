@@ -2,6 +2,17 @@ import type { Media } from '../types'
 import { isRemoteEmbyID } from './remoteEmby'
 import { getSeriesKey, isEpisodeLike, pathLooksEpisodic } from './groupSeries'
 
+export function mediaSearchLink(query: string, page = 1): string {
+  const params = new URLSearchParams({ q: query.trim() })
+  if (page > 1) params.set('page', String(page))
+  return `/search?${params}`
+}
+
+export function mediaSearchReturnPath(state: unknown): string | undefined {
+  if (!state || typeof state !== 'object' || !('from' in state)) return undefined
+  return typeof state.from === 'string' && state.from.startsWith('/search?') ? state.from : undefined
+}
+
 function pathLooksLikeMovie(media: Media): boolean {
   const path = (media.path || media.display_library_path || media.library_path || '').toLowerCase()
   return /[\\/](?:movie|movies|film|films|电影)[\\/]/i.test(path)
