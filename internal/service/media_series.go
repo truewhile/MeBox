@@ -524,9 +524,16 @@ func groupMediaSeriesCardsByKeys(items []model.Media, keys []string) []SeriesCar
 // GroupMediaSeriesItems folds episode-level rows into one representative media
 // row per series. It is intended for search surfaces where applying a small
 // limit before series grouping would otherwise return several episodes from
-// the same show.
+// the same show. Each display library keeps its own search result.
 func GroupMediaSeriesItems(items []model.Media) []model.Media {
-	cards := groupMediaSeriesCards(items)
+	_, keys := resolveMediaSeriesKeys(items)
+	for i, item := range items {
+		// External IDs and SeriesID can be shared by different libraries. Scope
+		// search grouping to the same library used by the result's label/link,
+		// while preserving episode folding within merged display libraries.
+		keys[i] = seriesFingerprint(mediaTargetLibraryID(item), keys[i])
+	}
+	cards := groupMediaSeriesCardsByKeys(items, keys)
 	if len(cards) == 0 {
 		return []model.Media{}
 	}

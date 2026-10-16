@@ -10,7 +10,7 @@ const ACTION_OVERLAY_CLASS =
 // memo：父级状态变化（如轮播切图、其它卡片操作）不再级联重渲染所有卡片。
 // 注意 actions/renderActions 必须引用稳定（用 renderActions 传函数）memo 才生效。
 export const MediaCard = memo(function MediaCard({
-  media, progress, count, rating, linkTo, linkState, onClick, actions, renderActions, compact,
+  media, progress, count, rating, linkTo, linkState, onClick, actions, renderActions, compact, showLibrary,
 }: {
   media: Media
   progress?: number
@@ -22,6 +22,7 @@ export const MediaCard = memo(function MediaCard({
   actions?: ReactNode
   renderActions?: (media: Media) => ReactNode
   compact?: boolean
+  showLibrary?: boolean
 }) {
   const ref = useRef<HTMLDivElement>(null)
   const href = linkTo ?? `/media/${media.id}`
@@ -31,6 +32,7 @@ export const MediaCard = memo(function MediaCard({
   const blurredPosterSrc = imageURL(media.poster_url, media.updated_at, ARTWORK.posterTiny)
   const displayRating = rating ?? media.rating
   const versionCount = media.versions?.length ?? 0
+  const libraryName = media.display_library_name || media.library_name
   // renderActions 延迟到卡片自身渲染时才调用，保证 memo 生效
   const actionContent = actions ?? renderActions?.(media)
 
@@ -131,6 +133,11 @@ export const MediaCard = memo(function MediaCard({
           }`}>
             {media.title}
           </p>
+          {showLibrary && libraryName && (
+            <p title={libraryName} className="truncate text-[10px] text-[var(--app-muted)] sm:text-xs">
+              {libraryName}
+            </p>
+          )}
           {/* 单行、不折行：年份可截断，徽标永不压缩。折行会让同一行里各卡片的
               徽标落位高低不一，看起来就是「错位」，所以宁可极窄屏上截断年份。
               min-h 统一行高，避免有/无徽标的卡片年份基线差几像素。 */}
