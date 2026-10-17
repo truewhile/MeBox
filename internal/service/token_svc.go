@@ -33,6 +33,8 @@ type Claims struct {
 	Tier    string `json:"tier,omitempty"`
 	Purpose string `json:"purpose,omitempty"`
 	MediaID string `json:"media_id,omitempty"`
+	// Sid 是设备认证会话 ID。旧令牌没有该字段，继续走兼容路径。
+	Sid string `json:"sid,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -60,6 +62,10 @@ type TokenService struct {
 	// rotations 记录刚轮换过的 refresh token 及其新令牌对，供宽限期内
 	// 幂等复用（见 token_refresh_rotation.go）。
 	rotations map[string]rotatedRefreshToken
+
+	// sessionValidator 校验刷新令牌所属认证会话是否仍有效；由服务构建器
+	// 注入，nil 表示不做会话校验（测试或旧配置）。
+	sessionValidator func(ctx context.Context, sessionID, userID string) error
 }
 
 // NewTokenService 创建令牌服务实例。
@@ -92,19 +98,35 @@ var (
 
 // IssuePair 为用户签发新的令牌对。
 func (s *TokenService) IssuePair(ctx context.Context, userID, role, tier string) (*TokenPair, error) {
-	return s.issuePair(ctx, userID, role, tier, false)
+	return s.issuePair(ctx, userID, role, tier, "", false)
 }
 
 // IssuePairBestEffort 为登录签发令牌。SQLite 被后台扫描长期写锁占用时，
 // 登录不能因为 refresh token 暂时无法落库而失败：先返回可用 access token，
 // 再在后台把 refresh token 补写进库。
 func (s *TokenService) IssuePairBestEffort(ctx context.Context, userID, role, tier string) (*TokenPair, error) {
-	return s.issuePair(ctx, userID, role, tier, true)
+	return s.issuePair(ctx, userID, role, tier, "", true)
 }
 
-func (s *TokenService) issuePair(ctx context.Context, userID, role, tier string, bestEffort bool) (*TokenPair, error) {
+// IssuePairForSession 为指定认证会话签发令牌对，访问令牌携带 sid，
+// 刷新令牌记录关联该会话。
+func (s *TokenService) IssuePairForSession(ctx context.Context, userID, role, tier, sessionID string) (*TokenPair, error) {
+	return s.issuePair(ctx, userID, role, tier, sessionID, false)
+}
+
+// IssuePairBestEffortForSession 与 IssuePairBestEffort 相同，但绑定会话。
+func (s *TokenService) IssuePairBestEffortForSession(ctx context.Context, userID, role, tier, sessionID string) (*TokenPair, error) {
+	return s.issuePair(ctx, userID, role, tier, sessionID, true)
+}
+
+// SetSessionValidator 注入认证会话校验器。
+func (s *TokenService) SetSessionValidator(fn func(ctx context.Context, sessionID, userID string) error) {
+	s.sessionValidator = fn
+}
+
+func (s *TokenService) issuePair(ctx context.Context, userID, role, tier, sessionID string, bestEffort bool) (*TokenPair, error) {
 	// 生成 Access Token
-	accessToken, err := s.issueAccessToken(userID, role, tier)
+	accessToken, err := s.issueAccessToken(userID, role, tier, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -118,12 +140,13 @@ func (s *TokenService) issuePair(ctx context.Context, userID, role, tier string,
 	// 存储 Refresh Token 哈希
 	tokenHash := repository.HashToken(refreshToken)
 	rt := &model.RefreshToken{
-		UserID:    userID,
-		TokenHash: tokenHash,
-		ExpiresAt: time.Now().Add(RefreshTokenDuration),
+		UserID:        userID,
+		TokenHash:     tokenHash,
+		AuthSessionID: sessionID,
+		ExpiresAt:     time.Now().Add(RefreshTokenDuration),
 	}
 	if bestEffort {
-		s.storeRefreshTokenBestEffort(userID, tokenHash, rt.ExpiresAt)
+		s.storeRefreshTokenBestEffort(userID, tokenHash, sessionID, rt.ExpiresAt)
 		return &TokenPair{
 			AccessToken:  accessToken,
 			RefreshToken: refreshToken,
@@ -162,11 +185,12 @@ func (s *TokenService) maxActiveRefreshTokens(ctx context.Context) int {
 }
 
 // issueAccessToken 签发 JWT Access Token（HS256，60分钟有效期）。
-func (s *TokenService) issueAccessToken(userID, role, tier string) (string, error) {
+func (s *TokenService) issueAccessToken(userID, role, tier, sessionID string) (string, error) {
 	claims := Claims{
 		UserID: userID,
 		Role:   role,
 		Tier:   tier,
+		Sid:    sessionID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(AccessTokenDuration)),
@@ -232,14 +256,28 @@ func (s *TokenService) refreshOnce(ctx context.Context, tokenHash string) (*Toke
 			return nil, ErrInvalidRefreshToken
 		}
 		rt = &model.RefreshToken{
-			UserID:    pending.UserID,
-			TokenHash: tokenHash,
-			ExpiresAt: pending.ExpiresAt,
+			UserID:        pending.UserID,
+			TokenHash:     tokenHash,
+			AuthSessionID: pending.SessionID,
+			ExpiresAt:     pending.ExpiresAt,
+		}
+		// 尚未落库的令牌同样受会话撤销约束。
+		if rt.AuthSessionID != "" && s.sessionValidator != nil {
+			if err := s.sessionValidator(ctx, rt.AuthSessionID, rt.UserID); err != nil {
+				return nil, err
+			}
 		}
 	}
 
 	// 检查是否已撤销
 	if rt.Revoked {
+		// 会话被撤销时必须在宽限期复用之前拦截：否则登出/被踢后的 60 秒
+		// 内，旧刷新令牌仍能从内存复用表换回一对有效令牌。
+		if rt.AuthSessionID != "" && s.sessionValidator != nil {
+			if err := s.sessionValidator(ctx, rt.AuthSessionID, rt.UserID); err != nil {
+				return nil, err
+			}
+		}
 		// 刚被轮换过的 token 在宽限期内允许幂等复用，避免并发/重试的
 		// 客户端拿到 revoked 401 后清空整个会话。
 		if pair, ok := s.reusedRotation(tokenHash, rt.UserID); ok {
@@ -268,14 +306,22 @@ func (s *TokenService) refreshOnce(ctx context.Context, tokenHash string) (*Toke
 		return nil, ErrUserExpired
 	}
 
+	// 会话被踢出/撤销后，旧刷新令牌不能再换出新会话。检查必须发生在撤销
+	// 旧令牌之前，否则一次失败的重试会把仍然有效的令牌标记成已撤销。
+	if rt.AuthSessionID != "" && s.sessionValidator != nil {
+		if err := s.sessionValidator(ctx, rt.AuthSessionID, user.ID); err != nil {
+			return nil, err
+		}
+	}
+
 	// 撤销旧的 Refresh Token（包括可能仍在后台补写队列里的副本）。
 	if err := s.repo.RefreshToken.Revoke(ctx, tokenHash); err != nil {
 		s.log.Warn("failed to revoke old refresh token", zap.Error(err))
 	}
 	s.untrackDelayedStore(rt.UserID, tokenHash)
 
-	// 签发新的令牌对
-	pair, err := s.IssuePairBestEffort(ctx, user.ID, user.Role, user.Tier)
+	// 签发新的令牌对；轮换后的令牌继续归属同一个认证会话。
+	pair, err := s.IssuePairBestEffortForSession(ctx, user.ID, user.Role, user.Tier, rt.AuthSessionID)
 	if err != nil {
 		return nil, err
 	}

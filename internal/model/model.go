@@ -49,6 +49,7 @@ func AllModels() []interface{} {
 		&APIConfig{},
 		&UserPermission{},
 		&RefreshToken{},
+		&AuthSession{},
 		&PlayProfile{},
 		&RegistrationCode{},
 		&SignIn{},

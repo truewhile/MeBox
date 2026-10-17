@@ -79,11 +79,23 @@ func (r *RefreshTokenRepository) DeleteExpired(ctx context.Context) error {
 	})
 }
 
-// Revoke revokes a specific refresh token.
+// Revoke 撤销某个刷新令牌。
 func (r *RefreshTokenRepository) Revoke(ctx context.Context, hash string) error {
 	return withSQLiteBusyRetry(ctx, func() error {
 		return r.db.WithContext(ctx).Model(&model.RefreshToken{}).
 			Where("token_hash = ?", hash).Update("revoked", true).Error
+	})
+}
+
+// RevokeByAuthSessionID 撤销某个认证会话名下的全部刷新令牌。
+// 设备被踢或主动退出后，旧刷新令牌不能再换出新令牌。
+func (r *RefreshTokenRepository) RevokeByAuthSessionID(ctx context.Context, sessionID string) error {
+	if sessionID == "" {
+		return nil
+	}
+	return withSQLiteBusyRetry(ctx, func() error {
+		return r.db.WithContext(ctx).Model(&model.RefreshToken{}).
+			Where("auth_session_id = ?", sessionID).Update("revoked", true).Error
 	})
 }
 

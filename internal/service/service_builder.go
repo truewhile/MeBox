@@ -234,10 +234,20 @@ func (b *serviceContainerBuilder) initAccessAndStorageServices() {
 
 func (b *serviceContainerBuilder) initIdentityServices() {
 	b.c.Token = NewTokenService(b.cfg, b.log, b.repos)
+	b.c.AuthSessions = NewAuthSessionService(b.log, b.repos)
+	b.c.ServerIdentity = NewServerIdentityService(b.repos, b.version)
+	// 刷新令牌轮换时必须校验所属会话仍然有效，否则被踢设备可以用旧刷新
+	// 令牌换出新令牌。
+	b.c.Token.SetSessionValidator(func(ctx context.Context, sessionID, userID string) error {
+		_, err := b.c.AuthSessions.Validate(ctx, sessionID, userID)
+		return err
+	})
 	b.c.Auth = NewAuthService(b.cfg, b.log, b.repos, b.c.Token, b.c.Permissions)
+	b.c.Auth.SetAuthSessionService(b.c.AuthSessions)
 	b.c.Sessions = NewSessionTrackerService(b.log)
 	b.c.Device = NewDeviceService(b.log, b.repos)
 	b.c.Device.SetSessionTracker(b.c.Sessions)
+	b.c.Device.SetAuthSessionService(b.c.AuthSessions)
 	// Telegram 通知：未启用时 Start 不会占用 goroutine，SendToUser 静默跳过。
 	b.c.Telegram = NewTelegramService(b.log, b.repos)
 	b.c.Device.SetNotifier(b.c.Telegram.SendToUser)

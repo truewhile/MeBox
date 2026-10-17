@@ -9,6 +9,8 @@ const (
 	CtxUserTier     = "ctx_user_tier"
 	CtxTokenPurpose = "ctx_token_purpose"
 	CtxTokenMediaID = "ctx_token_media_id"
+	// CtxAuthSessionID 保存已校验的设备认证会话 ID（新协议令牌才有）。
+	CtxAuthSessionID = "ctx_auth_session_id"
 
 	// AccessTokenCookieName carries the web access token for browser-managed
 	// resource requests such as <img>, which cannot attach Authorization.

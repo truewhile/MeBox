@@ -17,6 +17,8 @@ type Claims struct {
 	Tier    string `json:"tier,omitempty"`
 	Purpose string `json:"purpose,omitempty"`
 	MediaID string `json:"media_id,omitempty"`
+	// Sid 是设备认证会话 ID；旧令牌为空，继续走兼容路径。
+	Sid string `json:"sid,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -43,6 +45,19 @@ func AuthRequired(secret string) gin.HandlerFunc {
 		if !scopedTokenAllowedForRequest(c, claims) {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 40304, "message": "token scope denied"})
 			return
+		}
+		// 新协议令牌携带 sid：旧 API 也必须检查会话是否已被撤销，否则
+		// 设备被踢后仍能用未过期的 JWT 访问 /api/*。
+		if sid := strings.TrimSpace(claims.Sid); sid != "" {
+			if err := ValidateAuthSession(c.Request.Context(), sid, claims.UserID); err != nil {
+				if errors.Is(err, ErrSessionUnavailable) {
+					c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"code": 50303, "message": "auth session unavailable"})
+					return
+				}
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 40104, "message": "auth session revoked"})
+				return
+			}
+			c.Set(CtxAuthSessionID, sid)
 		}
 		syncAccessTokenCookie(c, raw, claims)
 		c.Set(CtxUserID, claims.UserID)
@@ -150,4 +165,9 @@ func extractToken(c *gin.Context) string {
 		return strings.TrimSpace(cookie)
 	}
 	return ""
+}
+
+// ExtractToken 暴露令牌提取逻辑给需要自定义错误契约的移动端中间件。
+func ExtractToken(c *gin.Context) string {
+	return extractToken(c)
 }

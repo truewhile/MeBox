@@ -60,6 +60,8 @@ type Container struct {
 	OrganizePipeline *OrganizePipelineService
 	Douban           *DoubanProvider
 	Token            *TokenService
+	AuthSessions     *AuthSessionService
+	ServerIdentity   *ServerIdentityService
 	ApiConfig        *ApiConfigService
 	Device           *DeviceService
 	Telegram         *TelegramService

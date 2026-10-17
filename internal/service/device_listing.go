@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/truewhile/MeBox/internal/model"
 )
 
@@ -28,6 +30,14 @@ func (s *DeviceService) KickDevice(ctx context.Context, userID, deviceID string)
 	if err != nil {
 		return err
 	}
+	// 立即撤销该设备的认证会话：只标记 UserDevice 不足以让已签发的 JWT
+	// 失效，新协议令牌必须同时被会话校验拒绝。
+	if s.authSessions != nil {
+		if err := s.authSessions.RevokeDevice(ctx, userID, d.DeviceID); err != nil && s.log != nil {
+			s.log.Warn("revoke auth sessions for kicked device failed",
+				zap.String("user_id", userID), zap.String("device_id", d.DeviceID), zap.Error(err))
+		}
+	}
 	s.notify(ctx, userID, fmt.Sprintf("🔌 设备已下线：<b>%s</b>\n该终端需要重新登录后才能继续使用。", deviceLabel(d.DeviceName, d.Client)))
 	return nil
 }
@@ -36,6 +46,12 @@ func (s *DeviceService) KickDevice(ctx context.Context, userID, deviceID string)
 func (s *DeviceService) KickAllDevices(ctx context.Context, userID string) error {
 	if err := s.repo.UserDevice.SetKickedByUser(ctx, userID, true); err != nil {
 		return err
+	}
+	if s.authSessions != nil {
+		if err := s.authSessions.RevokeByUser(ctx, userID); err != nil && s.log != nil {
+			s.log.Warn("revoke auth sessions for kicked user failed",
+				zap.String("user_id", userID), zap.Error(err))
+		}
 	}
 	s.notify(ctx, userID, "🔌 你名下的全部设备已下线，需要重新登录后才能继续使用。")
 	return nil

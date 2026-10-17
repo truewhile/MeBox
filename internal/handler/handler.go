@@ -46,6 +46,8 @@ func Register(r *gin.Engine, cfg *config.Config, log *zap.Logger, svc *service.C
 
 		registerPublicAuthRoutes(api, svc, log)
 
+		registerMobileRoutes(api, svc, log)
+
 		registerAuthenticatedRoutes(api, cfg, svc)
 
 		registerAdminRoutes(api, cfg, svc)

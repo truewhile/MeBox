@@ -16,11 +16,12 @@ const loginRefreshTokenStoreTimeout = 750 * time.Millisecond
 
 type pendingRefreshToken struct {
 	UserID    string
+	SessionID string
 	ExpiresAt time.Time
 }
 
-func (s *TokenService) storeRefreshTokenBestEffort(userID, tokenHash string, expiresAt time.Time) {
-	if !s.trackDelayedStore(userID, tokenHash, expiresAt) {
+func (s *TokenService) storeRefreshTokenBestEffort(userID, tokenHash, sessionID string, expiresAt time.Time) {
+	if !s.trackDelayedStore(userID, tokenHash, sessionID, expiresAt) {
 		return
 	}
 	done := make(chan error, 1)
@@ -29,16 +30,17 @@ func (s *TokenService) storeRefreshTokenBestEffort(userID, tokenHash string, exp
 		defer cancel()
 		err := helper.Recover(s.log, "token.storeRefreshToken", func() error {
 			return s.storeRefreshToken(ctx, &model.RefreshToken{
-				UserID:    userID,
-				TokenHash: tokenHash,
-				ExpiresAt: expiresAt,
+				UserID:        userID,
+				TokenHash:     tokenHash,
+				AuthSessionID: sessionID,
+				ExpiresAt:     expiresAt,
 			})
 		})
 		done <- err
 	}()
 	select {
 	case err := <-done:
-		s.finishBestEffortRefreshTokenStore(userID, tokenHash, expiresAt, err)
+		s.finishBestEffortRefreshTokenStore(userID, tokenHash, sessionID, expiresAt, err)
 	case <-time.After(loginRefreshTokenStoreTimeout):
 		if s.log != nil {
 			s.log.Warn("refresh token store delayed; login will continue",
@@ -47,12 +49,12 @@ func (s *TokenService) storeRefreshTokenBestEffort(userID, tokenHash string, exp
 		}
 		go func() {
 			err := <-done
-			s.finishBestEffortRefreshTokenStore(userID, tokenHash, expiresAt, err)
+			s.finishBestEffortRefreshTokenStore(userID, tokenHash, sessionID, expiresAt, err)
 		}()
 	}
 }
 
-func (s *TokenService) finishBestEffortRefreshTokenStore(userID, tokenHash string, expiresAt time.Time, err error) {
+func (s *TokenService) finishBestEffortRefreshTokenStore(userID, tokenHash, sessionID string, expiresAt time.Time, err error) {
 	if err == nil {
 		s.untrackDelayedStore(userID, tokenHash)
 		return
@@ -63,7 +65,7 @@ func (s *TokenService) finishBestEffortRefreshTokenStore(userID, tokenHash strin
 				zap.String("user_id", userID),
 				zap.Error(err))
 		}
-		s.storeRefreshTokenEventually(userID, tokenHash, expiresAt)
+		s.storeRefreshTokenEventually(userID, tokenHash, sessionID, expiresAt)
 		return
 	}
 	s.untrackDelayedStore(userID, tokenHash)
@@ -72,22 +74,23 @@ func (s *TokenService) finishBestEffortRefreshTokenStore(userID, tokenHash strin
 	}
 }
 
-func (s *TokenService) storeRefreshTokenEventually(userID, tokenHash string, expiresAt time.Time) {
+func (s *TokenService) storeRefreshTokenEventually(userID, tokenHash, sessionID string, expiresAt time.Time) {
 	defer s.untrackDelayedStore(userID, tokenHash)
 	delay := time.Second
 	for attempt := 1; attempt <= 8; attempt++ {
 		timer := time.NewTimer(delay)
 		<-timer.C
-		// 令牌可能已在等待期间被轮换/登出（从 pending 表移除），
-		// 此时绝不能再写库，否则会复活一个已被替换的旧令牌。
+		// ?????????????/???? pending ?????
+		// ?????????????????????????
 		if _, stillPending := s.pendingDelayedStore(tokenHash); !stillPending {
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		err := s.storeRefreshToken(ctx, &model.RefreshToken{
-			UserID:    userID,
-			TokenHash: tokenHash,
-			ExpiresAt: expiresAt,
+			UserID:        userID,
+			TokenHash:     tokenHash,
+			AuthSessionID: sessionID,
+			ExpiresAt:     expiresAt,
 		})
 		cancel()
 		if err == nil {
@@ -114,7 +117,7 @@ func (s *TokenService) storeRefreshTokenEventually(userID, tokenHash string, exp
 	}
 }
 
-func (s *TokenService) trackDelayedStore(userID, tokenHash string, expiresAt time.Time) bool {
+func (s *TokenService) trackDelayedStore(userID, tokenHash, sessionID string, expiresAt time.Time) bool {
 	if s == nil {
 		return false
 	}
@@ -126,7 +129,7 @@ func (s *TokenService) trackDelayedStore(userID, tokenHash string, expiresAt tim
 	if _, ok := s.delayedStores[tokenHash]; ok {
 		return false
 	}
-	s.delayedStores[tokenHash] = pendingRefreshToken{UserID: userID, ExpiresAt: expiresAt}
+	s.delayedStores[tokenHash] = pendingRefreshToken{UserID: userID, SessionID: sessionID, ExpiresAt: expiresAt}
 	return true
 }
 
@@ -139,7 +142,7 @@ func (s *TokenService) untrackDelayedStore(userID, tokenHash string) {
 	s.delayedStoreMu.Unlock()
 }
 
-// pendingDelayedStore 返回尚未落库的 refresh token 信息（如果存在）。
+// pendingDelayedStore ??????? refresh token ?????????
 func (s *TokenService) pendingDelayedStore(tokenHash string) (pendingRefreshToken, bool) {
 	if s == nil {
 		return pendingRefreshToken{}, false

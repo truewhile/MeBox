@@ -23,6 +23,7 @@ type Container struct {
 	Log            *AccessLogRepository
 	Permission     *PermissionRepository
 	RefreshToken   *RefreshTokenRepository
+	AuthSession    *AuthSessionRepository
 	ApiConfig      *ApiConfigRepository
 	PlayProfile    *PlayProfileRepository
 	RegCode        *RegistrationCodeRepository
@@ -56,6 +57,7 @@ func New(db *gorm.DB) *Container {
 		Log:            &AccessLogRepository{db: db},
 		Permission:     &PermissionRepository{db: db},
 		RefreshToken:   &RefreshTokenRepository{db: db},
+		AuthSession:    &AuthSessionRepository{db: db},
 		ApiConfig:      &ApiConfigRepository{db: db},
 		PlayProfile:    &PlayProfileRepository{db: db},
 		RegCode:        &RegistrationCodeRepository{db: db},
