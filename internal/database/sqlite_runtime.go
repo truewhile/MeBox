@@ -104,19 +104,18 @@ func (g *sqliteWriteGate) Lock(ctx context.Context) (*sqliteGateHolder, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// ctx 取消时唤醒等待者（cond 无法感知 ctx，用旁路 goroutine 广播）。
-	if done := ctx.Done(); done != nil {
-		stop := make(chan struct{})
-		defer close(stop)
-		go func() {
-			select {
-			case <-done:
-				g.cond.Broadcast()
-			case <-stop:
-			}
-		}()
+	// 广播也必须持有同一把锁，否则取消可能落在检查与 Wait 之间而丢失。
+	wake := func() {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		g.cond.Broadcast()
 	}
+	stopCancel := context.AfterFunc(ctx, wake)
+	defer stopCancel()
 	for {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if g.owner == nil {
 			holder := &sqliteGateHolder{
 				id:       sqliteGateHolderSeq.Add(1),
@@ -125,16 +124,17 @@ func (g *sqliteWriteGate) Lock(ctx context.Context) (*sqliteGateHolder, error) {
 			g.owner = holder
 			return holder, nil
 		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		if time.Since(g.owner.acquired) > sqliteGateHoldLimit {
+		remaining := sqliteGateHoldLimit - time.Since(g.owner.acquired)
+		if remaining <= 0 {
 			// 持有者疑似 panic 泄漏（After 回调未执行）：强制回收。
 			g.owner = nil
 			g.cond.Broadcast()
 			continue
 		}
+		// 无后续写入或取消时，也要在租约到期后主动唤醒等待者。
+		timer := time.AfterFunc(remaining, wake)
 		g.cond.Wait()
+		timer.Stop()
 	}
 }
 

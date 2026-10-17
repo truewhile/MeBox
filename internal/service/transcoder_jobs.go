@@ -6,41 +6,58 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/truewhile/MeBox/internal/config"
 )
 
 // WaitReady blocks (with a deadline) until the playlist file shows up on
 // disk for the *current* job generation. Stale playlists left behind by a
 // failed RemoveAll / still-exiting ffmpeg must not unblock a mid-file restart.
 func (t *TranscoderService) WaitReady(ctx context.Context, mediaID string, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
 	for {
+		if ctx.Err() != nil {
+			return false
+		}
 		t.mu.Lock()
 		job, ok := t.jobs[mediaID]
 		var started time.Time
+		var completed bool
 		if ok {
 			started = job.startedAt
+			completed = job.completed
 		}
 		t.mu.Unlock()
+		if !ok {
+			return false // A failed/exited job cannot become ready later.
+		}
 		if ok {
 			if info, err := os.Stat(t.PlaylistPath(mediaID)); err == nil {
 				// Allow a small clock skew; reject anything older than this job.
 				if !info.ModTime().Before(started.Add(-2 * time.Second)) {
 					t.mu.Lock()
-					if j, exists := t.jobs[mediaID]; exists {
+					if j, exists := t.jobs[mediaID]; exists && j == job {
 						j.playlistOK = true
+						t.mu.Unlock()
+						return true
 					}
 					t.mu.Unlock()
-					return true
 				}
 			}
 		}
-		if time.Now().After(deadline) || ctx.Err() != nil {
-			return false
+		if completed {
+			return false // A completed job cannot regenerate a missing playlist.
 		}
 		select {
 		case <-ctx.Done():
 			return false
-		case <-time.After(250 * time.Millisecond):
+		case <-timer.C:
+			return false
+		case <-ticker.C:
+		case <-job.done:
 		}
 	}
 }
@@ -101,6 +118,9 @@ func (t *TranscoderService) Active() []ActiveJob {
 	defer t.mu.Unlock()
 	out := make([]ActiveJob, 0, len(t.jobs))
 	for _, j := range t.jobs {
+		if j.completed {
+			continue
+		}
 		out = append(out, ActiveJob{
 			MediaID:    j.mediaID,
 			Encoder:    j.encoder,
@@ -111,7 +131,19 @@ func (t *TranscoderService) Active() []ActiveJob {
 	return out
 }
 
+func (t *TranscoderService) runningJobCountLocked() int {
+	n := 0
+	for _, job := range t.jobs {
+		if !job.completed {
+			n++
+		}
+	}
+	return n
+}
+
 func (t *TranscoderService) maxConcurrent() int {
+	config.RuntimeMu.RLock()
+	defer config.RuntimeMu.RUnlock()
 	if t.cfg.Transcoder.MaxConcurrent <= 0 {
 		return 1
 	}
@@ -119,6 +151,8 @@ func (t *TranscoderService) maxConcurrent() int {
 }
 
 func (t *TranscoderService) idleTimeout() time.Duration {
+	config.RuntimeMu.RLock()
+	defer config.RuntimeMu.RUnlock()
 	if t.cfg.Transcoder.IdleTimeoutSeconds <= 0 {
 		return 120 * time.Second
 	}
@@ -137,21 +171,38 @@ func (t *TranscoderService) monitorIdle(ctx context.Context, job *hlsJob) {
 		case <-ticker.C:
 			t.mu.Lock()
 			current, ok := t.jobs[job.mediaID]
-			if !ok {
+			if !ok || current != job {
 				t.mu.Unlock()
 				return
 			}
 			idleFor := time.Since(current.lastAccess)
 			t.mu.Unlock()
-			if idleFor >= timeout {
-				t.log.Info("transcode idle timeout",
-					zap.String("media_id", job.mediaID),
-					zap.Duration("idle_for", idleFor),
-					zap.Duration("timeout", timeout),
-				)
-				t.StopJob(job.mediaID)
+			if idleFor >= timeout && t.stopIdleJob(job, timeout) {
 				return
 			}
 		}
 	}
+}
+
+func (t *TranscoderService) stopIdleJob(job *hlsJob, timeout time.Duration) bool {
+	gate := t.mediaStartGate(job.mediaID)
+	gate.Lock()
+	defer gate.Unlock()
+	t.mu.Lock()
+	current := t.jobs[job.mediaID]
+	if current != job {
+		t.mu.Unlock()
+		return true
+	}
+	idleFor := time.Since(job.lastAccess)
+	if idleFor < timeout {
+		t.mu.Unlock()
+		return false
+	}
+	t.detachJobLocked(job.mediaID)
+	t.mu.Unlock()
+	waitJobExit(job, 12*time.Second)
+	t.log.Info("transcode idle timeout", zap.String("media_id", job.mediaID),
+		zap.Duration("idle_for", idleFor), zap.Duration("timeout", timeout))
+	return true
 }

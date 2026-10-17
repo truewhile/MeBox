@@ -63,38 +63,38 @@ type MediaQueryFilter struct {
 
 func applyMediaQueryFilter(q *gorm.DB, filter MediaQueryFilter) *gorm.DB {
 	if !filter.IncludeNSFW {
-		q = q.Where("nsfw = ?", false)
+		q = q.Where("media.nsfw = ?", false)
 	}
 	if len(filter.HiddenLibraryIDs) > 0 {
-		q = q.Where("library_id NOT IN ?", filter.HiddenLibraryIDs)
+		q = q.Where("media.library_id NOT IN ?", filter.HiddenLibraryIDs)
 	}
 	if len(filter.AllowedLibraryIDs) > 0 {
-		q = q.Where("library_id IN ?", filter.AllowedLibraryIDs)
+		q = q.Where("media.library_id IN ?", filter.AllowedLibraryIDs)
 	}
 	if libraryID := strings.TrimSpace(filter.LibraryID); libraryID != "" {
-		q = q.Where("library_id = ?", libraryID)
+		q = q.Where("media.library_id = ?", libraryID)
 	}
 	if seriesID := strings.TrimSpace(filter.SeriesID); seriesID != "" {
-		q = q.Where("series_id = ?", seriesID)
+		q = q.Where("media.series_id = ?", seriesID)
 	}
 	if len(filter.Genres) > 0 {
 		q = q.Where(genreMatchClause(filter.Genres), genreMatchArgs(filter.Genres)...)
 	}
 	if filter.YearMin > 0 {
-		q = q.Where("year >= ?", filter.YearMin)
+		q = q.Where("media.year >= ?", filter.YearMin)
 	}
 	if filter.YearMax > 0 {
-		q = q.Where("year <= ?", filter.YearMax)
+		q = q.Where("media.year <= ?", filter.YearMax)
 	}
 	if filter.RatingMin > 0 {
-		q = q.Where("rating >= ?", filter.RatingMin)
+		q = q.Where("media.rating >= ?", filter.RatingMin)
 	}
 	if filter.UnwatchedOnly {
 		userID := strings.TrimSpace(filter.UnwatchedUserID)
 		// 没有用户上下文时忽略该条件：否则会把整个库筛成空，看起来像「坏了」。
 		if userID != "" {
 			q = q.Where(
-				"id NOT IN (SELECT media_id FROM playback_histories WHERE user_id = ? AND completed = ?)",
+				"media.id NOT IN (SELECT media_id FROM playback_histories WHERE user_id = ? AND completed = ?)",
 				userID, true,
 			)
 		}
@@ -113,7 +113,7 @@ func applyMediaQueryFilter(q *gorm.DB, filter MediaQueryFilter) *gorm.DB {
 func genreMatchClause(genres []string) string {
 	clauses := make([]string, 0, len(genres))
 	for range genres {
-		clauses = append(clauses, "',' || REPLACE(REPLACE(TRIM(genres), ' ', ''), '，', ',') || ',' LIKE ?")
+		clauses = append(clauses, "',' || REPLACE(REPLACE(TRIM(media.genres), ' ', ''), '，', ',') || ',' LIKE ?")
 	}
 	return "(" + strings.Join(clauses, " OR ") + ")"
 }
@@ -122,7 +122,7 @@ func genreMatchClause(genres []string) string {
 //
 // 必须与 genreMatchClause 的列端处理完全对称：
 //   - TRIM                   → TrimSpace
-//   - REPLACE(…, ' ', '')    → ReplaceAll(…, " ", "")   ← 多词类型（如 "Science Fiction"）
+//   - REPLACE(…, ' ', ”)    → ReplaceAll(…, " ", "")   ← 多词类型（如 "Science Fiction"）
 //   - REPLACE(…, '，', ',')  → ReplaceAll(…, "，", ",")
 func genreMatchArgs(genres []string) []any {
 	args := make([]any, 0, len(genres))

@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { useParams } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import {
@@ -266,6 +266,19 @@ function settleTextDrag(dragEl: HTMLDivElement, turn: 1 | -1, dx: number, stride
   })
 }
 
+function ReaderMenuButton({ icon, label, onClick }: { icon: ReactNode; label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex flex-1 flex-col items-center gap-1 py-1 opacity-80 hover:opacity-100"
+    >
+      {icon}
+      <span className="text-2xs">{label}</span>
+    </button>
+  )
+}
+
 export default function ReaderViewPage() {
   const { bookId = '' } = useParams()
   const settings = useReaderSettingsStore()
@@ -316,6 +329,7 @@ export default function ReaderViewPage() {
   const [page, setPage] = useState(0)
   const [pageCount, setPageCount] = useState(1)
   const [vw, setVw] = useState(0)
+  const [scrollProgress, setScrollProgress] = useState(0)
   // 文本翻页：位移与页脚先走 DOM，React 的 page state 等到过渡结束后再同步。
   // 若在同一次点击/触摸里同步 setPage，整页重渲染会堵住下一次绘制，
   // 命令式 transform 也要等卡完才开始——点按和滑动都会顿一下。
@@ -338,8 +352,13 @@ export default function ReaderViewPage() {
   const paragraphWarmRef = useRef<Uint8Array | null>(null)
   /** 当前窗口中心页；-1 表示窗口失效（映射刚重算过），下次应用时重建。 */
   const warmCenterRef = useRef(-1)
-  vwRef.current = vw
-  pageCountRef.current = pageCount
+  const currentChapter = chapterIndex !== null ? chapters[chapterIndex] : null
+  const chapterTitle = currentChapter?.title ?? ''
+  useLayoutEffect(() => {
+    vwRef.current = vw
+    pageCountRef.current = pageCount
+    chapterTitleRef.current = chapterTitle
+  }, [vw, pageCount, chapterTitle])
   // 音频/漫画媒体状态
   const [media, setMedia] = useState<ReaderChapterContent | null>(null)
   const [restorePos, setRestorePos] = useState(0) // 音频秒数 / 漫画图片序号
@@ -448,6 +467,7 @@ export default function ReaderViewPage() {
   // ── 加载书籍与章节 ──
   useEffect(() => {
     let cancelled = false
+    const cache = contentCache.current
     ;(async () => {
       try {
         setLoadingStage('book')
@@ -510,7 +530,7 @@ export default function ReaderViewPage() {
     })()
     return () => {
       cancelled = true
-      contentCache.current.clear()
+      cache.clear()
     }
   }, [bookId, reloadKey])
 
@@ -909,6 +929,16 @@ export default function ReaderViewPage() {
   useEffect(() => {
     if (menuOpen) flushTextPageReactSync()
   }, [menuOpen, flushTextPageReactSync])
+
+  // Only refresh the scroll slider while its menu is visible, keeping scroll
+  // events on the reading path free of whole-page React renders.
+  useLayoutEffect(() => {
+    if (!menuOpen || settings.pageMode !== 'scroll') return
+    const el = scrollRef.current
+    if (el) {
+      setScrollProgress(Math.round((el.scrollTop / Math.max(1, el.scrollHeight - el.clientHeight)) * 1000))
+    }
+  }, [menuOpen, settings.pageMode, content])
 
   // 滚动模式恢复进度。
   //
@@ -1355,9 +1385,6 @@ export default function ReaderViewPage() {
     return () => el.removeEventListener('wheel', onWheel)
   }, [settings.pageMode, menuOpen, contentType, goPrev, goNext])
 
-  const currentChapter = chapterIndex !== null ? chapters[chapterIndex] : null
-  chapterTitleRef.current = currentChapter?.title ?? ''
-
   // 顶栏高度量一次：菜单打开时正文下移，开头几行不被顶栏压住。
   // 用 transform 而不是 padding，避免改变视口高度触发重新分页。
   const menuShiftStyle = useMemo(
@@ -1397,11 +1424,7 @@ export default function ReaderViewPage() {
       value:
         settings.pageMode === 'page'
           ? page + 1
-          : Math.round(
-              ((scrollRef.current?.scrollTop ?? 0) /
-                Math.max(1, (scrollRef.current?.scrollHeight ?? 1) - (scrollRef.current?.clientHeight ?? 1))) *
-                1000,
-            ),
+          : scrollProgress,
       onChange: (v: number) => {
         if (settings.pageMode === 'page') {
           commitTextPage(v - 1)
@@ -1569,6 +1592,7 @@ export default function ReaderViewPage() {
                 const max = el.scrollHeight - el.clientHeight
                 if (max > 0) {
                   const pct = el.scrollTop / max
+                  if (menuOpen) setScrollProgress(Math.round(pct * 1000))
                   if (shouldSaveScrollProgress(pct, el.dataset.last)) {
                     el.dataset.last = formatScrollPct(pct)
                     savePos(Math.round(el.scrollTop))
@@ -1753,62 +1777,35 @@ export default function ReaderViewPage() {
                 用 flex 等分而不是 grid-cols-N：动作数量随内容类型和书源能力变化，
                 grid 列数得写死成字面量类名，多一个按钮就要再加一档。 */}
             <div className="flex pt-1" style={{ color: theme.text }}>
-              {([
-                { icon: <LayoutList size={18} />, label: '目录', action: () => openPanel('toc') },
-                { icon: <BookOpen size={18} />, label: '界面', action: () => openPanel('style') },
-                {
-                  icon: settings.night ? <Sun size={18} /> : <Moon size={18} />,
-                  label: settings.night ? '日间' : '夜间',
-                  action: () => settings.toggleNight(),
-                },
-                {
-                  icon: settings.pageMode === 'page' ? <ScrollText size={18} /> : <ListEnd size={18} />,
-                  label: settings.pageMode === 'page' ? '滚动' : '翻页',
-                  action: () => settings.setPageMode(settings.pageMode === 'page' ? 'scroll' : 'page'),
-                },
-                // 双页铺开只对漫画的翻页模式有意义；窗口太窄时并排两页没法看，
-                // 干脆不显示入口（不是灰掉，避免用户以为坏了）。
-                ...(contentType === 'image' && settings.pageMode === 'page' && windowWidth >= COMIC_SPREAD_MIN_WIDTH
-                  ? [
-                      {
-                        icon: <Columns2 size={18} />,
-                        label: settings.comicDoublePage ? '单页' : '双页',
-                        action: () => settings.setComicDoublePage(!settings.comicDoublePage),
-                      },
-                    ]
-                  : []),
-                // 全屏：只在浏览器支持元素全屏时出现（iOS Safari 不支持，见上方注释）。
-                ...(fullscreenSupported
-                  ? [
-                      {
-                        icon: fullscreen ? <Minimize size={18} /> : <Maximize size={18} />,
-                        label: fullscreen ? '还原' : '全屏',
-                        action: toggleFullscreen,
-                      },
-                    ]
-                  : []),
-                ...(canSwitchSource
-                  ? [
-                      {
-                        icon: <ArrowLeftRight size={18} />,
-                        label: '换源',
-                        action: () => {
-                          void openSourcePicker()
-                        },
-                      },
-                    ]
-                  : []),
-              ]).map((item) => (
-                <button
-                  key={item.label}
-                  type="button"
-                  onClick={item.action}
-                  className="flex flex-1 flex-col items-center gap-1 py-1 opacity-80 hover:opacity-100"
-                >
-                  {item.icon}
-                  <span className="text-2xs">{item.label}</span>
-                </button>
-              ))}
+              <ReaderMenuButton icon={<LayoutList size={18} />} label="目录" onClick={() => openPanel('toc')} />
+              <ReaderMenuButton icon={<BookOpen size={18} />} label="界面" onClick={() => openPanel('style')} />
+              <ReaderMenuButton
+                icon={settings.night ? <Sun size={18} /> : <Moon size={18} />}
+                label={settings.night ? '日间' : '夜间'}
+                onClick={() => settings.toggleNight()}
+              />
+              <ReaderMenuButton
+                icon={settings.pageMode === 'page' ? <ScrollText size={18} /> : <ListEnd size={18} />}
+                label={settings.pageMode === 'page' ? '滚动' : '翻页'}
+                onClick={() => settings.setPageMode(settings.pageMode === 'page' ? 'scroll' : 'page')}
+              />
+              {contentType === 'image' && settings.pageMode === 'page' && windowWidth >= COMIC_SPREAD_MIN_WIDTH && (
+                <ReaderMenuButton
+                  icon={<Columns2 size={18} />}
+                  label={settings.comicDoublePage ? '单页' : '双页'}
+                  onClick={() => settings.setComicDoublePage(!settings.comicDoublePage)}
+                />
+              )}
+              {fullscreenSupported && (
+                <ReaderMenuButton
+                  icon={fullscreen ? <Minimize size={18} /> : <Maximize size={18} />}
+                  label={fullscreen ? '还原' : '全屏'}
+                  onClick={toggleFullscreen}
+                />
+              )}
+              {canSwitchSource && (
+                <ReaderMenuButton icon={<ArrowLeftRight size={18} />} label="换源" onClick={() => { void openSourcePicker() }} />
+              )}
             </div>
 
             {/* 界面设置面板（主题 / 字号 / 行距 / 段距 / 漫画图片尺寸） */}

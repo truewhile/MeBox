@@ -78,7 +78,7 @@ func copyModelTables(src, target *gorm.DB, batchSize int) (map[string]int64, int
 			if filtered.Len() > 0 {
 				filteredPtr := reflect.New(filtered.Type())
 				filteredPtr.Elem().Set(filtered)
-				if err := target.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(filteredPtr.Interface(), batchSize).Error; err != nil {
+				if err := InsertPreservingValues(target.Clauses(clause.OnConflict{DoNothing: true}), filteredPtr.Interface(), batchSize); err != nil {
 					return tableCounts, totalCopied, fmt.Errorf("copy sqlite table %s: %w", table, err)
 				}
 				copiedForTable += int64(filtered.Len())

@@ -76,9 +76,37 @@ func TestImageProxyStillBlocksUnlistedHostnameResolvingToPrivateIP(t *testing.T)
 	proxy.SetAllowedRemoteHostsProvider(func() []string { return nil })
 
 	_, port := hostAndPortOf(t, upstream.URL)
-	resp, err := proxy.client.Get("http://localhost:" + port + "/poster.jpg")
-	if err == nil {
-		resp.Body.Close()
-		t.Fatal("a non-allowlisted hostname resolving to a private IP must be refused")
+	for _, client := range []*http.Client{proxy.client, proxy.directClient} {
+		resp, err := client.Get("http://localhost:" + port + "/poster.jpg")
+		if err == nil {
+			resp.Body.Close()
+			t.Fatal("a non-allowlisted hostname resolving to a private IP must be refused")
+		}
+	}
+}
+
+func TestImageProxyAllowsSelectedLocalProxy(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write(testJPEG)
+	}))
+	defer upstream.Close()
+	proxyURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewImageProxy(&config.Config{}, zap.NewNop())
+	transport := NewExternalTransport()
+	transport.Proxy = http.ProxyURL(proxyURL)
+	p.guardTransport(transport)
+	t.Cleanup(transport.CloseIdleConnections)
+	client := &http.Client{Transport: transport}
+	resp, err := client.Get("http://images.example.com/poster.jpg")
+	if err != nil {
+		t.Fatalf("configured local proxy must remain usable: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
 	}
 }

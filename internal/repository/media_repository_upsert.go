@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/truewhile/MeBox/internal/model"
 )
@@ -95,6 +96,9 @@ func (r *MediaRepository) UpsertBatchWithAliases(ctx context.Context, items []Me
 
 // indexByIDBestEffort 在事务提交后按 ID 回读最新行并同步搜索索引。
 func (r *MediaRepository) indexByIDBestEffort(ctx context.Context, ids []string) {
+	if _, ok := r.searchBackend.(MediaSearchSyncBackend); !ok {
+		return
+	}
 	for _, id := range ids {
 		if id == "" {
 			continue
@@ -193,14 +197,19 @@ func (r *MediaRepository) findOrCreateMediaByPath(ctx context.Context, db *gorm.
 		if m.ScrapeStatus == "" {
 			m.ScrapeStatus = "pending"
 		}
-		if createErr := db.WithContext(ctx).Create(m).Error; createErr == nil {
-			return *m, true, false, nil
-		} else if retryErr := db.WithContext(ctx).Unscoped().Where("path = ?", m.Path).First(&existing).Error; retryErr != nil {
-			return model.Media{}, false, false, createErr
-		} else {
-			// 并发插入竞态：重查已命中既有行，直接走更新分支。
-			return existing, false, false, nil
+		// PostgreSQL 唯一键异常会中止整个事务，之后重查也会失败。
+		// DO NOTHING 保持事务可用，并兼容 path 的表达式唯一索引。
+		result := db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(m)
+		if result.Error != nil {
+			return model.Media{}, false, false, result.Error
 		}
+		if result.RowsAffected > 0 {
+			return *m, true, false, nil
+		}
+		if err := db.WithContext(ctx).Unscoped().Where("path = ?", m.Path).First(&existing).Error; err != nil {
+			return model.Media{}, false, false, err
+		}
+		return existing, false, false, nil
 	}
 	if err != nil {
 		return model.Media{}, false, false, err

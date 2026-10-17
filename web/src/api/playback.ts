@@ -42,9 +42,9 @@ function publicOriginHeader() {
 }
 
 export const playbackAPI = {
-  getResume: (mediaId: string) =>
+  getResume: (mediaId: string, signal?: AbortSignal) =>
     api
-      .get<{ position_ms: number; duration_ms: number; completed: boolean }>(`/playback/${mediaId}/resume`)
+      .get<{ position_ms: number; duration_ms: number; completed: boolean }>(`/playback/${encodeURIComponent(mediaId)}/resume`, { signal })
       .then((r) => r.data),
 
   // 片头/片尾片段：播放开始后再调用，服务端可能需要几秒去外部数据库取数，

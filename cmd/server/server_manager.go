@@ -355,6 +355,9 @@ func (m *serverManager) drain(s *http.Server) {
 	if s == nil {
 		return
 	}
+	// Stop reusing old connections before Reload returns. Asynchronous Shutdown
+	// alone leaves a window where a client receives the previous HTTP/TLS mode.
+	s.SetKeepAlivesEnabled(false)
 	go func(s *http.Server) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()

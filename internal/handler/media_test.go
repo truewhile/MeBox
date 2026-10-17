@@ -26,7 +26,9 @@ import (
 )
 
 func TestQueueLibraryRootScanImportsNewLibraryMedia(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	// The scanner and polling loop use separate connections; :memory: gives
+	// each connection its own empty database.
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "scan.db")+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
