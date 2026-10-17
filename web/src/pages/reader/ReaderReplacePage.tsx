@@ -35,7 +35,6 @@ export default function ReaderReplacePage() {
       .then(setRules)
       .catch(() => toast.error('加载替换规则失败'))
   }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(load, [])
 
   const save = async () => {

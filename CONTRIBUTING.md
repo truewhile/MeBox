@@ -84,6 +84,15 @@ go test ./internal/service -run "TestOrganize|TestSubscription|TestMTeam" -count
 go test ./cmd/server -count=1
 ```
 
+数据库兼容测试默认覆盖 SQLite。连接专用测试 PostgreSQL 后可运行真实的双数据库回归：
+
+```bash
+MEBOX_TEST_POSTGRES_DSN='postgres://mebox:test-password@127.0.0.1:5432/mebox_test?sslmode=disable' \
+  go test ./internal/database ./internal/repository -count=1
+```
+
+测试账号需要创建、删除 schema 的权限；每个用例使用独立的临时 schema。CI 会分别在 PostgreSQL 16、17 上执行这些检查。
+
 ### 代码要求
 
 - Go 代码使用 `gofmt`。

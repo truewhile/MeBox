@@ -71,8 +71,8 @@ func AutoMigrateWithConfig(db *gorm.DB, cfg *config.Config, log *zap.Logger) err
 //	index row size ... exceeds btree version 4 maximum 2704
 //
 // 所以 PostgreSQL 改用 md5(path) 的表达式唯一索引（定长 32 字节，永远塞得下），
-// 同时保留一条普通索引 idx_media_path 供 path = ? 等值查找（扫描与 upsert 的
-// 热路径）使用。SQLite 没有这个长度限制，沿用整列唯一索引。
+// 同时用 hash 索引 idx_media_path 加速 path = ? 等值查找；非唯一 btree
+// 也有索引项长度限制，不能继续对完整 path 建 btree。SQLite 沿用整列唯一索引。
 func ensureMediaPathIndex(db *gorm.DB) error {
 	if db == nil || !db.Migrator().HasTable("media") {
 		return nil
@@ -84,37 +84,39 @@ func ensureMediaPathIndex(db *gorm.DB) error {
 	if err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_media_path_hash ON media(md5(path))`).Error; err != nil {
 		return err
 	}
-	unique, found, err := postgresIndexIsUnique(db, "idx_media_path")
+	unique, method, found, err := postgresIndexProperties(db, "idx_media_path")
 	if err != nil {
 		return err
 	}
-	if found && unique {
+	if found && (unique || method != "hash") {
 		if err := db.Exec(`DROP INDEX IF EXISTS idx_media_path`).Error; err != nil {
 			return err
 		}
 	}
-	return db.Exec(`CREATE INDEX IF NOT EXISTS idx_media_path ON media(path)`).Error
+	return db.Exec(`CREATE INDEX IF NOT EXISTS idx_media_path ON media USING hash(path)`).Error
 }
 
-// postgresIndexIsUnique 报告当前 schema 下是否存在该索引、以及它是否唯一。
-func postgresIndexIsUnique(db *gorm.DB, indexName string) (unique bool, found bool, err error) {
+// postgresIndexProperties 返回当前 schema 下索引的唯一性与访问方法。
+func postgresIndexProperties(db *gorm.DB, indexName string) (unique bool, method string, found bool, err error) {
 	// 用指针接 bool：没有匹配行时 Scan 不报错，nil 即代表索引不存在。
 	var row struct {
 		IsUnique *bool
+		Method   string
 	}
 	if err := db.Raw(`
-SELECT i.indisunique AS is_unique
+SELECT i.indisunique AS is_unique, a.amname AS method
 FROM pg_class c
 JOIN pg_index i ON i.indexrelid = c.oid
 JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_am a ON a.oid = c.relam
 WHERE n.nspname = current_schema() AND c.relname = ?
 `, indexName).Scan(&row).Error; err != nil {
-		return false, false, err
+		return false, "", false, err
 	}
 	if row.IsUnique == nil {
-		return false, false, nil
+		return false, "", false, nil
 	}
-	return *row.IsUnique, true, nil
+	return *row.IsUnique, row.Method, true, nil
 }
 
 // ensurePostgresSearchIndexes 给 PostgreSQL 补上 SQLite FTS5 的替代品。

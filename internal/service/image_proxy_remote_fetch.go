@@ -32,7 +32,9 @@ func (p *ImageProxy) remoteImageFetchClients(host string) []remoteImageFetchClie
 	}
 	direct := p.directClient
 	if direct == nil {
-		direct = &http.Client{Timeout: timeout, Transport: NewInternalTransport()}
+		transport := NewInternalTransport()
+		p.guardTransport(transport)
+		direct = &http.Client{Timeout: timeout, Transport: transport}
 	}
 	directCandidate := remoteImageFetchClient{name: "direct", client: direct}
 	defaultCandidate := remoteImageFetchClient{name: "default", client: client}

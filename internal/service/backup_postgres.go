@@ -15,6 +15,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 
+	"github.com/truewhile/MeBox/internal/database"
 	"github.com/truewhile/MeBox/internal/model"
 )
 
@@ -271,7 +272,7 @@ func (b *BackupService) restorePostgresBackup(ctx context.Context, src string) e
 			if err != nil {
 				return fmt.Errorf("表 %s 解码失败: %w", chunk.Table, err)
 			}
-			if err := tx.Unscoped().CreateInBatches(rows, backupRestoreBatchSize).Error; err != nil {
+			if err := database.InsertPreservingValues(tx.Unscoped(), rows, backupRestoreBatchSize); err != nil {
 				return fmt.Errorf("恢复表 %s 失败: %w", chunk.Table, err)
 			}
 		}

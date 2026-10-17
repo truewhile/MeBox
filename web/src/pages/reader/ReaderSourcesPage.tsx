@@ -49,7 +49,6 @@ export default function ReaderSourcesPage() {
       .then(setSources)
       .catch(() => toast.error('加载书源失败'))
   }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(load, [])
 
   // 读取书源文件（选择或拖入），走与粘贴相同的导入链路

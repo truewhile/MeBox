@@ -14,14 +14,12 @@ package service
 
 import (
 	"context"
-	"errors"
 	"net"
 	"net/http"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"go.uber.org/zap"
@@ -103,66 +101,12 @@ func NewImageProxy(cfg *config.Config, log *zap.Logger) *ImageProxy {
 	// from image.tmdb.org via their HTTP proxy without extra config. On
 	// Windows we also honor the current user's system proxy settings.
 	transport := NewExternalTransport()
-	if proxyConfiguredForImageFetch() {
-		// 走本地代理（如 127.0.0.1:7890）时，拨号目标是代理本身，
-		// 连接层 SSRF 校验会误杀本地回环代理；此时沿用 URL 级校验。
-		log.Info("image proxy: outbound proxy detected, connection-level SSRF guard disabled")
-	} else {
-		// 仅 URL 解析层的 isPrivateHost 可被十进制/十六进制 IP、解析到
-		// 私网的域名与 DNS rebinding 绕过；在拨号层对最终连接 IP 做二次
-		// 校验（含重定向后的每条连接）堵住该旁路。
-		//
-		// 用户明确配置的远程挂载源（如内网 Emby）与显式配置的服务（如
-		// MetaTube）豁免该私网限制。豁免必须在 DialContext 这一层判断：
-		// Control 回调收到的 address 已经是**解析后的 IP**，而放行名单里
-		// 存的是主机名（mebox-metatube-1、NAS 名），在 Control 里比较永远
-		// 不相等——那段分支对主机名条目是死代码，现场表现就是「名单里有
-		// 这个主机，回源依然被拒」。
-		guardDialer := &net.Dialer{
-			Timeout: 15 * time.Second,
-			Control: func(_, address string, _ syscall.RawConn) error {
-				host, _, err := net.SplitHostPort(address)
-				if err != nil {
-					return err
-				}
-				ip := net.ParseIP(host)
-				if ip == nil {
-					return errors.New("image proxy: refusing non-IP dial target")
-				}
-				if isPrivateIP(ip) {
-					return errors.New("image proxy: requests to private/internal hosts are not allowed")
-				}
-				return nil
-			},
-		}
-		// 放行目标的专用拨号器：不再做私网校验，但仍然只连到请求里的那个
-		// 主机（豁免的是私网限制，不是「任意目标」）。
-		allowlistedDialer := &net.Dialer{Timeout: 15 * time.Second}
-		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-			host, _, err := net.SplitHostPort(address)
-			if err != nil {
-				return nil, err
-			}
-			if proxy.isAllowedRemoteHost(host) {
-				return allowlistedDialer.DialContext(ctx, network, address)
-			}
-			return guardDialer.DialContext(ctx, network, address)
-		}
-	}
-
+	proxy.guardTransport(transport)
+	directTransport := NewInternalTransport()
+	proxy.guardTransport(directTransport)
 	proxy.client = &http.Client{Timeout: 30 * time.Second, Transport: transport}
-	proxy.directClient = &http.Client{Timeout: 30 * time.Second, Transport: NewInternalTransport()}
+	proxy.directClient = &http.Client{Timeout: 30 * time.Second, Transport: directTransport}
 	return proxy
-}
-
-// proxyConfiguredForImageFetch 探测环境变量或系统代理是否会影响图片抓取。
-func proxyConfiguredForImageFetch() bool {
-	req, err := http.NewRequest(http.MethodGet, "https://image.tmdb.org/", nil)
-	if err != nil {
-		return false
-	}
-	proxy, err := ProxyFromEnvironmentOrSystem(req)
-	return err == nil && proxy != nil
 }
 
 // SetLibraryRootsProvider injects a callback that returns the current set of
