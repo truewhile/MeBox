@@ -51,10 +51,34 @@ func playbackInfoHandler(svc *service.Container) gin.HandlerFunc {
 			// 远程 Emby 挂载没有本地文件，不能提供转码地址。STRM 默认直连，直连失败时可走 HLS。
 			hlsURL = ""
 		}
+		// 起播路径原本还要各发一次 /playback/{id}/resume 和
+		// /media/{id}/subtitles。把这两份数据并进播放地址响应后，移动端起播
+		// 只剩一个请求 —— 跨境链路上每多一条连接就多一次 DNS/TLS 建连，
+		// 实测单次建连可到数秒。老客户端不读这两个字段，行为不变。
+		uid, _ := c.Get(middleware.CtxUserID)
+		resumePayload := gin.H{"position_ms": int64(0), "duration_ms": int64(0), "completed": false}
+		if svc.Playback != nil {
+			if row, err := svc.Playback.GetProgress(c.Request.Context(), toString(uid), m.ID); err == nil && row != nil {
+				resumePayload = gin.H{
+					"position_ms": row.PositionMs,
+					"duration_ms": row.DurationMs,
+					"completed":   row.Completed,
+				}
+			}
+		}
+		// 直连播放只需要外挂字幕；内嵌字幕由播放器从容器里解。
+		subtitles := []service.SubtitleTrack{}
+		if svc.Subtitle != nil && !(svc.EmbyRemote != nil && service.IsEmbyRemoteID(m.ID)) {
+			if discovered, err := svc.Subtitle.DiscoverExternalOnly(c.Request.Context(), m.ID); err == nil && discovered != nil {
+				subtitles = discovered
+			}
+		}
 		c.JSON(http.StatusOK, gin.H{
 			"media":      m,
 			"stream_url": "/api/stream/" + m.ID + "?token=" + url.QueryEscape(token) + profileQuery,
 			"hls_url":    hlsURL,
+			"resume":     resumePayload,
+			"subtitles":  subtitles,
 		})
 	}
 }

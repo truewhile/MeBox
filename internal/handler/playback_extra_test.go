@@ -435,6 +435,10 @@ func TestPlaybackInfoForSTRMMediaIncludesHLS(t *testing.T) {
 	var payload struct {
 		StreamURL string `json:"stream_url"`
 		HlsURL    string `json:"hls_url"`
+		// 移动端起播只打这一个接口：resume / subtitles 必须始终存在，
+		// 哪怕是默认值，否则客户端会退回额外两个请求。
+		Resume     *struct{ PositionMs int64 `json:"position_ms"` } `json:"resume"`
+		Subtitles  *[]struct{}                                     `json:"subtitles"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -444,6 +448,12 @@ func TestPlaybackInfoForSTRMMediaIncludesHLS(t *testing.T) {
 	}
 	if payload.HlsURL == "" || !strings.Contains(payload.HlsURL, "/api/hls/media-1/") {
 		t.Fatalf("expected strm hls_url, got %q", payload.HlsURL)
+	}
+	if payload.Resume == nil {
+		t.Fatalf("playback info must always carry resume (got body=%s)", w.Body.String())
+	}
+	if payload.Subtitles == nil {
+		t.Fatalf("playback info must always carry subtitles (got body=%s)", w.Body.String())
 	}
 }
 
