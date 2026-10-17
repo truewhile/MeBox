@@ -108,7 +108,13 @@ func (s *AuthService) RefreshTokens(ctx context.Context, refreshToken string) (*
 	return s.tokenSvc.Refresh(ctx, refreshToken)
 }
 
-// Logout 撤销用户的所有刷新令牌。
+// Logout 撤销用户的所有刷新令牌与认证会话。
 func (s *AuthService) Logout(ctx context.Context, userID string) error {
-	return s.tokenSvc.RevokeAll(ctx, userID)
+	if err := s.tokenSvc.RevokeAll(ctx, userID); err != nil {
+		return err
+	}
+	if s.sessionSvc != nil {
+		return s.sessionSvc.RevokeByUser(ctx, userID)
+	}
+	return nil
 }

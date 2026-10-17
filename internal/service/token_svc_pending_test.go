@@ -34,7 +34,7 @@ func TestRefreshAcceptsPendingDelayedToken(t *testing.T) {
 
 	refreshToken := "pending-token-value"
 	hash := repository.HashToken(refreshToken)
-	if !svc.trackDelayedStore(u.ID, hash, time.Now().Add(time.Hour)) {
+	if !svc.trackDelayedStore(u.ID, hash, "", time.Now().Add(time.Hour)) {
 		t.Fatal("trackDelayedStore returned false")
 	}
 
@@ -97,7 +97,7 @@ func TestRefreshRejectsExpiredPendingToken(t *testing.T) {
 
 	refreshToken := "expired-pending"
 	hash := repository.HashToken(refreshToken)
-	svc.trackDelayedStore("user-x", hash, time.Now().Add(-time.Minute))
+	svc.trackDelayedStore("user-x", hash, "", time.Now().Add(-time.Minute))
 
 	if _, err := svc.Refresh(t.Context(), refreshToken); err == nil {
 		t.Fatal("expired pending token should be rejected")

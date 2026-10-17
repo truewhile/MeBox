@@ -34,6 +34,7 @@ type AuthService struct {
 	repo          *repository.Container
 	tokenSvc      *TokenService
 	permissionSvc *PermissionService
+	sessionSvc    *AuthSessionService
 
 	tempPassMu    sync.RWMutex
 	tempPasswords map[string]temporaryPasswordEntry
@@ -49,6 +50,11 @@ func NewAuthService(cfg *config.Config, log *zap.Logger, repo *repository.Contai
 		permissionSvc: permissionSvc,
 		tempPasswords: make(map[string]temporaryPasswordEntry),
 	}
+}
+
+// SetAuthSessionService 注入设备会话服务；旧登出路径会同时撤销全部会话。
+func (s *AuthService) SetAuthSessionService(sessions *AuthSessionService) {
+	s.sessionSvc = sessions
 }
 
 // Common service-level errors.
@@ -162,6 +168,23 @@ type LoginResponse struct {
 
 // Login validates credentials and returns the user + a fresh JWT token pair.
 func (s *AuthService) Login(ctx context.Context, username, password string) (*LoginResponse, error) {
+	u, err := s.Authenticate(ctx, username, password)
+	if err != nil {
+		return nil, err
+	}
+	// 签发令牌对
+	tokens, err := s.tokenSvc.IssuePairBestEffort(ctx, u.ID, u.Role, u.Tier)
+	if err != nil {
+		return nil, err
+	}
+	s.touchLoginBestEffort(u.ID)
+	return &LoginResponse{User: u, Tokens: tokens}, nil
+}
+
+// Authenticate 只校验账号与密码，不签发任何令牌。
+// 移动端 v1 登录需要先确认账号有效，再创建设备会话并签发带 sid 的令牌；
+// 分离这一步可以避免先签发一对无会话的令牌再作废。
+func (s *AuthService) Authenticate(ctx context.Context, username, password string) (*model.User, error) {
 	u, err := s.repo.User.FindByUsername(ctx, username)
 	if err != nil {
 		return nil, err
@@ -180,13 +203,7 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (*Lo
 	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
 		return nil, ErrInvalidCredentials
 	}
-	// 签发令牌对
-	tokens, err := s.tokenSvc.IssuePairBestEffort(ctx, u.ID, u.Role, u.Tier)
-	if err != nil {
-		return nil, err
-	}
-	s.touchLoginBestEffort(u.ID)
-	return &LoginResponse{User: u, Tokens: tokens}, nil
+	return u, nil
 }
 
 func (s *AuthService) touchLoginBestEffort(userID string) {
