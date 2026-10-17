@@ -35,16 +35,28 @@ func IsUserFavorite(ctx context.Context, repo *repository.Container, userID, med
 func setLocalFavorite(ctx context.Context, repo *repository.Container, userID, mediaID string, favorite bool) error {
 	if favorite {
 		var existing model.Favorite
-		err := repo.DB.WithContext(ctx).
+		// 收藏行的删除是软删除；重新收藏时必须连已软删除的行一起查出来，
+		// 否则会再次插入同一 (user_id, media_id)，撞上唯一索引后稳定返回
+		// 500，用户表现为“取消收藏后无法再收藏”。
+		err := repo.DB.WithContext(ctx).Unscoped().
 			Where("user_id = ? AND media_id = ?", userID, mediaID).
 			First(&existing).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
 			return repo.DB.WithContext(ctx).Create(&model.Favorite{
 				UserID:  userID,
 				MediaID: mediaID,
 			}).Error
+		case err != nil:
+			return err
+		case existing.DeletedAt.Valid:
+			return repo.DB.WithContext(ctx).Unscoped().
+				Model(&model.Favorite{}).
+				Where("id = ?", existing.ID).
+				Update("deleted_at", nil).Error
+		default:
+			return nil
 		}
-		return err
 	}
 	return repo.DB.WithContext(ctx).
 		Where("user_id = ? AND media_id = ?", userID, mediaID).
