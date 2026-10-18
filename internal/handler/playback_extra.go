@@ -73,13 +73,26 @@ func playbackInfoHandler(svc *service.Container) gin.HandlerFunc {
 				subtitles = discovered
 			}
 		}
-		c.JSON(http.StatusOK, gin.H{
+		// 能在服务端换链就把最终直链一并返回：客户端直接连 CDN，省掉
+		// /api/stream 的 302 往返。跨境/高延迟链路上，这一跳等于一次完整的
+		// DNS + TCP + TLS，实测能到数秒，正好压在起播关键路径上。
+		// 换链失败、本地文件或需要服务端加头的网盘保持原样，客户端仍走
+		// stream_url 跳转，行为与改动前一致。
+		directURL, hasDirectURL := "", false
+		if svc.Stream != nil {
+			directURL, hasDirectURL = svc.Stream.ResolveDirectPlayURL(c.Request, m)
+		}
+		payload := gin.H{
 			"media":      m,
 			"stream_url": "/api/stream/" + m.ID + "?token=" + url.QueryEscape(token) + profileQuery,
 			"hls_url":    hlsURL,
 			"resume":     resumePayload,
 			"subtitles":  subtitles,
-		})
+		}
+		if hasDirectURL {
+			payload["direct_url"] = directURL
+		}
+		c.JSON(http.StatusOK, payload)
 	}
 }
 
