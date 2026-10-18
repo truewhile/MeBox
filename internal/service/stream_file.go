@@ -110,6 +110,29 @@ func setCloudRedirectNoStore(w http.ResponseWriter) {
 // 由 /api/strm/play 再去换链，最坏情况只是回到改动前的行为。
 const directPlayResolveTimeout = 10 * time.Second
 
+// directPlayInfoResolveTimeout 是播放地址响应（/api/playback/{id}/info）里
+// 预换链的等待上限。这条路径是用户点播放后的同步阻塞，宁可退回 /api/stream
+// 跳转，也不能把起播卡在换链上；命中直链缓存时通常只有微秒级。
+const directPlayInfoResolveTimeout = 3 * time.Second
+
+// ResolveDirectPlayURL 尝试把媒体的 STRM/网盘目标换成客户端可直接播放的最终
+// 直链，供 /api/playback/{id}/info 预置给客户端。
+//
+// 客户端拿到直链后可以跳过 /api/stream 的 302 往返；在高延迟/跨境链路上，
+// 这一次「DNS + TCP + TLS + 请求」常常是数秒，正好落在起播关键路径上。
+// 返回 false 表示必须继续走 /api/stream（本地文件、需要服务端加头的网盘、
+// 解析失败或超时），行为与改动前一致。
+func (s *StreamService) ResolveDirectPlayURL(r *http.Request, m *model.Media) (string, bool) {
+	if s == nil || r == nil || m == nil {
+		return "", false
+	}
+	raw := MediaSTRMTarget(m)
+	if raw == "" || !playableSTRMTarget(r.Context(), s.repo, raw, m) {
+		return "", false
+	}
+	return s.resolveDirectPlayTargetURLWithin(r, raw, directPlayInfoResolveTimeout)
+}
+
 // resolveDirectPlayTargetURL 尝试在服务端把 strm 目标解析成客户端可直接拉取的
 // 最终直链，供调用方直接 302。
 //
@@ -117,10 +140,18 @@ const directPlayResolveTimeout = 10 * time.Second
 // 解析到本地文件、以及解析失败都会返回 false，由调用方按改动前的方式回退到
 // strm 端点跳转，行为不会变差。
 func (s *StreamService) resolveDirectPlayTargetURL(r *http.Request, raw string) (string, bool) {
+	return s.resolveDirectPlayTargetURLWithin(r, raw, directPlayResolveTimeout)
+}
+
+func (s *StreamService) resolveDirectPlayTargetURLWithin(
+	r *http.Request,
+	raw string,
+	timeout time.Duration,
+) (string, bool) {
 	if s == nil || s.strmResolve == nil || r == nil {
 		return "", false
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), directPlayResolveTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 	// 必须带播放器 UA：115 直链绑定换取时的 UA，且按 UA 分键缓存，换错会拿到
 	// 与播放器不匹配（或未命中缓存）的地址。
