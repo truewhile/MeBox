@@ -80,6 +80,11 @@ func playbackInfoHandler(svc *service.Container) gin.HandlerFunc {
 		// stream_url 跳转，行为与改动前一致。
 		directURL, hasDirectURL := "", false
 		if svc.Stream != nil {
+			// `?refresh=1`：客户端手上的直链已失效（CDN 403），要求丢掉缓存
+			// 重新换链，别把同一条死链再发一次。
+			if strings.EqualFold(strings.TrimSpace(c.Query("refresh")), "1") {
+				service.InvalidateMediaLinkCache(m)
+			}
 			directURL, hasDirectURL = svc.Stream.ResolveDirectPlayURL(c.Request, m)
 		}
 		payload := gin.H{

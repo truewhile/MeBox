@@ -3,11 +3,13 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/repository"
 	"github.com/truewhile/MeBox/internal/service/cloud"
+	"github.com/truewhile/MeBox/internal/service/cloud115"
 )
 
 // directRedirectTestRepo 建一个带网盘账号表的库：normalizeCloudPlayTarget 需要
@@ -142,6 +145,53 @@ func TestServeFileFallsBackWhenDirectResolveUnavailable(t *testing.T) {
 				t.Fatalf("Location = %q, must not point at an unusable direct link", loc)
 			}
 		})
+	}
+}
+
+// `?refresh=1`：客户端手上的直链已被 CDN 403，服务端必须丢掉缓存重新换链，
+// 不能把同一条死链再发一次；不带该参数时缓存照旧命中，保住快路径。
+func TestServeFileRefreshDropsCachedDirectLink(t *testing.T) {
+	repos := directRedirectTestRepo(t)
+	seedCloudSTRMMedia(t, repos, "cloud-refresh", "/api/strm/play/cloud115/video.mkv?acct=a1&pickcode=pc-refresh")
+	cached := fmt.Sprintf("https://cdn.example/stale.mkv?t=%d", time.Now().Add(30*time.Minute).Unix())
+	fresh := "https://cdn.example/fresh.mkv?t=2"
+	cloud115.SetDownloadURLCache("pc-refresh", cached, "RodelPlayer/2.0")
+	t.Cleanup(func() { cloud115.ClearDownloadURLCache("pc-refresh") })
+	oldMinAge := directLinkRefreshMinAge
+	directLinkRefreshMinAge = 0
+	defer func() { directLinkRefreshMinAge = oldMinAge }()
+
+	run := func(t *testing.T, query string) (cachedAtResolve, location string) {
+		t.Helper()
+		svc := NewStreamService(&config.Config{}, zap.NewNop(), repos, nil).
+			SetStrmPlayTargetResolver(func(_ context.Context, _ string, userAgent string) (*StrmPlayResult, error) {
+				cachedAtResolve = cloud115.GetDownloadURLCache("pc-refresh", userAgent)
+				return &StrmPlayResult{
+					RedirectURL: fresh,
+					Link:        &cloud.DirectLink{URL: fresh, Headers: map[string]string{"User-Agent": userAgent}},
+				}, nil
+			})
+		req := httptest.NewRequest(http.MethodGet, "http://nas.local:18080/api/stream/cloud-refresh?token=jwt123"+query, nil)
+		req.Header.Set("User-Agent", "RodelPlayer/2.0")
+		w := httptest.NewRecorder()
+		if err := svc.ServeFile(w, req, "cloud-refresh"); err != nil {
+			t.Fatalf("ServeFile: %v", err)
+		}
+		return cachedAtResolve, w.Header().Get("Location")
+	}
+
+	// 正常播放：缓存里的直链照旧命中，服务端不该白跑一次换链。
+	if got, loc := run(t, ""); got != cached {
+		t.Fatalf("cached link = %q, want the cached %q", got, cached)
+	} else if loc != fresh {
+		t.Fatalf("Location = %q, want the resolved direct link", loc)
+	}
+
+	// 客户端报告直链失效：换链前必须先清掉缓存。
+	if got, loc := run(t, "&refresh=1"); got != "" {
+		t.Fatalf("cached link must be dropped before resolving, got %q", got)
+	} else if loc != fresh {
+		t.Fatalf("Location = %q, want the freshly resolved direct link", loc)
 	}
 }
 
