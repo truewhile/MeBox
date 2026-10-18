@@ -35,6 +35,12 @@ type RemoteLibraryView struct {
 // RemoteLibraries 把所有启用挂载的远程媒体库映射为网页媒体库列表
 // （只有显式挂载的库才出现在本项目媒体库中）。
 func (r *EmbyRemoteService) RemoteLibraries(ctx context.Context) ([]RemoteLibraryView, error) {
+	// 远程库只是「追加」到本地库列表上，绝不允许它拖住整页首屏：给整段
+	// 聚合（多账号 × 多线路故障转移）一个总预算，超时后各账号按失败处理，
+	// 调用方随即降级为只返回本地库。
+	ctx, cancel := context.WithTimeout(ctx, embyRemoteViewsBudget)
+	defer cancel()
+
 	mounts, err := r.ListMounts(ctx)
 	if err != nil || len(mounts) == 0 {
 		return nil, err

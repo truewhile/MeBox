@@ -40,6 +40,23 @@ import (
 // embyRemoteHTTPTimeout 远程 Emby 常规 API 请求超时（流式代理不在此列）。
 const embyRemoteHTTPTimeout = 15 * time.Second
 
+// embyRemoteViewsBudget 是网页端聚合远程媒体库时的总时间预算。
+//
+// 上游 Emby 整体不可用时（典型表现：Cloudflare 522，连接卡住近 20 秒），
+// 首页 /api/libraries 会被同步阻塞，而前端 axios 30 秒就放弃，于是一个挂掉的
+// 远端会把整个首页拖成加载失败。这里给聚合调用一个硬预算：超时即降级为
+// 「只返回本地库」，把首屏确定性地控制在几秒内。
+var embyRemoteViewsBudget = 5 * time.Second
+
+// embyRemoteViewsFailureTTL 是远程 Views 拉取失败后的负缓存时长。
+//
+// 失败结果也缓存一小段时间，避免每个请求都重新等满预算（首页每次刷新、
+// 每个并发客户端都会各打一次）。时间很短，远端恢复后最多 30 秒即可自动重试。
+var embyRemoteViewsFailureTTL = 30 * time.Second
+
+// errRemoteViewsRecentlyFailed 表示远程 Emby 刚失败过，当前处于负缓存窗口。
+var errRemoteViewsRecentlyFailed = errors.New("远程 Emby 暂时不可用（近期请求失败，稍后自动重试）")
+
 // embyRemoteUA 桌面浏览器 UA：远程 Emby 前方若有 Cloudflare/WAF 会拦截
 // Go-http-client 等非浏览器 UA（403 error code: 1010），必须伪装浏览器。
 const embyRemoteUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -420,6 +437,22 @@ func (r *EmbyRemoteService) DeleteMount(ctx context.Context, id string) error {
 		r.invalidateRemoteMediaCache(ctx)
 	}
 	return err
+}
+
+// SetMountsEnabled 批量启用/停用某账号下的全部挂载。
+//
+// 账号整体不可用时（远端宕机、线路全挂），管理员可以一键把所有挂载从媒体库
+// 中摘掉：网页端 /api/libraries 不再为该账号发起任何远程请求，首页恢复秒开；
+// 远端恢复后再一键启用即可，挂载配置和播放设置都不丢。
+func (r *EmbyRemoteService) SetMountsEnabled(ctx context.Context, accountID string, enabled bool) (int64, error) {
+	affected, err := r.repo.EmbyMount.SetEnabledByAccountID(ctx, accountID, enabled)
+	if err != nil {
+		return 0, err
+	}
+	// 启停会改变可见库集合，顺手清掉远程元数据缓存（含 Views 失败负缓存），
+	// 让下一次请求立刻按新状态重新探测，而不是继续吃 30 秒的负缓存。
+	r.invalidateRemoteMediaCache(ctx)
+	return affected, nil
 }
 
 // ReorderMounts 批量重排挂载媒体库顺序。
@@ -822,7 +855,13 @@ func (r *EmbyRemoteService) TestConnection(ctx context.Context, acct *model.Strm
 		return err
 	}
 	var out json.RawMessage
-	return r.doGet(ctx, acct, cfg, "/System/Info", nil, &out)
+	if err := r.doGet(ctx, acct, cfg, "/System/Info", nil, &out); err != nil {
+		return err
+	}
+	// 连通性恢复：清掉 Views 失败负缓存与旧元数据，让下一次媒体库列表请求
+	// 立即重新探测，而不是继续在负缓存窗口里显示「没有远程库」。
+	r.invalidateRemoteMediaCache(ctx)
+	return nil
 }
 
 // ProxyPlayOf 返回账号是否配置了播放代理（供账号列表/编辑回显）。
@@ -837,7 +876,34 @@ func (r *EmbyRemoteService) ProxyPlayOf(acct *model.StrmAccount) (bool, error) {
 // ─── 元数据 / 目录聚合 ─────────────────────────────────────────────────────────
 
 // RemoteViews 拉取远程媒体库（View）列表，返回远程原始 view map（未重写）。
+//
+// 失败时写入短时负缓存：远程整站不可用时，避免每次首页刷新都重新等满超时。
 func (r *EmbyRemoteService) RemoteViews(ctx context.Context, acct *model.StrmAccount) ([]map[string]any, error) {
+	if acct == nil {
+		return nil, errors.New("缺少远程 Emby 账号")
+	}
+	failKey := r.remoteCacheKey("views-fail", acct.ID)
+	var failed bool
+	if r.cache != nil && r.cache.GetJSON(ctx, failKey, &failed) && failed {
+		return nil, errRemoteViewsRecentlyFailed
+	}
+	views, err := r.remoteViewsUncached(ctx, acct)
+	if err != nil {
+		// 客户端主动断开（切换页面 / 关标签）不算上游故障，不能让它把
+		// 负缓存窗口写进去，否则正常用户会被别人的一次取消拖慢 30 秒。
+		if r.cache != nil && !errors.Is(err, context.Canceled) {
+			r.cache.SetJSON(ctx, failKey, true, embyRemoteViewsFailureTTL)
+		}
+		return nil, err
+	}
+	if r.cache != nil {
+		r.cache.SetJSON(ctx, failKey, false, embyRemoteViewsFailureTTL)
+	}
+	return views, nil
+}
+
+// remoteViewsUncached 是 RemoteViews 的实际拉取逻辑（含正常结果缓存）。
+func (r *EmbyRemoteService) remoteViewsUncached(ctx context.Context, acct *model.StrmAccount) ([]map[string]any, error) {
 	cfg, err := r.remoteConfigWithToken(ctx, acct)
 	if err != nil {
 		return nil, err

@@ -370,6 +370,8 @@ export function EmbyMountPage() {
   const [accountDialog, setAccountDialog] = useState<StrmAccount | null | 'new'>(null)
   const [mountDialogFor, setMountDialogFor] = useState<StrmAccount | null>(null)
   const [testingID, setTestingID] = useState<string | null>(null)
+  const [togglingAccountID, setTogglingAccountID] = useState<string | null>(null)
+  const [bulkTogglingID, setBulkTogglingID] = useState<string | null>(null)
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [dragOverId, setDragOverId] = useState<string | null>(null)
   const [reordering, setReordering] = useState(false)
@@ -504,6 +506,46 @@ export function EmbyMountPage() {
     }
   }
 
+  // 账号级总开关：停用后该服务器不再参与任何远程请求，其下挂载从媒体库中
+  // 立即隐藏（配置保留），用于远端宕机时先让首页恢复可用。
+  const toggleAccount = async (acct: StrmAccount) => {
+    const next = !acct.enabled
+    const acctMountCount = mounts.filter((m) => m.account_id === acct.id).length
+    if (!next && !(await confirmAction({
+      message: `停用 Emby 服务器「${acct.name}」？其下 ${acctMountCount} 个远程媒体库会立即从媒体库中隐藏，首页也不再请求该服务器；挂载配置与播放设置会保留，可随时重新启用。`,
+      confirmText: '停用账号',
+    }))) return
+    setTogglingAccountID(acct.id)
+    try {
+      await strmAPI.updateAccount(acct.id, { provider: acct.provider, enabled: next })
+      toast.success(next ? `已启用「${acct.name}」` : `已停用「${acct.name}」，远程媒体库已隐藏`)
+      await load()
+    } catch (err) {
+      toast.error(apiErrorMessage(err))
+    } finally {
+      setTogglingAccountID(null)
+    }
+  }
+
+  // 一键启停该账号下全部挂载（配置保留，只控制是否出现在媒体库中）。
+  const setAllMounts = async (acct: StrmAccount, enabled: boolean) => {
+    const acctMounts = mounts.filter((m) => m.account_id === acct.id)
+    if (!enabled && !(await confirmAction({
+      message: `停用「${acct.name}」下的全部 ${acctMounts.length} 个挂载？它们会立即从媒体库中隐藏，配置保留，可随时全部启用。`,
+      confirmText: '全部停用',
+    }))) return
+    setBulkTogglingID(acct.id)
+    try {
+      const res = await embyAPI.setAccountMountsEnabled(acct.id, enabled)
+      toast.success(enabled ? `已启用 ${res.affected} 个挂载` : `已停用 ${res.affected} 个挂载`)
+      await load()
+    } catch (err) {
+      toast.error(apiErrorMessage(err))
+    } finally {
+      setBulkTogglingID(null)
+    }
+  }
+
   const removeMount = async (mount: EmbyMount) => {
     if (!(await confirmAction({ message: `取消挂载「${mount.remote_view_name || mount.name}」？媒体库列表中将不再显示。`, confirmText: '取消挂载' }))) return
     try {
@@ -566,26 +608,55 @@ export function EmbyMountPage() {
       ) : (
         accounts.map((acct) => {
           const acctMounts = mounts.filter((m) => m.account_id === acct.id)
+          const anyMountEnabled = acctMounts.some((m) => m.enabled)
           return (
-            <div key={acct.id} className="overflow-hidden rounded-3xl border border-sand-200 bg-white shadow-card">
+            <div
+              key={acct.id}
+              className={`overflow-hidden rounded-3xl border bg-white shadow-card ${
+                acct.enabled ? 'border-sand-200' : 'border-gray-200 opacity-80'
+              }`}
+            >
               {/* 账号头部 */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-sand-100 bg-gradient-to-r from-brand-50/60 to-transparent px-5 py-4">
                 <div className="flex items-center gap-3">
-                  <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-brand-100 text-brand-600">
+                  <span className={`flex h-10 w-10 items-center justify-center rounded-2xl ${acct.enabled ? 'bg-brand-100 text-brand-600' : 'bg-gray-100 text-sand-500'}`}>
                     <Server size={20} />
                   </span>
                   <div>
-                    <p className="font-display text-lg font-bold text-ink-600">{acct.name}</p>
+                    <p className="font-display text-lg font-bold text-ink-600">
+                      {acct.name}
+                      {!acct.enabled && (
+                        <span className="ml-2 rounded-full bg-gray-200 px-2 py-0.5 align-middle text-[11px] font-semibold text-sand-500">
+                          已停用
+                        </span>
+                      )}
+                    </p>
                     <p className="text-xs text-sand-500">
                       {acct.has_credential ? '凭据已配置' : '待补全凭据'}
                       {acct.emby_lines && acct.emby_lines.length > 0
                         ? ` · ${acct.emby_lines.length} 条线路`
                         : ''}
                       {acct.last_test_result ? ` · 最近测试：${acct.last_test_ok ? '正常' : acct.last_test_result}` : ''}
+                      {!acct.enabled ? ' · 不会发起远程请求' : ''}
                     </p>
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => toggleAccount(acct)}
+                    disabled={togglingAccountID === acct.id}
+                    className={`iconButtonCls ${acct.enabled ? '!text-amber-600 hover:!bg-amber-50' : '!text-green-600 hover:!bg-green-50'}`}
+                    title={acct.enabled ? '停用该服务器：其下挂载全部从媒体库隐藏' : '重新启用该服务器'}
+                  >
+                    {togglingAccountID === acct.id ? (
+                      <Loader2 size={13} className="animate-spin" />
+                    ) : acct.enabled ? (
+                      <PowerOff size={13} />
+                    ) : (
+                      <Power size={13} />
+                    )}
+                    {acct.enabled ? '停用账号' : '启用账号'}
+                  </button>
                   <button onClick={() => testAccount(acct)} disabled={testingID === acct.id} className="iconButtonCls">
                     {testingID === acct.id ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
                     测试
@@ -644,6 +715,7 @@ export function EmbyMountPage() {
                           <p className="text-xs text-sand-500">
                             {m.collection_type || 'mixed'}
                             {m.proxy_play ? ' · 本机代理播放' : ' · 直连播放'}
+                            {!m.enabled ? ' · 已停用' : ''}
                           </p>
                         </div>
                         <div className="flex items-center gap-1">
@@ -687,14 +759,41 @@ export function EmbyMountPage() {
                   </div>
                 )}
                 <div className="mt-4 flex flex-wrap gap-2">
-                  <button onClick={() => setMountDialogFor(acct)} className="btn-outline">
+                  <button
+                    onClick={() => setMountDialogFor(acct)}
+                    disabled={!acct.enabled}
+                    className="btn-outline disabled:cursor-not-allowed disabled:opacity-40"
+                    title={acct.enabled ? undefined : '账号已停用，启用后才能挂载新的媒体库'}
+                  >
                     <Plus size={14} />
                     选择挂载媒体库
                   </button>
-                  <button onClick={() => fullMount(acct)} className="btn-outline">
+                  <button
+                    onClick={() => fullMount(acct)}
+                    disabled={!acct.enabled}
+                    className="btn-outline disabled:cursor-not-allowed disabled:opacity-40"
+                    title={acct.enabled ? undefined : '账号已停用，启用后才能挂载新的媒体库'}
+                  >
                     <Check size={14} />
                     全量挂载
                   </button>
+                  {acctMounts.length > 0 && (
+                    <button
+                      onClick={() => setAllMounts(acct, !anyMountEnabled)}
+                      disabled={bulkTogglingID === acct.id}
+                      className="btn-outline disabled:cursor-not-allowed disabled:opacity-40"
+                      title={anyMountEnabled ? '把该账号下全部挂载从媒体库中隐藏（配置保留）' : '恢复该账号下全部挂载'}
+                    >
+                      {bulkTogglingID === acct.id ? (
+                        <Loader2 size={14} className="animate-spin" />
+                      ) : anyMountEnabled ? (
+                        <PowerOff size={14} />
+                      ) : (
+                        <Power size={14} />
+                      )}
+                      {anyMountEnabled ? '全部停用' : '全部启用'}
+                    </button>
+                  )}
                 </div>
               </div>
             </div>

@@ -10,6 +10,10 @@ export const embyAPI = {
   deleteMount: (id: string) => api.delete(`/admin/emby/mounts/${id}`).then((r) => r.data),
   reorderMounts: (ids: string[]) =>
     api.put<{ ok: boolean }>('/admin/emby/mounts/reorder', { ids }).then((r) => r.data),
+  setAccountMountsEnabled: (accountId: string, enabled: boolean) =>
+    api
+      .put<{ ok: boolean; affected: number }>(`/admin/emby/accounts/${accountId}/mounts/enabled`, { enabled })
+      .then((r) => r.data),
   listAccountViews: (accountId: string) =>
     api.get<RemoteEmbyView[]>(`/admin/emby/accounts/${accountId}/views`).then((r) => r.data),
   fullMountAccount: (accountId: string, proxy: boolean) =>
