@@ -22,8 +22,9 @@ import (
 
 const (
 	// IntroDBBaseURL is the public read endpoint. Overridable on the service
-	// for tests and for pointing at a mirror.
-	IntroDBBaseURL = "https://api.theintrodb.org/v3"
+	// for tests and for pointing at a mirror. v1 已删除，v2/v3 冻结在只读的
+	// GET /media 上并被官方标记为弃用，所以这里直接跟 v4。
+	IntroDBBaseURL = "https://api.theintrodb.org/v4"
 	// IntroDBSource tags rows that came from this provider.
 	IntroDBSource = "theintrodb"
 
@@ -92,8 +93,10 @@ type introDBRange struct {
 	EndMs   *int64 `json:"end_ms"`
 }
 
+// introDBResponse 对应 v4 的 MediaResponse。v4 以 TVDB 为身份，响应只带
+// tvdb_id —— tmdb_id 字段已被官方移除，需要 tmdb_id 只能从请求侧自己记。
 type introDBResponse struct {
-	TMDbID  int            `json:"tmdb_id"`
+	TVDBID  int            `json:"tvdb_id"`
 	Type    string         `json:"type"`
 	Intro   []introDBRange `json:"intro"`
 	Recap   []introDBRange `json:"recap"`
