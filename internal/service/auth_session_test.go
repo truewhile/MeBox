@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -160,6 +161,52 @@ func TestRefreshKeepsSessionAssociation(t *testing.T) {
 	}
 	if rt.AuthSessionID != session.ID {
 		t.Fatalf("rotated refresh session = %q, want %q", rt.AuthSessionID, session.ID)
+	}
+}
+
+// TestMobileDeviceSessionsDoNotTrimEachOther 覆盖同一账号多设备登录：
+// 每台设备有独立认证会话与刷新令牌，新设备登录或任一设备刷新都不应撤销
+// 其他设备的刷新令牌。历史实现把「最大同时登录终端」直接作用在刷新令牌
+// 上，第 N+1 台设备登录会把最早那台设备的刷新令牌标记为已撤销，那台设备
+// 下一次刷新就会收到 SESSION_REVOKED，被强制退回登录页。
+func TestMobileDeviceSessionsDoNotTrimEachOther(t *testing.T) {
+	sessions, tokens, repos := newAuthSessionTestEnv(t)
+	ctx := context.Background()
+	user := seedSessionUser(t, repos)
+
+	// 默认上限是 3，这里故意登录 4 台设备。
+	const devices = 4
+	pairs := make([]*TokenPair, 0, devices)
+	for i := 0; i < devices; i++ {
+		session, err := sessions.Create(ctx, CreateAuthSessionInput{
+			UserID:     user.ID,
+			DeviceID:   fmt.Sprintf("device-%02d", i),
+			DeviceName: fmt.Sprintf("Phone %d", i+1),
+		})
+		if err != nil {
+			t.Fatalf("create session %d: %v", i+1, err)
+		}
+		pair, err := tokens.IssuePairForSession(ctx, user.ID, user.Role, user.Tier, session.ID)
+		if err != nil {
+			t.Fatalf("issue pair %d: %v", i+1, err)
+		}
+		pairs = append(pairs, pair)
+	}
+
+	for i, pair := range pairs {
+		row, err := repos.RefreshToken.FindByHash(ctx, repository.HashToken(pair.RefreshToken))
+		if err != nil {
+			t.Fatalf("load device %d token: %v", i+1, err)
+		}
+		if row == nil {
+			t.Fatalf("device %d refresh token missing", i+1)
+		}
+		if row.Revoked {
+			t.Fatalf("device %d refresh token was revoked by another device", i+1)
+		}
+		if _, err := tokens.Refresh(ctx, pair.RefreshToken); err != nil {
+			t.Fatalf("device %d refresh failed: %v", i+1, err)
+		}
 	}
 }
 

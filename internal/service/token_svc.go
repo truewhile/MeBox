@@ -170,8 +170,16 @@ func (s *TokenService) storeRefreshToken(ctx context.Context, rt *model.RefreshT
 	if err := s.repo.RefreshToken.Create(ctx, rt); err != nil {
 		return err
 	}
-	if err := s.repo.RefreshToken.RevokeOldestActiveByUserID(ctx, rt.UserID, s.maxActiveRefreshTokens(ctx)); err != nil && s.log != nil {
-		s.log.Warn("failed to enforce refresh token session limit", zap.String("user_id", rt.UserID), zap.Error(err))
+	// 「最大同时登录终端」只约束未绑定设备会话的旧客户端。
+	//
+	// 移动端每台设备有独立认证会话，刷新令牌归属该会话；如果仍按用户统一
+	// 裁剪活跃令牌，第 N+1 台设备登录（或任一设备刷新）就会把最早那台设备
+	// 的刷新令牌标记为已撤销，那台设备下次刷新收到 SESSION_REVOKED，被迫
+	// 重新登录。设备数量由设备策略单独约束，不能靠撤销刷新令牌实现。
+	if rt.AuthSessionID == "" {
+		if err := s.repo.RefreshToken.RevokeOldestActiveLegacyByUserID(ctx, rt.UserID, s.maxActiveRefreshTokens(ctx)); err != nil && s.log != nil {
+			s.log.Warn("failed to enforce refresh token session limit", zap.String("user_id", rt.UserID), zap.Error(err))
+		}
 	}
 	return nil
 }
