@@ -11,23 +11,23 @@ import (
 	"strings"
 )
 
-func metadataFromArtwork(mediaPath, showBaseDir string) *LocalMetadata {
+func metadataFromArtwork(mediaPath, showBaseDir, libraryRoot string) *LocalMetadata {
 	meta := &LocalMetadata{}
-	mergeArtworkMetadata(meta, mediaPath, showBaseDir)
+	mergeArtworkMetadata(meta, mediaPath, showBaseDir, libraryRoot)
 	if meta.PosterURL == "" && meta.BackdropURL == "" {
 		return nil
 	}
 	return meta
 }
 
-func mergeArtworkMetadata(meta *LocalMetadata, mediaPath, showBaseDir string) {
+func mergeArtworkMetadata(meta *LocalMetadata, mediaPath, showBaseDir, libraryRoot string) {
 	if meta == nil {
 		return
 	}
 	mediaDir := filepath.Dir(mediaPath)
 	if localPoster := firstLocalPoster(mediaPath, showBaseDir); localPoster != "" {
 		meta.PosterURL = localPoster
-	} else if meta.PosterURL == "" {
+	} else if meta.PosterURL == "" && looseArtworkFallbackAllowed(mediaDir, libraryRoot) {
 		meta.PosterURL = firstAdultLooseImage(mediaDir, "poster")
 	}
 	dirs := []string{mediaDir, showBaseDir}
@@ -39,7 +39,7 @@ func mergeArtworkMetadata(meta *LocalMetadata, mediaPath, showBaseDir string) {
 			meta.BackdropURL = img
 			break
 		}
-		if meta.BackdropURL == "" {
+		if meta.BackdropURL == "" && looseArtworkFallbackAllowed(dir, libraryRoot) {
 			meta.BackdropURL = firstAdultLooseImage(dir, "backdrop")
 		}
 	}
@@ -243,6 +243,48 @@ func firstExistingPosterImage(dir string, names ...string) string {
 		}
 	}
 	return ""
+}
+
+// looseArtworkFallbackAllowed reports whether an unmatched image sitting in dir
+// can be attributed to mediaPath. Such an image carries no filename relation to
+// a specific video, so it is only trustworthy when the folder holds a single
+// media file and that folder is not the library root. Download tools routinely
+// drop unrelated titles flat into one directory (a 115 cloud-download library,
+// for example); claiming the first "*-poster.jpg" there made every item show the
+// same artwork. Mirrors the root-level guard findMovieNFO already applies to
+// loose NFO files.
+func looseArtworkFallbackAllowed(dir, libraryRoot string) bool {
+	if dir == "" {
+		return false
+	}
+	if libraryRoot != "" && samePath(dir, libraryRoot) {
+		return false
+	}
+	return countMediaFilesInDir(dir) <= 1
+}
+
+// countMediaFilesInDir counts the video files directly inside dir, stopping once
+// more than one is found. It walks the real directory rather than reusing the
+// loose-image glob because a shared folder may contain no images at all.
+func countMediaFilesInDir(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if _, ok := videoExtensions[strings.ToLower(filepath.Ext(entry.Name()))]; !ok {
+			continue
+		}
+		count++
+		if count > 1 {
+			return count
+		}
+	}
+	return count
 }
 
 func firstAdultLooseImage(dir, kind string) string {

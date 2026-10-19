@@ -184,6 +184,85 @@ func TestReadAdultMetadataDerivesDMMPosterFromRemoteFanart(t *testing.T) {
 	}
 }
 
+func TestReadAdultArtworkIgnoresLoosePosterInLibraryRoot(t *testing.T) {
+	root := t.TempDir()
+	// 云下载这类库把不同影片平铺在同一个根目录里，根目录中残留的松散海报
+	// 属于别的影片，不能被抓来当作当前影片的封面。
+	if err := os.WriteFile(filepath.Join(root, "AAA-001-poster.jpg"), []byte("jpg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "AAA-001-fanart.jpg"), []byte("jpg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mediaPath := filepath.Join(root, "BBB-002.mp4")
+	if err := os.WriteFile(mediaPath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadLocalMetadata(mediaPath, root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil && (got.PosterURL != "" || got.BackdropURL != "") {
+		t.Fatalf("library-root artwork must not be inherited: poster=%q backdrop=%q", got.PosterURL, got.BackdropURL)
+	}
+}
+
+func TestReadAdultArtworkIgnoresLoosePosterInSharedFolder(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "shared")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"AAA-001.mp4", "BBB-002.mp4"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "AAA-001-poster.jpg"), []byte("jpg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "AAA-001-fanart.jpg"), []byte("jpg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadLocalMetadata(filepath.Join(dir, "BBB-002.mp4"), root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil && (got.PosterURL != "" || got.BackdropURL != "") {
+		t.Fatalf("sibling artwork must not be inherited in a shared folder: poster=%q backdrop=%q", got.PosterURL, got.BackdropURL)
+	}
+}
+
+func TestReadAdultArtworkKeepsLooseFallbackInItemFolder(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "BBB-002")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mediaPath := filepath.Join(dir, "video.mp4")
+	if err := os.WriteFile(mediaPath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	poster := filepath.Join(dir, "japanese-title-cover.jpg")
+	fanart := filepath.Join(dir, "japanese-title-fanart.jpg")
+	if err := os.WriteFile(poster, []byte("jpg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fanart, []byte("jpg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadLocalMetadata(mediaPath, root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.PosterURL != poster || got.BackdropURL != fanart {
+		t.Fatalf("single-item folder should keep loose artwork fallback: %+v", got)
+	}
+}
+
 func TestReadAdultArtworkByCodeWithoutNFO(t *testing.T) {
 	root := t.TempDir()
 	mediaPath := filepath.Join(root, "SSIS-001-CD1.mp4")
