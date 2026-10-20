@@ -96,15 +96,34 @@ func (r *MediaRepository) UpsertBatchWithAliases(ctx context.Context, items []Me
 
 // indexByIDBestEffort 在事务提交后按 ID 回读最新行并同步搜索索引。
 func (r *MediaRepository) indexByIDBestEffort(ctx context.Context, ids []string) {
-	if _, ok := r.searchBackend.(MediaSearchSyncBackend); !ok {
+	backend, ok := r.searchBackend.(MediaSearchSyncBackend)
+	if !ok {
 		return
 	}
+	unique := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
 		if id == "" {
 			continue
 		}
-		if fresh, err := r.FindByID(ctx, id); err == nil && fresh != nil {
-			r.indexMediaBestEffort(ctx, *fresh)
+		if _, exists := seen[id]; !exists {
+			seen[id] = struct{}{}
+			unique = append(unique, id)
+		}
+	}
+	// Read committed rows and submit one bulk per bounded batch. Keep network
+	// work outside the transaction and below SQLite's parameter limit.
+	const batchSize = 500
+	for start := 0; start < len(unique); start += batchSize {
+		batch := unique[start:min(start+batchSize, len(unique))]
+		rows, err := r.ListMediaByIDs(ctx, batch)
+		if err == nil {
+			err = backend.IndexMedia(ctx, rows)
+		}
+		if err != nil {
+			// The primary write has committed; do not report a failed upsert and
+			// make scanners repeat it. Surface the separate index failure instead.
+			r.db.Logger.Error(ctx, "media saved but search index sync failed for %d items: %v", len(batch), err)
 		}
 	}
 }

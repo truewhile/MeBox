@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -135,14 +137,113 @@ func (b *OpenSearchMediaBackend) EnsureIndex(ctx context.Context) error {
 }
 
 func (b *OpenSearchMediaBackend) IndexMedia(ctx context.Context, rows []model.Media) error {
+	const batchSize = 500
+	var failures []error
+	for start := 0; start < len(rows); start += batchSize {
+		if err := b.indexMediaBatch(ctx, rows[start:min(start+batchSize, len(rows))]); err != nil {
+			failures = append(failures, err)
+			if ctx.Err() != nil {
+				break
+			}
+		}
+	}
+	return errors.Join(failures...)
+}
+
+type openSearchBulkResponse struct {
+	Errors bool `json:"errors"`
+	Items  []struct {
+		Index struct {
+			ID     string `json:"_id"`
+			Status int    `json:"status"`
+			Error  *struct {
+				Type string `json:"type"`
+			} `json:"error"`
+		} `json:"index"`
+	} `json:"items"`
+}
+
+func (b *OpenSearchMediaBackend) indexMediaBatch(ctx context.Context, rows []model.Media) error {
 	if len(rows) == 0 {
 		return nil
+	}
+	pending := rows
+	var failures []error
+	const attempts = 3
+	for attempt := 0; attempt < attempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(failures, err)...)
+		}
+		if attempt > 0 {
+			timer := time.NewTimer(time.Duration(100*(1<<(attempt-1))) * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return errors.Join(append(failures, ctx.Err())...)
+			case <-timer.C:
+			}
+		}
+		response, err := b.submitMediaBulk(ctx, pending)
+		if err != nil {
+			if retryableOpenSearchError(err) && attempt < attempts-1 {
+				continue
+			}
+			return errors.Join(append(failures, err)...)
+		}
+		if len(response.Items) != len(pending) {
+			return errors.Join(append(failures, fmt.Errorf("opensearch bulk returned %d item results for %d documents", len(response.Items), len(pending)))...)
+		}
+		var retry []model.Media
+		failed := false
+		for i, item := range response.Items {
+			result := item.Index
+			if result.Status >= 200 && result.Status < 300 && result.Error == nil {
+				continue
+			}
+			failed = true
+			if retryableOpenSearchStatus(result.Status) && attempt < attempts-1 {
+				retry = append(retry, pending[i])
+				continue
+			}
+			errorType := "unknown"
+			if result.Error != nil {
+				errorType = result.Error.Type
+			}
+			failures = append(failures, fmt.Errorf("opensearch bulk document %q failed: status %d (%s)", pending[i].ID, result.Status, errorType))
+		}
+		if response.Errors && !failed {
+			failures = append(failures, errors.New("opensearch bulk reported errors without failed item results"))
+		}
+		if len(retry) == 0 {
+			break
+		}
+		pending = retry
+	}
+	return errors.Join(failures...)
+}
+
+func retryableOpenSearchStatus(status int) bool {
+	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500
+}
+
+func retryableOpenSearchError(err error) bool {
+	var statusError *openSearchHTTPError
+	if errors.As(err, &statusError) {
+		return retryableOpenSearchStatus(statusError.status)
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError)
+}
+
+func (b *OpenSearchMediaBackend) submitMediaBulk(ctx context.Context, rows []model.Media) (*openSearchBulkResponse, error) {
+	if len(rows) == 0 {
+		return &openSearchBulkResponse{}, nil
 	}
 	var bulk bytes.Buffer
 	enc := json.NewEncoder(&bulk)
 	for _, row := range rows {
 		if err := enc.Encode(map[string]any{"index": map[string]any{"_index": b.index, "_id": row.ID}}); err != nil {
-			return err
+			return nil, err
 		}
 		if err := enc.Encode(map[string]any{
 			"id":            row.ID,
@@ -155,10 +256,24 @@ func (b *OpenSearchMediaBackend) IndexMedia(ctx context.Context, rows []model.Me
 			"deleted":       row.DeletedAt.Valid,
 			"created_at":    row.CreatedAt,
 		}); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return b.do(ctx, http.MethodPost, "/_bulk", &bulk, "application/x-ndjson", nil)
+	var response openSearchBulkResponse
+	if err := b.do(ctx, http.MethodPost, "/_bulk", &bulk, "application/x-ndjson", &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+type openSearchHTTPError struct {
+	method string
+	path   string
+	status int
+}
+
+func (e *openSearchHTTPError) Error() string {
+	return fmt.Sprintf("opensearch %s %s returned %d", e.method, e.path, e.status)
 }
 
 func (b *OpenSearchMediaBackend) doJSON(ctx context.Context, method, path string, body any, out any) error {
@@ -190,7 +305,7 @@ func (b *OpenSearchMediaBackend) do(ctx context.Context, method, path string, bo
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("opensearch %s %s returned %d", method, path, resp.StatusCode)
+		return &openSearchHTTPError{method: method, path: path, status: resp.StatusCode}
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, resp.Body)

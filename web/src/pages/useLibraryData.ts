@@ -158,11 +158,9 @@ export function useLibraryData(
       try {
         const resolved = await resolveLibrary(libraryID)
         if (cancelled || seq !== requestSeqRef.current) return
-        if (!lib) {
-          lib = resolved
-          libraryRef.current = lib
-          setLibrary(lib)
-        }
+        lib = resolved
+        libraryRef.current = lib
+        setLibrary(lib)
       } catch {
         if (!cancelled && seq === requestSeqRef.current) {
           setLoading(false)

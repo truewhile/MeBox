@@ -556,19 +556,17 @@ func listMediaHandler(svc *service.Container) gin.HandlerFunc {
 			})
 			return
 		}
-		grouped, err := svc.Media.GroupedMediaVisibleFiltered(ctx, id, mediaVisibilityForRequest(c, svc), filters)
+		items, total, err := svc.Media.ListMediaVisibleSortedPage(ctx, id, page, size, mediaVisibilityForRequest(c, svc), filters, sortSpec, history)
 		if err != nil {
 			writeInternalOrCanceled(c, err)
 			return
 		}
-		grouped = service.SortMediaItems(grouped, sortSpec.Field, sortSpec.Order, history)
-		items := service.PaginateMediaItems(grouped, page, size)
 		if items == nil {
 			items = []service.MediaItem{}
 		}
 		c.JSON(http.StatusOK, gin.H{
 			"items":     items,
-			"total":     len(grouped),
+			"total":     total,
 			"page":      page,
 			"page_size": size,
 		})

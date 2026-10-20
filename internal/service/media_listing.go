@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"go.uber.org/zap"
+	"github.com/google/uuid"
 
 	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/repository"
@@ -129,6 +129,26 @@ func (s *MediaService) GroupedMediaVisibleFiltered(
 	visibility MediaVisibility,
 	filters MediaListFilters,
 ) ([]MediaItem, error) {
+	value, err := s.groupedMediaVisibleFiltered(ctx, libraryID, visibility, filters)
+	if err != nil {
+		return nil, err
+	}
+	return value.Items, nil
+}
+
+// Each immutable grouping has its own revision. Lightweight sort indices can
+// reference that revision without retaining another copy of the full rows.
+type groupedMediaCacheValue struct {
+	Items    []MediaItem
+	Revision string
+}
+
+func (s *MediaService) groupedMediaVisibleFiltered(
+	ctx context.Context,
+	libraryID string,
+	visibility MediaVisibility,
+	filters MediaListFilters,
+) (*groupedMediaCacheValue, error) {
 	visibility = ExpandMediaVisibilityForMergedCloudLibraries(ctx, s.repo, visibility)
 	libraryIDs, err := MergedLibraryIDsForLibrary(ctx, s.repo, libraryID)
 	if err != nil {
@@ -143,7 +163,7 @@ func (s *MediaService) GroupedMediaVisibleFiltered(
 	value, err, _ := s.groupedMediaFlight.Do(itemsCacheKey, func() (any, error) {
 		if s.cache != nil {
 			if cachedObj, ok := s.cache.GetObject(itemsCacheKey); ok {
-				if cached, ok := cachedObj.([]MediaItem); ok {
+				if cached, ok := cachedObj.(*groupedMediaCacheValue); ok {
 					return cached, nil
 				}
 			}
@@ -154,8 +174,8 @@ func (s *MediaService) GroupedMediaVisibleFiltered(
 		if err != nil {
 			return nil, err
 		}
-		grouped := groupMediaVersions(items)
-		if s.cache != nil && len(grouped) > 0 {
+		grouped := &groupedMediaCacheValue{Items: groupMediaVersions(items), Revision: uuid.NewString()}
+		if s.cache != nil && len(grouped.Items) > 0 {
 			s.cache.SetObject(itemsCacheKey, grouped, s.mediaObjectTTL())
 		}
 		return grouped, nil
@@ -163,10 +183,10 @@ func (s *MediaService) GroupedMediaVisibleFiltered(
 	if err != nil {
 		return nil, err
 	}
-	if grouped, ok := value.([]MediaItem); ok {
+	if grouped, ok := value.(*groupedMediaCacheValue); ok {
 		return grouped, nil
 	}
-	return nil, nil
+	return &groupedMediaCacheValue{}, nil
 }
 
 func (s *MediaService) listMediaVisibleForGrouping(ctx context.Context, libraryID string, visibility MediaVisibility, filters MediaListFilters) ([]model.Media, error) {
@@ -180,24 +200,19 @@ func (s *MediaService) listMediaVisibleForGrouping(ctx context.Context, libraryI
 		AllowedLibraryIDs: visibility.AllowedLibraryIDs,
 		HiddenLibraryIDs:  visibility.HiddenLibraryIDs,
 	})
-	// 版本分组的 URL 分页发生在 Go 进程内，响应里的 total 是分组后的数量，
-	// 不需要数据库再为原始行做一次 COUNT(*)。全量 COUNT 在超大媒体库上
-	// 会重复扫描整个 library_id 范围，而这里只关心是否存在截断风险。
-	items, err := s.repo.Media.ListByLibrariesFilteredNoCount(ctx, libraryIDs, 0, maxMediaSearchLimit, filter)
+	// Group before paginating so versions stay together. The search safety limit
+	// must not truncate a library listing or its reported grouped total.
+	items, err := s.repo.Media.ListAllByLibrariesFilteredNoCount(ctx, libraryIDs, filter)
 	if err != nil {
 		return nil, err
-	}
-	if len(items) >= maxMediaSearchLimit && s.log != nil {
-		s.log.Warn("media version grouping may be truncated by safety limit",
-			zap.String("library_id", libraryID),
-			zap.Int("limit", maxMediaSearchLimit))
 	}
 	s.attachLibraryMetadata(ctx, items)
 	return items, nil
 }
 
 // GetMedia returns a single media row.
-func (s *MediaService) GetMedia(ctx context.Context, id string) (*model.Media, error) {	media, err := s.repo.Media.FindByID(ctx, id)
+func (s *MediaService) GetMedia(ctx context.Context, id string) (*model.Media, error) {
+	media, err := s.repo.Media.FindByID(ctx, id)
 	if err != nil || media == nil {
 		return media, err
 	}

@@ -1,9 +1,7 @@
 // Package handler — WebSocket endpoint.
 //
-// Clients connect to /api/ws?token=... (the token is the same JWT used for
-// REST calls). The first message they send is a JSON {"action":"subscribe",
-// "topics":["scan","scrape","transcode"]}. Subsequent server-pushed events
-// arrive as {"topic":"...","payload":{...}}.
+// Administrators connect to /api/ws?token=... with their REST access token.
+// Operator events arrive as {"topic":"...","payload":{...}}.
 package handler
 
 import (
@@ -52,8 +50,11 @@ func wsHandler(svc *service.Container) gin.HandlerFunc {
 		sub := svc.WSHub.Subscribe(id, nil)
 		defer svc.WSHub.Unsubscribe(id)
 
-		// Reader: accept ping + subscription updates.
+		// Reading processes WebSocket control frames and detects disconnects.
+		done := make(chan struct{})
+		conn.SetReadLimit(64 << 10)
 		go func() {
+			defer close(done)
 			for {
 				if _, _, err := conn.NextReader(); err != nil {
 					_ = conn.Close()
@@ -67,6 +68,8 @@ func wsHandler(svc *service.Container) gin.HandlerFunc {
 		defer ticker.Stop()
 		for {
 			select {
+			case <-done:
+				return
 			case ev, ok := <-sub.Out:
 				if !ok {
 					return
