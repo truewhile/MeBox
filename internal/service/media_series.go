@@ -239,26 +239,6 @@ func (s *MediaService) completedMediaIDSet(ctx context.Context, filters MediaLis
 	return out
 }
 
-func (s *MediaService) ListRecentSeriesCards(ctx context.Context, limit int, visibility MediaVisibility) ([]SeriesCard, error) {
-	if limit <= 0 {
-		limit = 24
-	} else if limit > 100 {
-		limit = 100
-	}
-	rows, err := s.SearchMediaVisible(ctx, "", maxMediaSearchLimit, visibility)
-	if err != nil {
-		return nil, err
-	}
-	cards := groupMediaSeriesCards(rows)
-	if len(cards) == 0 {
-		return []SeriesCard{}, nil
-	}
-	if len(cards) > limit {
-		cards = cards[:limit]
-	}
-	return cards, nil
-}
-
 func (s *MediaService) ListLibrarySeriesEpisodes(ctx context.Context, libraryID, key string, visibility MediaVisibility) ([]model.Media, error) {
 	rows, err := s.libraryRowsWithIndex(ctx, libraryID, visibility)
 	if err != nil {
@@ -524,9 +504,16 @@ func groupMediaSeriesCardsByKeys(items []model.Media, keys []string) []SeriesCar
 // GroupMediaSeriesItems folds episode-level rows into one representative media
 // row per series. It is intended for search surfaces where applying a small
 // limit before series grouping would otherwise return several episodes from
-// the same show.
+// the same show. Each display library keeps its own search result.
 func GroupMediaSeriesItems(items []model.Media) []model.Media {
-	cards := groupMediaSeriesCards(items)
+	_, keys := resolveMediaSeriesKeys(items)
+	for i, item := range items {
+		// External IDs and SeriesID can be shared by different libraries. Scope
+		// search grouping to the same library used by the result's label/link,
+		// while preserving episode folding within merged display libraries.
+		keys[i] = seriesFingerprint(mediaTargetLibraryID(item), keys[i])
+	}
+	cards := groupMediaSeriesCardsByKeys(items, keys)
 	if len(cards) == 0 {
 		return []model.Media{}
 	}

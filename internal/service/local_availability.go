@@ -50,9 +50,12 @@ func LookupLocalAvailability(ctx context.Context, repo *repository.Container, ti
 		return out
 	}
 	like := "%" + query + "%"
+	// 方言相关的 ILIKE/LIKE：PostgreSQL 下用 LIKE 会因标题大小写与查询不一致而
+	// 漏判「本地已有该剧」，进而反复提示订阅缺失。
+	likeOp := repository.LikeOperator(repo.DB)
 	var rows []model.Media
 	if err := repo.DB.WithContext(ctx).
-		Where("title LIKE ? OR original_name LIKE ? OR path LIKE ?", like, like, like).
+		Where("title "+likeOp+" ? OR original_name "+likeOp+" ? OR path "+likeOp+" ?", like, like, like).
 		Order("season_num asc, episode_num asc, episode_fraction asc, created_at desc").
 		Limit(2000).
 		Find(&rows).Error; err != nil {

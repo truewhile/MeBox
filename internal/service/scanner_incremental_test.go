@@ -282,6 +282,106 @@ func TestScanLibraryUpdatesExistingPathFromOverlappingLibrary(t *testing.T) {
 	}
 }
 
+// TestScanLibraryReclaimsMediaOrphanedByDeletedLibrary covers the "scan reports
+// files but the library stays empty" failure: a row left behind by a deleted
+// library keeps its stale library_id, and because media.path carries a global
+// unique index the rescan can neither insert a fresh row nor rewrite the
+// ownership, so a rebuilt library stays empty forever. The scan must reclaim
+// such orphaned rows for the library being scanned.
+func TestScanLibraryReclaimsMediaOrphanedByDeletedLibrary(t *testing.T) {
+	sc, repos := newScannerTestEnv(t)
+	root := t.TempDir()
+	file := filepath.Join(root, "Orphaned Episode 1.mkv")
+	if err := os.WriteFile(file, []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldLib := model.Library{Name: "Old", Path: root, Type: "movie", Enabled: true}
+	if err := repos.Library.Create(t.Context(), &oldLib); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sc.ScanLibrary(t.Context(), oldLib.ID); err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+
+	// Reproduce the gap the scan cannot see: the library row is gone while its
+	// media rows survive (hard-deleted library, or an in-flight scan writing
+	// after DeleteLibrary).
+	if err := repos.DB.Unscoped().Delete(&model.Library{}, "id = ?", oldLib.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got := countMediaInLibrary(t, repos, oldLib.ID); got != 1 {
+		t.Fatalf("precondition: rows still pinned to deleted library = %d, want 1", got)
+	}
+
+	newLib := model.Library{Name: "New", Path: root, Type: "movie", Enabled: true}
+	if err := repos.Library.Create(t.Context(), &newLib); err != nil {
+		t.Fatal(err)
+	}
+	res, err := sc.ScanLibrary(t.Context(), newLib.ID)
+	if err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	if res.ErrorCount != 0 {
+		t.Fatalf("rescan errors = %#v, want none", res.Errors)
+	}
+	if got := countMedia(t, repos); got != 1 {
+		t.Fatalf("media count = %d, want 1 (orphan reclaimed, not duplicated)", got)
+	}
+	if got := countMediaInLibrary(t, repos, newLib.ID); got != 1 {
+		t.Fatalf("rebuilt library media count = %d, want 1", got)
+	}
+	var media model.Media
+	if err := repos.DB.First(&media, "path = ?", file).Error; err != nil {
+		t.Fatal(err)
+	}
+	if media.LibraryID != newLib.ID {
+		t.Fatalf("media library_id = %q, want reclaimed to %q", media.LibraryID, newLib.ID)
+	}
+}
+
+// TestScanLibraryKeepsOwnershipWhenOwningLibraryStillExists pins the other half
+// of the rule: local media stays with its existing library as long as that
+// library is real, so overlapping libraries do not steal each other's rows.
+func TestScanLibraryKeepsOwnershipWhenOwningLibraryStillExists(t *testing.T) {
+	sc, repos := newScannerTestEnv(t)
+	root := t.TempDir()
+	file := filepath.Join(root, "Shared (2026).mkv")
+	if err := os.WriteFile(file, []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ownerLib := model.Library{Name: "Owner", Path: root, Type: "movie", Enabled: true}
+	otherLib := model.Library{Name: "Other", Path: root, Type: "movie", Enabled: true}
+	if err := repos.Library.Create(t.Context(), &ownerLib); err != nil {
+		t.Fatal(err)
+	}
+	if err := repos.Library.Create(t.Context(), &otherLib); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sc.ScanLibrary(t.Context(), ownerLib.ID); err != nil {
+		t.Fatalf("owner scan: %v", err)
+	}
+	if _, err := sc.ScanLibrary(t.Context(), otherLib.ID); err != nil {
+		t.Fatalf("other scan: %v", err)
+	}
+	var media model.Media
+	if err := repos.DB.First(&media, "path = ?", file).Error; err != nil {
+		t.Fatal(err)
+	}
+	if media.LibraryID != ownerLib.ID {
+		t.Fatalf("media library_id = %q, want unchanged owner %q", media.LibraryID, ownerLib.ID)
+	}
+}
+
+func countMediaInLibrary(t *testing.T, repos *repository.Container, libraryID string) int64 {
+	t.Helper()
+	var n int64
+	if err := repos.DB.Model(&model.Media{}).Where("library_id = ?", libraryID).Count(&n).Error; err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 func TestScanLibrarySkipsUnchangedLocalMetadata(t *testing.T) {
 	sc, repos := newScannerTestEnv(t)
 	root := t.TempDir()

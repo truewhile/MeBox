@@ -43,6 +43,12 @@ type SchedulerService struct {
 
 	imagesPolicyProvider func() ImageCachePolicy
 
+	// readerContentCleaner 阅读正文缓存的清理钩子（由阅读模块注入）。
+	readerContentCleaner func(context.Context)
+	// readerFilesTTLHours 书源文件缓存（java.cacheFile / downloadFile）的保留小时数。
+	// 0 表示用内置兜底值（见 readerFilesRetentionMax）。
+	readerFilesTTLHours int
+
 	segments *MediaSegmentService
 
 	mu     sync.Mutex
@@ -84,6 +90,18 @@ func (s *SchedulerService) imageCachePolicy() ImageCachePolicy {
 		return s.imagesPolicyProvider()
 	}
 	return ImageCachePolicy{}
+}
+
+// SetReaderContentCleaner 注入阅读正文缓存的清理钩子（TTL 过期 + 容量 LRU）。
+// 阅读模块自身持有缓存目录与索引（见 reader 包的 pruneReaderContentCache），
+// 调度器只负责按小时触发；未注入时不注册该任务。
+func (s *SchedulerService) SetReaderContentCleaner(fn func(context.Context)) {
+	s.readerContentCleaner = fn
+}
+
+// SetReaderFilesTTL 配置书源文件缓存的保留小时数（0 表示用兜底值）。
+func (s *SchedulerService) SetReaderFilesTTL(hours int) {
+	s.readerFilesTTLHours = hours
 }
 
 // scheduledJob is one recurring task.
@@ -147,6 +165,20 @@ func (s *SchedulerService) Start(ctx context.Context) {
 			interval: 1 * time.Hour,
 			run:      s.jobCleanImageCache,
 		},
+	}
+	// 阅读正文缓存清理只在注入钩子后注册（见 SetReaderContentCleaner）。
+	if s.readerContentCleaner != nil {
+		s.jobs = append(s.jobs, &scheduledJob{
+			name:     "reader_content_cleanup",
+			interval: 1 * time.Hour,
+			run:      s.jobCleanReaderContentCache,
+		})
+		// 书源文件缓存与孤儿临时文件的清理和正文缓存同源，一起注册。
+		s.jobs = append(s.jobs, &scheduledJob{
+			name:     "reader_files_cleanup",
+			interval: 24 * time.Hour,
+			run:      s.jobCleanReaderFiles,
+		})
 	}
 	// 片头预热只在注入了 Segments 时注册，避免测试跑无转外网任务。
 	if s.segments != nil {

@@ -213,6 +213,22 @@ func TestEndToEndSourceChain(t *testing.T) {
 	}
 }
 
+// TestGetContentForBookEmptyContentFails 书源一条内容都没返回时不能当成功下发。
+//
+// 回归：聚合类书源把七条线路全试完会返回空串（光遇聚合的 request() 就是这么写的），
+// 以前这种空正文会当成功下发，前端渲染成一张白页并缓存下来，读者只能干等。
+func TestGetContentForBookEmptyContentFails(t *testing.T) {
+	svc, bookID := setupTextChapterBook(t, "")
+
+	_, err := svc.GetContentForBook(t.Context(), "u1", bookID, 0)
+	if err == nil {
+		t.Fatal("空正文应当报错，实际当成功下发了")
+	}
+	if !strings.Contains(err.Error(), "正文为空") {
+		t.Fatalf("错误信息 = %q，期望提示正文为空", err.Error())
+	}
+}
+
 // ─── 纯函数测试：导入识别 / 搜索合并 ────────────────────────────────────────
 
 func TestParseSourcePayload(t *testing.T) {

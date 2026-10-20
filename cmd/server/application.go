@@ -88,7 +88,7 @@ func (a *application) start() error {
 		a.logger.Error("database not ready", zap.Error(err))
 		return fmt.Errorf("database not ready: %w", err)
 	}
-	if err := database.AutoMigrate(db); err != nil {
+	if err := database.AutoMigrateWithConfig(db, a.cfg, a.logger); err != nil {
 		a.logger.Error("auto-migrate failed", zap.Error(err))
 		return fmt.Errorf("auto-migrate failed: %w", err)
 	}

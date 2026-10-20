@@ -39,7 +39,9 @@ const (
 	// audioTranscodeDirName 缓存目录名，位于 cache.cache_dir 之下。
 	audioTranscodeDirName = "reader-audio"
 	// maxAudioTranscodeCacheBytes 转码缓存上限，超出按修改时间淘汰最旧的。
-	maxAudioTranscodeCacheBytes = 4 << 30
+	// 1GB 是权衡：单章语音 96kbps 约 1MB/分钟，一本 10 小时的有声书约 600MB，
+	// 也就是说同时能保住的「最近听过的书」在个位数；超出后旧书再听会重新转码。
+	maxAudioTranscodeCacheBytes = 1 << 30
 	// audioTranscodeKeepRatio 触发淘汰后回落到上限的比例，避免每次写入都淘汰。
 	audioTranscodeKeepRatio = 0.9
 	// maxAudioTranscodeDuration 单章转码超时。
@@ -269,7 +271,7 @@ func (s *ReaderService) transcodeInputHeaders(ctx context.Context, bookID, sourc
 	if err != nil || book == nil || strings.TrimSpace(book.Origin) == "" {
 		return headers
 	}
-	if src, err := s.repo.GetSourceByURL(ctx, book.Origin); err == nil && src != nil && src.Header != "" {
+	if src, err := s.repo.GetSourceAnyByURL(ctx, book.Origin); err == nil && src != nil && src.Header != "" {
 		var extra map[string]any
 		if json.Unmarshal([]byte(src.Header), &extra) == nil {
 			for k, v := range extra {
@@ -286,8 +288,12 @@ func (s *ReaderService) transcodeInputHeaders(ctx context.Context, bookID, sourc
 	if ck := state.CookieForRequest(source); ck != "" {
 		headers["Cookie"] = ck
 	}
+	// 默认 Referer 同上：聚合类书源的 origin 是显示名，拼出来的 Referer 非法，
+	// 会被音源/图床判盗链。只在 origin 是真正的 http(s) 地址时才补。
 	if headers["Referer"] == "" {
-		headers["Referer"] = strings.TrimSuffix(book.Origin, "/") + "/"
+		if referer := sourceReferer(book.Origin); referer != "" {
+			headers["Referer"] = referer
+		}
 	}
 	return headers
 }

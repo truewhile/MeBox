@@ -51,11 +51,53 @@ func playbackInfoHandler(svc *service.Container) gin.HandlerFunc {
 			// 远程 Emby 挂载没有本地文件，不能提供转码地址。STRM 默认直连，直连失败时可走 HLS。
 			hlsURL = ""
 		}
-		c.JSON(http.StatusOK, gin.H{
+		// 起播路径原本还要各发一次 /playback/{id}/resume 和
+		// /media/{id}/subtitles。把这两份数据并进播放地址响应后，移动端起播
+		// 只剩一个请求 —— 跨境链路上每多一条连接就多一次 DNS/TLS 建连，
+		// 实测单次建连可到数秒。老客户端不读这两个字段，行为不变。
+		uid, _ := c.Get(middleware.CtxUserID)
+		resumePayload := gin.H{"position_ms": int64(0), "duration_ms": int64(0), "completed": false}
+		if svc.Playback != nil {
+			if row, err := svc.Playback.GetProgress(c.Request.Context(), toString(uid), m.ID); err == nil && row != nil {
+				resumePayload = gin.H{
+					"position_ms": row.PositionMs,
+					"duration_ms": row.DurationMs,
+					"completed":   row.Completed,
+				}
+			}
+		}
+		// 直连播放只需要外挂字幕；内嵌字幕由播放器从容器里解。
+		subtitles := []service.SubtitleTrack{}
+		if svc.Subtitle != nil && !(svc.EmbyRemote != nil && service.IsEmbyRemoteID(m.ID)) {
+			if discovered, err := svc.Subtitle.DiscoverExternalOnly(c.Request.Context(), m.ID); err == nil && discovered != nil {
+				subtitles = discovered
+			}
+		}
+		// 能在服务端换链就把最终直链一并返回：客户端直接连 CDN，省掉
+		// /api/stream 的 302 往返。跨境/高延迟链路上，这一跳等于一次完整的
+		// DNS + TCP + TLS，实测能到数秒，正好压在起播关键路径上。
+		// 换链失败、本地文件或需要服务端加头的网盘保持原样，客户端仍走
+		// stream_url 跳转，行为与改动前一致。
+		directURL, hasDirectURL := "", false
+		if svc.Stream != nil {
+			// `?refresh=1`：客户端手上的直链已失效（CDN 403），要求丢掉缓存
+			// 重新换链，别把同一条死链再发一次。
+			if strings.EqualFold(strings.TrimSpace(c.Query("refresh")), "1") {
+				service.InvalidateMediaLinkCache(m)
+			}
+			directURL, hasDirectURL = svc.Stream.ResolveDirectPlayURL(c.Request, m)
+		}
+		payload := gin.H{
 			"media":      m,
 			"stream_url": "/api/stream/" + m.ID + "?token=" + url.QueryEscape(token) + profileQuery,
 			"hls_url":    hlsURL,
-		})
+			"resume":     resumePayload,
+			"subtitles":  subtitles,
+		}
+		if hasDirectURL {
+			payload["direct_url"] = directURL
+		}
+		c.JSON(http.StatusOK, payload)
 	}
 }
 

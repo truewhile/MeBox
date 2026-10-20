@@ -25,6 +25,7 @@ function isMediaView(pathname: string, search: string): boolean {
 
   return (
     pathname === '/' ||
+    pathname === '/search' ||
     pathname === '/libraries' ||
     pathname.startsWith('/library') ||
     pathname.startsWith('/media') ||

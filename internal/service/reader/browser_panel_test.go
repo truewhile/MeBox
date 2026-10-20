@@ -167,6 +167,51 @@ func TestBrowserPanelCancelReleasesBlock(t *testing.T) {
 	}
 }
 
+// TestBrowserPageURLKeepsTargetQuery 承载地址必须原样带上目标地址的 query。
+//
+// 光遇聚合的段评页从 location.search 读 item_id/para/source，再据此请求评论接口。
+// 承载地址若只剩我们自己的 id/s，页面就按缺参数去请求：段评气泡上的数字照常有，
+// 点开却一条评论都没有。
+func TestBrowserPageURLKeepsTargetQuery(t *testing.T) {
+	svc, _ := newLoginTestService(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<html><body>comment page</body></html>`))
+	}))
+	defer srv.Close()
+
+	// 目标地址里故意带上与我们同名的 s/id：它们不能顶掉签名参数。
+	target := srv.URL + "/get_para_review?item_id=abc&para=1&source=QQ%E9%98%85%E8%AF%BB&s=decoy&id=decoy"
+	entry, err := svc.registerBrowser(t.Context(), srv.URL, "src-1", readerTestUserID,
+		browserCookieTarget{}, rule.BrowserTask{URL: target, Title: "段评"}, browserModeOpen)
+	if err != nil {
+		t.Fatalf("登记承载页面失败: %v", err)
+	}
+
+	page := svc.browserPageOf(entry)
+	u, err := url.Parse(page.PageURL)
+	if err != nil {
+		t.Fatalf("承载地址不合法: %q", page.PageURL)
+	}
+	q := u.Query()
+	if q.Get("item_id") != "abc" || q.Get("para") != "1" || q.Get("source") != "QQ阅读" {
+		t.Fatalf("承载地址丢了目标参数（段评页会因此取不到评论）: %q", page.PageURL)
+	}
+	// 路由按 id/s 取承载的页面快照，同名参数必须仍指向我们自己的待办
+	if q.Get("id") != entry.id || q.Get("s") != svc.browserPageSig(entry.id) {
+		t.Fatalf("同名参数顶掉了签名参数: %q", page.PageURL)
+	}
+	if _, err := svc.VerifyBrowserPage(q.Get("id"), q.Get("s")); err != nil {
+		t.Fatalf("带业务参数后签名校验失败: %v", err)
+	}
+	// 没有 query 的地址（含 data: 页面）不该多出参数
+	for _, plain := range []string{"https://panel.example.com/plain", "data:text/html;base64,AAA"} {
+		if got := svc.browserPageURL("id1", plain); strings.Count(got, "&") != 1 {
+			t.Fatalf("无 query 的地址被拼进了多余参数: %q", got)
+		}
+	}
+}
+
 // TestBrowserPanelInjectsSourceCookies http(s) 页面必须由服务端带书源 Cookie
 // 抓取，否则「用户后台」在浏览器里永远是未登录状态。
 func TestBrowserPanelInjectsSourceCookies(t *testing.T) {
@@ -201,7 +246,7 @@ func TestBrowserPanelInjectsSourceCookies(t *testing.T) {
 	st.flush()
 
 	// 直接驱动服务层：等价于书源调用 startBrowser 打开用户后台
-	if err := svc.openBrowser(ctx, srv.URL, sourceID, readerTestUserID, rule.BrowserTask{
+	if err := svc.openBrowser(ctx, srv.URL, sourceID, readerTestUserID, browserCookieTarget{}, rule.BrowserTask{
 		URL: srv.URL + "/user", Title: "用户后台",
 	}); err != nil {
 		t.Fatalf("打开用户后台失败: %v", err)
@@ -266,7 +311,7 @@ func TestBrowserPanelInjectsSourceCookies(t *testing.T) {
 	if gotSourceURL != srv.URL {
 		t.Fatalf("资源关联的书源 = %q", gotSourceURL)
 	}
-	contentType, status, data, err := svc.FetchBrowserAsset(ctx, gotSourceURL, target)
+	contentType, status, data, err := svc.FetchBrowserAsset(ctx, page.ID, target)
 	if err != nil {
 		t.Fatalf("拉取资源失败: %v", err)
 	}
@@ -313,7 +358,7 @@ func TestBrowserPanelXHRProxy(t *testing.T) {
 	st.SetCookie(srv.URL, "qttoken=SESSION_abcdef123456")
 	st.flush()
 
-	if err := svc.openBrowser(ctx, srv.URL, sourceID, readerTestUserID, rule.BrowserTask{
+	if err := svc.openBrowser(ctx, srv.URL, sourceID, readerTestUserID, browserCookieTarget{}, rule.BrowserTask{
 		URL: srv.URL + "/user", Title: "用户后台",
 	}); err != nil {
 		t.Fatalf("打开用户后台失败: %v", err)
@@ -388,5 +433,48 @@ func TestBrowserPanelUnknownSourceIsolated(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("未解除阻塞")
+	}
+}
+
+// TestBrowserPanelOpenPageDroppedAfterResolve open 模式（java.startBrowser）
+// 的页面在用户关闭后必须立刻离开待办表。
+//
+// 回归：这条日志只删除 wait 模式（awaitBrowser 的 defer），open 模式没有清理
+// 路径，会一直躺到 15 分钟 TTL 到期。前端轮询到它就又把旧页面弹出来——光遇
+// 聚合点过「❇️ 更新书源」后，接下来点「书源设置」「段评设置」都会跳到书源更新页。
+func TestBrowserPanelOpenPageDroppedAfterResolve(t *testing.T) {
+	svc, _ := newLoginTestService(t)
+	ctx := t.Context()
+	sourceID := prepareLoginSource(t, svc, browserPanelSourceJSON(t, "https://panel.example.com"))
+
+	// 等价于书源的 renderVersionPage()：java.startBrowser(data:..., '光遇书源更新')
+	if err := svc.openBrowser(ctx, "https://panel.example.com", sourceID, readerTestUserID, browserCookieTarget{},
+		rule.BrowserTask{URL: "data:text/html,<html><body>更新</body></html>", Title: "光遇书源更新"}); err != nil {
+		t.Fatalf("登记 open 页面失败: %v", err)
+	}
+	old := waitPending(t, svc, sourceID)
+	if old.Mode != browserModeOpen {
+		t.Fatalf("模式 = %q，期望 open", old.Mode)
+	}
+
+	// 用户关掉页面
+	if err := svc.ResolveBrowser(old.ID, readerTestUserID, "", "", true); err != nil {
+		t.Fatalf("关闭页面失败: %v", err)
+	}
+	if pages := svc.PendingBrowserPages(readerTestUserID, sourceID); len(pages) != 0 {
+		t.Fatalf("关闭后待办未清理: %+v", pages)
+	}
+
+	// 再点别的按钮：待办表里只应剩新页面，且序号更大
+	if err := svc.openBrowser(ctx, "https://panel.example.com", sourceID, readerTestUserID, browserCookieTarget{},
+		rule.BrowserTask{URL: "data:text/html,<html><body>设置</body></html>", Title: "光遇书源设置"}); err != nil {
+		t.Fatalf("登记新页面失败: %v", err)
+	}
+	pages := svc.PendingBrowserPages(readerTestUserID, sourceID)
+	if len(pages) != 1 || pages[0].Title != "光遇书源设置" {
+		t.Fatalf("待办表应只剩新页面: %+v", pages)
+	}
+	if pages[0].Seq <= old.Seq {
+		t.Fatalf("新页面 seq 应更大: %d <= %d", pages[0].Seq, old.Seq)
 	}
 }

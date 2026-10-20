@@ -16,6 +16,7 @@ import (
 
 	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/service/cloud"
+	"github.com/truewhile/MeBox/internal/service/cloud115"
 )
 
 // ErrStrmPlayNotFound 表示 strm 播放目标不存在（handler 返回 404）。
@@ -250,21 +251,87 @@ func (s *StrmService) ProxyMediaDirect(ctx context.Context, w http.ResponseWrite
 	if err != nil {
 		return err
 	}
-	switch {
-	case result.Link != nil && result.Link.URL != "":
-		return s.ProxyDirect(ctx, w, r, result.Link)
-	case result.RedirectURL != "":
-		return s.ProxyDirect(ctx, w, r, &cloud.DirectLink{URL: result.RedirectURL})
-	default:
+	link := directLinkOfPlayResult(result)
+	if link == nil {
 		// 本地文件（LocalPath）由静态文件处理器提供，本身就是同源。
 		return ErrStrmProxyNotApplicable
 	}
+	resp, method, err := s.openDirectUpstream(ctx, r, link)
+	if err != nil {
+		return err
+	}
+	// 直链被 CDN 拒绝：115 直链带 30 分钟过期时间戳，缓存命中也可能拿到已经
+	// 失效的地址。这里清掉缓存重新换链再试一次，避免客户端只看到 403。
+	if directLinkRejected(resp.StatusCode) {
+		_ = resp.Body.Close()
+		if fresh := s.refreshDirectLink(ctx, raw); fresh != nil {
+			if retry, retryMethod, retryErr := s.openDirectUpstream(ctx, r, fresh); retryErr == nil {
+				resp, method = retry, retryMethod
+			}
+		}
+	}
+	defer resp.Body.Close()
+	return writeDirectUpstream(w, resp, method)
+}
+
+// directLinkOfPlayResult 取出可反向代理的直链；本地文件返回 nil。
+func directLinkOfPlayResult(result *StrmPlayResult) *cloud.DirectLink {
+	if result == nil {
+		return nil
+	}
+	switch {
+	case result.Link != nil && result.Link.URL != "":
+		return result.Link
+	case result.RedirectURL != "":
+		return &cloud.DirectLink{URL: result.RedirectURL}
+	default:
+		return nil
+	}
+}
+
+// directLinkRejected 判断上游状态码是否属于「直链本身失效」（而不是文件/权限
+// 之类与链接无关的问题）。
+func directLinkRejected(status int) bool {
+	switch status {
+	case http.StatusForbidden, http.StatusNotFound, http.StatusGone:
+		return true
+	default:
+		return false
+	}
+}
+
+// refreshDirectLink 丢弃当前直链缓存并重新换链，返回新的直链；无法换链时返回
+// nil，调用方继续用原来那条。
+func (s *StrmService) refreshDirectLink(ctx context.Context, raw string) *cloud.DirectLink {
+	pickCode := PickCodeFromPlayTarget(raw)
+	if pickCode == "" {
+		return nil
+	}
+	if !cloud115.ClearDownloadURLCacheIfOlderThan(pickCode, directLinkRefreshMinAge) {
+		// 缓存刚写入不久：说明失败与链接过期无关，重换一次也会拿到同一条。
+		return nil
+	}
+	fresh, err := s.ResolvePlayTarget(ctx, raw)
+	if err != nil {
+		return nil
+	}
+	return directLinkOfPlayResult(fresh)
 }
 
 // ProxyDirect 反向代理渲染直链内容（保留 Range 请求头以支持拖动播放）。
 func (s *StrmService) ProxyDirect(ctx context.Context, w http.ResponseWriter, r *http.Request, link *cloud.DirectLink) error {
+	resp, method, err := s.openDirectUpstream(ctx, r, link)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return writeDirectUpstream(w, resp, method)
+}
+
+// openDirectUpstream 向网盘直链发起一次请求，保留 Range 与 UA 语义。
+func (s *StrmService) openDirectUpstream(ctx context.Context, r *http.Request, link *cloud.DirectLink) (*http.Response, string, error) {
 	if link == nil || link.URL == "" {
-		return errors.New("空直链")
+		return nil, "", errors.New("空直链")
 	}
 	method := http.MethodGet
 	if r != nil && r.Method == http.MethodHead {
@@ -272,7 +339,7 @@ func (s *StrmService) ProxyDirect(ctx context.Context, w http.ResponseWriter, r 
 	}
 	req, err := http.NewRequestWithContext(ctx, method, link.URL, nil)
 	if err != nil {
-		return err
+		return nil, "", err
 	}
 	for k, v := range link.Headers {
 		req.Header.Set(k, v)
@@ -288,9 +355,13 @@ func (s *StrmService) ProxyDirect(ctx context.Context, w http.ResponseWriter, r 
 	}
 	resp, err := s.streamHTTP.Do(req)
 	if err != nil {
-		return err
+		return nil, "", err
 	}
-	defer resp.Body.Close()
+	return resp, method, nil
+}
+
+// writeDirectUpstream 把上游响应原样写给客户端。
+func writeDirectUpstream(w http.ResponseWriter, resp *http.Response, method string) error {
 	for _, header := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified"} {
 		if value := resp.Header.Get(header); value != "" {
 			w.Header().Set(header, value)
@@ -310,7 +381,7 @@ func (s *StrmService) ProxyDirect(ctx context.Context, w http.ResponseWriter, r 
 	if flusher, ok := w.(http.Flusher); ok {
 		writer = &flushWriter{writer: w, flusher: flusher}
 	}
-	_, err = io.Copy(writer, resp.Body)
+	_, err := io.Copy(writer, resp.Body)
 	return err
 }
 

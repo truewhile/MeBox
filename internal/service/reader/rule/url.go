@@ -43,11 +43,17 @@ type Request struct {
 	// 返回而不是解码成文本（对应 legado AnalyzeUrl.type）。
 	// 书源用它配合 data: 地址当参数信封，见 datauri.go。
 	HexBody bool
+	// Raw 请求响应按「原始字节」返回，跳过 charset 解码。
+	// 供 java.downloadFile / java.cacheFile 这类需要保真落盘的调用使用：
+	// 一旦按 UTF-8 解码，GBK 字节会被替换成 U+FFFD，写出来的文件就坏了。
+	Raw bool
 	// BodyJsFn 对应 UrlOption.bodyJs：响应体二次处理（JS 执行闭包）。
 	BodyJsFn func(body string) string
 	// Unsupported 非 nil 表示该请求依赖当前阶段不支持的能力，
 	// 值为对应错误（webView；JS 在接入 runner 后已支持）。
 	Unsupported error
+	// Retry 对应 URL 选项的 retry：可恢复失败时的额外重试次数。
+	Retry *int
 }
 
 // ParseAnalyzeUrl 对应 AnalyzeUrl.init：URL 规则 → 可执行请求。
@@ -202,6 +208,7 @@ func ParseAnalyzeUrlWithJS(mUrl, key string, page int, baseUrl string, runner *J
 			}
 		}
 		req.Charset = option.Charset
+		req.Retry = option.Retry
 		// 对应 legado AnalyzeUrl.type：值本身不参与判断，只要非空就把响应按
 		// 「原始字节的 hex」返回。书源借此把 data: 地址当参数信封用。
 		if option.Type != "" {
@@ -330,6 +337,58 @@ func findParamSplit(s string) (start, end int, ok bool) {
 		}
 	}
 	return 0, 0, false
+}
+
+// FindParamSplit 导出 findParamSplit：图片等媒体地址也支持 ",{...}" 选项段，
+// 服务层需要先拆分再分别做请求与展示处理。
+func FindParamSplit(s string) (start, end int, ok bool) {
+	return findParamSplit(s)
+}
+
+// MediaOptions 是媒体地址尾部 ",{...}" 选项段里服务端允许应用的部分。
+//
+// 图片/音频等媒体请求走代理，选项里只有请求头与重试这类「取图必需」的字段有意义；
+// webView/webJs/js/bodyJs 这些需要浏览器或脚本执行引擎的字段必须忽略，
+// 否则一个书源就能让媒体代理变成任意请求的中转。
+type MediaOptions struct {
+	Headers map[string]string
+	Charset string
+	Retry   *int
+	Method  string
+}
+
+// ParseMediaOptions 拆分媒体地址与其尾部选项。
+// 返回去掉选项段的地址（已 trim）、应用后的选项与「是否带选项」。
+func ParseMediaOptions(raw string) (string, MediaOptions, bool) {
+	var out MediaOptions
+	s := strings.TrimSpace(raw)
+	st, end, ok := findParamSplit(s)
+	if !ok {
+		return s, out, false
+	}
+	base := strings.TrimSpace(s[:st])
+	optionStr := strings.TrimSpace(s[end:])
+	var option URLOption
+	if err := json.Unmarshal([]byte(optionStr), &option); err != nil {
+		if err2 := json.Unmarshal([]byte(strings.TrimPrefix(optionStr, ",")), &option); err2 != nil {
+			return base, out, false
+		}
+	}
+	if len(option.Headers) > 0 {
+		out.Headers = make(map[string]string, len(option.Headers))
+		for k, v := range option.Headers {
+			out.Headers[k] = anyToString(v)
+		}
+	}
+	out.Charset = option.Charset
+	out.Retry = option.Retry
+	switch strings.ToUpper(option.Method) {
+	case "HEAD":
+		out.Method = "HEAD"
+	default:
+		out.Method = "GET"
+	}
+	return base, out, true
 }
 
 func isSpaceByte(c byte) bool {

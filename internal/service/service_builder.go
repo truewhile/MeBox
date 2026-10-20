@@ -159,26 +159,39 @@ func (b *serviceContainerBuilder) initContentServices() {
 	b.c.Stream.SetStrmPlayTargetResolver(b.c.Strm.ResolvePlayTargetWithUA)
 	// 弹幕识别需要把远程 Emby 条目解析为 Media 元数据及可拉取前 16MB 的直链 URL。
 	if b.c.EmbyRemote != nil {
-		b.c.Danmaku.SetRemoteMediaResolver(func(ctx context.Context, encodedID string) (*model.Media, string, error) {
-			mountID, remoteID, ok := DecodeEmbyRemoteID(encodedID)
-			if !ok {
-				return nil, "", errors.New("invalid emby remote id")
-			}
-			mount, acct, err := b.c.EmbyRemote.ResolveMount(ctx, mountID)
-			if err != nil || mount == nil || acct == nil {
-				if err != nil {
-					return nil, "", err
-				}
-				return nil, "", errors.New("emby mount or account not found")
-			}
-			m, err := b.c.EmbyRemote.RemoteMediaDetail(ctx, mount, acct, remoteID)
-			if err != nil || m == nil {
-				return nil, "", err
-			}
-			streamURL, _ := b.c.EmbyRemote.WebStreamURL(ctx, acct, remoteID)
-			return m, streamURL, nil
-		})
+		b.c.Danmaku.SetRemoteMediaResolver(b.resolveDanmakuRemoteMedia)
 	}
+}
+
+// resolveDanmakuRemoteMedia 把远程 Emby 伪 ID 解析成弹幕识别要用的 Media 与直链 URL。
+//
+// 目录类条目（整部剧/季/目录）自身没有媒体源，拿它的 ID 去请求远程
+// /Videos/{id}/stream 只会回 500（Unable to cast object of type 'Series' to type
+// 'IHasMediaSources'），哈希层于是每次都在这里白白失败、退回按文件名搜索。所以先按
+// 与 /api/stream 相同的规则回落到第一集：算出来的哈希对得上真正播放的那条流，元数据
+// （时长、文件名）也才是播放中那一集的。
+func (b *serviceContainerBuilder) resolveDanmakuRemoteMedia(ctx context.Context, encodedID string) (*model.Media, string, error) {
+	mountID, remoteID, ok := DecodeEmbyRemoteID(encodedID)
+	if !ok {
+		return nil, "", errors.New("invalid emby remote id")
+	}
+	mount, acct, err := b.c.EmbyRemote.ResolveMount(ctx, mountID)
+	if err != nil || mount == nil || acct == nil {
+		if err != nil {
+			return nil, "", err
+		}
+		return nil, "", errors.New("emby mount or account not found")
+	}
+	playable := b.c.EmbyRemote.PlayableRemoteID(ctx, acct, remoteID)
+	if strings.TrimSpace(playable) == "" {
+		playable = remoteID
+	}
+	m, err := b.c.EmbyRemote.RemoteMediaDetail(ctx, mount, acct, playable)
+	if err != nil || m == nil {
+		return nil, "", err
+	}
+	streamURL, _ := b.c.EmbyRemote.WebStreamURL(ctx, acct, playable)
+	return m, streamURL, nil
 }
 
 func (b *serviceContainerBuilder) initAccessAndStorageServices() {
@@ -210,14 +223,31 @@ func (b *serviceContainerBuilder) initAccessAndStorageServices() {
 		}
 		return policy
 	})
+	// 阅读正文缓存清理：由阅读模块自己按 TTL + 容量 LRU 淘汰（见 reader_content_cache.go）。
+	if b.c.Reader != nil {
+		b.c.Scheduler.SetReaderContentCleaner(b.c.Reader.PruneContentCache)
+	}
+	if b.cfg != nil {
+		b.c.Scheduler.SetReaderFilesTTL(b.cfg.Cache.ReaderFilesTTLHours)
+	}
 }
 
 func (b *serviceContainerBuilder) initIdentityServices() {
 	b.c.Token = NewTokenService(b.cfg, b.log, b.repos)
+	b.c.AuthSessions = NewAuthSessionService(b.log, b.repos)
+	b.c.ServerIdentity = NewServerIdentityService(b.repos, b.version)
+	// 刷新令牌轮换时必须校验所属会话仍然有效，否则被踢设备可以用旧刷新
+	// 令牌换出新令牌。
+	b.c.Token.SetSessionValidator(func(ctx context.Context, sessionID, userID string) error {
+		_, err := b.c.AuthSessions.Validate(ctx, sessionID, userID)
+		return err
+	})
 	b.c.Auth = NewAuthService(b.cfg, b.log, b.repos, b.c.Token, b.c.Permissions)
+	b.c.Auth.SetAuthSessionService(b.c.AuthSessions)
 	b.c.Sessions = NewSessionTrackerService(b.log)
 	b.c.Device = NewDeviceService(b.log, b.repos)
 	b.c.Device.SetSessionTracker(b.c.Sessions)
+	b.c.Device.SetAuthSessionService(b.c.AuthSessions)
 	// Telegram 通知：未启用时 Start 不会占用 goroutine，SendToUser 静默跳过。
 	b.c.Telegram = NewTelegramService(b.log, b.repos)
 	b.c.Device.SetNotifier(b.c.Telegram.SendToUser)
@@ -233,9 +263,29 @@ func (b *serviceContainerBuilder) initIdentityServices() {
 func (b *serviceContainerBuilder) initImageProxy() {
 	b.c.ImageProxy = NewImageProxy(b.cfg, b.log)
 	b.c.ImageProxy.SetLibraryRootsProvider(b.libraryRoots)
+	// 放行名单 = 远程 Emby 挂载主机 + 用户显式配置的内网服务地址。
+	//
+	// 只放行挂载主机是不够的：MetaTube 这类刮削后端会把「容器服务名」写进
+	// poster_url（现场：http://mebox-metatube-1:8081），连接层 SSRF 校验会把
+	// 每一次封面回源都拒掉，前端长期只拿到占位图。名单本身有 30s 缓存，
+	// 所以管理员改完设置无需重启即可生效。
+	b.c.ImageProxy.SetAllowedRemoteHostsProvider(func() []string {
+		var mounts []string
+		if b.c.EmbyRemote != nil {
+			mounts = b.c.EmbyRemote.ConfiguredRemoteHosts(context.Background())
+		}
+		services := configuredServiceImageHostsFromRepo(context.Background(), b.repos)
+		return mergeImageProxyAllowedHosts(mounts, services)
+	})
 	if b.c.EmbyRemote != nil {
-		b.c.ImageProxy.SetAllowedRemoteHostsProvider(func() []string {
-			return b.c.EmbyRemote.ConfiguredRemoteHosts(context.Background())
+		// 远程 Emby 的图片 URL 会带着签发时的 api_key 长期缓存/下发；轮换后
+		// URL 里的旧值必然过期。回源时改用账号当前 token，并在上游 401/403 时
+		// 重新登录一次再重试，封面图不再依赖人工改账号。
+		b.c.ImageProxy.SetRemoteEmbyAuthProvider(func(ctx context.Context, host string) (string, bool) {
+			return b.c.EmbyRemote.RemoteEmbyImageTokenForHost(ctx, host)
+		})
+		b.c.ImageProxy.SetRemoteEmbyAuthRefresher(func(ctx context.Context, host string) (string, error) {
+			return b.c.EmbyRemote.RefreshRemoteEmbyImageTokenForHost(ctx, host)
 		})
 	}
 	b.c.Scan.SetImageProxy(b.c.ImageProxy)

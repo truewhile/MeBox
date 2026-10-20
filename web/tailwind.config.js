@@ -1,6 +1,12 @@
 ﻿/** @type {import('tailwindcss').Config} */
 export default {
   content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
+  future: {
+    // hover 样式只对真正能悬停的设备（鼠标/触控板）生效。触屏点击会让浏览器
+    // 保留 :hover 状态，导致海报墙上的卡片被放大、上移、盖上「立即观影」遮罩，
+    // 看起来像是整行错位、海报显示不全。
+    hoverOnlyWhenSupported: true,
+  },
   theme: {
     extend: {
       fontFamily: {

@@ -6,6 +6,7 @@ const HomePageLoader = () => import('./pages/HomePage').then((m) => ({ default: 
 const LibraryPageLoader = () => import('./pages/LibraryPage').then((m) => ({ default: m.LibraryPage }))
 const LibrariesPageLoader = () => import('./pages/LibrariesPage').then((m) => ({ default: m.LibrariesPage }))
 const FavouritesPageLoader = () => import('./pages/FavouritesPage').then((m) => ({ default: m.FavouritesPage }))
+const MediaSearchPageLoader = () => import('./pages/MediaSearchPage').then((m) => ({ default: m.MediaSearchPage }))
 const PlaylistsPageLoader = () => import('./pages/PlaylistsPage').then((m) => ({ default: m.PlaylistsPage }))
 const PlaylistDetailPageLoader = () =>
   import('./pages/PlaylistDetailPage').then((m) => ({ default: m.PlaylistDetailPage }))
@@ -21,6 +22,7 @@ const HomePage = lazy(HomePageLoader)
 const LibraryPage = lazy(LibraryPageLoader)
 const LibrariesPage = lazy(LibrariesPageLoader)
 const FavouritesPage = lazy(FavouritesPageLoader)
+const MediaSearchPage = lazy(MediaSearchPageLoader)
 const PlaylistsPage = lazy(PlaylistsPageLoader)
 const PlaylistDetailPage = lazy(PlaylistDetailPageLoader)
 const MediaDetailPage = lazy(MediaDetailPageLoader)
@@ -73,6 +75,7 @@ export function prefetchCommonRouteChunks() {
     LibrariesPageLoader,
     LibraryPageLoader,
     MediaDetailPageLoader,
+    MediaSearchPageLoader,
     FavouritesPageLoader,
     WatchHistoryPageLoader,
     PlaylistsPageLoader,
@@ -98,6 +101,7 @@ export type AppRoute = {
 
 export const appRoutes: AppRoute[] = [
   { index: true, element: <HomePage /> },
+  { path: 'search', element: <MediaSearchPage /> },
   { path: 'libraries', element: <LibrariesPage /> },
   { path: 'library/:id', element: <LibraryPage /> },
   { path: 'favourites', element: <FavouritesPage /> },

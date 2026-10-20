@@ -202,3 +202,103 @@ func TestSubtitleServeRawWritesSourceBytes(t *testing.T) {
 		t.Fatal("ServeRaw accepted a non-subtitle file")
 	}
 }
+
+func TestSubtitleLanguageNameMapsCommonTags(t *testing.T) {
+	cases := map[string]string{
+		"chs":                   "简体中文",
+		"CHS":                   "简体中文",
+		"zh-Hans":               "简体中文",
+		"cht":                   "繁体中文",
+		"chi":                   "中文",
+		"zh":                    "中文",
+		"jpn":                   "日本語",
+		"eng":                   "English",
+		"kor":                   "한국어",
+		"chs[bilibiliid_danmu]": "简体中文",
+		"und":                   "",
+		"":                      "",
+	}
+	for raw, want := range cases {
+		if got := subtitleLanguageName(raw); got != want {
+			t.Errorf("subtitleLanguageName(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+func TestSubtitleDisplayLabelKeepsUnknownTags(t *testing.T) {
+	// 认不出来的标记原样返回：Emby 的 DisplayTitle 依赖 `und` 走「字幕 (ASS)」兜底。
+	if got := subtitleDisplayLabel("und"); got != "und" {
+		t.Fatalf("subtitleDisplayLabel(und) = %q, want und", got)
+	}
+	if got := subtitleDisplayLabel("weird"); got != "weird" {
+		t.Fatalf("subtitleDisplayLabel(weird) = %q, want weird", got)
+	}
+}
+
+func TestIsDanmakuSubtitle(t *testing.T) {
+	if !isDanmakuSubtitle("S01E01.chs[BilibiliID_danmu].ass") {
+		t.Fatal("danmaku sidecar was not detected")
+	}
+	if !isDanmakuSubtitle("弹幕.ass") {
+		t.Fatal("Chinese danmaku name was not detected")
+	}
+	if isDanmakuSubtitle("S01E01.chs.ass") {
+		t.Fatal("normal subtitle was misdetected as danmaku")
+	}
+}
+
+func TestDiscoverExternalSubtitleLabelsAreReadable(t *testing.T) {
+	dir := t.TempDir()
+	videoPath := filepath.Join(dir, "S01E01.mkv")
+	files := map[string]string{
+		"S01E01.chs.ass":                   "[Script Info]\n",
+		"S01E01.chs[BilibiliID_danmu].ass": "[Script Info]\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := &model.Media{Path: videoPath}
+	tracks := discoverExternalSubtitleTracks(m)
+	if len(tracks) != 2 {
+		t.Fatalf("len(tracks) = %d, want 2: %#v", len(tracks), tracks)
+	}
+	labels := map[string]string{}
+	for _, track := range tracks {
+		labels[filepath.Base(track.Path)] = track.Label
+	}
+	if got := labels["S01E01.chs.ass"]; got != "简体中文" {
+		t.Fatalf("chs.ass label = %q, want 简体中文", got)
+	}
+	if got := labels["S01E01.chs[BilibiliID_danmu].ass"]; got != "简体中文 · 弹幕" {
+		t.Fatalf("danmaku label = %q, want 简体中文 · 弹幕", got)
+	}
+}
+
+func TestEmbeddedSubtitleProbeUsesReadableLanguage(t *testing.T) {
+	var probe embeddedSubtitleProbe
+	raw := []byte(`{"streams":[
+		{"index":2,"codec_name":"hdmv_pgs_subtitle","tags":{"language":"chi"},"disposition":{"default":1}},
+		{"index":3,"codec_name":"subrip","tags":{"language":"jpn"}},
+		{"index":4,"codec_name":"subrip","tags":{"language":"chi","title":"简日双语"}}
+	]}`)
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		t.Fatal(err)
+	}
+	tracks := subtitleTracksFromProbe(probe)
+	if len(tracks) != 3 {
+		t.Fatalf("len(tracks) = %d, want 3", len(tracks))
+	}
+	if got := tracks[0].Label; got != "中文（默认）（内嵌·图片）" {
+		t.Fatalf("bitmap label = %q", got)
+	}
+	if got := tracks[1].Label; got != "日本語（内嵌）" {
+		t.Fatalf("text label = %q", got)
+	}
+	// 容器自带 title 时优先用 title。
+	if got := tracks[2].Label; got != "简日双语（内嵌）" {
+		t.Fatalf("titled label = %q", got)
+	}
+}

@@ -3,8 +3,9 @@ import { Virtuoso } from 'react-virtuoso'
 import clsx from 'clsx'
 
 // 与 LibraryMediaSections 等处的海报网格保持同一套响应式列配置。
+// 手机上单卡只有约 100px 宽，间距收到 gap-3 给标题和徽标多留一点宽度。
 export const MEDIA_GRID_CLASS =
-  'grid grid-cols-3 gap-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8'
+  'grid grid-cols-3 gap-3 sm:gap-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8'
 
 function getFallbackColumns(width: number): number {
   if (width >= 1536) return 8
@@ -105,7 +106,7 @@ export function VirtualMediaGrid({
           itemContent={(rowIndex) => {
             const start = rowIndex * columns
             return (
-              <div className={clsx(MEDIA_GRID_CLASS, rowIndex < rowCount - 1 && 'pb-4')}>
+              <div className={clsx(MEDIA_GRID_CLASS, rowIndex < rowCount - 1 && 'pb-3 sm:pb-4')}>
                 {Array.from({ length: columns }, (_, colIndex) => {
                   const itemIndex = start + colIndex
                   if (itemIndex >= totalCount) {

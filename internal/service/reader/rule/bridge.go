@@ -10,9 +10,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/dop251/goja"
+	"github.com/google/uuid"
 )
 
 // 本文件对应 legado JsExtensions / JsEncodeUtils / RegexJsExtensions 中
@@ -52,7 +55,7 @@ func newJavaObject(vm *goja.Runtime, r *JSRunner, a *AnalyzeRule) *goja.Object {
 				req.Headers[k] = fmt.Sprintf("%v", v)
 			}
 		}
-		body, _, _, err := r.cfg.Fetch(req)
+		body, _, _, err := r.fetch(req)
 		if err != nil {
 			bridgeErr(name, err)
 		}
@@ -92,7 +95,7 @@ func newJavaObject(vm *goja.Runtime, r *JSRunner, a *AnalyzeRule) *goja.Object {
 		if req.Unsupported != nil {
 			bridgeErr(name, req.Unsupported)
 		}
-		respBody, finalURL, code, err := r.cfg.Fetch(req)
+		respBody, finalURL, code, err := r.fetch(req)
 		if err != nil {
 			bridgeErr(name, err)
 		}
@@ -243,6 +246,12 @@ func newJavaObject(vm *goja.Runtime, r *JSRunner, a *AnalyzeRule) *goja.Object {
 	set("bytesToStr", func(call goja.FunctionCall) goja.Value {
 		if len(call.Arguments) == 0 || goja.IsUndefined(call.Arguments[0]) || goja.IsNull(call.Arguments[0]) {
 			return vm.ToValue("")
+		}
+		// 字节参数可能是 ArrayBuffer / typed array：这类值的 Export() 返回属性 map，
+		// 只有 ExportTo 才能取回字节，旧写法会退化成 String(value) 得到 "[object ArrayBuffer]"。
+		var buf []byte
+		if err := vm.ExportTo(call.Arguments[0], &buf); err == nil {
+			return vm.ToValue(string(buf))
 		}
 		if buf, ok := call.Arguments[0].Export().([]byte); ok {
 			return vm.ToValue(string(buf))
@@ -401,9 +410,127 @@ func newJavaObject(vm *goja.Runtime, r *JSRunner, a *AnalyzeRule) *goja.Object {
 	set("getWebViewUA", func(call goja.FunctionCall) goja.Value {
 		return vm.ToValue(defaultWebViewUA)
 	})
-	set("t2s", func(call goja.FunctionCall) goja.Value { return vm.ToValue(stringArg(call, 0)) })
-	set("s2t", func(call goja.FunctionCall) goja.Value { return vm.ToValue(stringArg(call, 0)) })
+	// 简繁转换（对应 legado ChineseUtils → quick-transfer）。这里按单字映射实现，
+	// 见 zh_convert.go 的说明。
+	set("t2s", func(call goja.FunctionCall) goja.Value { return vm.ToValue(zhToSimplified(stringArg(call, 0))) })
+	set("s2t", func(call goja.FunctionCall) goja.Value { return vm.ToValue(zhToTraditional(stringArg(call, 0))) })
 	set("htmlFormat", func(call goja.FunctionCall) goja.Value { return vm.ToValue(stringArg(call, 0)) })
+	// randomUUID：部分书源拿它生成设备标识/请求 ID（缺失会让整条规则抛异常）。
+	set("randomUUID", func(call goja.FunctionCall) goja.Value { return vm.ToValue(uuid.NewString()) })
+	// toNumChapter：章节标题里的数字规整成阿拉伯数字（见 zh_number.go）。
+	set("toNumChapter", func(call goja.FunctionCall) goja.Value { return vm.ToValue(numChapter(stringArg(call, 0))) })
+	// toURL(url[, baseUrl])：对应 legado JsURL（host/origin/pathname/searchParams）。
+	set("toURL", func(call goja.FunctionCall) goja.Value {
+		base := ""
+		if len(call.Arguments) > 1 && !goja.IsUndefined(call.Arguments[1]) && !goja.IsNull(call.Arguments[1]) {
+			base = call.Arguments[1].String()
+		}
+		obj, err := newJSURLObject(vm, stringArg(call, 0), base)
+		if err != nil {
+			bridgeErr("toURL", err)
+		}
+		return obj
+	})
+	// logType：调试用，打印值的类型（对应 legado 的日志实现）。
+	set("logType", func(call goja.FunctionCall) goja.Value {
+		if r.cfg.Log != nil {
+			if len(call.Arguments) == 0 || goja.IsNull(call.Arguments[0]) || goja.IsUndefined(call.Arguments[0]) {
+				r.cfg.Log("null")
+			} else {
+				r.cfg.Log(fmt.Sprintf("%T", call.Arguments[0].Export()))
+			}
+		}
+		return goja.Null()
+	})
+
+	// ── 本地文件（对应 legado JsExtensions 的缓存/文件系列） ──
+	//
+	// 服务端把文件限制在自己的缓存目录（<cache>/reader/files）内，
+	// 书源只能用相对路径（允许以 / 开头，downloadFile 的返回值即此形态）。
+	set("downloadFile", func(call goja.FunctionCall) goja.Value {
+		// 旧签名 downloadFile(contentHex, url)：把 hex 字符串落成文件。
+		if len(call.Arguments) >= 2 && !goja.IsUndefined(call.Arguments[1]) && !goja.IsNull(call.Arguments[1]) {
+			url := stringArg(call, 1)
+			raw, err := hex.DecodeString(strings.TrimSpace(stringArg(call, 0)))
+			if err != nil {
+				bridgeErr("downloadFile", err)
+			}
+			rel, err := writeCacheFile(r.cfg.CacheDir, cacheFileName(url), raw)
+			if err != nil {
+				bridgeErr("downloadFile", err)
+			}
+			return vm.ToValue(rel)
+		}
+		rel, err := downloadToCache(r, stringArg(call, 0))
+		if err != nil {
+			bridgeErr("downloadFile", err)
+		}
+		return vm.ToValue(rel)
+	})
+	// cacheFile(url): 下载并缓存文本文件，返回文件**内容**（对应 legado 语义）。
+	set("cacheFile", func(call goja.FunctionCall) goja.Value {
+		url := stringArg(call, 0)
+		if dir := readerFilesDir(r.cfg.CacheDir); dir != "" {
+			if b, err := os.ReadFile(filepath.Join(dir, cacheFileName(url))); err == nil && len(b) > 0 {
+				return vm.ToValue(decodeTextAuto(b))
+			}
+		}
+		rel, err := downloadToCache(r, url)
+		if err != nil {
+			bridgeErr("cacheFile", err)
+		}
+		full, err := resolveCacheFilePath(r.cfg.CacheDir, rel)
+		if err != nil {
+			bridgeErr("cacheFile", err)
+		}
+		b, err := os.ReadFile(full)
+		if err != nil {
+			bridgeErr("cacheFile", err)
+		}
+		return vm.ToValue(decodeTextAuto(b))
+	})
+	set("readFile", func(call goja.FunctionCall) goja.Value {
+		full, err := resolveCacheFilePath(r.cfg.CacheDir, stringArg(call, 0))
+		if err != nil {
+			return goja.Null()
+		}
+		b, err := os.ReadFile(full)
+		if err != nil {
+			return goja.Null()
+		}
+		return vm.ToValue(vm.NewArrayBuffer(b))
+	})
+	set("readTxtFile", func(call goja.FunctionCall) goja.Value {
+		full, err := resolveCacheFilePath(r.cfg.CacheDir, stringArg(call, 0))
+		if err != nil {
+			return vm.ToValue("")
+		}
+		b, err := os.ReadFile(full)
+		if err != nil {
+			return vm.ToValue("")
+		}
+		if cs := stringArgOr(call, 1, ""); cs != "" {
+			if s, derr := DecodeBytes(b, cs); derr == nil {
+				return vm.ToValue(s)
+			}
+		}
+		return vm.ToValue(decodeTextAuto(b))
+	})
+	set("deleteFile", func(call goja.FunctionCall) goja.Value {
+		full, err := resolveCacheFilePath(r.cfg.CacheDir, stringArg(call, 0))
+		if err != nil {
+			return vm.ToValue(false)
+		}
+		return vm.ToValue(os.Remove(full) == nil)
+	})
+	// getFile(path): 返回 File 对象（提供书源常用的 exists/length/name/delete/readText）。
+	set("getFile", func(call goja.FunctionCall) goja.Value {
+		full, err := resolveCacheFilePath(r.cfg.CacheDir, stringArg(call, 0))
+		if err != nil {
+			full = ""
+		}
+		return newFileObject(vm, full, stringArg(call, 0))
+	})
 
 	// ── 书源会话状态（legado 中 `java` 与 `source` 是同一对象） ──
 	if r.state != nil {
@@ -496,22 +623,32 @@ func newJavaObject(vm *goja.Runtime, r *JSRunner, a *AnalyzeRule) *goja.Object {
 	//   open / searchBook —— legado 中仅做原生界面跳转（打开搜索页 / 登录页），
 	//                        服务端没有对应页面，谎报成功会让书源走错分支
 
-	// 需要真正无头浏览器/本地文件系统的能力：明确抛出不支持
-	unsupported := func(name string) func(goja.FunctionCall) goja.Value {
+	// 需要真正无头浏览器/本地文件系统的能力：明确抛出不支持，并把原因说清楚
+	// （书源调试面板会把这句原样显示出来，用户能立刻判断该不该继续折腾这个源）。
+	unsupported := func(name, reason string) func(goja.FunctionCall) goja.Value {
 		return func(call goja.FunctionCall) goja.Value {
-			panic(vm.ToValue("java." + name + " 需要浏览器或本地文件能力，服务端不支持"))
+			panic(vm.ToValue(fmt.Sprintf("java.%s 服务端不支持：%s", name, reason)))
 		}
 	}
 	for _, name := range []string{
 		"webView", "webViewGetSource", "webViewGetOverrideUrl",
 		"openVideoPlayer", "getVerificationCode",
-		"importScript", "cacheFile", "downloadFile", "readFile", "readTxtFile", "deleteFile",
+	} {
+		set(name, unsupported(name, "需要无头浏览器（WebView）"))
+	}
+	for _, name := range []string{
 		"unzipFile", "un7zFile", "unrarFile", "unArchiveFile", "getTxtInFolder",
 		"getZipStringContent", "getZipByteArrayContent",
 		"getRarStringContent", "get7zStringContent",
 	} {
-		set(name, unsupported(name))
+		set(name, unsupported(name, "需要压缩包解压能力"))
 	}
+	// importScript 在 legado 里是「下载 JS 文件并 eval」，服务端可做但会引入
+	// 任意脚本执行面，暂不支持，保持明确报错。
+	set("importScript", unsupported("importScript", "服务端不支持动态加载外部脚本"))
+
+	// 字体混淆还原（queryTTF / queryBase64TTF / replaceFont）。
+	r.installFontBridge(vm, set)
 
 	return o
 }

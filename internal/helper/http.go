@@ -17,6 +17,13 @@ import (
 // defaultUserAgent 是默认浏览器 User-Agent（用于 HTTP 请求头）。
 const defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
+// maxDecompressedBody 解压后的响应体上限。
+//
+// 调用方只限制了压缩前的字节数（例如 reader 的 8MiB），而高压缩比响应可以
+// 放大几个数量级：一个几 MB 的 gzip 就能在解压时把内存吃光。这里统一兜底，
+// 超过上限时按解压失败处理（原样返回压缩字节，由调用方报错）。
+const maxDecompressedBody = 32 << 20
+
 // DecompressBody 兜底解压响应体（gzip / deflate）。
 //
 // 正常情况下用不到：只要不显式设置 Accept-Encoding，net/http 会自己带上 gzip
@@ -37,22 +44,34 @@ func DecompressBody(resp *http.Response, data []byte) []byte {
 			return data
 		}
 		defer r.Close()
-		if out, err := io.ReadAll(r); err == nil {
+		// 不吞掉多个 member：默认 Multistream(true) 会让串接的 member 继续解，
+		// 是压缩炸弹的常见放大手段。
+		r.Multistream(false)
+		if out, ok := readLimited(r); ok {
 			return out
 		}
 	case "deflate":
 		// deflate 有两种实际写法：zlib 包装与裸 DEFLATE，依次尝试。
-		if out, err := io.ReadAll(flate.NewReader(bytes.NewReader(data))); err == nil {
+		if out, ok := readLimited(flate.NewReader(bytes.NewReader(data))); ok {
 			return out
 		}
 		if zr, err := zlib.NewReader(bytes.NewReader(data)); err == nil {
 			defer zr.Close()
-			if out, err := io.ReadAll(zr); err == nil {
+			if out, ok := readLimited(zr); ok {
 				return out
 			}
 		}
 	}
 	return data
+}
+
+// readLimited 读取解压流，超过上限返回 ok=false。
+func readLimited(r io.Reader) ([]byte, bool) {
+	out, err := io.ReadAll(io.LimitReader(r, maxDecompressedBody+1))
+	if err != nil || len(out) > maxDecompressedBody {
+		return nil, false
+	}
+	return out, true
 }
 
 // StripAcceptEncoding 移除显式设置的 Accept-Encoding，交回 net/http 管理。
@@ -104,10 +123,19 @@ func NewSiteHTTPClient(timeoutSeconds int, useProxy bool) *http.Client {
 //
 // 交给 net/http 管理后：请求仍会带 `Accept-Encoding: gzip`（浏览器常见取值），
 // 且响应被自动解压；另外也避免服务端挑选我们无法解码的 br。
+// 注意：Accept 刻意用 `*/*` 而不是浏览器页面导航的
+// `text/html,application/xhtml+xml,...`。
+//
+// 很多书源接口是 DRF（Django REST framework）一类会做内容协商的后端：当 Accept
+// 首选 text/html 时，它按浏览器语义返回「可浏览的 HTML 页面」（HTTP 200），
+// 而不是 JSON。引擎再把这份 HTML 交给 JSONPath 解析，结果永远是 0 条——表现为
+// 「同一个源在手机 App 里能搜到，在 MeBox 里搜不到」（拷贝系列源就是这个坑）。
+// 手机端阅读 App 走 OkHttp，不显式设置 Accept，等价于 `*/*`；这里对齐该行为。
+// 需要页面型 Accept 的书源可以在自身 header 里显式声明覆盖。
 func HTTPHeaderPresets() map[string]string {
 	return map[string]string{
 		"User-Agent":                defaultUserAgent,
-		"Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+		"Accept":                    "*/*",
 		"Accept-Language":           "zh-CN,zh;q=0.9,en;q=0.8",
 		"Connection":                "keep-alive",
 		"Upgrade-Insecure-Requests": "1",

@@ -17,12 +17,12 @@ func ReadLocalMetadata(mediaPath, libraryRoot string, seriesLike bool) (*LocalMe
 	doc, path, err := findMovieNFO(mediaPath, libraryRoot)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return metadataFromArtwork(mediaPath, ""), nil
+			return metadataFromArtwork(mediaPath, "", libraryRoot), nil
 		}
 		return nil, err
 	}
 	meta := metadataFromDoc(doc, filepath.Dir(path), false)
-	mergeArtworkMetadata(meta, mediaPath, filepath.Dir(path))
+	mergeArtworkMetadata(meta, mediaPath, filepath.Dir(path), libraryRoot)
 	// A sidecar written while resolution tokens were misread as SxxExx must not
 	// reintroduce the bogus season/episode on rescan.
 	dropResolutionArtifactEpisodeIdentity(meta, mediaPath)
@@ -115,9 +115,9 @@ func readSeriesMetadata(mediaPath, libraryRoot string) (*LocalMetadata, error) {
 		}
 	}
 	if meta == nil {
-		meta = metadataFromArtwork(mediaPath, showBaseDir)
+		meta = metadataFromArtwork(mediaPath, showBaseDir, libraryRoot)
 	} else {
-		mergeArtworkMetadata(meta, mediaPath, showBaseDir)
+		mergeArtworkMetadata(meta, mediaPath, showBaseDir, libraryRoot)
 	}
 	// A sidecar written while resolution tokens were misread as SxxExx must not
 	// reintroduce the bogus season/episode on rescan.

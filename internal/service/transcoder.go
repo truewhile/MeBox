@@ -59,6 +59,9 @@ type TranscoderService struct {
 	availMu        sync.Mutex
 	availCheckedAt time.Time
 	availValue     bool
+	availKey       string
+	ffmpegMu       sync.Mutex
+	ffmpegCache    ffmpegValidationCache
 }
 
 // hlsJob holds the live state of one ffmpeg run.
@@ -83,6 +86,11 @@ type hlsJob struct {
 	quality string
 	// done is closed when the ffmpeg goroutine fully exits (after process death).
 	done chan struct{}
+	// Completed outputs stay reusable until idle eviction without occupying a
+	// running-process slot. The binary and config are fixed for this generation.
+	completed  bool
+	ffmpegPath string
+	config     *config.Config
 }
 
 var (
@@ -117,22 +125,35 @@ func (t *TranscoderService) Available() bool {
 	if t == nil || t.cfg == nil {
 		return false
 	}
-	if !t.cfg.Transcoder.Enabled {
+	cfg := t.transcodeConfig()
+	if !cfg.Transcoder.Enabled {
 		return false
 	}
+	encoder := ffmpegArgSettingsFromConfig(cfg, nil).encoder
+	key := cfg.App.FFmpegPath + "\x00" + encoder
 	t.availMu.Lock()
 	defer t.availMu.Unlock()
-	if !t.availCheckedAt.IsZero() && time.Since(t.availCheckedAt) < transcodeAvailabilityTTL {
-		return t.availValue
+	if !t.availValue && t.availKey == key && !t.availCheckedAt.IsZero() && time.Since(t.availCheckedAt) < transcodeAvailabilityTTL {
+		return false
 	}
-	_, err := t.resolveFFmpegPath()
+	_, err := t.resolveFFmpegPathFor(context.Background(), cfg.App.FFmpegPath, encoder)
 	available := err == nil
 	if !available && t.log != nil {
 		t.log.Debug("local HLS renditions unavailable", zap.Error(err))
 	}
 	t.availValue = available
 	t.availCheckedAt = time.Now()
+	t.availKey = key
 	return available
+}
+
+func (t *TranscoderService) transcodeConfig() *config.Config {
+	config.RuntimeMu.RLock()
+	defer config.RuntimeMu.RUnlock()
+	return &config.Config{
+		App:        config.AppConfig{FFmpegPath: t.cfg.App.FFmpegPath, VAAPIDevice: t.cfg.App.VAAPIDevice},
+		Transcoder: t.cfg.Transcoder,
+	}
 }
 
 // HLSDir is the per-media directory that holds index.m3u8 + segment files.
@@ -174,7 +195,8 @@ func (t *TranscoderService) EnsureJobFromSubtitle(ctx context.Context, mediaID s
 // EnsureJobFromSubtitleQuality is EnsureJobFromSubtitle with an explicit local
 // HLS quality profile. Empty qualityID keeps the global transcoder config.
 func (t *TranscoderService) EnsureJobFromSubtitleQuality(ctx context.Context, mediaID string, startSec float64, seekGen int64, subtitleStream int, qualityID string) (string, error) {
-	if !t.cfg.Transcoder.Enabled {
+	cfg := t.transcodeConfig()
+	if !cfg.Transcoder.Enabled {
 		return "", ErrTranscodeDisabled
 	}
 	if startSec < 0 {
@@ -203,12 +225,17 @@ func (t *TranscoderService) EnsureJobFromSubtitleQuality(ctx context.Context, me
 
 	t.mu.Lock()
 	if existing, ok := t.jobs[mediaID]; ok {
-		if sameHLSConfiguration(existing, startSec, subtitleStream, qualityID) {
+		reusable := true
+		if existing.completed {
+			info, err := os.Stat(t.PlaylistPath(mediaID))
+			reusable = err == nil && info.Size() > 0
+		}
+		if reusable && sameHLSConfiguration(existing, startSec, subtitleStream, qualityID) {
 			t.touchJobLocked(mediaID)
 			t.mu.Unlock()
 			return t.PlaylistPath(mediaID), nil
 		}
-		if !shouldReplaceHLSJobConfigurationQuality(existing, startSec, seekGen, subtitleStream, qualityID) {
+		if reusable && !shouldReplaceHLSJobConfigurationQuality(existing, startSec, seekGen, subtitleStream, qualityID) {
 			t.touchJobLocked(mediaID)
 			t.mu.Unlock()
 			return t.PlaylistPath(mediaID), nil
@@ -230,7 +257,13 @@ func (t *TranscoderService) EnsureJobFromSubtitleQuality(ctx context.Context, me
 	}
 	input.Quality = quality
 	t.maybeFillDuration(ctx, m, input)
-	if _, err := t.resolveFFmpegPath(); err != nil {
+	settings := ffmpegArgSettingsFromConfig(cfg, quality)
+	jobEncoder := settings.encoder
+	if settings.noScale || subtitleStream >= 0 {
+		jobEncoder = ""
+	}
+	bin, err := t.resolveFFmpegPathFor(ctx, cfg.App.FFmpegPath, jobEncoder)
+	if err != nil {
 		return "", err
 	}
 
@@ -242,29 +275,15 @@ func (t *TranscoderService) EnsureJobFromSubtitleQuality(ctx context.Context, me
 	}
 
 	t.mu.Lock()
-	if existing, ok := t.jobs[mediaID]; ok {
-		if sameHLSConfiguration(existing, startSec, subtitleStream, qualityID) {
-			t.touchJobLocked(mediaID)
-			t.mu.Unlock()
-			return t.PlaylistPath(mediaID), nil
-		}
-		if !shouldReplaceHLSJobConfigurationQuality(existing, startSec, seekGen, subtitleStream, qualityID) {
-			t.touchJobLocked(mediaID)
-			t.mu.Unlock()
-			return t.PlaylistPath(mediaID), nil
-		}
-		prev := t.detachJobLocked(mediaID)
-		t.mu.Unlock()
-		waitJobExit(prev, 12*time.Second)
-		t.mu.Lock()
-	}
-	if max := t.maxConcurrent(); max > 0 && len(t.jobs) >= max {
+	if max := t.maxConcurrent(); max > 0 && t.runningJobCountLocked() >= max {
 		t.mu.Unlock()
 		return "", ErrTranscodeBusy
 	}
 
 	jobCtx, cancel := context.WithCancel(context.Background())
-	jobEncoder := t.effectiveEncoder()
+	if jobEncoder == "" {
+		jobEncoder = "software"
+	}
 	if subtitleStream >= 0 {
 		jobEncoder = "software (subtitle burn-in)"
 	}
@@ -280,6 +299,8 @@ func (t *TranscoderService) EnsureJobFromSubtitleQuality(ctx context.Context, me
 		subtitleStream: subtitleStream,
 		quality:        qualityID,
 		done:           make(chan struct{}),
+		ffmpegPath:     bin,
+		config:         cfg,
 	}
 	t.jobs[mediaID] = job
 	t.mu.Unlock()

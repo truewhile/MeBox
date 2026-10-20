@@ -33,6 +33,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("database.cache_size", -40000)
 	v.SetDefault("database.max_open_conns", defaultDatabaseMaxOpenConns)
 	v.SetDefault("database.max_idle_conns", defaultDatabaseMaxIdleConns)
+	v.SetDefault("database.postgres_trgm_index", true)
 
 	v.SetDefault("secrets.jwt_secret", "")
 
@@ -52,6 +53,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("cache.redis_prefix", "mebox")
 	v.SetDefault("cache.media_ttl_seconds", 90)
 	v.SetDefault("cache.emby_latest_ttl_seconds", 300)
+	v.SetDefault("cache.reader_content_max_size_mb", 1024)
+	v.SetDefault("cache.reader_content_ttl_hours", 168)
+	v.SetDefault("cache.reader_files_ttl_hours", 720)
 
 	v.SetDefault("search.backend", "")
 	v.SetDefault("search.opensearch_url", "")

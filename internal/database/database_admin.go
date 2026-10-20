@@ -165,7 +165,7 @@ func MigrateCurrentToPostgres(src *gorm.DB, targetDSN string, batchSize int, log
 	}
 
 	// 1. 初始化目标库 Schema、类型与索引
-	if err := AutoMigrate(targetDB); err != nil {
+	if err := AutoMigrateWithConfig(targetDB, nil, log); err != nil {
 		return nil, fmt.Errorf("auto migrate target PostgreSQL: %w", err)
 	}
 

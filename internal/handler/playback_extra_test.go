@@ -22,6 +22,7 @@ import (
 	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/repository"
 	"github.com/truewhile/MeBox/internal/service"
+	"github.com/truewhile/MeBox/internal/service/cloud"
 )
 
 func TestExternalURLUsesMediaScopedPlaybackToken(t *testing.T) {
@@ -435,6 +436,10 @@ func TestPlaybackInfoForSTRMMediaIncludesHLS(t *testing.T) {
 	var payload struct {
 		StreamURL string `json:"stream_url"`
 		HlsURL    string `json:"hls_url"`
+		// 移动端起播只打这一个接口：resume / subtitles 必须始终存在，
+		// 哪怕是默认值，否则客户端会退回额外两个请求。
+		Resume     *struct{ PositionMs int64 `json:"position_ms"` } `json:"resume"`
+		Subtitles  *[]struct{}                                     `json:"subtitles"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -444,6 +449,66 @@ func TestPlaybackInfoForSTRMMediaIncludesHLS(t *testing.T) {
 	}
 	if payload.HlsURL == "" || !strings.Contains(payload.HlsURL, "/api/hls/media-1/") {
 		t.Fatalf("expected strm hls_url, got %q", payload.HlsURL)
+	}
+	if payload.Resume == nil {
+		t.Fatalf("playback info must always carry resume (got body=%s)", w.Body.String())
+	}
+	if payload.Subtitles == nil {
+		t.Fatalf("playback info must always carry subtitles (got body=%s)", w.Body.String())
+	}
+}
+
+// 服务端能换到最终直链时，播放地址响应要把直链一并给客户端：移动端起播就能
+// 跳过 /api/stream 的 302 往返（跨境链路上等于一次完整 DNS+TCP+TLS）。
+func TestPlaybackInfoCarriesPrefetchedDirectURL(t *testing.T) {
+	router, svc, secret := newPlaybackScopeTestRouter(t)
+	loginToken := signedTestToken(t, secret)
+	const direct = "https://cdnfhnfile.115cdn.net/637b/Movie.mkv?t=1&k=sig"
+	var gotUA string
+	svc.Stream.SetStrmPlayTargetResolver(func(_ context.Context, _, userAgent string) (*service.StrmPlayResult, error) {
+		gotUA = userAgent
+		return &service.StrmPlayResult{
+			RedirectURL: direct,
+			Link:        &cloud.DirectLink{URL: direct, Headers: map[string]string{"User-Agent": userAgent}},
+		}, nil
+	})
+	if err := svc.Repo.DB.Create(&model.Media{
+		Base:        model.Base{ID: "media-direct"},
+		LibraryID:   "lib-1",
+		Title:       "Direct",
+		Path:        "cloud://cloud115/Movie.mkv",
+		Container:   "strm",
+		DurationSec: 3600,
+		STRMURL:     "/api/strm/play/cloud115/video.mkv?acct=a1&pickcode=pc1",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://nas.local/api/playback/media-direct/info", nil)
+	req.Header.Set("Authorization", "Bearer "+loginToken)
+	req.Header.Set("User-Agent", "MeBox-Android/0.1.0")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		DirectURL string `json:"direct_url"`
+		StreamURL string `json:"stream_url"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.DirectURL != direct {
+		t.Fatalf("direct_url = %q, want %q (body=%s)", payload.DirectURL, direct, w.Body.String())
+	}
+	if !strings.Contains(payload.StreamURL, "/api/stream/media-direct") {
+		t.Fatalf("stream_url must stay as the fallback, got %q", payload.StreamURL)
+	}
+	// 115 直链绑定换取时的 UA：预置直链必须按播放器的 UA 换，否则播放会 403。
+	if gotUA != "MeBox-Android/0.1.0" {
+		t.Fatalf("resolver UA = %q, want the client UA", gotUA)
 	}
 }
 

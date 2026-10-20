@@ -1,0 +1,389 @@
+openapi: 3.0.3
+info:
+  title: MeBox Mobile API
+  version: 1.0.0
+  description: |
+    MeBox 安卓客户端的稳定接入契约。所有路径以 `/api` 为前缀挂载，
+    本文档描述 `/api/v1` 部分；既有 `/api` 与 Emby/Jellyfin 入口保持兼容。
+
+    约定：
+    - JSON 字段使用 snake_case；
+    - 时间点为 RFC 3339 UTC 字符串，播放位置与时长使用整数毫秒；
+    - 集合为空时返回 `[]`，未知字段客户端必须忽略；
+    - 错误响应统一为 `code`、`message`、`request_id`、`retryable`；
+    - 能力开关只有在接口实现且当前可运行时才为 true。
+servers:
+  - url: /api
+security:
+  - bearerAuth: []
+tags:
+  - name: server
+  - name: auth
+paths:
+  /v1/server-info:
+    get:
+      tags: [server]
+      summary: 匿名读取实例身份与移动端能力
+      security: []
+      responses:
+        '200':
+          description: 实例可连接
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              description: 固定为 no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerInfo'
+        '503':
+          description: 暂时无法读取实例身份
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MobileError'
+  /v1/auth/login:
+    post:
+      tags: [auth]
+      summary: 账号密码登录并创建认证会话
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/InvalidCredentials'
+        '403':
+          description: 账号被禁用或已到期
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MobileError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/auth/refresh:
+    post:
+      tags: [auth]
+      summary: 使用刷新令牌轮换令牌对
+      security: []
+      description: |
+        刷新令牌必须由 v1 登录签发并关联认证会话。同一 refresh token 的
+        并发提交只会真正轮换一次；轮换后 60 秒内重复提交返回同一次结果。
+        会话被撤销后刷新返回 SESSION_REVOKED。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: 刷新成功，新令牌继续归属同一 auth_session_id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '401':
+          description: 刷新令牌无效、过期或会话已撤销
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MobileError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/auth/session:
+    get:
+      tags: [auth]
+      summary: 读取当前用户与认证会话
+      responses:
+        '200':
+          description: 会话有效
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '401':
+          $ref: '#/components/responses/SessionInvalid'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: 撤销当前认证会话
+      description: 幂等；重复退出同样返回 200。
+      responses:
+        '200':
+          description: 已退出（本机与远端）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+        '401':
+          $ref: '#/components/responses/SessionInvalid'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    RequestId:
+      name: X-Request-ID
+      in: header
+      required: false
+      description: |
+        可选的诊断 ID（8—128 位 ASCII 字母、数字或 `-_.:`）。服务器会在
+        响应头与错误体回传同一个值；非法值会被替换为新 UUID。该值不参与鉴权。
+      schema:
+        type: string
+  responses:
+    InvalidArgument:
+      description: 请求字段缺失或格式错误
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/MobileError'
+    InvalidCredentials:
+      description: 用户名或密码错误
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/MobileError'
+    SessionInvalid:
+      description: 访问令牌无效、过期或认证会话已撤销
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/MobileError'
+    RateLimited:
+      description: 请求过于频繁
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: 建议等待秒数
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/MobileError'
+    ServiceUnavailable:
+      description: 暂时性服务/存储错误，可安全重试
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/MobileError'
+  schemas:
+    ServerInfo:
+      type: object
+      required:
+        - name
+        - server_id
+        - server_version
+        - api_version
+        - min_supported_app_version_code
+        - capabilities
+      properties:
+        name:
+          type: string
+          example: MeBox
+        server_id:
+          type: string
+          format: uuid
+          description: 实例持久身份；备份克隆成独立实例时必须显式重置。
+        server_version:
+          type: string
+          example: MeBox-v0.1.16
+        api_version:
+          type: string
+          example: v1
+        min_supported_app_version_code:
+          type: integer
+          minimum: 1
+        capabilities:
+          $ref: '#/components/schemas/ServerCapabilities'
+    ServerCapabilities:
+      type: object
+      required:
+        - device_sessions
+        - playback_sessions
+        - reader_progress_v1
+        - reader_content_batch
+        - local_transcode
+      properties:
+        device_sessions:
+          type: boolean
+          description: M1 起为 true
+        playback_sessions:
+          type: boolean
+          description: 播放会话接口未实现前必须为 false
+        reader_progress_v1:
+          type: boolean
+          description: v1 阅读锚点/版本冲突未实现前必须为 false
+        reader_content_batch:
+          type: boolean
+          description: v1 批量正文与资源引用未实现前必须为 false
+        local_transcode:
+          type: boolean
+          description: 移动端可用的本地转码会话未实现前必须为 false
+    MobileUser:
+      type: object
+      required: [id, username, role, tier, is_active, force_password_reset]
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        nickname:
+          type: string
+        role:
+          type: string
+          enum: [admin, user]
+        tier:
+          type: string
+          example: free
+        is_active:
+          type: boolean
+        force_password_reset:
+          type: boolean
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token, expires_in, token_type]
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        expires_in:
+          type: integer
+          description: 访问令牌有效秒数
+        token_type:
+          type: string
+          example: Bearer
+    LoginRequest:
+      type: object
+      required: [username, password, device_id]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+        device_id:
+          type: string
+          maxLength: 128
+          description: App 安装随机生成，不使用 IMEI/MAC 等硬件标识。
+        device_name:
+          type: string
+          maxLength: 128
+        client_name:
+          type: string
+          maxLength: 64
+          example: MeBox Android
+        client_version:
+          type: string
+          maxLength: 64
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+    AuthResponse:
+      type: object
+      required: [auth_session_id, user, tokens]
+      properties:
+        auth_session_id:
+          type: string
+          format: uuid
+        user:
+          $ref: '#/components/schemas/MobileUser'
+        tokens:
+          $ref: '#/components/schemas/TokenPair'
+    SessionDevice:
+      type: object
+      properties:
+        device_id:
+          type: string
+        device_name:
+          type: string
+        client_name:
+          type: string
+        client_version:
+          type: string
+        last_used_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+    SessionResponse:
+      type: object
+      required: [auth_session_id, user]
+      properties:
+        auth_session_id:
+          type: string
+          format: uuid
+        user:
+          $ref: '#/components/schemas/MobileUser'
+        session:
+          $ref: '#/components/schemas/SessionDevice'
+    MobileError:
+      type: object
+      required: [code, message, request_id, retryable]
+      properties:
+        code:
+          type: string
+          enum:
+            - INVALID_ARGUMENT
+            - INVALID_CREDENTIALS
+            - TOKEN_EXPIRED
+            - SESSION_REVOKED
+            - ACCOUNT_DISABLED
+            - ACCOUNT_EXPIRED
+            - PERMISSION_DENIED
+            - PROFILE_PIN_REQUIRED
+            - RATE_LIMITED
+            - UPSTREAM_UNAVAILABLE
+            - TRANSCODE_BUSY
+            - PLAYBACK_SESSION_NOT_FOUND
+            - RESOURCE_EXPIRED
+            - PROGRESS_CONFLICT
+            - SERVICE_UNAVAILABLE
+        message:
+          type: string
+        request_id:
+          type: string
+        retryable:
+          type: boolean
+        retry_after_sec:
+          type: integer
+          minimum: 0
+        details:
+          description: 可选的稳定结构化细节，未定义时客户端必须忽略。

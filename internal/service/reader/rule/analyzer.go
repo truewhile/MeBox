@@ -2,6 +2,7 @@ package rule
 
 import (
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/PaesslerAG/jsonpath"
@@ -25,14 +26,20 @@ type AnalyzeRule struct {
 	chapterVars map[string]string
 	bookVars    map[string]string
 	vars        map[string]string
-	chapterTitle string
-	chapterIndex int
-	bookName     string
+	// sourceDefaults 书源 JSON 的 variables 字段（作者设定的默认值）。
+	// 它只作为 @get 的兜底：显式保存过的书源变量与会话内 @put 的值优先级更高。
+	sourceDefaults map[string]string
+	chapterTitle   string
+	chapterIndex   int
+	bookName       string
 	// bookMeta 书籍元数据（对应 legado 规则 JS 里的 Book 实体字段）。
 	bookMeta map[string]any
 	// bookCustom 书籍自定义变量（对应 legado Book.variableMap），
 	// 由规则 JS 的 book.getVariable / book.putVariable 读写。
 	bookCustom map[string]string
+	// bookVarPutter 由服务层注册：book.putVariable 写入后触发，
+	// 用于把变量变更持久化回书架记录（对应 legado 的 Book.upVariable）。
+	bookVarPutter func()
 	// bookTypeOverride 书源在规则 JS 里给 book.type 赋的值
 	// （听书/漫画/短剧源靠它声明书籍类型），由服务层读回。
 	bookTypeOverride *int
@@ -119,6 +126,17 @@ func (a *AnalyzeRule) SetBookCustomVars(vars map[string]string) {
 	}
 }
 
+// BookCustomVars 返回书籍自定义变量的当前值（可能被 book.putVariable 改过），
+// 服务层据此把变更写回书架记录。没有书籍上下文时为 nil。
+func (a *AnalyzeRule) BookCustomVars() map[string]string {
+	return a.bookCustom
+}
+
+// RegisterBookVariablePutter 注册书籍变量变更回调（book.putVariable 写入后触发）。
+func (a *AnalyzeRule) RegisterBookVariablePutter(putter func()) {
+	a.bookVarPutter = putter
+}
+
 // SetBookType 记录书源声明的书籍类型（legado Book.type）。
 func (a *AnalyzeRule) SetBookType(t int) {
 	v := t
@@ -153,6 +171,14 @@ func (a *AnalyzeRule) SetBookContext(name string, vars map[string]string) {
 	}
 }
 
+// SetSourceDefaults 注入书源 variables 字段的默认值（@get 的兜底）。
+// 显式保存过的源变量与会话内 @put 的值优先级都高于它。
+func (a *AnalyzeRule) SetSourceDefaults(vars map[string]string) {
+	if len(vars) > 0 {
+		a.sourceDefaults = vars
+	}
+}
+
 // SetSourceVariables 注入书源级变量读写（source.variableMap）。
 func (a *AnalyzeRule) SetSourceVariables(getter func(key string) string, putter func(key, value string)) {
 	a.sourceGetter = getter
@@ -171,13 +197,19 @@ func jsonpathGet(path string, root any) (v any, err error) {
 
 // ─── 变量存取（对应 put/get） ───────────────────────────────────────────────
 
-// Put 对应 put(key, value)：chapter → book → 局部 → source。
+// Put 对应 put(key, value)：chapter → book → 局部 → 书源持久变量。
+//
+// 「书源持久变量」是 @put 在 legado 里的真实落点（BaseSource.putVariable）：
+// 写进去的值跨请求可见。书源默认变量（variables 字段）与书籍自定义变量都
+// 不是这个通道，所以最后才回退到 sourcePutter，而不是写一次性的 bookVars。
 func (a *AnalyzeRule) Put(key, value string) string {
 	switch {
 	case a.chapterVars != nil:
 		a.chapterVars[key] = value
 	case a.bookVars != nil:
 		a.bookVars[key] = value
+	case a.sourcePutter != nil:
+		a.sourcePutter(key, value)
 	default:
 		if a.vars == nil {
 			a.vars = map[string]string{}
@@ -188,6 +220,7 @@ func (a *AnalyzeRule) Put(key, value string) string {
 }
 
 // Get 对应 get(key)：特殊键 bookName/title 优先取上下文。
+// 查找顺序 chapter → book → book 变量之上的显式源变量 → 书源默认变量。
 func (a *AnalyzeRule) Get(key string) string {
 	switch key {
 	case "bookName":
@@ -210,6 +243,9 @@ func (a *AnalyzeRule) Get(key string) string {
 		if v := a.sourceGetter(key); v != "" {
 			return v
 		}
+	}
+	if v, ok := a.sourceDefaults[key]; ok {
+		return v
 	}
 	return ""
 }
@@ -248,10 +284,16 @@ func (a *AnalyzeRule) putRule(putMap map[string]string) error {
 	return nil
 }
 
-func (a *AnalyzeRule) makeDeps() *RuleDeps {
+// makeDeps 构造 MakeUpRule 展开内嵌 {{...}} 需要的执行环境。
+//
+// content 是当前正在解析的元素。legado 的内嵌规则（{{$.x}} / {{@x}}）在**当前元素**
+// 上求值：书源普遍用 `{{$.status}},{{$.score}}` 这种模板拼 kind、用
+// `{{$.source}} {{$.last_chapter_title}}` 拼最新章节。若拿整份响应去求值，
+// 这些模板会全部取空——表现为 kind=",,,"、"最新"为空（聚合源尤其明显）。
+func (a *AnalyzeRule) makeDeps(content any) *RuleDeps {
 	return &RuleDeps{
 		JS:   a.evalJS,
-		Rule: func(rule string) (string, error) { return a.GetString(rule, nil, false) },
+		Rule: func(rule string) (string, error) { return a.GetString(rule, content, false) },
 		Get:  a.Get,
 	}
 }
@@ -279,7 +321,7 @@ func (a *AnalyzeRule) getStringListRules(ruleList []*SourceRule, mContent any, i
 			if err := a.putRule(sourceRule.putMap); err != nil {
 				return nil, err
 			}
-			resolved, err := sourceRule.MakeUpRule(result, a.makeDeps())
+			resolved, err := sourceRule.MakeUpRule(result, a.makeDeps(result))
 			if err != nil {
 				return nil, err
 			}
@@ -326,13 +368,14 @@ func (a *AnalyzeRule) getStringListRules(ruleList []*SourceRule, mContent any, i
 		result = strings.Split(s, "\n")
 	}
 	if isUrl {
+		// 这里必须接受任何切片形态：书源的下一页地址/章节地址规则常常由 JS 生成，
+		// goja 导出的是 []any。早期只认 []string，JS 给的地址数组会被静默丢掉，
+		// 表现为「nextTocUrl 明明有规则却永远不翻页」。
 		var urlList []string
-		if lst, ok := result.([]string); ok {
-			for _, u := range lst {
-				abs := a.absolutize(u)
-				if abs != "" && !containsStr(urlList, abs) {
-					urlList = append(urlList, abs)
-				}
+		for _, u := range resultStrings(result) {
+			abs := a.absolutize(u)
+			if abs != "" && !containsStr(urlList, abs) {
+				urlList = append(urlList, abs)
 			}
 		}
 		return urlList, nil
@@ -357,6 +400,32 @@ func (a *AnalyzeRule) getStringListRules(ruleList []*SourceRule, mContent any, i
 	}
 }
 
+// resultStrings 把任意分析结果归一成字符串切片（[]string / []any / []*html.Node / 单值）。
+func resultStrings(result any) []string {
+	switch t := result.(type) {
+	case nil:
+		return nil
+	case []string:
+		return t
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, v := range t {
+			out = append(out, anyToString(v))
+		}
+		return out
+	case []*html.Node:
+		out := make([]string, 0, len(t))
+		for _, v := range t {
+			out = append(out, outerHTML(v))
+		}
+		return out
+	case string:
+		return strings.Split(t, "\n")
+	default:
+		return []string{anyToString(result)}
+	}
+}
+
 // GetString 对应 getString(rule, mContent, isUrl)。
 func (a *AnalyzeRule) GetString(ruleStr string, mContent any, isUrl bool) (string, error) {
 	if ruleStr == "" {
@@ -378,7 +447,7 @@ func (a *AnalyzeRule) getStringRules(ruleList []*SourceRule, mContent any, isUrl
 			if err := a.putRule(sourceRule.putMap); err != nil {
 				return "", err
 			}
-			resolved, err := sourceRule.MakeUpRule(result, a.makeDeps())
+			resolved, err := sourceRule.MakeUpRule(result, a.makeDeps(result))
 			if err != nil {
 				return "", err
 			}
@@ -417,13 +486,17 @@ func (a *AnalyzeRule) getStringRules(ruleList []*SourceRule, mContent any, isUrl
 	if result == nil {
 		result = ""
 	}
-	str := resultString(result)
-	if strings.Contains(str, "&") {
-		str = html.UnescapeString(str)
-	}
+	str := unescapeRuleEntities(resultString(result))
 	if isUrl {
 		if strings.TrimSpace(str) == "" {
-			return a.baseUrl, nil
+			// 对应 legado：取值为空时回退 baseUrl，让相对地址还能解析。
+			// 但 baseUrl 未必是地址：聚合类书源（如「光遇聚合」）的搜索请求地址
+			// 本身就是 data:;base64,... 参数信封，直接回退会把信封当成封面/书址
+			// 返回，前端 <img> 只能显示破图。故仅在 baseUrl 是 http(s) 地址时回退。
+			if base := strings.TrimSpace(a.baseUrl); isAbsURL(base) {
+				return base, nil
+			}
+			return "", nil
 		}
 		return a.absolutize(str), nil
 	}
@@ -444,7 +517,7 @@ func (a *AnalyzeRule) GetElement(ruleStr string) (any, error) {
 			if err := a.putRule(sourceRule.putMap); err != nil {
 				return nil, err
 			}
-			resolved, err := sourceRule.MakeUpRule(result, a.makeDeps())
+			resolved, err := sourceRule.MakeUpRule(result, a.makeDeps(result))
 			if err != nil {
 				return nil, err
 			}
@@ -555,6 +628,49 @@ func applyReplaceRegex(result string, r ResolvedSourceRule) string {
 		return regexReplaceFirstOnFirstMatch(r.ReplaceRegex, result, r.Replacement)
 	}
 	return regexReplaceAll(r.ReplaceRegex, result, r.Replacement)
+}
+
+// entityRefRe 匹配一个 HTML 字符引用：命名实体（&amp;、&nbsp;）、十进制（&#39;）、
+// 十六进制（&#x27;）。分号可选——旧式简写（&nbsp、&amp）在 HTML 文本里同样成立。
+var entityRefRe = regexp.MustCompile(`&(?:[a-zA-Z][a-zA-Z0-9]{1,31}|#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6});?`)
+
+// unescapeRuleEntities 还原规则结果里的 HTML 实体（`&amp;` → `&`、`&#39;` → `'`）。
+//
+// 唯一的例外是「不带分号的旧式简写后面紧跟 = 或字母数字」这一种：HTML5 里这类写法
+// 属于历史匹配，而规则结果并不是纯 HTML 文本——正文、地址、查询串都在同一份字符串里。
+// 按浏览器语义无差别还原会把查询串吃掉：光遇聚合的段评地址
+// `…?item_id=X&para=1&source=QQ阅读` 会变成 `…?item_id=X¶=1&source=QQ阅读`，
+// 上游按缺参数处理返回空页面，段评面板就只剩一片空白（见 reader/comment.go）。
+func unescapeRuleEntities(s string) string {
+	if !strings.Contains(s, "&") {
+		return s
+	}
+	var b strings.Builder
+	last := 0
+	for _, loc := range entityRefRe.FindAllStringIndex(s, -1) {
+		match := s[loc[0]:loc[1]]
+		if !strings.HasSuffix(match, ";") && loc[1] < len(s) && isEntityStopByte(s[loc[1]]) {
+			continue
+		}
+		decoded := html.UnescapeString(match)
+		if decoded == match {
+			continue // 不是已知实体，原样保留
+		}
+		b.WriteString(s[last:loc[0]])
+		b.WriteString(decoded)
+		last = loc[1]
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// isEntityStopByte 判断旧式简写实体后面这个字符是否让它失去实体语义
+// （HTML5 规定不带分号的引用后跟 = 或字母数字时按普通文本处理）。
+func isEntityStopByte(c byte) bool {
+	return c == '=' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
 // resultString 对应 Kotlin 的 result.toString()。

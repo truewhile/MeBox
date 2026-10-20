@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/truewhile/MeBox/internal/model"
+	"github.com/truewhile/MeBox/internal/repository"
 )
 
 // movieLibraryHasEpisodicContent 报告电影类型库里是否混入了「剧集结构」内容
@@ -51,7 +52,11 @@ func (e *EmbyService) movieLibraryItems(ctx context.Context, p ItemsParams) (map
 		q = e.applyUserMediaVisibility(ctx, q, p.UserID)
 		q = q.Where("library_id IN ?", libIDs)
 		if p.SearchTerm != "" {
-			q = q.Where("title LIKE ? OR original_name LIKE ?", "%"+p.SearchTerm+"%", "%"+p.SearchTerm+"%")
+			// 方言相关的 ILIKE/LIKE：PostgreSQL 的 LIKE 区分大小写，
+			// 直接用 LIKE 会让客户端搜索的大小写与入库标题不一致时搜不到。
+			likeOp := repository.LikeOperator(e.repo.DB)
+			term := "%" + p.SearchTerm + "%"
+			q = q.Where("title "+likeOp+" ? OR original_name "+likeOp+" ?", term, term)
 		}
 		if containsEmbyFilter(p.Filters, "IsFavorite") {
 			if strings.TrimSpace(p.UserID) == "" {
@@ -266,6 +271,14 @@ func filterLikelyEpisodicPathsFromMovieQuery(q *gorm.DB) *gorm.DB {
 	return q.Where("NOT ((media.season_num > 0 OR media.episode_num > 0) AND ("+clause+"))", args...)
 }
 
+// embyEpisodicPathExpr 把路径分隔符归一化成 '/' 后再小写化，供剧集路径判定使用。
+//
+// 反斜杠归一化必须放在 SQL 里做，而不是再生成一份反斜杠模式：PostgreSQL 的
+// LIKE 默认就把反斜杠当转义符，模式结尾的 `\%` 会被解析成「字面百分号」而不是
+// 「反斜杠 + 通配符」，那些模式在 PostgreSQL 下永不命中（SQLite 没有默认转义符，
+// 所以只有换库之后才会暴露）。归一化列值后两种方言结果一致。
+const embyEpisodicPathExpr = `LOWER(REPLACE(media.path, '\', '/'))`
+
 func embyLikelyEpisodicPathSQL() (string, []any) {
 	patterns := []string{
 		"%/season %/%", "%/season.%/%", "%/season-%/%", "%/season_%/%",
@@ -274,15 +287,11 @@ func embyLikelyEpisodicPathSQL() (string, []any) {
 		"%/电视剧/%", "%/剧集/%", "%/连续剧/%", "%/短剧/%", "%/国产剧/%", "%/国剧/%", "%/大陆剧/%", "%/华语剧/%", "%/国产电视剧/%", "%/大陆电视剧/%", "%/华语电视剧/%", "%/欧美剧/%", "%/欧美电视剧/%", "%/美剧/%", "%/英剧/%", "%/日韩剧/%", "%/日韩电视剧/%", "%/日剧/%", "%/韩剧/%", "%/港剧/%", "%/台剧/%", "%/港台剧/%", "%/泰剧/%",
 		"%/日番/%", "%/国漫/%", "%/番剧/%", "%/动漫/%", "%/特别篇/%", "%/特別篇/%", "%/番外/%", "%/特典/%",
 	}
-	clauses := make([]string, 0, len(patterns)*2)
-	args := make([]any, 0, len(patterns)*2)
+	clauses := make([]string, 0, len(patterns))
+	args := make([]any, 0, len(patterns))
 	for _, pattern := range patterns {
-		clauses = append(clauses, "LOWER(media.path) LIKE ?")
+		clauses = append(clauses, embyEpisodicPathExpr+" LIKE ?")
 		args = append(args, pattern)
-		if strings.Contains(pattern, "/") {
-			clauses = append(clauses, "LOWER(media.path) LIKE ?")
-			args = append(args, strings.ReplaceAll(pattern, "/", `\`))
-		}
 	}
 	return strings.Join(clauses, " OR "), args
 }

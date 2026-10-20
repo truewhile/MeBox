@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +18,14 @@ import (
 	"github.com/truewhile/MeBox/internal/config"
 	"github.com/truewhile/MeBox/internal/service"
 )
+
+// httpSchemeFileName 是数据目录下记录当前监听协议的小文件（内容为 http 或 https）。
+//
+// 容器健康检查无法读取后台保存的 HTTPS 设置（它存在数据库里），而同一端口在开启
+// HTTPS 后只接受 TLS。若健康检查固定用 http:// 探测，每轮都会撞出
+// "client sent an HTTP request to an HTTPS server"，既刷日志又让容器永远 unhealthy。
+// 因此由服务进程在每次成功绑定监听后写下真实协议，供 docker-healthcheck.sh 选择。
+const httpSchemeFileName = ".http_scheme"
 
 // tlsPair 记录当前正在服务的证书，用于判断是否需要重新绑定监听。
 type tlsPair struct {
@@ -35,6 +45,9 @@ type tlsPair struct {
 //   - 旧服务器随后优雅退出，正在进行的播放/请求不会被立刻掐断。
 //
 // 任何校验失败都会中止切换并保留旧监听，保证用户不会被锁在服务外面。
+//
+// 开启 HTTPS 时端口上会同时接两类连接：TLS 走主服务器，明文 HTTP 走
+// redirectSrv 并跳转到 HTTPS（见 protocol_mux.go）。
 type serverManager struct {
 	cfg     *config.Config
 	log     *zap.Logger
@@ -43,6 +56,7 @@ type serverManager struct {
 
 	mu                sync.Mutex
 	srv               *http.Server
+	redirectSrv       *http.Server
 	ln                net.Listener
 	pair              *tlsPair
 	stopCh            chan struct{}
@@ -92,11 +106,11 @@ func (m *serverManager) Reload() error {
 		return nil
 	}
 
-	oldSrv, oldLn, oldPair := m.srv, m.ln, m.pair
+	oldSrv, oldRedirect, oldLn, oldPair := m.srv, m.redirectSrv, m.ln, m.pair
 	if oldLn != nil {
 		_ = oldLn.Close() // 释放端口后再绑定新监听
 	}
-	m.srv, m.ln, m.pair = nil, nil, nil
+	m.srv, m.redirectSrv, m.ln, m.pair = nil, nil, nil, nil
 
 	firstErr := m.bind(pair)
 	if firstErr != nil {
@@ -107,6 +121,7 @@ func (m *serverManager) Reload() error {
 	}
 	// 新监听已就绪，让旧服务器在新连接切换到新监听后优雅退出。
 	m.drain(oldSrv)
+	m.drain(oldRedirect)
 	m.logServerReady()
 	m.maybeStartAutoReloadLocked()
 	return firstErr
@@ -120,11 +135,19 @@ func (m *serverManager) Shutdown(ctx context.Context) error {
 		close(m.stopCh)
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.srv == nil {
-		return nil
+	targets := []*http.Server{m.srv, m.redirectSrv}
+	m.mu.Unlock()
+
+	var firstErr error
+	for _, srv := range targets {
+		if srv == nil {
+			continue
+		}
+		if err := srv.Shutdown(ctx); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	return m.srv.Shutdown(ctx)
+	return firstErr
 }
 
 // desiredPair 根据当前配置计算目标监听形态：nil 表示明文 HTTP，非 nil 表示 TLS。
@@ -217,25 +240,107 @@ func (m *serverManager) pairEquals(pair *tlsPair) bool {
 	return pair.version == m.pair.version
 }
 
-// bind 创建并按需启用 TLS 的监听，异步开始服务。
+// bind 创建监听，异步开始服务。
+//
+// 未开启 HTTPS 时端口只服务明文 HTTP；开启后同一个端口两种流量都要接：TLS 连接
+// 交给主服务器，明文 HTTP 连接交给只做跳转的 redirect 服务器，让 http:// 自动
+// 跳到 https://，而不是甩给用户一句 "Client sent an HTTP request to an HTTPS
+// server."。
 func (m *serverManager) bind(pair *tlsPair) error {
 	ln, err := net.Listen("tcp", m.addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", m.addr, err)
 	}
-	srv := &http.Server{
-		Handler:           m.handler,
+
+	if pair == nil {
+		srv := m.newHTTPServer(m.handler)
+		m.srv, m.redirectSrv, m.ln, m.pair = srv, nil, ln, nil
+		m.writeSchemeState(nil)
+		go m.serve(srv, ln)
+		return nil
+	}
+
+	split := newSplitListener(ln)
+	srv := m.newHTTPServer(m.handler)
+	tlsLn := tls.NewListener(split.tlsListener(), &tls.Config{
+		Certificates: []tls.Certificate{pair.cert},
+		MinVersion:   tls.VersionTLS12,
+	})
+	redirect := m.newHTTPServer(m.httpsRedirectHandler())
+
+	m.srv, m.redirectSrv, m.ln, m.pair = srv, redirect, ln, pair
+	m.writeSchemeState(pair)
+	go m.serve(srv, tlsLn)
+	go m.serve(redirect, split.plainListener())
+	return nil
+}
+
+func (m *serverManager) newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
 		ReadHeaderTimeout: 15 * time.Second,
 	}
-	if pair != nil {
-		ln = tls.NewListener(ln, &tls.Config{
-			Certificates: []tls.Certificate{pair.cert},
-			MinVersion:   tls.VersionTLS12,
-		})
+}
+
+// httpsRedirectHandler 处理"开着 HTTPS 却用 http:// 访问"的请求：跳转到同端口、
+// 同路径的 https://。
+//
+// 用 302/307 而不是 301/308：HTTPS 开关可以在后台随时改，永久跳转会被浏览器长期
+// 缓存，等用户关掉 HTTPS 之后 http 访问会被带到已经不提供 TLS 的端口上打不开。
+func (m *serverManager) httpsRedirectHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := redirectHostHeader(r)
+		if host == "" {
+			// 没有可用的 Host（HTTP/1.0 或畸形请求头）时宁可明说，也不跳到错的地方。
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, "HTTPS is enabled; open https://<host>:%d instead.\n", m.cfg.App.Port)
+			return
+		}
+		status := http.StatusFound
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			status = http.StatusTemporaryRedirect // 保住方法与请求体
+		}
+		w.Header().Set("Location", httpsRedirectURL(host, r))
+		w.WriteHeader(status)
+	})
+}
+
+// httpsRedirectURL 拼出同端口同路径的 HTTPS 地址。
+func httpsRedirectURL(host string, r *http.Request) string {
+	target := "https://" + host + r.URL.EscapedPath()
+	if r.URL.RawQuery != "" {
+		target += "?" + r.URL.RawQuery
 	}
-	m.srv, m.ln, m.pair = srv, ln, pair
-	go m.serve(srv, ln)
-	return nil
+	return target
+}
+
+// redirectHostHeader 取重定向目标主机。HTTP/1.1 里 Host 是唯一的主机来源（端口映射
+// 到容器 8080 时它同时也是 HTTPS 端口），这里只做字符过滤，避免把请求头里的怪字符
+// 带进 Location 造成任意跳转。
+func redirectHostHeader(r *http.Request) string {
+	host := strings.TrimSpace(r.Host)
+	if host == "" || strings.ContainsAny(host, " \t\r\n/\\@?#") {
+		return ""
+	}
+	return host
+}
+
+// writeSchemeState 把当前实际监听的协议写入数据目录，供容器健康检查按协议探测。
+// 写失败只降级为告警：健康检查脚本在状态文件缺失时会回退试另一种协议。
+func (m *serverManager) writeSchemeState(pair *tlsPair) {
+	dataDir := strings.TrimSpace(m.cfg.App.DataDir)
+	if dataDir == "" {
+		return
+	}
+	scheme := "http"
+	if pair != nil {
+		scheme = "https"
+	}
+	path := filepath.Join(dataDir, httpSchemeFileName)
+	if err := os.WriteFile(path, []byte(scheme+"\n"), 0o644); err != nil { // #nosec G304 -- path is DataDir + fixed filename.
+		m.log.Warn("write http scheme state failed", zap.String("path", path), zap.Error(err))
+	}
 }
 
 func (m *serverManager) serve(s *http.Server, ln net.Listener) {
@@ -250,6 +355,9 @@ func (m *serverManager) drain(s *http.Server) {
 	if s == nil {
 		return
 	}
+	// Stop reusing old connections before Reload returns. Asynchronous Shutdown
+	// alone leaves a window where a client receives the previous HTTP/TLS mode.
+	s.SetKeepAlivesEnabled(false)
 	go func(s *http.Server) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -271,7 +379,7 @@ func (m *serverManager) logServerReady() {
 		zap.String("listen", m.addr),
 	)
 	if m.pair != nil {
-		m.log.Info("HTTPS is enabled; plain HTTP is no longer served on this port",
+		m.log.Info("HTTPS is enabled; plain HTTP requests on this port are redirected to HTTPS",
 			zap.String("addr", m.addr),
 		)
 	}

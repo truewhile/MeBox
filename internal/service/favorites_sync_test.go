@@ -44,6 +44,19 @@ func TestSyncUserFavoriteWritesLocalForRemoteID(t *testing.T) {
 	if favorite {
 		t.Fatal("expected remote favourite to be removed locally")
 	}
+
+	// 软删除后重新收藏必须恢复原行：唯一索引 (user_id, media_id) 不允许
+	// 再插入一条，旧的实现会在这里返回约束错误。
+	if err := SyncUserFavorite(context.Background(), repos, nil, userID, remoteMediaID, true); err != nil {
+		t.Fatalf("SyncUserFavorite re-favorite: %v", err)
+	}
+	favorite, err = IsUserFavorite(context.Background(), repos, userID, remoteMediaID)
+	if err != nil {
+		t.Fatalf("IsUserFavorite after re-favorite: %v", err)
+	}
+	if !favorite {
+		t.Fatal("expected re-favourite to restore the soft-deleted row")
+	}
 }
 
 func TestFavoriteItemsIncludesRemoteFavourites(t *testing.T) {

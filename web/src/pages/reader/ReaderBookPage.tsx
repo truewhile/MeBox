@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import toast from 'react-hot-toast'
-import { ArrowLeft, BookOpen, ChevronDown, ChevronUp, Loader2, RefreshCw, Trash2 } from 'lucide-react'
+import { ArrowLeft, ArrowLeftRight, BookOpen, ChevronDown, ChevronUp, Loader2, RefreshCw, Trash2 } from 'lucide-react'
 
-import { readerAPI, type ReaderBook, type ReaderBookInfo, type ReaderTocChapter } from '../../api/reader'
+import { readerAPI, type ReaderBook, type ReaderBookInfo, type ReaderSearchOrigin, type ReaderTocChapter } from '../../api/reader'
+import ReaderBookCover from '../../components/ReaderBookCover'
+import { pickChapterIndex } from './bookDetailModel'
+import { SourcePickerDialog } from './SourcePickerDialog'
 
 // 书籍详情页（仿 legado BookInfoActivity：封面 + 信息 + 简介 + 目录入口 + 加书架/开始阅读）。
 
@@ -22,8 +25,14 @@ export default function ReaderBookPage() {
   const [chapters, setChapters] = useState<ReaderTocChapter[] | null>(null)
   const [shelfBook, setShelfBook] = useState<ReaderBook | null>(null)
   const [busy, setBusy] = useState(false)
+  // 当前书源声明的类型（1 音频 / 2 图片），加入书架时写进来源记录
+  const [sourceType, setSourceType] = useState(0)
   const [tocExpanded, setTocExpanded] = useState(false)
   const [introExpanded, setIntroExpanded] = useState(false)
+  // 换源：候选源来自按书名重新搜索的结果
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [pickLoading, setPickLoading] = useState(false)
+  const [candidates, setCandidates] = useState<ReaderSearchOrigin[]>([])
 
   const loadInfo = () => {
     if (!bookURL) return
@@ -52,6 +61,16 @@ export default function ReaderBookPage() {
       .catch(() => setChapters([]))
   }, [bookURL, sourceURL])
 
+  // 书源声明的类型（1 音频 / 2 图片）。加入书架时要带上它：写死成 0（文本）会让
+  // 听书源的书以文本类型落库，阅读器就把播放直链当正文排版出来，根本播不了。
+  useEffect(() => {
+    if (!sourceURL) return
+    readerAPI
+      .listSources()
+      .then((sources) => setSourceType(sources.find((s) => s.source_url === sourceURL)?.type ?? 0))
+      .catch(() => undefined)
+  }, [sourceURL])
+
   // 详情返回的 tocUrl 更准确，拿到后重新拉目录
   useEffect(() => {
     const tocURL = info?.toc_url
@@ -68,7 +87,16 @@ export default function ReaderBookPage() {
 
   const firstReadableChapter = useMemo(() => chapters?.find((c) => !c.is_volume && c.url) ?? null, [chapters])
 
-  const startReading = async () => {
+  /**
+   * 目录点章：把点中的章节换算成阅读器要的序号（换算规则与理由见 bookDetailModel）。
+   */
+  const resolveChapterIndex = async (bookID: string, chapter: ReaderTocChapter): Promise<number> => {
+    const cached = await readerAPI.listChapters(bookID).catch(() => [])
+    return pickChapterIndex(cached, chapter)
+  }
+
+  // chapter 为空＝开始/继续阅读（沿用服务端进度）；给了章节＝目录点章跳读。
+  const startReading = async (chapter?: ReaderTocChapter) => {
     setBusy(true)
     try {
       let book = shelfBook
@@ -78,7 +106,7 @@ export default function ReaderBookPage() {
             source_id: originID,
             origin: sourceURL,
             origin_name: originName || info?.name || '',
-            origin_type: 0,
+            origin_type: sourceType,
             book_url: bookURL,
             latest_chapter: info?.latest_chapter ?? '',
           },
@@ -87,7 +115,9 @@ export default function ReaderBookPage() {
           cover_url: cover,
         })
       }
-      navigate(`/reader/view/${book.id}`)
+      // 目录点章：带上阅读器认识的 chapter 序号跳进去（没有它阅读器就用服务端进度）。
+      const index = chapter ? await resolveChapterIndex(book.id, chapter) : null
+      navigate(index === null ? `/reader/view/${book.id}` : `/reader/view/${book.id}?chapter=${index}`)
     } catch (e) {
       toast.error((e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '操作失败')
     } finally {
@@ -115,6 +145,66 @@ export default function ReaderBookPage() {
       toast.success(`目录已刷新，共 ${list.length} 章`)
     } catch {
       toast.error('目录刷新失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // ── 换源 ──
+
+  // 换源候选：按书名重新搜索，取同名（作者一致优先）那本书上的所有源。
+  const openSourcePicker = async () => {
+    const key = (info?.name || qName).trim()
+    if (!key) {
+      toast.error('缺少书名，无法换源')
+      return
+    }
+    setPickerOpen(true)
+    setPickLoading(true)
+    setCandidates([])
+    try {
+      const res = await readerAPI.search(key)
+      const list = res.books ?? []
+      const wantAuthor = (info?.author || qAuthor).trim()
+      const hit =
+        list.find((b) => b.name === key && wantAuthor !== '' && b.author === wantAuthor) ??
+        list.find((b) => b.name === key) ??
+        null
+      setCandidates(hit?.origins ?? [])
+    } catch (e) {
+      toast.error((e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '搜索书源失败')
+    } finally {
+      setPickLoading(false)
+    }
+  }
+
+  const bookPath = (origin: ReaderSearchOrigin) =>
+    `/reader/book?${new URLSearchParams({
+      source_url: origin.origin,
+      book_url: origin.book_url,
+      name,
+      author,
+      cover_url: cover,
+      origin_id: origin.source_id,
+      origin_name: origin.origin_name,
+    }).toString()}`
+
+  // 已在书架：调用换源接口（服务端保留进度、清空旧源目录缓存）；
+  // 未在书架：这本书还没绑定书源，直接按所选源打开详情页即可。
+  const applyOrigin = async (origin: ReaderSearchOrigin) => {
+    setPickerOpen(false)
+    if (!shelfBook) {
+      navigate(bookPath(origin))
+      return
+    }
+    setBusy(true)
+    try {
+      await readerAPI.switchOrigin(shelfBook.id, origin)
+      toast.success(`已切换到「${origin.origin_name || origin.origin}」`)
+      // URL 上的旧源地址已失效，替换成新源地址，页面据此重新拉详情与目录
+      navigate(bookPath(origin), { replace: true })
+    } catch (e) {
+      toast.error((e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '换源失败')
     } finally {
       setBusy(false)
     }
@@ -151,13 +241,7 @@ export default function ReaderBookPage() {
       {/* 信息区（仿 legado：封面 + 书名/作者/最新章节/简介） */}
       <div className="mt-6 flex gap-5">
         <div className="h-40 w-28 shrink-0 overflow-hidden rounded-xl border border-[var(--app-border)] bg-[var(--app-panel-soft)]">
-          {cover ? (
-            <img src={cover} alt={name} referrerPolicy="no-referrer" className="h-full w-full object-cover" />
-          ) : (
-            <div className="flex h-full w-full items-center justify-center">
-              <BookOpen size={24} className="text-[var(--app-muted)]" />
-            </div>
-          )}
+          <ReaderBookCover url={cover} alt={name} iconSize={24} />
         </div>
         <div className="min-w-0 flex-1">
           <h1 className="font-display text-xl text-ink-600">{name || '未知书名'}</h1>
@@ -201,13 +285,22 @@ export default function ReaderBookPage() {
             <Trash2 size={13} className="mr-1 inline" /> 移出书架
           </button>
         ) : (
-          <button type="button" onClick={startReading} disabled={busy} className="btn-outline flex-1 text-xs disabled:opacity-50">
+          <button type="button" onClick={() => startReading()} disabled={busy} className="btn-outline flex-1 text-xs disabled:opacity-50">
             <BookOpen size={13} className="mr-1 inline" /> 加入书架
           </button>
         )}
-        <button type="button" onClick={startReading} disabled={busy || !firstReadableChapter} className="btn-primary flex-1 text-xs disabled:opacity-50">
+        <button type="button" onClick={() => startReading()} disabled={busy || !firstReadableChapter} className="btn-primary flex-1 text-xs disabled:opacity-50">
           {busy ? <Loader2 size={13} className="mr-1 inline animate-spin" /> : null}
           {shelfBook?.dur_chapter_title ? '继续阅读' : '开始阅读'}
+        </button>
+        <button
+          type="button"
+          onClick={openSourcePicker}
+          disabled={busy}
+          className="btn-outline shrink-0 px-3 text-xs disabled:opacity-50"
+          title="换源"
+        >
+          <ArrowLeftRight size={13} className="mr-1 inline" /> 换源
         </button>
       </div>
 
@@ -237,6 +330,16 @@ export default function ReaderBookPage() {
               <div key={c.index} className="px-1 py-1.5 text-xs text-[var(--app-muted)]">
                 {c.is_volume ? (
                   <p className="font-bold text-[var(--app-text)]">{c.title}</p>
+                ) : c.url ? (
+                  // 点章节＝跳到阅读器并从这一章开始（听书源会自动起播这一章）。
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => startReading(c)}
+                    className="block w-full truncate text-left transition-colors hover:text-brand-600 disabled:opacity-50"
+                  >
+                    {c.title}
+                  </button>
                 ) : (
                   c.title
                 )}
@@ -245,6 +348,18 @@ export default function ReaderBookPage() {
           </div>
         )}
       </div>
+
+      {pickerOpen && (
+        <SourcePickerDialog
+          title={name || '这本书'}
+          origins={candidates}
+          current={{ originURL: sourceURL, bookURL }}
+          loading={pickLoading}
+          emptyHint="按书名重搜后没有找到其它书源"
+          onPick={applyOrigin}
+          onClose={() => setPickerOpen(false)}
+        />
+      )}
     </div>
   )
 }

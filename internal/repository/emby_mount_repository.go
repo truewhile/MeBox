@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -87,6 +88,22 @@ func (r *EmbyMountRepository) SetSortOrder(ctx context.Context, ids []string) er
 			return nil
 		})
 	})
+}
+
+// SetEnabledByAccountID 批量设置账号下全部挂载的启用状态。
+func (r *EmbyMountRepository) SetEnabledByAccountID(ctx context.Context, accountID string, enabled bool) (int64, error) {
+	var affected int64
+	if strings.TrimSpace(accountID) == "" {
+		return 0, nil
+	}
+	err := withSQLiteBusyRetry(ctx, func() error {
+		res := r.db.WithContext(ctx).Model(&model.EmbyMount{}).
+			Where("account_id = ?", accountID).
+			Updates(map[string]any{"enabled": enabled, "updated_at": time.Now()})
+		affected = res.RowsAffected
+		return res.Error
+	})
+	return affected, err
 }
 
 func (r *EmbyMountRepository) CountByAccountID(ctx context.Context, accountID string) (int64, error) {

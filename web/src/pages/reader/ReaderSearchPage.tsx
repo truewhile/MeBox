@@ -1,40 +1,170 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import toast from 'react-hot-toast'
-import { AlertTriangle, ArrowLeft, BookOpen, ChevronDown, ChevronRight, Loader2, Plus, Search } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, ChevronDown, ChevronRight, ListFilter, Loader2, Plus, Search } from 'lucide-react'
 
-import { readerAPI, type ReaderSearchBook, type ReaderSearchSkipped } from '../../api/reader'
+import { readerAPI, type ReaderSearchBook, type ReaderSearchSkipped, type ReaderSource } from '../../api/reader'
+import { LoadMoreSentinel } from '../../components/LoadMoreSentinel'
+import ReaderBookCover from '../../components/ReaderBookCover'
+import { useReaderSettingsStore } from '../../stores/readerSettings'
+import { splitKindTags } from '../../utils/kindTags'
+import { mergeSearchBooks, mergeSearchSkipped, searchBookKey } from '../../utils/searchBooks'
+import { SearchScopeDialog } from './SearchScopeDialog'
+import { SourcePickerDialog } from './SourcePickerDialog'
 
 // 多源聚合搜索页（仿 legado SearchActivity：结果流 + 失败书源列表）。
+// 搜索前可按书源收敛范围（对应 legado 的搜索范围）：默认全选已启用书源。
+// 搜索结果会剔除已在书架里的书——这里的搜索是用来发现新书的。
+// 结果按页取：滚到底自动请求下一页并增量合并，直到某一页不再带来新书。
+
+/** 单次搜索最多翻到第几页。书源分页规则千奇百怪，个别源会一直返回新条目，
+ *  不设上限时用户一直往下滚就会一直发请求（每次都要把所有源再搜一遍）。 */
+const MAX_SEARCH_PAGES = 20
+
+/** 这本搜索结果是否已在书架：优先按书名+作者，其次按书本身/任一命中书源的地址（换源后地址会变）。 */
+function isOnShelf(book: ReaderSearchBook, shelf: Set<string>): boolean {
+  if (shelf.has(searchBookKey(book.name, book.author))) return true
+  if (book.book_url && shelf.has(book.book_url)) return true
+  return book.origins.some((o) => !!o.book_url && shelf.has(o.book_url))
+}
 
 export default function ReaderSearchPage() {
   const navigate = useNavigate()
   const [params] = useSearchParams()
   const [key, setKey] = useState(() => params.get('key') ?? '')
   const [searching, setSearching] = useState(false)
+  // 换源：点「N 源可换」后选择用哪个源打开这本书
+  const [picker, setPicker] = useState<ReaderSearchBook | null>(null)
   const [books, setBooks] = useState<ReaderSearchBook[] | null>(null)
   const [skipped, setSkipped] = useState<ReaderSearchSkipped[]>([])
   const [showSkipped, setShowSkipped] = useState(false)
   const [adding, setAdding] = useState('')
+  // 滚动加载：page 是已加载到的页码；hasMore 为 false 表示到底了（或还没搜过）。
+  const [page, setPage] = useState(0)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [hasMore, setHasMore] = useState(false)
+  const [moreError, setMoreError] = useState('')
+  // loadMore 的在途标记（见 loadMore 里的说明），比 loadingMore 状态更早生效。
+  const loadingMoreRef = useRef(false)
+  // 每次新搜索 +1：在飞的 loadMore 回来时若已经换了关键词（searchSeq 已变），
+  // 就把那一页结果丢掉，避免旧关键词的第 N 页被并进新列表。
+  const searchSeq = useRef(0)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  // 搜索范围（设备级持久化，见 readerSettings store）：空数组 = 全部启用书源。
+  const scopeIds = useReaderSettingsStore((s) => s.searchScopeIds)
+  const setSearchScopeIds = useReaderSettingsStore((s) => s.setSearchScopeIds)
+  const [sources, setSources] = useState<ReaderSource[]>([])
+  const [showScope, setShowScope] = useState(false)
+  const enabledSources = useMemo(() => sources.filter((s) => s.enabled), [sources])
+  // 已保存范围里仍有效的书源（删源/停源后自动剔除，全失效时等同于全部）。
+  const activeScopeIds = useMemo(
+    () => scopeIds.filter((id) => enabledSources.some((s) => s.id === id)),
+    [scopeIds, enabledSources],
+  )
+  // 书源列表还没加载完（sources 为空）时不能判断有效性，先按已存 ID 数显示，
+  // 避免已保存子集在加载瞬间被错标成「全部书源」。
+  const scopeAll = scopeIds.length === 0 || (sources.length > 0 && activeScopeIds.length === 0)
+  const scopeLabel = scopeAll ? '全部书源' : `已选 ${activeScopeIds.length || scopeIds.length} 个书源`
+
+  useEffect(() => {
+    readerAPI.listSources().then(setSources).catch(() => undefined)
+  }, [])
+
+  // 书架命中集合：已在书架的书不参与结果展示（这里只找新书）。
+  const [shelfKeys, setShelfKeys] = useState<Set<string>>(() => new Set())
+  useEffect(() => {
+    readerAPI
+      .listBooks()
+      .then((books) => {
+        const keys = new Set<string>()
+        for (const b of books) {
+          keys.add(searchBookKey(b.name, b.author))
+          if (b.book_url) keys.add(b.book_url)
+        }
+        setShelfKeys(keys)
+      })
+      .catch(() => undefined)
+  }, [])
+
+  // 展示用结果 = 原始结果剔除已在书架的书。用派生值而不是在 doSearch 里过滤：
+  // 书架是异步加载的，派生能保证「书架先到还是结果先到」都能正确隐藏，
+  // 且刚加进书架的书也会立刻从列表消失。
+  const visibleBooks = useMemo(
+    () => (books === null ? null : books.filter((b) => !isOnShelf(b, shelfKeys))),
+    [books, shelfKeys],
+  )
+  const hiddenOnShelf = books === null ? 0 : books.length - (visibleBooks?.length ?? 0)
 
   const doSearch = async () => {
     const kw = key.trim()
     if (!kw || searching) return
+    searchSeq.current++
     setSearching(true)
     setShowSkipped(false)
+    setLoadingMore(false)
+    setMoreError('')
     try {
-      const res = await readerAPI.search(kw)
-      setBooks(res.books ?? [])
+      // 直接把已保存范围交给后端：它只搜其中仍启用的书源，全部失效时退回全部启用，
+      // 因此这里不必等书源列表加载完，也能正确处理「换设备后书源尚未同步」的情况。
+      const res = await readerAPI.search(kw, scopeIds, 1)
+      const list = res.books ?? []
+      setBooks(list)
       // 后端在「没有书源失败」时会把空列表编码成 null，这里兜底成数组，
       // 否则下面 skipped.length 会直接抛 TypeError 把整页打崩。
       setSkipped(res.skipped ?? [])
-      if ((res.books ?? []).length === 0) toast.error('所有书源都没有找到结果')
+      setPage(1)
+      // 首页一条都没有 → 后面也不会有；有结果就先假定还有下一页。
+      // 书源是否支持分页只有它自己知道（{{page}} 也可能藏在 URL 的 <js> 里），
+      // 所以这里不预判：多花一次「第 2 页」请求，由 loadMore 发现这一页没带来新书时收口。
+      setHasMore(list.length > 0)
+      if (list.length === 0) toast.error('所有书源都没有找到结果')
     } catch (e) {
       const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '搜索失败'
       toast.error(msg)
     } finally {
       setSearching(false)
+    }
+  }
+
+  // 滚动到底加载下一页。每页都会把范围内的书源重新搜一遍（后端按页下发），
+  // 因此这里要注意两件事：
+  //   1. 结果必须增量合并而不是替换——不支持 {{page}} 的源会在每一页重复返回首页结果；
+  //   2. 合并后没有新书（重复内容或该页为空）就说明到底了，否则用户会一直滚一直转圈。
+  const loadMore = async () => {
+    const kw = key.trim()
+    if (!kw || !hasMore || loadingMore || searching || books === null) return
+    // loadingMore 是渲染后才生效的状态：同一帧里观察器可能回调两次，用 ref 兜住，
+    // 避免把同一页请求两次（每次翻页都要把所有源再搜一遍，重复请求不便宜）。
+    if (loadingMoreRef.current) return
+    loadingMoreRef.current = true
+    const next = page + 1
+    if (next > MAX_SEARCH_PAGES) {
+      setHasMore(false)
+      loadingMoreRef.current = false
+      return
+    }
+    setLoadingMore(true)
+    setMoreError('')
+    const seq = searchSeq.current
+    try {
+      const res = await readerAPI.search(kw, scopeIds, next)
+      // 期间用户又发起了一次搜索：这一页属于旧关键词，直接丢弃。
+      if (searchSeq.current !== seq) return
+      const incoming = res.books ?? []
+      const merged = mergeSearchBooks(books, incoming)
+      setBooks(merged)
+      setSkipped((prev) => mergeSearchSkipped(prev, res.skipped ?? []))
+      setPage(next)
+      if (merged.length === books.length) setHasMore(false)
+    } catch (e) {
+      if (searchSeq.current !== seq) return
+      // 不弹 toast 打断浏览：把失败原因挂在哨兵上，改由用户点重试。
+      const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '加载下一页失败'
+      setMoreError(msg)
+    } finally {
+      loadingMoreRef.current = false
+      setLoadingMore(false)
     }
   }
 
@@ -47,12 +177,20 @@ export default function ReaderSearchPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const addToShelf = async (book: ReaderSearchBook) => {    const origin = book.origins[0]
+  const addToShelf = async (book: ReaderSearchBook) => {
+    const origin = book.origins[0]
     if (!origin) return
     setAdding(book.book_url)
     try {
       await readerAPI.addBook({ origin, name: book.name, author: book.author, cover_url: book.cover_url })
       toast.success(`《${book.name}》已加入书架`)
+      // 立刻并入书架命中集合：这本「刚加的书」应从「搜索新书」的结果里消失。
+      setShelfKeys((prev) => {
+        const next = new Set(prev)
+        next.add(searchBookKey(book.name, book.author))
+        if (origin.book_url) next.add(origin.book_url)
+        return next
+      })
     } catch (e) {
       const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '加入书架失败'
       toast.error(msg)
@@ -61,8 +199,7 @@ export default function ReaderSearchPage() {
     }
   }
 
-  const openBook = async (book: ReaderSearchBook) => {
-    const origin = book.origins[0]
+  const openBook = (book: ReaderSearchBook, origin = book.origins[0]) => {
     if (!origin) return
     navigate(
       `/reader/book?${new URLSearchParams({
@@ -109,6 +246,22 @@ export default function ReaderSearchPage() {
         </button>
       </div>
 
+      {/* 搜索范围：默认「全部书源」（全选已启用），点开可收敛到指定书源 */}
+      <div className="mt-3 flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setShowScope(true)}
+          className="inline-flex items-center gap-1.5 rounded-full border border-[var(--app-border)] bg-[var(--app-panel)] px-3 py-1.5 text-2xs font-bold text-[var(--app-muted)] transition hover:border-brand-500/40 hover:text-brand-600"
+        >
+          <ListFilter size={13} />
+          搜索范围
+          <span className="text-brand-600">{scopeLabel}</span>
+        </button>
+        {scopeAll && enabledSources.length > 0 && (
+          <span className="text-2xs text-[var(--app-subtle)]">共 {enabledSources.length} 个启用书源</span>
+        )}
+      </div>
+
       {searching && (
         <div className="flex flex-col items-center gap-2 py-24 text-[var(--app-muted)]">
           <Loader2 className="animate-spin" size={22} />
@@ -116,45 +269,56 @@ export default function ReaderSearchPage() {
         </div>
       )}
 
-      {!searching && books !== null && (
+      {!searching && visibleBooks !== null && (
         <div className="mt-6 space-y-3">
-          {books.map((book) => (
+          {hiddenOnShelf > 0 && visibleBooks.length > 0 && (
+            <p className="rounded-xl border border-[var(--app-border)] bg-[var(--app-panel-soft)] px-3 py-2 text-2xs text-[var(--app-muted)]">
+              已隐藏 {hiddenOnShelf} 本已在书架里的书
+            </p>
+          )}
+          {visibleBooks.length === 0 && (
+            <p className="py-16 text-center text-xs text-[var(--app-muted)]">
+              {hiddenOnShelf > 0 ? '搜到的书都已经在书架里了' : '没有找到结果'}
+            </p>
+          )}
+          {visibleBooks.map((book) => (
             <div
               key={`${book.name}|${book.author}`}
               className="flex gap-4 rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel)] p-4"
             >
               <button type="button" onClick={() => openBook(book)} className="shrink-0">
                 <div className="h-24 w-16 overflow-hidden rounded-lg border border-[var(--app-border)] bg-[var(--app-panel-soft)]">
-                  {book.cover_url ? (
-                    <img
-                      src={book.cover_url}
-                      alt={book.name}
-                      loading="lazy"
-                      referrerPolicy="no-referrer"
-                      className="h-full w-full object-cover"
-                    />
-                  ) : (
-                    <div className="flex h-full w-full items-center justify-center">
-                      <BookOpen size={18} className="text-[var(--app-muted)]" />
-                    </div>
-                  )}
+                  <ReaderBookCover url={book.cover_url} alt={book.name} iconSize={18} />
                 </div>
               </button>
               <div className="min-w-0 flex-1">
-                <button type="button" onClick={() => openBook(book)} className="text-left">
-                  <p className="truncate text-sm font-bold text-[var(--app-text)] hover:text-brand-600">
-                    {book.name}
-                    {book.origins.length > 1 && (
-                      <span className="ml-2 rounded-md bg-brand-500/10 px-1.5 py-0.5 text-2xs font-bold text-brand-600">
-                        {book.origins.length} 源可换
-                      </span>
-                    )}
-                  </p>
-                </button>
-                <p className="mt-1 truncate text-xs text-[var(--app-muted)]">
-                  {book.author || '佚名'}
-                  {book.kind ? ` · ${book.kind}` : ''}
-                  {book.word_count ? ` · ${book.word_count}` : ''}
+                <div className="flex items-center gap-2">
+                  <button type="button" onClick={() => openBook(book)} className="min-w-0 text-left">
+                    <p className="truncate text-sm font-bold text-[var(--app-text)] hover:text-brand-600">{book.name}</p>
+                  </button>
+                  {book.origins.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => setPicker(book)}
+                      title="换源"
+                      className="shrink-0 rounded-md bg-brand-500/10 px-1.5 py-0.5 text-2xs font-bold text-brand-600 transition hover:bg-brand-500/20"
+                    >
+                      {book.origins.length} 源可换
+                    </button>
+                  )}
+                </div>
+                <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-[var(--app-muted)]">
+                  <span className="truncate">{book.author || '佚名'}</span>
+                  {splitKindTags(book.kind).map((k) => (
+                    <span key={k} className="shrink-0 rounded bg-brand-500/10 px-1 py-0.5 text-2xs font-bold text-brand-600">
+                      {k}
+                    </span>
+                  ))}
+                  {book.word_count && (
+                    <span className="shrink-0 rounded bg-[var(--app-hover)] px-1 py-0.5 text-2xs font-bold text-[var(--app-muted)]">
+                      {book.word_count}
+                    </span>
+                  )}
                 </p>
                 <p className="mt-1 truncate text-xs text-[var(--app-muted)]">最新：{book.latest_chapter || '未知'}</p>
                 {book.intro && <p className="mt-1 line-clamp-2 text-xs text-[var(--app-subtle)]">{book.intro}</p>}
@@ -172,6 +336,19 @@ export default function ReaderSearchPage() {
               </div>
             </div>
           ))}
+
+          {/* 滚动到底自动加载下一页；失败时改成手动重试（见 LoadMoreSentinel）。 */}
+          <LoadMoreSentinel
+            hasMore={hasMore}
+            loadingMore={loadingMore}
+            onLoadMore={loadMore}
+            error={moreError}
+            onRetry={loadMore}
+            loadingLabel={`正在搜索第 ${page + 1} 页…`}
+          />
+          {!hasMore && !moreError && visibleBooks.length > 0 && (
+            <p className="py-2 text-center text-2xs text-[var(--app-subtle)]">已经到底了</p>
+          )}
 
           {skipped.length > 0 && (
             <div className="rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel-soft)]">
@@ -206,6 +383,31 @@ export default function ReaderSearchPage() {
         <div className="py-24 text-center text-xs text-[var(--app-muted)]">
           输入关键词开始搜索 · 需要 <Link to="/reader/sources" className="text-brand-600 hover:underline">先导入书源</Link>
         </div>
+      )}
+
+      {picker && (
+        <SourcePickerDialog
+          title={picker.name}
+          origins={picker.origins}
+          onPick={(origin) => {
+            const book = picker
+            setPicker(null)
+            openBook(book, origin)
+          }}
+          onClose={() => setPicker(null)}
+        />
+      )}
+
+      {showScope && (
+        <SearchScopeDialog
+          sources={sources}
+          selectedIds={scopeIds}
+          onConfirm={(ids) => {
+            setSearchScopeIds(ids)
+            setShowScope(false)
+          }}
+          onClose={() => setShowScope(false)}
+        />
       )}
     </div>
   )

@@ -182,6 +182,77 @@ func (s *SubtitleService) discoverExternalUncached(ctx context.Context, mediaID 
 	return discoverExternalSubtitleTracks(m), nil
 }
 
+// subtitleLanguageNames 把文件名后缀/容器里的语言标记折成可读名称。
+//
+// 外挂字幕只能从文件名拿到语言（`movie.chs.ass` → `chs`），直接展示给用户
+// 就是「chs」这种看不懂的值；内嵌轨没有 title 标签时同理。认不出来的标记
+// 原样保留，交给调用方（例如 Emby 的「字幕 (ASS)」兜底）处理。
+var subtitleLanguageNames = map[string]string{
+	"zh":  "中文",
+	"chi": "中文",
+	"zho": "中文",
+	"cn":  "中文",
+
+	"chs":     "简体中文",
+	"sc":      "简体中文",
+	"zh-cn":   "简体中文",
+	"zh-hans": "简体中文",
+	"zh-sg":   "简体中文",
+
+	"cht":     "繁体中文",
+	"tc":      "繁体中文",
+	"zh-tw":   "繁体中文",
+	"zh-hk":   "繁体中文",
+	"zh-mo":   "繁体中文",
+	"zh-hant": "繁体中文",
+
+	"jpn": "日本語",
+	"ja":  "日本語",
+	"jp":  "日本語",
+
+	"eng": "English",
+	"en":  "English",
+
+	"kor": "한국어",
+	"ko":  "한국어",
+
+	"yue": "粤语",
+}
+
+// subtitleLanguageName 返回语言标记的可读名称，认不出来时返回空串。
+func subtitleLanguageName(raw string) string {
+	tag := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(raw, "_", "-")))
+	if tag == "" {
+		return ""
+	}
+	if name, ok := subtitleLanguageNames[tag]; ok {
+		return name
+	}
+	// `chs[bilibiliid_danmu]`、`chs.ass` 这类带附加信息的标记先取前缀。
+	head := tag
+	if i := strings.IndexAny(head, "[.@"); i > 0 {
+		head = strings.TrimSpace(head[:i])
+	}
+	return subtitleLanguageNames[head]
+}
+
+// subtitleDisplayLabel 把语言标记换成可读名称；认不出来时保留原值（含 und）。
+func subtitleDisplayLabel(raw string) string {
+	if name := subtitleLanguageName(raw); name != "" {
+		return name
+	}
+	return strings.TrimSpace(raw)
+}
+
+// isDanmakuSubtitle 报告字幕文件是否是弹幕转存（`xxx[BilibiliID_danmu].ass`）。
+// 这类轨道是飘过的弹幕而不是对白字幕，名称里要标出来，避免和对白字幕混淆。
+func isDanmakuSubtitle(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.Contains(lower, "danmu") ||
+		strings.Contains(lower, "danmaku") ||
+		strings.Contains(name, "弹幕")
+}
+
 func discoverExternalSubtitleTracks(m *model.Media) []SubtitleTrack {
 	dir := filepath.Dir(m.Path)
 	bases := mediaSidecarBaseVariants(m.Path)
@@ -228,9 +299,13 @@ func discoverExternalSubtitleTracks(m *model.Media) []SubtitleTrack {
 				matchedBase = bases[0]
 			}
 			lang := detectLang(fullName, matchedBase)
+			label := subtitleDisplayLabel(lang)
+			if isDanmakuSubtitle(e.Name()) {
+				label += " · 弹幕"
+			}
 			tracks = append(tracks, SubtitleTrack{
 				Lang:     lang,
-				Label:    lang,
+				Label:    label,
 				Path:     filepath.Join(c, e.Name()),
 				Codec:    codec,
 				Source:   "external",
@@ -319,7 +394,11 @@ func subtitleTracksFromProbe(probe embeddedSubtitleProbe) []SubtitleTrack {
 		}
 		label := strings.TrimSpace(stream.Tags.Title)
 		if label == "" {
-			label = lang
+			// 没有 title 标签时用可读语言名（chi → 中文）代替裸语言码。
+			label = subtitleDisplayLabel(lang)
+		}
+		if label == "" {
+			label = "字幕"
 		}
 		if stream.Disposition.Forced != 0 {
 			label += "（强制）"

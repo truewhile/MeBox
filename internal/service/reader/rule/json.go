@@ -2,6 +2,8 @@ package rule
 
 import (
 	"encoding/json"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -30,14 +32,56 @@ func jsonRead(root any, path string) any {
 	if root == nil || path == "" {
 		return nil
 	}
-	v, err := jsonpathGet(path, root)
+	v, err := jsonpathGet(normalizeJSONPath(path), root)
 	if err != nil {
 		return nil
 	}
 	return v
 }
 
+// normalizeJSONPath 把 legado（Jayway）允许、而 PaesslerAG/jsonpath 拒绝的写法
+// 归一化成合法路径，共两处差异：
+//
+//  1. 缺根 `$`：Jayway 要求路径以 `$`/`@` 开头，legado 书源却常直接写
+//     `results.list`、`results.list.[*]`。PaesslerAG 对「不含 `[]`/`*` 的裸路径」
+//     恰好能容忍（内部按 `$.` 解析），但一旦出现 `[*]` 就报
+//     `unexpected "*" while scanning extensions`。这里统一补根。
+//  2. 点后紧跟方括号：`results.list.[*]`、`$.a.[0]`、`$.a.['k']`。Jayway 里
+//     `.[` 等价于 `[`，PaesslerAG 会报 `unexpected "[" while scanning field`。
+//
+// 两处都会让整条规则静默返回空——表现为「书源明明有效却搜不出任何结果」
+// （拷贝轻小说源的搜索列表规则就是 `results.list.[*]`）。
+func normalizeJSONPath(path string) string {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return path
+	}
+	switch {
+	case strings.HasPrefix(p, "$"), strings.HasPrefix(p, "@"):
+		// 已有根，保持
+	case strings.HasPrefix(p, "."):
+		p = "$" + p // `..a` 这类递归写法，补 `$` 而不是 `$.`
+	default:
+		p = "$." + p
+	}
+	if !strings.Contains(p, ".[") {
+		return p
+	}
+	var b strings.Builder
+	b.Grow(len(p))
+	for i := 0; i < len(p); i++ {
+		// 丢掉 `[` 前多余的点；递归下降 `..[` 保持原样。
+		if p[i] == '.' && i+1 < len(p) && p[i+1] == '[' && i > 0 && p[i-1] != '.' {
+			continue
+		}
+		b.WriteByte(p[i])
+	}
+	return b.String()
+}
+
 // jsonValueToString 对应 Kotlin 的 ob.toString() / joinToString("\n")。
+// 列表按 "\n" 拼接（legado 的 getString 就是这么做的）；对象走 Java 的 Map.toString
+// 形态（见 javaValueString），书源的正则大量依赖这个形态。
 func jsonValueToString(ob any) string {
 	switch t := ob.(type) {
 	case nil:
@@ -51,7 +95,63 @@ func jsonValueToString(ob any) string {
 		}
 		return strings.Join(parts, "\n")
 	default:
-		return anyToString(t)
+		return javaValueString(t)
+	}
+}
+
+// javaValueString 按 Java 的 Map/List toString 形态输出 JSON 值。
+//
+// 书源规则里的正则就是照着这个形态写的，最典型的是拷贝漫画的作者规则
+// `$.author##.*name=(.*?)\,.*##$1`：它期望拿到 `{name=岸本斉史, alias=…}`。
+// 之前这里用 Go 的 fmt 输出 `map[alias:… name:…]`，`name=` 根本匹配不到，
+// 作者字段就退化成一整串 map 文本。
+//
+// 已知差异：Java 的 LinkedTreeMap 保留 JSON 里的键顺序，而 Go 的
+// map[string]interface{} 不保序（JSONPath 库也只认这个类型），这里按 **键排序**
+// 输出以保证确定性。绝大多数「取某个键」的正则不受影响，但依赖原始键序的正则
+// （如 `.*name=(.*?)\,` 且 name 是最后一个键）仍可能与阅读 App 的结果不同。
+func javaValueString(v any) string {
+	switch t := v.(type) {
+	case nil:
+		return "null"
+	case string:
+		return t
+	case bool:
+		return strconv.FormatBool(t)
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case int:
+		return strconv.Itoa(t)
+	case int64:
+		return strconv.FormatInt(t, 10)
+	case json.Number:
+		return t.String()
+	case []any:
+		parts := make([]string, len(t))
+		for i, e := range t {
+			parts[i] = javaValueString(e)
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
+	case map[string]any:
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		var sb strings.Builder
+		sb.WriteByte('{')
+		for i, k := range keys {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(k)
+			sb.WriteByte('=')
+			sb.WriteString(javaValueString(t[k]))
+		}
+		sb.WriteByte('}')
+		return sb.String()
+	default:
+		return anyToString(v)
 	}
 }
 

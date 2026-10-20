@@ -102,7 +102,10 @@ export const danmakuAPI = {
     api
       .get<DanmakuFetchResult>(`/danmaku/${encodeURIComponent(mediaId)}`, {
         params: { kw: options.kw || undefined, episodeId: options.episodeId || undefined },
-        timeout: 20_000,
+        // 服务端依次做「16MB 前缀哈希 → 上游匹配 → 评论库」三段串行请求，每段的上游
+        // 超时都是 20 秒。客户端要是也卡在 20 秒，就会在服务端正要降级返回（哈希超时
+        // 后改按文件名搜索）时把请求撤掉：用户看不到弹幕，服务端还记一条 404。
+        timeout: 45_000,
       })
       .then((r) => r.data),
 

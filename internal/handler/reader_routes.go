@@ -11,8 +11,10 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/truewhile/MeBox/internal/middleware"
+	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/service"
 	"github.com/truewhile/MeBox/internal/service/reader"
+	readerrule "github.com/truewhile/MeBox/internal/service/reader/rule"
 )
 
 func registerReaderRoutes(authed *gin.RouterGroup, svc *service.Container) {
@@ -39,6 +41,9 @@ func registerReaderRoutes(authed *gin.RouterGroup, svc *service.Container) {
 	// 页面内的 fetch/XHR 经此转发（iframe 是不透明源，请求带不上书源 Cookie）
 	g.POST("/browser/xhr", readerBrowserXHRHandler(svc))
 
+	// 段评：用宿主浏览器打开评论地址（带书源 Cookie/登录态，对应书源的 showCmt）
+	g.POST("/comments/open", readerOpenCommentHandler(svc))
+
 	// 搜索（多源聚合）
 	g.POST("/search", readerSearchHandler(svc))
 
@@ -57,10 +62,24 @@ func registerReaderRoutes(authed *gin.RouterGroup, svc *service.Container) {
 	g.POST("/local/audiobooks", middleware.AdminRequired(), readerImportLocalAudioDirHandler(svc))
 	g.DELETE("/books/:id", readerRemoveBookHandler(svc))
 	g.PUT("/books/:id/progress", readerSaveProgressHandler(svc))
+	// 更新目录：重抓书架里全部网络书籍的目录，刷新章节缓存与「最近更新」时间
+	g.POST("/shelf/refresh-toc", readerRefreshBooksTocHandler(svc))
+
+	// 阅读器偏好（每个用户一条）：主题 / 排版 / 听书 / 书架展示设置，跨设备同步
+	g.GET("/profile", readerGetProfileHandler(svc))
+	g.PUT("/profile", readerSaveProfileHandler(svc))
+
+	// 书架分组（每个用户一份）：组名 → 书籍 ID，仿影视模块的媒体库标签
+	g.GET("/book-groups", readerGetBookGroupsHandler(svc))
+	g.PUT("/book-groups", readerSetBookGroupsHandler(svc))
+	// 换源：把书架里的书切到另一个书源（保留阅读进度，目录缓存按新源重建）
+	g.POST("/books/:id/origin", readerSwitchOriginHandler(svc))
 	g.PUT("/books/:id/audio-config", readerSaveAudioConfigHandler(svc))
 	g.GET("/books/:id/chapters", readerListChaptersHandler(svc))
 	g.POST("/books/:id/chapters", readerReplaceChaptersHandler(svc))
 	g.GET("/books/:id/content", readerBookContentHandler(svc))
+	// 批量取正文（离线缓存协议，对应 legado CacheBook）：返回每章内容与命中统计
+	g.POST("/books/:id/content-batch", readerBookContentBatchHandler(svc))
 
 	// 替换净化规则
 	g.GET("/replace-rules", readerListReplaceRulesHandler(svc))
@@ -71,7 +90,8 @@ func registerReaderRoutes(authed *gin.RouterGroup, svc *service.Container) {
 
 func readerListSourcesHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		sources, err := svc.Reader.ListSources(c.Request.Context())
+		userID := c.GetString(middleware.CtxUserID)
+		sources, err := svc.Reader.ListSources(c.Request.Context(), userID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -89,7 +109,8 @@ func readerImportSourcesHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		imported, err := svc.Reader.ImportSources(c.Request.Context(), body.Text)
+		userID := c.GetString(middleware.CtxUserID)
+		imported, err := svc.Reader.ImportSources(c.Request.Context(), userID, body.Text)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -107,7 +128,8 @@ func readerUpdateSourceHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "enabled 字段必填"})
 			return
 		}
-		if err := svc.Reader.UpdateSourceEnabled(c.Request.Context(), c.Param("id"), *body.Enabled); err != nil {
+		userID := c.GetString(middleware.CtxUserID)
+		if err := svc.Reader.UpdateSourceEnabled(c.Request.Context(), userID, c.Param("id"), *body.Enabled); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -117,7 +139,8 @@ func readerUpdateSourceHandler(svc *service.Container) gin.HandlerFunc {
 
 func readerDeleteSourceHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if err := svc.Reader.DeleteSource(c.Request.Context(), c.Param("id")); err != nil {
+		userID := c.GetString(middleware.CtxUserID)
+		if err := svc.Reader.DeleteSource(c.Request.Context(), userID, c.Param("id")); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -134,7 +157,8 @@ func readerDebugSourceHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		logs, err := svc.Reader.Debug(c.Request.Context(), c.Param("id"), body.Key)
+		userID := c.GetString(middleware.CtxUserID)
+		logs, err := svc.Reader.Debug(c.Request.Context(), userID, c.Param("id"), body.Key)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -236,6 +260,30 @@ func readerBrowserXHRHandler(svc *service.Container) gin.HandlerFunc {
 	}
 }
 
+// readerOpenCommentHandler 打开一条段评：复用书源登录态在宿主浏览器里承载评论页。
+// 书源的 showCmt 内部就是「java.ajax 取评论页 → java.showBrowser 展示」，
+// 这里用承载登录页的同一套机制等价实现（见 reader.OpenContentComment）。
+func readerOpenCommentHandler(svc *service.Container) gin.HandlerFunc {
+	var body struct {
+		BookID string `json:"book_id" binding:"required"`
+		URL    string `json:"url" binding:"required"`
+		Title  string `json:"title"`
+	}
+	return func(c *gin.Context) {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		userID := c.GetString(middleware.CtxUserID)
+		page, err := svc.Reader.OpenContentComment(c.Request.Context(), userID, body.BookID, body.URL, body.Title)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, page)
+	}
+}
+
 // readerBrowserPageHandler 承载待办页面本体。//
 // 鉴权走 HMAC 签名而非 JWT：这个地址要填进 <iframe src>，而 iframe 的请求
 // 带不上 Authorization 头。签名绑定待办 ID，链接随待办一起过期。
@@ -255,12 +303,12 @@ func readerBrowserPageHandler(svc *service.Container) gin.HandlerFunc {
 // 服务端补上书源 Cookie 与请求头，使「用户后台」这类页面在 iframe 里保持登录态。
 func readerBrowserAssetHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		target, sourceURL, err := svc.Reader.VerifyBrowserAsset(c.Query("id"), c.Query("u"), c.Query("s"))
+		target, _, err := svc.Reader.VerifyBrowserAsset(c.Query("id"), c.Query("u"), c.Query("s"))
 		if err != nil {
 			c.String(http.StatusForbidden, "%s", err.Error())
 			return
 		}
-		contentType, status, data, err := svc.Reader.FetchBrowserAsset(c.Request.Context(), sourceURL, target)
+		contentType, status, data, err := svc.Reader.FetchBrowserAsset(c.Request.Context(), c.Query("id"), target)
 		if err != nil {
 			c.String(http.StatusBadGateway, "资源加载失败: %s", err.Error())
 			return
@@ -275,7 +323,8 @@ func readerBrowserAssetHandler(svc *service.Container) gin.HandlerFunc {
 
 func readerSourceLogoutHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if err := svc.Reader.ClearSourceLogin(c.Request.Context(), c.Param("id")); err != nil {
+		userID := c.GetString(middleware.CtxUserID)
+		if err := svc.Reader.ClearSourceLogin(c.Request.Context(), userID, c.Param("id")); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -292,7 +341,8 @@ func readerSetSourceVariableHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		if err := svc.Reader.SetSourceVariable(c.Request.Context(), c.Param("id"), body.Variable); err != nil {
+		userID := c.GetString(middleware.CtxUserID)
+		if err := svc.Reader.SetSourceVariable(c.Request.Context(), userID, c.Param("id"), body.Variable); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
@@ -309,7 +359,8 @@ func readerSetSourceLoginInfoHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		if err := svc.Reader.SetSourceLoginInfo(c.Request.Context(), c.Param("id"), body.Fields); err != nil {
+		userID := c.GetString(middleware.CtxUserID)
+		if err := svc.Reader.SetSourceLoginInfo(c.Request.Context(), userID, c.Param("id"), body.Fields); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
@@ -320,13 +371,18 @@ func readerSetSourceLoginInfoHandler(svc *service.Container) gin.HandlerFunc {
 func readerSearchHandler(svc *service.Container) gin.HandlerFunc {
 	var body struct {
 		Key string `json:"key" binding:"required"`
+		// SourceIDs 搜索范围：空表示全部启用书源（默认），非空则只搜这些书源。
+		SourceIDs []string `json:"source_ids"`
+		// Page 页码（从 1 开始）：书源 searchUrl 支持 {{page}} 时，前端滚到底逐页取。
+		Page int `json:"page"`
 	}
 	return func(c *gin.Context) {
 		if err := c.ShouldBindJSON(&body); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		books, skipped, err := svc.Reader.Search(c.Request.Context(), body.Key)
+		userID := c.GetString(middleware.CtxUserID)
+		books, skipped, err := svc.Reader.Search(c.Request.Context(), userID, body.Key, body.SourceIDs, body.Page)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -345,6 +401,10 @@ func readerBookInfoHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		// 声明了封面解密的书源：详情封面也要走解密代理（尚未入库，按书源 URL 签）。
+		if info != nil {
+			info.CoverURL = svc.Reader.RewriteBookCover(c.Request.Context(), "", c.Query("source_url"), info.CoverURL)
+		}
 		c.JSON(http.StatusOK, info)
 	}
 }
@@ -359,6 +419,11 @@ func readerTocHandler(svc *service.Container) gin.HandlerFunc {
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
+		}
+		// nil 切片会被编码成 null，前端拿到 null 再取 .length 就是一句
+		// 「Cannot read properties of null」。空目录统一给 []。
+		if chapters == nil {
+			chapters = []reader.TocChapter{}
 		}
 		c.JSON(http.StatusOK, gin.H{"chapters": chapters})
 	}
@@ -386,6 +451,10 @@ func readerListBooksHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		// 封面解密代理只在下发时改写：库里仍存原始地址，换源/换签名密钥后不会失效。
+		for i := range books {
+			books[i].CoverURL = svc.Reader.RewriteBookCover(c.Request.Context(), books[i].ID, books[i].Origin, books[i].CoverURL)
+		}
 		c.JSON(http.StatusOK, gin.H{"books": books})
 	}
 }
@@ -409,6 +478,28 @@ func readerAddBookHandler(svc *service.Container) gin.HandlerFunc {
 			return
 		}
 		// 后台补目录缓存，让书架能显示未读章数；失败不影响加入书架本身。
+		svc.Reader.WarmUpBookChaptersAsync(c.Request.Context(), userID, book)
+		c.JSON(http.StatusOK, book)
+	}
+}
+
+// readerSwitchOriginHandler 换源：把书架里的书切到另一个书源。
+// 阅读进度保留；旧源目录缓存清空后按新源后台重新预热。
+func readerSwitchOriginHandler(svc *service.Container) gin.HandlerFunc {
+	var body struct {
+		Origin reader.SearchOrigin `json:"origin" binding:"required"`
+	}
+	return func(c *gin.Context) {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		userID := c.GetString(middleware.CtxUserID)
+		book, err := svc.Reader.SwitchOrigin(c.Request.Context(), userID, c.Param("id"), body.Origin)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		svc.Reader.WarmUpBookChaptersAsync(c.Request.Context(), userID, book)
 		c.JSON(http.StatusOK, book)
 	}
@@ -502,6 +593,20 @@ func readerImportLocalAudioDirHandler(svc *service.Container) gin.HandlerFunc {
 	}
 }
 
+// readerRefreshBooksTocHandler 更新目录：重抓书架里全部网络书籍的目录。
+// 本地书籍与没有书源信息的书籍跳过；单本失败只计数，不影响其它书。
+func readerRefreshBooksTocHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID := c.GetString(middleware.CtxUserID)
+		res, err := svc.Reader.RefreshBooksToc(c.Request.Context(), userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, res)
+	}
+}
+
 func readerRemoveBookHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userID := c.GetString(middleware.CtxUserID)
@@ -513,11 +618,56 @@ func readerRemoveBookHandler(svc *service.Container) gin.HandlerFunc {
 	}
 }
 
-func readerSaveProgressHandler(svc *service.Container) gin.HandlerFunc {
+// readerGetProfileHandler 读当前用户的阅读器偏好。
+// 没保存过时返回 {"profile": null}，前端据此用本地值播种。
+func readerGetProfileHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID := c.GetString(middleware.CtxUserID)
+		settings, err := svc.Reader.GetReaderSettings(c.Request.Context(), userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"profile": settings})
+	}
+}
+
+// readerSaveProfileHandler 覆盖保存当前用户的阅读器偏好（服务端做范围收敛）。
+func readerSaveProfileHandler(svc *service.Container) gin.HandlerFunc {
+	var body reader.ReaderSettings
+	return func(c *gin.Context) {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		userID := c.GetString(middleware.CtxUserID)
+		saved, err := svc.Reader.SaveReaderSettings(c.Request.Context(), userID, body)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"profile": saved})
+	}
+}
+
+// readerGetBookGroupsHandler 读当前用户的书架分组。
+// 没有分组时返回空数组（不是 null），前端可以直接遍历。
+func readerGetBookGroupsHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID := c.GetString(middleware.CtxUserID)
+		groups, err := svc.Reader.GetBookGroups(c.Request.Context(), userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"groups": groups})
+	}
+}
+
+// readerSetBookGroupsHandler 覆盖保存当前用户的书架分组（整份替换）。
+func readerSetBookGroupsHandler(svc *service.Container) gin.HandlerFunc {
 	var body struct {
-		ChapterIndex int    `json:"chapter_index"`
-		Pos          int    `json:"pos"`
-		ChapterTitle string `json:"chapter_title"`
+		Groups []model.BookGroupSet `json:"groups"`
 	}
 	return func(c *gin.Context) {
 		if err := c.ShouldBindJSON(&body); err != nil {
@@ -525,7 +675,44 @@ func readerSaveProgressHandler(svc *service.Container) gin.HandlerFunc {
 			return
 		}
 		userID := c.GetString(middleware.CtxUserID)
-		if err := svc.Reader.SaveProgress(c.Request.Context(), userID, c.Param("id"), body.ChapterIndex, body.Pos, body.ChapterTitle); err != nil {
+		groups, err := svc.Reader.SetBookGroups(c.Request.Context(), userID, body.Groups)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"groups": groups})
+	}
+}
+
+// maxReaderChapterPos 进度上限：秒（听书）/ 页码（文本）/ 图片序号（漫画）都远小于它，
+// 只用来挡住异常大的浮点数转 int 时溢出。约 115 天，足够覆盖任何单章。
+const maxReaderChapterPos = 10_000_000
+
+func readerSaveProgressHandler(svc *service.Container) gin.HandlerFunc {
+	var body struct {
+		ChapterIndex int `json:"chapter_index"`
+		// Pos 用 float64 接：听书的进度是 audio.currentTime（秒，天然带小数），
+		// 漫画是图片序号、文本是页码（都是整数）。用 int 接小数会让整个请求
+		// 400，而前端是 fire-and-forget，音频进度就被静默丢掉了。
+		Pos          float64 `json:"pos"`
+		ChapterTitle string  `json:"chapter_title"`
+	}
+	return func(c *gin.Context) {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		// dur_chapter_pos 落库是 int，截断成秒；负数没有意义，夹到 0。
+		posFloat := body.Pos
+		if !(posFloat > 0) { // 同时挡住 0 与负数（JSON 不会给出 NaN）
+			posFloat = 0
+		}
+		if posFloat > maxReaderChapterPos {
+			posFloat = maxReaderChapterPos
+		}
+		pos := int(posFloat)
+		userID := c.GetString(middleware.CtxUserID)
+		if err := svc.Reader.SaveProgress(c.Request.Context(), userID, c.Param("id"), body.ChapterIndex, pos, body.ChapterTitle); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -652,12 +839,37 @@ func readerMediaProxyHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "仅支持 http(s) 媒体地址"})
 			return
 		}
+		// 封面解密代理（d=cover）：签名主体可能是书源 URL（搜索结果尚未入库）。
+		// 封面不读取书籍正文，因此不需要书籍记录；统一整段读取后解密下发。
+		if c.Query("d") == "cover" {
+			resp, fetchErr := svc.Reader.FetchCover(c.Request.Context(), bookID, rawURL)
+			if fetchErr != nil {
+				c.JSON(http.StatusBadGateway, gin.H{"error": "封面拉取失败: " + fetchErr.Error()})
+				return
+			}
+			defer resp.Body.Close()
+			data, readErr := io.ReadAll(io.LimitReader(resp.Body, readerImageDecodeMaxBytes+1))
+			if readErr != nil || len(data) > readerImageDecodeMaxBytes {
+				c.JSON(http.StatusBadGateway, gin.H{"error": "封面过大或读取失败"})
+				return
+			}
+			decoded := svc.Reader.DecodeCoverBytes(c.Request.Context(), bookID, rawURL, data)
+			contentType := resp.Header.Get("Content-Type")
+			if contentType == "" {
+				contentType = http.DetectContentType(decoded)
+			}
+			c.Data(resp.StatusCode, contentType, decoded)
+			return
+		}
 		book, err := svc.Reader.GetBook(c.Request.Context(), bookID)
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "书籍不存在"})
 			return
 		}
-		resp, err := svc.Reader.FetchMedia(c.Request.Context(), book, rawURL, c.GetHeader("Range"))
+		// 图片地址可自带 ",{headers:{...}}" 选项段：拆分后 headers 逐图应用，
+		// 代理地址里只保留不带选项的地址（见 ProxyURL）。
+		rawURL, mediaOptions, _ := readerrule.ParseMediaOptions(rawURL)
+		resp, err := svc.Reader.FetchMediaWithOptions(c.Request.Context(), book, rawURL, c.GetHeader("Range"), mediaOptions.Headers)
 		if err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "媒体拉取失败: " + err.Error()})
 			return
@@ -665,13 +877,51 @@ func readerMediaProxyHandler(svc *service.Container) gin.HandlerFunc {
 		defer resp.Body.Close()
 
 		ct := resp.Header.Get("Content-Type")
-		isPlaylist := strings.Contains(ct, "mpegurl") || strings.Contains(ct, "m3u8") ||
-			strings.HasSuffix(strings.ToLower(rawURL), ".m3u8")
-		if isPlaylist {
-			// m3u8：改写分片/密钥地址为签名代理后返回，hls.js 无感续播
-			data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-			rewritten := svc.Reader.RewritePlaylist(bookID, rawURL, string(data))
-			c.Data(http.StatusOK, "application/vnd.apple.mpegurl", []byte(rewritten))
+		// 书源声明了 imageDecode 时，图片字节需要服务端二次解密。
+		// 这类响应必须整段读取后处理，不再支持 Range（解密后长度会变）。
+		if decodeJS := svc.Reader.ImageDecodeRule(c.Request.Context(), book); decodeJS != "" && !isMediaPlaylistRequest(resp) {
+			sniffed, readErr := io.ReadAll(io.LimitReader(resp.Body, readerImageDecodeMaxBytes+1))
+			if readErr != nil || len(sniffed) > readerImageDecodeMaxBytes {
+				c.JSON(http.StatusBadGateway, gin.H{"error": "图片过大或读取失败"})
+				return
+			}
+			decoded, decErr := svc.Reader.DecodeImageBytes(c.Request.Context(), book, rawURL, false, sniffed)
+			if decErr != nil {
+				c.JSON(http.StatusBadGateway, gin.H{"error": "图片解密失败: " + decErr.Error()})
+				return
+			}
+			contentType := ct
+			if contentType == "" {
+				contentType = http.DetectContentType(decoded)
+			}
+			c.Data(resp.StatusCode, contentType, decoded)
+			return
+		}
+		// m3u8 判定不能只看 Content-Type 或 URL 后缀：上游经常把播放列表标成
+		// application/octet-stream，或者地址是 /index.m3u8?token=...（后缀判断不命中）。
+		// 先读一小段用 #EXTM3U 标记确认；不是播放列表就把这段拼回响应体继续流式透传。
+		//
+		// 只嗅探 200 的 GET：206 的体是二进制分片、HEAD 没有体，都不需要判断。
+		if c.Request.Method == http.MethodGet && resp.StatusCode == http.StatusOK {
+			head, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+			if readErr == nil && reader.BodyIsPlaylist(head, ct) {
+				rest, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+				rewritten := svc.Reader.RewritePlaylist(bookID, rawURL, string(head)+string(rest))
+				c.Data(http.StatusOK, "application/vnd.apple.mpegurl", []byte(rewritten))
+				return
+			}
+			// 不是播放列表：透传时 Content-Length 可能因为已经读过一部分而失配，
+			// 直接省略交给 net/http 按 chunked 处理，避免少写/多写导致截断。
+			for _, h := range []string{"Content-Type", "Content-Range", "Accept-Ranges"} {
+				if v := resp.Header.Get(h); v != "" {
+					c.Header(h, v)
+				}
+			}
+			c.Status(resp.StatusCode)
+			if len(head) > 0 {
+				_, _ = c.Writer.Write(head)
+			}
+			_, _ = io.Copy(c.Writer, resp.Body)
 			return
 		}
 		// 流式透传（含 206 Partial Content，支持音频拖动进度）
@@ -683,6 +933,22 @@ func readerMediaProxyHandler(svc *service.Container) gin.HandlerFunc {
 		c.Status(resp.StatusCode)
 		_, _ = io.Copy(c.Writer, resp.Body)
 	}
+}
+
+// readerImageDecodeMaxBytes 需要服务端解密的单张图片上限。
+const readerImageDecodeMaxBytes = 32 << 20
+
+// isMediaPlaylistRequest 判断响应是否可能已是 HLS 播放列表。
+// 播放列表太小、不该走图片解密分支（书源的 imageDecode 只会用于图片）。
+func isMediaPlaylistRequest(resp *http.Response) bool {
+	ct := strings.ToLower(resp.Header.Get("Content-Type"))
+	return strings.Contains(ct, "mpegurl")
+}
+
+// readerBodyIsPlaylist 判断上游响应体是否是 HLS 播放列表。
+// 以 #EXTM3U 标记为准：Content-Type 只是辅助（上游常标成 octet-stream）。
+func readerBodyIsPlaylist(head []byte, contentType string) bool {
+	return reader.BodyIsPlaylist(head, contentType)
 }
 
 // readerLocalAssetHandler 本地书籍内嵌资源（EPUB 图片等）：
@@ -771,5 +1037,34 @@ func readerBookContentHandler(svc *service.Container) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, content)
+	}
+}
+
+// readerBookContentBatchHandler 批量取正文（对应 legado CacheBook / getContentBatch）。
+//
+// 请求 {chapter_indexes:[...], apply_replace:bool}：单章失败不中断整批，
+// 返回每章内容与 hit/miss/failed 统计，供前端窗口预取与后续离线缓存。
+func readerBookContentBatchHandler(svc *service.Container) gin.HandlerFunc {
+	var body struct {
+		ChapterIndexes []int `json:"chapter_indexes" binding:"required"`
+		// ApplyReplace 是否在服务端应用用户替换净化规则（默认 false，与单章接口一致）。
+		ApplyReplace bool `json:"apply_replace"`
+	}
+	return func(c *gin.Context) {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "chapter_indexes 不能为空"})
+			return
+		}
+		if len(body.ChapterIndexes) > 64 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "一次最多请求 64 章"})
+			return
+		}
+		userID := c.GetString(middleware.CtxUserID)
+		result, err := svc.Reader.GetContentBatch(c.Request.Context(), userID, c.Param("id"), body.ChapterIndexes, body.ApplyReplace)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, result)
 	}
 }

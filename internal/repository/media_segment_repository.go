@@ -86,21 +86,15 @@ func (r *MediaSegmentRepository) UpsertFetch(ctx context.Context, row *model.Med
 	return r.db.WithContext(ctx).Clauses(onConflict).Create(row).Error
 }
 
-// ListPrewarmCandidates returns media that should be refreshed from source:
-// no ledger, expired miss (fetched_at < missBefore), or expired hit (fetched_at < hitBefore).
-// Recently played items come first so hot titles recover coverage sooner.
-func (r *MediaSegmentRepository) ListPrewarmCandidates(
-	ctx context.Context,
-	source string,
-	missBefore, hitBefore time.Time,
-	limit int,
-) ([]model.Media, error) {
-	if r == nil || limit <= 0 {
-		return nil, nil
-	}
-	rows := make([]model.Media, 0, limit)
-	// 可查询：有 TMDb，且是剧集（有季集）或电影（无季集）。
-	err := r.db.WithContext(ctx).Raw(`
+// segmentPrewarmCandidatesQuery 是片段预取候选查询。
+//
+// 抽成包级常量是为了让方言相关的回归测试能直接断言语句文本：DryRun 模式下
+// GORM 不会把 Raw 语句交给 logger，无法从执行路径上捕获生成后的 SQL。
+//
+// 注意 found 必须用占位符绑定布尔值，不能写 f.found = 0 / = 1：
+// PostgreSQL 没有 boolean = integer 运算符，那样写会固定报 SQLSTATE 42883
+// （SQLite 宽容，所以只在 PostgreSQL 上暴露）。
+const segmentPrewarmCandidatesQuery = `
 SELECT m.*
 FROM media m
 LEFT JOIN media_segment_fetches f
@@ -119,11 +113,29 @@ WHERE m.deleted_at IS NULL
   )
   AND (
     f.id IS NULL
-    OR (f.found = 0 AND f.fetched_at < ?)
-    OR (f.found = 1 AND f.fetched_at < ?)
+    OR (f.found = ? AND f.fetched_at < ?)
+    OR (f.found = ? AND f.fetched_at < ?)
   )
 ORDER BY ph.last_played DESC
 LIMIT ?
-`, source, missBefore, hitBefore, limit).Scan(&rows).Error
+`
+
+// ListPrewarmCandidates returns media that should be refreshed from source:
+// no ledger, expired miss (fetched_at < missBefore), or expired hit (fetched_at < hitBefore).
+// Recently played items come first so hot titles recover coverage sooner.
+func (r *MediaSegmentRepository) ListPrewarmCandidates(
+	ctx context.Context,
+	source string,
+	missBefore, hitBefore time.Time,
+	limit int,
+) ([]model.Media, error) {
+	if r == nil || limit <= 0 {
+		return nil, nil
+	}
+	rows := make([]model.Media, 0, limit)
+	// 可查询：有 TMDb，且是剧集（有季集）或电影（无季集）。
+	err := r.db.WithContext(ctx).
+		Raw(segmentPrewarmCandidatesQuery, source, false, missBefore, true, hitBefore, limit).
+		Scan(&rows).Error
 	return rows, err
 }

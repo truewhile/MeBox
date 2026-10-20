@@ -33,6 +33,20 @@ func (r *HistoryRepository) UpsertProgress(ctx context.Context, h *model.Playbac
 	return r.upsert(ctx, h, true)
 }
 
+// historyColumn 生成「当前表」限定的列引用。
+//
+// PostgreSQL 的 ON CONFLICT DO UPDATE ... WHERE 里，未限定的列名会同时可解析到
+// 目标表和本次插入的行，于是报
+//
+//	column reference "session_started_at_ms" is ambiguous (SQLSTATE 42702)
+//
+// 结果是 POST /api/history 一律 500，观看进度与续播完全存不下来。SQLite 不做这项
+// 检查，所以这个错只在 PostgreSQL 上暴露。clause.CurrentTable 由 GORM 在构建语句
+// 时替换成真实表名，两种方言都能正确渲染。
+func historyColumn(name string) clause.Column {
+	return clause.Column{Table: clause.CurrentTable, Name: name}
+}
+
 func (r *HistoryRepository) upsert(ctx context.Context, h *model.PlaybackHistory, versioned bool) error {
 	updates := playbackHistoryAssignments(h)
 	if versioned {
@@ -49,16 +63,16 @@ func (r *HistoryRepository) upsert(ctx context.Context, h *model.PlaybackHistory
 		onConflict.Where = clause.Where{Exprs: []clause.Expression{
 			clause.Or(
 				clause.Lt{
-					Column: clause.Column{Name: "session_started_at_ms"},
+					Column: historyColumn("session_started_at_ms"),
 					Value:  h.SessionStartedAtMs,
 				},
 				clause.And(
 					clause.Eq{
-						Column: clause.Column{Name: "session_started_at_ms"},
+						Column: historyColumn("session_started_at_ms"),
 						Value:  h.SessionStartedAtMs,
 					},
 					clause.Lte{
-						Column: clause.Column{Name: "sequence"},
+						Column: historyColumn("sequence"),
 						Value:  h.Sequence,
 					},
 				),

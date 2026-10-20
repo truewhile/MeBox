@@ -6,6 +6,7 @@ import (
 	"unicode"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/truewhile/MeBox/internal/model"
 )
@@ -86,7 +87,7 @@ func (r *MediaRepository) searchFilteredFTS(ctx context.Context, query string, o
 		Joins("JOIN media_search_fts ON media_search_fts.rowid = media.rowid").
 		Where("media.deleted_at IS NULL").
 		Where("media_search_fts MATCH ?", ftsQuery)
-	q = applyQualifiedMediaQueryFilter(q, filter)
+	q = applyMediaQueryFilter(q, filter)
 	if err := q.Count(&total).Error; err != nil {
 		return nil, 0, false
 	}
@@ -106,11 +107,8 @@ func (r *MediaRepository) searchFilteredLIKE(ctx context.Context, query string, 
 	q := r.db.WithContext(ctx).Model(&model.Media{})
 	q = applyMediaQueryFilter(q, filter)
 	// SQLite 的 LIKE 对 ASCII 不区分大小写；Postgres 的 LIKE 区分大小写，
-	// 需用 ILIKE 保持两端搜索行为一致。
-	likeOp := "LIKE"
-	if r.db.Dialector != nil && r.db.Dialector.Name() == "postgres" {
-		likeOp = "ILIKE"
-	}
+	// 需用 ILIKE 保持两端搜索行为一致（见 dialect.go 的 likeOperator）。
+	likeOp := likeOperator(r.db)
 	terms := mediaSearchTerms(query)
 	for _, term := range terms {
 		like := "%" + escapeLike(term) + "%"
@@ -125,31 +123,15 @@ func (r *MediaRepository) searchFilteredLIKE(ctx context.Context, query string, 
 	if query != "" {
 		prefix := escapeLike(query) + "%"
 		exact := query
-		q = q.Order(gorm.Expr(
+		q = q.Order(clause.OrderBy{Expression: gorm.Expr(
 			"CASE WHEN title = ? THEN 0 WHEN original_name = ? THEN 1 WHEN title "+likeOp+" ? ESCAPE '\\' THEN 2 WHEN original_name "+likeOp+" ? ESCAPE '\\' THEN 3 ELSE 4 END, created_at desc",
 			exact, exact, prefix, prefix,
-		))
+		)})
 	} else {
 		q = q.Order("created_at desc")
 	}
 	err := q.Offset(offset).Limit(limit).Find(&items).Error
 	return items, total, err
-}
-
-func applyQualifiedMediaQueryFilter(q *gorm.DB, filter MediaQueryFilter) *gorm.DB {
-	if !filter.IncludeNSFW {
-		q = q.Where("media.nsfw = ?", false)
-	}
-	if len(filter.HiddenLibraryIDs) > 0 {
-		q = q.Where("media.library_id NOT IN ?", filter.HiddenLibraryIDs)
-	}
-	if len(filter.AllowedLibraryIDs) > 0 {
-		q = q.Where("media.library_id IN ?", filter.AllowedLibraryIDs)
-	}
-	if seriesID := strings.TrimSpace(filter.SeriesID); seriesID != "" {
-		q = q.Where("media.series_id = ?", seriesID)
-	}
-	return q
 }
 
 func mediaFTSQuery(query string) string {

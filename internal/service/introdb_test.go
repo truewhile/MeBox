@@ -11,11 +11,12 @@ import (
 	"go.uber.org/zap"
 )
 
-// 这两段响应是从 api.theintrodb.org/v3/media 实测抓下来的原文，
-// 用来锁住 null 语义：start_ms: null = 从片头开始，end_ms: null = 一直到片尾。
+// 这两段响应是从 api.theintrodb.org/v4/media 实测抓下来的原文（v4 以 TVDB 为身份，
+// 响应里只有 tvdb_id），用来锁住 null 语义：start_ms: null = 从片头开始，
+// end_ms: null = 一直到片尾。
 const (
-	introDBTVPayload    = `{"tmdb_id":1396,"type":"tv","season":1,"episode":1,"intro":[{"start_ms":228664,"end_ms":246143}],"credits":[{"start_ms":3431000,"end_ms":null}]}`
-	introDBMoviePayload = `{"tmdb_id":27205,"type":"movie","intro":[{"start_ms":null,"end_ms":38000}]}`
+	introDBTVPayload    = `{"tvdb_id":81189,"type":"tv","season":1,"episode":1,"intro":[{"start_ms":228664,"end_ms":246143}],"credits":[{"start_ms":3431000,"end_ms":null}]}`
+	introDBMoviePayload = `{"tvdb_id":113,"type":"movie","intro":[{"start_ms":null,"end_ms":38000}]}`
 )
 
 func TestParseIntroDBResponseResolvesNullBounds(t *testing.T) {
@@ -48,7 +49,7 @@ func TestParseIntroDBResponseResolvesNullBounds(t *testing.T) {
 }
 
 func TestParseIntroDBResponseDropsEmptyRanges(t *testing.T) {
-	body := `{"tmdb_id":1,"type":"movie",
+	body := `{"tvdb_id":1,"type":"movie",
 		"intro":[{"start_ms":5000,"end_ms":5000},{"start_ms":9000,"end_ms":8000},{"start_ms":1000,"end_ms":2000}],
 		"recap":[],"credits":[],"preview":[]}`
 	spans, err := parseIntroDBResponse([]byte(body))
@@ -62,7 +63,7 @@ func TestParseIntroDBResponseDropsEmptyRanges(t *testing.T) {
 }
 
 func TestParseIntroDBResponseOrdersByType(t *testing.T) {
-	body := `{"tmdb_id":1,"type":"tv","credits":[{"start_ms":900,"end_ms":1000}],
+	body := `{"tvdb_id":1,"type":"tv","credits":[{"start_ms":900,"end_ms":1000}],
 		"intro":[{"start_ms":100,"end_ms":200}],"recap":[{"start_ms":50,"end_ms":60}]}`
 	spans, err := parseIntroDBResponse([]byte(body))
 	if err != nil {
@@ -82,12 +83,12 @@ func TestParseIntroDBResponseOrdersByType(t *testing.T) {
 func TestIntroDBMediaURLOnlyAddsSeasonEpisodeForTV(t *testing.T) {
 	svc := NewIntroDBService(zap.NewNop())
 	if got, want := svc.mediaURL(1396, 1, 1),
-		"https://api.theintrodb.org/v3/media?tmdb_id=1396&season=1&episode=1"; got != want {
+		"https://api.theintrodb.org/v4/media?tmdb_id=1396&season=1&episode=1"; got != want {
 		t.Fatalf("tv url = %q, want %q", got, want)
 	}
 	// 电影（season/episode 为 0）不能带季集参数，否则会被当成剧集查不到。
 	if got, want := svc.mediaURL(27205, 0, 0),
-		"https://api.theintrodb.org/v3/media?tmdb_id=27205"; got != want {
+		"https://api.theintrodb.org/v4/media?tmdb_id=27205"; got != want {
 		t.Fatalf("movie url = %q, want %q", got, want)
 	}
 }

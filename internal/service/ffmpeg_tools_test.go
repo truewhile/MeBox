@@ -49,6 +49,8 @@ func TestSafeZipTargetRejectsTraversal(t *testing.T) {
 }
 
 func TestFFmpegToolsStatusNoPanic(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	t.Chdir(t.TempDir())
 	svc := NewFFmpegToolsService(&config.Config{}, zap.NewNop(), nil)
 	st := svc.Status(context.Background())
 	for _, key := range []string{"installing", "message", "error", "install_dir", "target", "ffmpeg", "ffprobe"} {

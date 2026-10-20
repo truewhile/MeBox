@@ -50,6 +50,7 @@ func registerAdminStrmRoutes(admin *gin.RouterGroup, svc *service.Container) {
 	// Emby 挂载管理：远程 Emby 媒体库挂载（账号复用 strm/accounts）
 	admin.GET("/emby/accounts/:id/views", embyAccountViewsHandler(svc))
 	admin.POST("/emby/accounts/:id/full-mount", fullMountEmbyAccountHandler(svc))
+	admin.PUT("/emby/accounts/:id/mounts/enabled", setEmbyMountsEnabledHandler(svc))
 	admin.GET("/emby/mounts", listEmbyMountsHandler(svc))
 	admin.POST("/emby/mounts", createEmbyMountsHandler(svc))
 	admin.PUT("/emby/mounts/reorder", reorderEmbyMountsHandler(svc))

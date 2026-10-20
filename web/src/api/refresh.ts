@@ -1,37 +1,56 @@
-// 令牌刷新 API 模块
-import { api } from './client'
+// 令牌刷新 API 模块。
+import { RefreshRequestError, type RefreshTokens } from '../utils/authRefresh'
 
-// 刷新令牌请求/响应
-export interface RefreshTokenRequest {
-  refresh_token: string
-}
+const REFRESH_ENDPOINT = '/api/auth/refresh'
 
-export interface RefreshTokenResponse {
-  token: string
-  refresh_token: string
-  expires_in: number
-  token_type: string
-}
+// 刷新是短请求：网关/服务重启时尽快失败并让调用方重试，
+// 不要用默认的长超时把页面卡在等待里。
+const REFRESH_TIMEOUT_MS = 15_000
 
-// 刷新访问令牌。
-//
-// 后端响应封装在 { code, message, data } 里，需解包 .data。
-// /auth/login 的响应是直接展开的（{tokens:..., user:...}），
-// /auth/refresh 的响应是包装过的 — 这里负责拉平成前端使用的 shape。
-export async function refreshToken(refreshToken: string): Promise<RefreshTokenResponse> {
-  const resp = await api.post<{
-    code: number
-    message: string
-    data: RefreshTokenResponse
-  }>('/auth/refresh', { refresh_token: refreshToken })
-  const body = resp.data
-  if (!body || !body.data || !body.data.token) {
-    throw new Error(body?.message || 'refresh failed')
+/**
+ * 用 refresh token 换取新的令牌对。
+ *
+ * 刻意使用 fetch 而不是共享的 axios 实例：
+ *  - 刷新请求的失败不能进入 401 拦截器，否则会递归触发刷新/登出；
+ *  - 调用方需要拿到 HTTP 状态码，以区分「凭证失效」和「服务暂时不可用」。
+ *
+ * 服务端响应形如 { code, message, data: { token, refresh_token, ... } }。
+ */
+export async function requestRefreshTokens(refreshToken: string): Promise<RefreshTokens> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS)
+
+  let resp: Response
+  try {
+    resp = await fetch(REFRESH_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      cache: 'no-store',
+      body: JSON.stringify({ refresh_token: refreshToken }),
+      signal: controller.signal,
+    })
+  } catch {
+    // 网络不可达、被中止或超时：没有 HTTP 状态码，按「暂时不可用」处理。
+    throw new RefreshRequestError('refresh request failed')
+  } finally {
+    clearTimeout(timer)
   }
-  return body.data
-}
 
-// 登出
-export async function logout(): Promise<void> {
-  await api.post('/me/logout')
+  const body = (await resp.json().catch(() => null)) as
+    | { code?: number; message?: string; data?: Partial<RefreshTokens> }
+    | null
+
+  if (!resp.ok) {
+    throw new RefreshRequestError(body?.message ?? 'refresh failed', resp.status)
+  }
+
+  const token = body?.data?.token
+  const nextRefreshToken = body?.data?.refresh_token
+  if (!token || !nextRefreshToken) {
+    // 200 但没有可用令牌（例如被网关/代理改写了响应）：同样按暂时不可用处理，
+    // 不要据此清空用户会话。
+    throw new RefreshRequestError('malformed refresh response')
+  }
+  return { token, refresh_token: nextRefreshToken }
 }

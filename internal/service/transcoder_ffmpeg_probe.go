@@ -11,29 +11,17 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/truewhile/MeBox/internal/config"
 )
 
 func (t *TranscoderService) runFFmpeg(ctx context.Context, job *hlsJob, input transcodeInput) {
-	bin, err := t.resolveFFmpegPath()
-	if err != nil {
-		t.log.Warn("ffmpeg unavailable", zap.String("media_id", job.mediaID), zap.Error(err))
-		t.mu.Lock()
-		delete(t.jobs, job.mediaID)
-		t.mu.Unlock()
-		t.hub.Publish("transcode", map[string]any{
-			"media_id": job.mediaID,
-			"status":   "error",
-			"error":    err.Error(),
-		})
-		return
-	}
-
 	playlist := filepath.Join(job.outputDir, "index.m3u8")
 	segments := filepath.Join(job.outputDir, "seg_%05d.ts")
 
-	args := buildFFmpegArgsForInput(t.cfg, input, playlist, segments)
+	args := buildFFmpegArgsForInput(job.config, input, playlist, segments)
 
-	cmd := exec.CommandContext(ctx, bin, args...) // #nosec G204 -- bin is resolved by resolveFFmpegPath and args are passed without a shell.
+	cmd := exec.CommandContext(ctx, job.ffmpegPath, args...) // #nosec G204 -- the binary was validated before creating this job.
 	setFFmpegSysProcAttr(cmd)
 	cmd.Stderr = os.Stderr
 
@@ -50,7 +38,8 @@ func (t *TranscoderService) runFFmpeg(ctx context.Context, job *hlsJob, input tr
 		"start_sec": input.StartSec,
 	})
 
-	if err := cmd.Run(); err != nil && !errors.Is(ctx.Err(), context.Canceled) {
+	err := cmd.Run()
+	if err != nil && !errors.Is(ctx.Err(), context.Canceled) {
 		t.log.Warn("ffmpeg exited",
 			zap.String("media_id", job.mediaID),
 			zap.Float64("start_sec", input.StartSec),
@@ -59,11 +48,18 @@ func (t *TranscoderService) runFFmpeg(ctx context.Context, job *hlsJob, input tr
 	}
 
 	t.mu.Lock()
-	// Only drop the map entry if we are still the registered generation.
+	// Only update the map entry if we are still the registered generation.
 	if cur, ok := t.jobs[job.mediaID]; ok && cur == job {
-		delete(t.jobs, job.mediaID)
+		if err == nil && ctx.Err() == nil {
+			job.completed = true
+		} else {
+			delete(t.jobs, job.mediaID)
+		}
 	}
 	t.mu.Unlock()
+	if err != nil || ctx.Err() != nil {
+		job.cancel()
+	}
 
 	t.hub.Publish("transcode", map[string]any{
 		"media_id": job.mediaID,
@@ -73,19 +69,53 @@ func (t *TranscoderService) runFFmpeg(ctx context.Context, job *hlsJob, input tr
 }
 
 func (t *TranscoderService) resolveFFmpegPath() (string, error) {
-	t.mu.Lock()
-	configuredPath := strings.TrimSpace(t.cfg.App.FFmpegPath)
-	t.mu.Unlock()
+	cfg := t.transcodeConfig()
+	return t.resolveFFmpegPathFor(context.Background(), cfg.App.FFmpegPath, ffmpegArgSettingsFromConfig(cfg, nil).encoder)
+}
+
+type ffmpegValidationCache struct {
+	configuredPath string
+	path           string
+	encoder        string
+	size           int64
+	modTime        time.Time
+	checkedAt      time.Time
+}
+
+func (t *TranscoderService) resolveFFmpegPathFor(ctx context.Context, configuredPath, encoder string) (string, error) {
+	t.ffmpegMu.Lock()
+	defer t.ffmpegMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	configuredPath = strings.TrimSpace(configuredPath)
+	cached := t.ffmpegCache
+	if cached.path != "" && cached.encoder == encoder &&
+		(configuredPath == cached.configuredPath || configuredPath == cached.path) &&
+		time.Since(cached.checkedAt) < transcodeAvailabilityTTL {
+		if info, err := os.Stat(cached.path); err == nil && info.Size() == cached.size && info.ModTime().Equal(cached.modTime) {
+			return cached.path, nil
+		}
+	}
 
 	var lastErr error
 	for _, bin := range executableCandidates(configuredPath, "ffmpeg") {
-		if err := validateFFmpegForTranscode(context.Background(), bin, t.effectiveEncoder()); err != nil {
+		if err := validateFFmpegForTranscode(ctx, bin, encoder); err != nil {
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
 			lastErr = err
 			continue
 		}
-		t.mu.Lock()
-		t.cfg.App.FFmpegPath = bin
-		t.mu.Unlock()
+		if info, err := os.Stat(bin); err == nil {
+			t.ffmpegCache = ffmpegValidationCache{configuredPath: configuredPath, path: bin, encoder: encoder,
+				size: info.Size(), modTime: info.ModTime(), checkedAt: time.Now()}
+		}
+		config.RuntimeMu.Lock()
+		if strings.TrimSpace(t.cfg.App.FFmpegPath) == configuredPath {
+			t.cfg.App.FFmpegPath = bin
+		}
+		config.RuntimeMu.Unlock()
 		return bin, nil
 	}
 	if lastErr != nil {
@@ -95,10 +125,11 @@ func (t *TranscoderService) resolveFFmpegPath() (string, error) {
 }
 
 func (t *TranscoderService) effectiveEncoder() string {
-	if !t.cfg.Transcoder.HardwareAccel {
+	cfg := t.transcodeConfig()
+	if !cfg.Transcoder.HardwareAccel {
 		return ""
 	}
-	return normalizedHardwareEncoder(t.cfg.Transcoder.Encoder)
+	return normalizedHardwareEncoder(cfg.Transcoder.Encoder)
 }
 
 func normalizedHardwareEncoder(encoder string) string {
@@ -160,6 +191,7 @@ func hasFFmpegListEntry(output, name string) bool {
 
 // HumanFFmpegProfile is exposed for the admin UI / settings view.
 func (t *TranscoderService) HumanFFmpegProfile() string {
+	cfg := t.transcodeConfig()
 	return fmt.Sprintf("ffmpeg=%s, encoder=%s, output=%s",
-		t.cfg.App.FFmpegPath, t.cfg.Transcoder.Encoder, filepath.Join(t.cfg.Cache.CacheDir, "hls"))
+		cfg.App.FFmpegPath, cfg.Transcoder.Encoder, filepath.Join(t.cfg.Cache.CacheDir, "hls"))
 }

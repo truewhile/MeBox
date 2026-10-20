@@ -50,7 +50,8 @@ type AppConfig struct {
 	DataDir string `mapstructure:"data_dir"`
 	WebDir  string `mapstructure:"web_dir"`
 	// HTTPSEnabled 是否仅通过 HTTPS 提供访问。启用时必须同时配置
-	// SSLCert / SSLKey（或 SSLCertPath / SSLKeyPath），保存后服务会热切换到 HTTPS。
+	// SSLCert / SSLKey（或 SSLCertPath / SSLKeyPath），保存后服务会热切换到 HTTPS；
+	// 同一端口上的明文 HTTP 请求会被跳转到 HTTPS，而不是直接拒绝。
 	HTTPSEnabled bool `mapstructure:"https_enabled"`
 	// SSLCert 是 PEM 编码的 SSL 证书内容。
 	SSLCert string `mapstructure:"ssl_cert"`
@@ -86,6 +87,10 @@ type DatabaseConfig struct {
 	CacheSize    int    `mapstructure:"cache_size"`
 	MaxOpenConns int    `mapstructure:"max_open_conns"`
 	MaxIdleConns int    `mapstructure:"max_idle_conns"`
+	// PostgresTrgmIndex 决定是否用 pg_trgm 的 GIN 三元组索引替代 SQLite 的
+	// FTS5 全文索引。开启后 ILIKE '%term%' 搜索能走索引而不是整表扫描，代价是
+	// media 表写入时要多维护 4 个 GIN 索引。仅对 PostgreSQL 生效。
+	PostgresTrgmIndex bool `mapstructure:"postgres_trgm_index"`
 }
 
 // SecretsConfig 保存 JWT / 第三方 API 密钥（不要提交值）。
@@ -133,6 +138,13 @@ type CacheConfig struct {
 	// 并发），缓存过短会让这批请求同时穿透并各自重建 payload，在低配主机
 	// 上造成秒级延迟。默认 300 秒，新入库内容最迟 5 分钟后出现在最新列表。
 	EmbyLatestTTLSeconds int `mapstructure:"emby_latest_ttl_seconds"`
+	// ReaderContentMaxSizeMB 阅读正文持久缓存的总容量（MB），0 表示不限制。
+	ReaderContentMaxSizeMB int `mapstructure:"reader_content_max_size_mb"`
+	// ReaderContentTTLHours 阅读正文缓存的保留时长（小时），0 表示不过期。
+	ReaderContentTTLHours int `mapstructure:"reader_content_ttl_hours"`
+	// ReaderFilesTTLHours 书源文件缓存（java.cacheFile / downloadFile）的保留时长（小时）。
+	// 0 表示使用内置兜底值（30 天）。
+	ReaderFilesTTLHours int `mapstructure:"reader_files_ttl_hours"`
 }
 
 type SearchConfig struct {

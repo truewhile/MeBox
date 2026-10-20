@@ -31,6 +31,8 @@ type DeviceService struct {
 	log      *zap.Logger
 	repo     *repository.Container
 	sessions *SessionTrackerService
+	// authSessions 用于踢出设备时立即撤销其认证会话；nil 表示旧装配路径。
+	authSessions *AuthSessionService
 
 	// notifyUser sends a Telegram message to the local user (resolved to their
 	// Telegram binding). Wired by the bot service; nil disables notifications.
@@ -58,6 +60,11 @@ func (s *DeviceService) SetAdminNotifier(fn func(ctx context.Context, text strin
 
 func (s *DeviceService) SetSessionTracker(tracker *SessionTrackerService) {
 	s.sessions = tracker
+}
+
+// SetAuthSessionService 注入认证会话服务，使踢出设备同时撤销其新协议令牌。
+func (s *DeviceService) SetAuthSessionService(sessions *AuthSessionService) {
+	s.authSessions = sessions
 }
 
 // fingerprint derives a stable terminal hash from the device name. Client/app

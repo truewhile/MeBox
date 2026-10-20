@@ -1,4 +1,5 @@
 import {
+  autoPlayEpisodeFor,
   isStrmMedia,
   mediaVersionFileName,
   mediaVersionLabel,
@@ -63,5 +64,26 @@ check('mkv is local source', mediaVersionSourceLabel(local1080) === '本地文�
 check('strm filename drops outer extension', mediaVersionFileName(cloudRow) === 'Inception.2010.mkv')
 check('missing path has no filename', mediaVersionFileName(media({ path: '' })) === '')
 check('isStrmMedia detects strm url', isStrmMedia(cloudRow))
+
+// 首页轮播/剧集卡片交给播放器的是「整部剧」ID：选集列表里没有它自己，
+// 播放器要自动落到第一集，否则 /api/stream/<剧集ID> 会被远程 Emby 打回 500。
+const series = media({ id: 'embyremote~mount-1~222679', title: '某部新番', path: '/anime/某部新番', size_bytes: 0 })
+const ep1 = media({ id: 'embyremote~mount-1~222681', path: '/anime/某部新番/Season 1/S1E01.mp4', size_bytes: 299580311 })
+const ep2 = media({ id: 'embyremote~mount-1~222683', path: '/anime/某部新番/Season 1/S1E02.mp4', size_bytes: 299580312 })
+
+check('series falls back to its first episode', autoPlayEpisodeFor(series, series.id, [ep1, ep2])?.id === ep1.id)
+check('playable episode stays untouched', autoPlayEpisodeFor(ep1, ep1.id, [ep1, ep2]) === null)
+check('single-item movie list stays untouched', autoPlayEpisodeFor(ep1, ep1.id, [{ ...ep1 }]) === null)
+check('waits until the requested item is loaded', autoPlayEpisodeFor(null, series.id, [ep1]) === null)
+check('ignores a response for another id', autoPlayEpisodeFor(ep2, series.id, [ep1]) === null)
+check('empty episode list has no fallback', autoPlayEpisodeFor(series, series.id, []) === null)
+check(
+  'entry present as another version stays untouched',
+  autoPlayEpisodeFor(
+    media({ id: 'v-4k' }),
+    'v-4k',
+    [media({ id: 'v-4k', versions: [local4k, local1080] })],
+  ) === null,
+)
 
 console.log('mediaVersion.test.ts: ok')

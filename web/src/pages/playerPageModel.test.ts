@@ -1,4 +1,11 @@
-import { classifyDirectPlayError } from './directPlayError.ts'
+import {
+  classifyDirectPlayError,
+  directPlayFailureCopy,
+  directStallTimeoutMs,
+  DIRECT_STALL_TIMEOUT_MS,
+  DIRECT_STALL_TIMEOUT_NO_FALLBACK_MS,
+  DIRECT_STALL_TIMEOUT_STRM_MS,
+} from './directPlayError.ts'
 
 function check(name: string, cond: boolean) {
   if (!cond) throw new Error(`classifyDirectPlayError: ${name}`)
@@ -95,5 +102,37 @@ check(
     seekGraceActive: true,
   }) === 'ignore',
 )
+
+// 起播看门狗的期限：没有可退线路（远程 Emby / 直连解码）时必须容忍慢启动，
+// 否则上游冷启动的 8–11 秒会被误报成「编码不兼容」。
+check('local direct stall waits 6s', directStallTimeoutMs({ canFallback: true }) === DIRECT_STALL_TIMEOUT_MS)
+check(
+  'strm direct stall waits 12s',
+  directStallTimeoutMs({ isStrm: true, canFallback: true }) === DIRECT_STALL_TIMEOUT_STRM_MS,
+)
+check(
+  'no fallback line waits 20s',
+  directStallTimeoutMs({ canFallback: false }) === DIRECT_STALL_TIMEOUT_NO_FALLBACK_MS,
+)
+check(
+  'no fallback line ignores strm tuning',
+  directStallTimeoutMs({ isStrm: true, canFallback: false }) === DIRECT_STALL_TIMEOUT_NO_FALLBACK_MS,
+)
+
+const stallCopy = directPlayFailureCopy('remote-emby', 'stall')
+check('stall copy blames the upstream, not the codec', !stallCopy.banner.includes('不支持'))
+check('stall copy keeps the failure prefix', stallCopy.banner.startsWith('直接播放失败'))
+const decodeCopy = directPlayFailureCopy('remote-emby', 'error')
+check('decode copy still mentions unsupported codec', decodeCopy.banner.includes('不支持'))
+check(
+  'copy defaults to the decode wording',
+  directPlayFailureCopy('remote-emby').banner === decodeCopy.banner,
+)
+check(
+  'direct-only copy names the client-decode mode',
+  directPlayFailureCopy('direct-only', 'stall').banner.includes('客户端直连解码') &&
+    directPlayFailureCopy('direct-only', 'error').banner.includes('客户端直连解码'),
+)
+check('stall toast is not the external-player advice', stallCopy.toast !== decodeCopy.toast)
 
 console.log('playerPageModel.test.ts ok')

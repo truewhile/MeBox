@@ -810,6 +810,20 @@ func streamHandler(svc *service.Container) gin.HandlerFunc {
 				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 				return
 			}
+			// 远程条目可能是「整部剧/季/目录」：这类条目自身没有媒体源，远程 Emby 对它
+			// 们的 /Videos/{id}/stream 会直接回 500（Unable to cast object of type
+			// 'Series' to type 'IHasMediaSources'）。网页端、外部播放器、第三方客户端都
+			// 可能把这种 ID 送进来，这里统一改投第一集：302 让客户端自己跟过去，播放器
+			// 原有的 token / proxy 查询参数一并保留。
+			if playable := svc.EmbyRemote.PlayableRemoteID(ctx, acct, remoteID); playable != "" && playable != remoteID {
+				target := "/api/stream/" + service.EncodeEmbyRemoteID(mountID, playable)
+				if rawQuery := c.Request.URL.RawQuery; rawQuery != "" {
+					target += "?" + rawQuery
+				}
+				setRedirectNoStoreHeaders(c)
+				c.Redirect(http.StatusFound, target)
+				return
+			}
 			// 远程 Emby 条目的同源转发：VR 全景需要浏览器读帧（见 stream_proxy.go），
 			// 与挂载账号的 proxy_play 开关等价。
 			if mount.ProxyPlay || wantSameOriginProxy(c) {

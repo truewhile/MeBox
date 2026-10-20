@@ -197,6 +197,32 @@ func deleteEmbyMountHandler(svc *service.Container) gin.HandlerFunc {
 	}
 }
 
+// setEmbyMountsEnabledHandler 一键启用/停用某账号下的全部挂载。
+//
+// 远端整站不可用时（如 Cloudflare 522），管理员可以用它把该账号的挂载
+// 全部从媒体库摘掉，首页立刻只返回本地库；远端恢复后再一键启用。
+func setEmbyMountsEnabledHandler(svc *service.Container) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req struct {
+			Enabled *bool `json:"enabled" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if svc.EmbyRemote == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "emby remote service not available"})
+			return
+		}
+		affected, err := svc.EmbyRemote.SetMountsEnabled(c.Request.Context(), c.Param("id"), *req.Enabled)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true, "affected": affected})
+	}
+}
+
 type reorderEmbyMountsReq struct {
 	IDs []string `json:"ids" binding:"required"`
 }

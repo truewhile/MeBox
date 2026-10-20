@@ -35,6 +35,12 @@ type RemoteLibraryView struct {
 // RemoteLibraries 把所有启用挂载的远程媒体库映射为网页媒体库列表
 // （只有显式挂载的库才出现在本项目媒体库中）。
 func (r *EmbyRemoteService) RemoteLibraries(ctx context.Context) ([]RemoteLibraryView, error) {
+	// 远程库只是「追加」到本地库列表上，绝不允许它拖住整页首屏：给整段
+	// 聚合（多账号 × 多线路故障转移）一个总预算，超时后各账号按失败处理，
+	// 调用方随即降级为只返回本地库。
+	ctx, cancel := context.WithTimeout(ctx, embyRemoteViewsBudget)
+	defer cancel()
+
 	mounts, err := r.ListMounts(ctx)
 	if err != nil || len(mounts) == 0 {
 		return nil, err
@@ -818,6 +824,123 @@ func (r *EmbyRemoteService) remoteItemSeriesID(ctx context.Context, acct *model.
 		return ""
 	}
 	return remoteItemString(out, "SeriesId")
+}
+
+// PlayableRemoteID 把「自身没有媒体源」的远程条目换成可直接播放的条目 ID。
+//
+// 远程 Emby 只为带媒体源的条目提供 /Videos/{id}/stream：拿整部剧/季/目录的 ID 去
+// 请求，它会回 500 加一句 .NET 异常（Unable to cast object of type 'Series' to
+// type 'IHasMediaSources'）。首页轮播、剧集库卡片、外部播放器与第三方客户端都可能
+// 把这种 ID 交过来，统一在这里回落到第一集，保证拿到的 ID 真能取到流。
+//
+// 条目本身可播、或解析失败时返回原 ID（调用方拿到后用原逻辑处理即可，无需区分错误）。
+func (r *EmbyRemoteService) PlayableRemoteID(ctx context.Context, acct *model.StrmAccount, remoteID string) string {
+	remoteID = strings.TrimSpace(remoteID)
+	if r == nil || acct == nil || remoteID == "" {
+		return remoteID
+	}
+	cfg, err := r.remoteConfigWithToken(ctx, acct)
+	if err != nil {
+		return remoteID
+	}
+	cacheKey := r.remoteCacheKey("playable-remote-id", acct.ID, remoteID)
+	if r.cache != nil {
+		var cached string
+		// 播放器会对同一个地址发很多次 Range 请求，判定结果必须走缓存，否则每次拖动
+		// 进度条都要多打两次远程 Emby。缓存比常规媒体缓存长：条目可播性是静态属性。
+		if r.cache.GetJSON(ctx, cacheKey, &cached) {
+			if cached == "" {
+				return remoteID
+			}
+			return cached
+		}
+	}
+	resolved := r.resolvePlayableRemoteID(ctx, acct, cfg, remoteID)
+	// 解析失败不写缓存：远程抖动时下次照样重试，而不是把「播不了」记住十分钟。
+	if r.cache != nil && resolved != "" {
+		r.cache.SetJSON(ctx, cacheKey, resolved, playableRemoteIDCacheTTL)
+	}
+	if resolved == "" {
+		return remoteID
+	}
+	return resolved
+}
+
+// playableRemoteIDCacheTTL 是「条目可播性」判定的缓存时长。
+const playableRemoteIDCacheTTL = 10 * time.Minute
+
+// resolvePlayableRemoteID 返回 remoteID 对应的可播条目：本身带媒体源时原样返回，
+// 容器条目（整部剧/季/目录）返回排在最前的、确实带媒体源的子条目。
+func (r *EmbyRemoteService) resolvePlayableRemoteID(ctx context.Context, acct *model.StrmAccount, cfg *EmbyRemoteConfig, remoteID string) string {
+	var item map[string]any
+	if err := r.doGet(ctx, acct, cfg, "/Users/"+url.PathEscape(r.remoteUserID(cfg))+"/Items/"+url.PathEscape(remoteID), nil, &item); err != nil {
+		return ""
+	}
+	if remoteItemHasMediaSources(item) || !remoteItemIsContainer(item) {
+		return remoteID
+	}
+
+	q := url.Values{}
+	q.Set("ParentId", remoteID)
+	q.Set("Recursive", "true")
+	q.Set("IncludeItemTypes", "Episode,Movie,Video")
+	q.Set("Fields", "MediaSources")
+	q.Set("SortBy", "ParentIndexNumber,IndexNumber,SortName")
+	q.Set("Limit", "50")
+	var body struct {
+		Items []map[string]any `json:"Items"`
+	}
+	if err := r.doGet(ctx, acct, cfg, "/Users/"+url.PathEscape(r.remoteUserID(cfg))+"/Items", q, &body); err != nil {
+		return ""
+	}
+
+	// 远程 SortBy 只覆盖它认识的字段（不同 Emby/Jellyfin 版本支持度不一），
+	// 这里再按季/集排一次，确保拿到的是第一集而不是服务端返回顺序里的第一条。
+	children := body.Items
+	sort.SliceStable(children, func(i, j int) bool {
+		if a, b := remoteItemInt(children[i], "ParentIndexNumber"), remoteItemInt(children[j], "ParentIndexNumber"); a != b {
+			return a < b
+		}
+		if a, b := remoteItemInt(children[i], "IndexNumber"), remoteItemInt(children[j], "IndexNumber"); a != b {
+			return a < b
+		}
+		return remoteItemString(children[i], "SortName") < remoteItemString(children[j], "SortName")
+	})
+	for _, child := range children {
+		if id := remoteItemString(child, "Id"); id != "" && remoteItemHasMediaSources(child) {
+			return id
+		}
+	}
+	return ""
+}
+
+// remoteItemHasMediaSources 该条目是否自带媒体源（即能直接取流）。
+func remoteItemHasMediaSources(item map[string]any) bool {
+	if item == nil {
+		return false
+	}
+	switch sources := item["MediaSources"].(type) {
+	case []any:
+		return len(sources) > 0
+	case []map[string]any:
+		return len(sources) > 0
+	}
+	return false
+}
+
+// remoteItemIsContainer 该条目是否是「装别人」的容器：整部剧/季/目录/合集。
+func remoteItemIsContainer(item map[string]any) bool {
+	switch remoteItemString(item, "Type") {
+	case "Series", "Season", "Folder", "BoxSet", "CollectionFolder", "AggregateFolder", "Playlist":
+		return true
+	}
+	// 类型缺失时退回 IsFolder（Emby 的目录类条目都会带）。
+	if _, ok := item["Type"]; !ok {
+		if isFolder, okBool := item["IsFolder"].(bool); okBool {
+			return isFolder
+		}
+	}
+	return false
 }
 
 // ─── 远程 item JSON 取值辅助 ────────────────────────────────────────────────

@@ -1,4 +1,7 @@
 import { LONG_REQUEST_TIMEOUT, api } from './client'
+// 只引类型：阅读器偏好的字段定义在 store（它是本地状态的形状），
+// 这里作为 /reader/profile 的线上载荷复用，类型导入不会产生运行时依赖。
+import type { ReaderSettingsProfile } from '../stores/readerSettings'
 
 // 阅读子系统 API（/api/reader/*），字段与后端 model/reader.go 对齐。
 
@@ -59,6 +62,8 @@ export interface ReaderBook {
   intro: string
   type: number
   latest_chapter_title: string
+  /** 最后一次检测到「目录末尾章节变化」的时间（毫秒，0 表示未检测到更新）。 */
+  latest_chapter_time: number
   total_chapter_num: number
   dur_chapter_index: number
   dur_chapter_pos: number
@@ -72,6 +77,12 @@ export interface ReaderBook {
   /** 听书跳过片头/片尾秒数（0 表示不跳过，对应 legado Book.openCredits/closeCredits）。 */
   open_credits: number
   close_credits: number
+}
+
+/** 书架分组（对齐影视模块的媒体库标签）：组名 + 组内书籍 ID，顺序即组内展示顺序。 */
+export interface BookGroup {
+  name: string
+  book_ids: string[]
 }
 
 export interface ReaderBookInfo {
@@ -107,8 +118,47 @@ export interface ReaderChapterContent {
   tracks?: string[]
   images?: string[]
   image_style?: string
+  /** 正文里的段评锚点（按 line 挂到对应段落旁的气泡）。 */
+  comments?: ReaderContentComment[]
   /** 该音轨走了服务端转码（源格式浏览器解不了），首次播放需要等转码完成。 */
   transcoding?: boolean
+  /** 该音轨是 HLS 播放列表（m3u8），前端据此走 hls.js 而不是原生 audio。 */
+  hls?: boolean
+}
+
+/** 批量取正文的单章结果（对应服务端 ContentBatchItem）。 */
+export interface ReaderContentBatchItem {
+  chapter_index: number
+  type?: 'text' | 'audio' | 'image'
+  content?: string
+  tracks?: string[]
+  images?: string[]
+  image_style?: string
+  hls?: boolean
+  comments?: ReaderContentComment[]
+  /** 由服务端持久缓存直接命中（本次未访问书源）。 */
+  cached?: boolean
+  error?: string
+}
+
+/** 批量取正文的汇总（对应服务端 ContentBatchResult）。 */
+export interface ReaderContentBatchResult {
+  items: ReaderContentBatchItem[]
+  stats: { hit: number; miss: number; failed: number }
+}
+
+/** 正文里的一条段评（服务端从 <comment> / 内嵌评论图里解析出来）。 */
+export interface ReaderContentComment {
+  /** 段落行号：content 按 \n 拆分后的 0-based 下标。 */
+  line: number
+  /** 评论数（0 表示未知，只画一个不带数字的气泡）。 */
+  count: number
+  /** 评论地址（书源 showCmt 的第一个参数）。 */
+  url: string
+  /** 段评 / 本章说。 */
+  label?: string
+  /** 独占一行的整块评论（章末「本章说」）。 */
+  block?: boolean
 }
 
 export interface ReaderReplaceRule {
@@ -163,6 +213,8 @@ export interface ReaderBrowserPage {
   title: string
   /** wait = 需要回传 DOM（点 √）；open = 仅展示。 */
   mode: 'wait' | 'open'
+  /** 登记序号（单调递增）。同时有多个待办时，取它最大的那个展示。 */
+  seq: number
   /** iframe 承载地址（同源，带签名）。 */
   page_url: string
   refetch: boolean
@@ -212,6 +264,9 @@ export const readerAPI = {
   // 回传用户操作后的 DOM（或取消），解除服务端阻塞
   submitBrowserResult: (body: { id: string; body?: string; url?: string; cancelled?: boolean }) =>
     api.post('/reader/browser/result', body).then((r) => r.data),
+  // 打开一条段评：复用书源登录态在宿主浏览器里承载评论页（对应书源的 showCmt）
+  openContentComment: (body: { book_id: string; url: string; title?: string }) =>
+    api.post<ReaderBrowserPage>('/reader/comments/open', body).then((r) => r.data),
   // 承载页面内的接口请求转交服务端代发（iframe 是不透明源，带不上书源 Cookie）
   browserXHR: (body: {
     id: string
@@ -234,11 +289,14 @@ export const readerAPI = {
   setSourceVariable: (id: string, variable: string) => api.put(`/reader/sources/${id}/variable`, { variable }),
 
   // ── 搜索 / 详情 / 目录 / 正文 ──
-  search: (key: string) =>
+  // 多源聚合搜索。sourceIds 为空表示搜索范围＝全部启用书源（默认）；
+  // 非空则只搜这些书源（后端会忽略其中已删除/停用的，全部失效时退回全部启用）。
+  // page 从 1 开始：书源 searchUrl 里的 {{page}}，前端滚到底逐页取再增量合并。
+  search: (key: string, sourceIds: string[] = [], page = 1) =>
     api
       .post<{ books: ReaderSearchBook[] | null; skipped: ReaderSearchSkipped[] | null }>(
         '/reader/search',
-        { key },
+        { key, source_ids: sourceIds, page },
         longOpts,
       )
       .then((r) => r.data),
@@ -246,15 +304,17 @@ export const readerAPI = {
     api.get<ReaderBookInfo>('/reader/book-info', { params, timeout: LONG_REQUEST_TIMEOUT }).then((r) => r.data),
   toc: (params: { source_id?: string; source_url?: string; book_url: string; toc_url: string }) =>
     api
-      .get<{ chapters: ReaderTocChapter[] }>('/reader/toc', { params, timeout: LONG_REQUEST_TIMEOUT })
-      .then((r) => r.data.chapters),
+      .get<{ chapters: ReaderTocChapter[] | null }>('/reader/toc', { params, timeout: LONG_REQUEST_TIMEOUT })
+      // 后端把 nil 目录编码成 null；调用方一律按数组处理，
+      // 否则 `chapters.length` 会抛 TypeError（页面只剩一句 JS 报错）。
+      .then((r) => r.data.chapters ?? []),
   content: (params: { source_id?: string; source_url?: string; book_url: string; chapter_url: string }) =>
     api
       .get<ReaderChapterContent>('/reader/content', { params, timeout: LONG_REQUEST_TIMEOUT })
       .then((r) => r.data),
 
   // ── 书架 ──
-  listBooks: () => api.get<{ books: ReaderBook[] }>('/reader/books').then((r) => r.data.books),
+  listBooks: () => api.get<{ books: ReaderBook[] | null }>('/reader/books').then((r) => r.data.books ?? []),
   addBook: (body: { origin: ReaderSearchOrigin; name: string; author: string; cover_url: string }) =>
     api.post<ReaderBook>('/reader/books', body).then((r) => r.data),
   /** 上传本地书籍（TXT / EPUB），服务端解析目录后加入书架。 */
@@ -283,18 +343,72 @@ export const readerAPI = {
       .post<ReaderBook>('/reader/local/audiobooks', { path }, { timeout: LONG_REQUEST_TIMEOUT })
       .then((r) => r.data),
   removeBook: (id: string) => api.delete(`/reader/books/${id}`),
+  /**
+   * 读取当前账号的阅读器偏好（主题 / 排版 / 听书 / 书架展示）。
+   * 从未保存过时返回 null，由前端用本地的值播种。
+   */
+  getReaderSettings: () =>
+    api.get<{ profile: ReaderSettingsProfile | null }>('/reader/profile').then((r) => r.data.profile),
+  /** 覆盖保存阅读器偏好（服务端会做范围收敛）。 */
+  saveReaderSettings: (body: ReaderSettingsProfile) =>
+    api.put<{ profile: ReaderSettingsProfile }>('/reader/profile', body).then((r) => r.data.profile),
+
+  // ── 书架分组（每个用户一份，仿影视模块的媒体库标签）──
+  /** 读取当前账号的书架分组；没有分组时返回空数组。 */
+  getBookGroups: () =>
+    api.get<{ groups: BookGroup[] | null }>('/reader/book-groups').then((r) => r.data.groups ?? []),
+  /** 覆盖保存书架分组：服务端会收敛成「一书一组」并丢弃已不在书架上的书。 */
+  setBookGroups: (groups: BookGroup[]) =>
+    api.put<{ groups: BookGroup[] | null }>('/reader/book-groups', { groups }).then((r) => r.data.groups ?? []),
+  /**
+   * 更新目录（对应 legado 书架的「更新目录」）：重抓书架里全部网络书籍的目录，
+   * 覆盖章节缓存并刷新「最近更新」时间。返回本次刷新的汇总：
+   * updated 有新章节 / unchanged 抓成功但没新章节 / failed 抓取或写入失败。
+   */
+  refreshBooksToc: () =>
+    api
+      .post<{ total: number; updated: number; unchanged: number; failed: number }>(
+        '/reader/shelf/refresh-toc',
+        {},
+        longOpts,
+      )
+      .then((r) => r.data),
+  /**
+   * 换源：把书架里的书切到另一个书源。
+   * 阅读进度保留，旧源目录缓存由服务端清空并按新源重新预热。
+   */
+  switchOrigin: (id: string, origin: ReaderSearchOrigin) =>
+    api.post<ReaderBook>(`/reader/books/${id}/origin`, { origin }, longOpts).then((r) => r.data),
   saveProgress: (id: string, body: { chapter_index: number; pos: number; chapter_title: string }) =>
     api.put(`/reader/books/${id}/progress`, body),
   // 听书跳过片头/片尾（秒，0 不跳过）
   saveAudioConfig: (id: string, body: { open_credits: number; close_credits: number }) =>
     api.put(`/reader/books/${id}/audio-config`, body),
   listChapters: (id: string) =>
-    api.get<{ chapters: ReaderChapter[] }>(`/reader/books/${id}/chapters`).then((r) => r.data.chapters),
+    api
+      .get<{ chapters: ReaderChapter[] | null }>(`/reader/books/${id}/chapters`)
+      .then((r) => r.data.chapters ?? []),
   saveChapters: (id: string, chapters: ReaderChapter[]) => api.post(`/reader/books/${id}/chapters`, { chapters }),
   // 书架维度正文（服务端已应用书源 replaceRegex 与用户替换净化规则）
-  bookContent: (id: string, chapter: number) =>
+  // signal：换章/换源/离开页面时取消在途请求——慢源上一章要等十几秒，不取消的话
+  // 旧源的响应会白等，换源后还可能把旧源的正文写进新书的缓存。
+  bookContent: (id: string, chapter: number, signal?: AbortSignal) =>
     api
-      .get<ReaderChapterContent>(`/reader/books/${id}/content`, { params: { chapter }, timeout: LONG_REQUEST_TIMEOUT })
+      .get<ReaderChapterContent>(`/reader/books/${id}/content`, {
+        params: { chapter },
+        timeout: LONG_REQUEST_TIMEOUT,
+        signal,
+      })
+      .then((r) => r.data),
+
+  // 批量取正文（窗口预取 / 离线缓存）：单章失败不中断整批，命中持久缓存的章节零网络开销。
+  bookContentBatch: (id: string, chapterIndexes: number[], signal?: AbortSignal) =>
+    api
+      .post<ReaderContentBatchResult>(
+        `/reader/books/${id}/content-batch`,
+        { chapter_indexes: chapterIndexes },
+        { timeout: LONG_REQUEST_TIMEOUT, signal },
+      )
       .then((r) => r.data),
 
   // ── 替换净化规则 ──

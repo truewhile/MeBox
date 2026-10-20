@@ -10,6 +10,7 @@ import (
 
 	"github.com/truewhile/MeBox/internal/model"
 	"github.com/truewhile/MeBox/internal/repository"
+	"github.com/truewhile/MeBox/internal/service/cloud115"
 )
 
 // ServeFile streams the file backing the given media ID using
@@ -20,6 +21,47 @@ import (
 // direct links flow through the rest of the player UI unchanged.
 func (s *StreamService) ServeFile(w http.ResponseWriter, r *http.Request, mediaID string) error {
 	return s.ServeFileWithCloudMode(w, r, mediaID, "")
+}
+
+// PickCodeFromPlayTarget 从 /api/strm/play/... 形式的播放目标里取出 pickcode。
+// 115 直链缓存按 pickcode 分键，客户端要求强制换链时用它定位缓存条目。
+func PickCodeFromPlayTarget(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u == nil {
+		return ""
+	}
+	return strings.TrimSpace(u.Query().Get("pickcode"))
+}
+
+// directLinkRefreshMinAge 是「强制换链」的最小间隔：缓存条目刚写入不久就
+// 收到换链请求时忽略它，避免客户端重试风暴把 115 换链接口打出突发。
+// 测试会临时改成 0，让「CDN 拒绝 → 立刻换链」的路径可验证。
+var directLinkRefreshMinAge = 30 * time.Second
+
+// wantsFreshLink 判断客户端是否要求跳过直链缓存重新换链（`?refresh=1`）。
+//
+// 115 直链只有 30 分钟有效期，客户端拿到过期直链被 CDN 403 后需要一条新链；
+// 正常路径下缓存会先于直链过期，这里是客户端上报失败时的兜底。
+func wantsFreshLink(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("refresh"))) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
+// InvalidateMediaLinkCache 清除媒体播放目标对应的云盘直链缓存，让下一次解析
+// 重新换链。非云盘/无 pickcode 的媒体是空操作。
+func InvalidateMediaLinkCache(m *model.Media) {
+	pickCode := PickCodeFromPlayTarget(MediaSTRMTarget(m))
+	if pickCode == "" {
+		return
+	}
+	cloud115.ClearDownloadURLCacheIfOlderThan(pickCode, directLinkRefreshMinAge)
 }
 
 // MediaSTRMTarget 返回媒体行固化的 STRM 播放目标。STRMURL 为空时回读本地
@@ -57,6 +99,11 @@ func (s *StreamService) ServeFileWithCloudMode(w http.ResponseWriter, r *http.Re
 		// 能在服务端换到最终直链就直接 302 过去：客户端少跟随一次 302，等于
 		// 省掉一次「DNS+TCP+TLS+请求」的往返。解析结果同时写进 strm 层直链
 		// 缓存，后续 /api/strm/play 请求直接命中。
+		// `?refresh=1` 表示客户端手上的直链已经失效（被 CDN 403），要求丢掉
+		// 缓存重新换链。
+		if wantsFreshLink(r) {
+			InvalidateMediaLinkCache(m)
+		}
 		if direct, ok := s.resolveDirectPlayTargetURL(r, strmURL); ok {
 			setCloudRedirectNoStore(w)
 			http.Redirect(w, r, direct, http.StatusFound)
@@ -110,6 +157,29 @@ func setCloudRedirectNoStore(w http.ResponseWriter) {
 // 由 /api/strm/play 再去换链，最坏情况只是回到改动前的行为。
 const directPlayResolveTimeout = 10 * time.Second
 
+// directPlayInfoResolveTimeout 是播放地址响应（/api/playback/{id}/info）里
+// 预换链的等待上限。这条路径是用户点播放后的同步阻塞，宁可退回 /api/stream
+// 跳转，也不能把起播卡在换链上；命中直链缓存时通常只有微秒级。
+const directPlayInfoResolveTimeout = 3 * time.Second
+
+// ResolveDirectPlayURL 尝试把媒体的 STRM/网盘目标换成客户端可直接播放的最终
+// 直链，供 /api/playback/{id}/info 预置给客户端。
+//
+// 客户端拿到直链后可以跳过 /api/stream 的 302 往返；在高延迟/跨境链路上，
+// 这一次「DNS + TCP + TLS + 请求」常常是数秒，正好落在起播关键路径上。
+// 返回 false 表示必须继续走 /api/stream（本地文件、需要服务端加头的网盘、
+// 解析失败或超时），行为与改动前一致。
+func (s *StreamService) ResolveDirectPlayURL(r *http.Request, m *model.Media) (string, bool) {
+	if s == nil || r == nil || m == nil {
+		return "", false
+	}
+	raw := MediaSTRMTarget(m)
+	if raw == "" || !playableSTRMTarget(r.Context(), s.repo, raw, m) {
+		return "", false
+	}
+	return s.resolveDirectPlayTargetURLWithin(r, raw, directPlayInfoResolveTimeout)
+}
+
 // resolveDirectPlayTargetURL 尝试在服务端把 strm 目标解析成客户端可直接拉取的
 // 最终直链，供调用方直接 302。
 //
@@ -117,10 +187,18 @@ const directPlayResolveTimeout = 10 * time.Second
 // 解析到本地文件、以及解析失败都会返回 false，由调用方按改动前的方式回退到
 // strm 端点跳转，行为不会变差。
 func (s *StreamService) resolveDirectPlayTargetURL(r *http.Request, raw string) (string, bool) {
+	return s.resolveDirectPlayTargetURLWithin(r, raw, directPlayResolveTimeout)
+}
+
+func (s *StreamService) resolveDirectPlayTargetURLWithin(
+	r *http.Request,
+	raw string,
+	timeout time.Duration,
+) (string, bool) {
 	if s == nil || s.strmResolve == nil || r == nil {
 		return "", false
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), directPlayResolveTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 	// 必须带播放器 UA：115 直链绑定换取时的 UA，且按 UA 分键缓存，换错会拿到
 	// 与播放器不匹配（或未命中缓存）的地址。

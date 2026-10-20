@@ -64,6 +64,9 @@ type BrowserPage struct {
 	Title string `json:"title"`
 	// Mode wait = 需回传（点 √ 后回传 DOM）；open = 仅展示。
 	Mode string `json:"mode"`
+	// Seq 登记序号（单调递增）。待办表可能同时存多个页面，前端按它取最新的
+	// 那个展示——不能依赖返回顺序，map 遍历是随机的。
+	Seq int64 `json:"seq"`
 	// PageURL 同源承载地址（iframe src），带 HMAC 签名。
 	PageURL string `json:"page_url"`
 	// Refetch 见 rule.BrowserTask.Refetch。
@@ -83,17 +86,26 @@ type BrowserPageSnapshot struct {
 }
 
 // pendingBrowser 一个待用户完成的页面。
+// seq 为登记序号（越大越新，见 ReaderService.browserSeq），供前端挑选最新页面。
 type pendingBrowser struct {
 	id        string
+	seq       int64
 	sourceID  string
 	sourceURL string
 	userID    string
 	request   rule.BrowserTask
+	// cookies 是发起这次页面的会话 Cookie 累积区：页面在面板里发出的
+	// 请求（接口代理 / 资源代理）会把 Set-Cookie 写回它，用户点「完成」后
+	// 书源会话就能读到登录凭证。
+	cookies browserCookieTarget
 	// html 已就绪的页面源码（data: 直接解码；http 抓取后资源地址已改写）。
 	html     string
 	finalURL string
 	mode     string
 	expires  time.Time
+	// comments 段落评论接口的翻页适配（上游页面按 page 翻页，接口只认 cursor，
+	// 见 browser_comment_page.go）。
+	comments *commentPager
 
 	done     chan struct{}
 	mu       sync.Mutex
@@ -108,21 +120,56 @@ type browserHost struct {
 	sourceURL string
 	sourceID  string
 	userID    string
+	// state / capture 是这次会话的 Cookie 累积区与 enabledCookieJar 开关。
+	// 面板承载的页面自己发起的请求（ProxyBrowserXHR / 资源代理）会把
+	// 响应 Set-Cookie 写进 state，从而让「页面里登录成功 = 书源会话拿到凭证」。
+	state   *sourceState
+	capture bool
 }
 
 func (h *browserHost) AwaitBrowser(ctx context.Context, req rule.BrowserTask) (rule.BrowserResult, error) {
-	return h.svc.awaitBrowser(ctx, h.sourceURL, h.sourceID, h.userID, req)
+	return h.svc.awaitBrowser(ctx, h.sourceURL, h.sourceID, h.userID, h.cookieTarget(), req)
 }
 
 func (h *browserHost) OpenBrowser(ctx context.Context, req rule.BrowserTask) error {
-	return h.svc.openBrowser(ctx, h.sourceURL, h.sourceID, h.userID, req)
+	return h.svc.openBrowser(ctx, h.sourceURL, h.sourceID, h.userID, h.cookieTarget(), req)
+}
+
+// cookieTarget 打包会话状态与开关；capture 为假时返回携带 nil state 的目标。
+func (h *browserHost) cookieTarget() browserCookieTarget {
+	if !h.capture {
+		return browserCookieTarget{}
+	}
+	return browserCookieTarget{state: h.state}
+}
+
+// browserCookieTarget 面板链路要回写 Cookie 的目标会话。
+type browserCookieTarget struct {
+	state *sourceState
+}
+
+// captureFrom 把这次请求（含重定向各跳）下发的 Set-Cookie 写回会话。
+// ctx 上挂了 sink 时以它为准（逐跳收集，见 cookies.go），最后再补最终响应。
+// 归属域一律 Cookie 的 Domain 优先、否则该跳地址。
+func (t browserCookieTarget) captureFrom(ctx context.Context, resp *http.Response) {
+	if t.state == nil || resp == nil {
+		return
+	}
+	sink := cookieSinkFrom(ctx)
+	if sink == nil {
+		sink = &cookieSink{}
+	}
+	if resp.Request != nil {
+		sink.add(resp.Request.URL, resp)
+	}
+	sink.apply(t.state)
 }
 
 // ─── 服务层入口 ────────────────────────────────────────────────────────────
 
 // awaitBrowser 登记待办并阻塞等待用户回传页面内容。
-func (s *ReaderService) awaitBrowser(ctx context.Context, sourceURL, sourceID, userID string, req rule.BrowserTask) (rule.BrowserResult, error) {
-	entry, err := s.registerBrowser(ctx, sourceURL, sourceID, userID, req, browserModeWait)
+func (s *ReaderService) awaitBrowser(ctx context.Context, sourceURL, sourceID, userID string, cookies browserCookieTarget, req rule.BrowserTask) (rule.BrowserResult, error) {
+	entry, err := s.registerBrowser(ctx, sourceURL, sourceID, userID, cookies, req, browserModeWait)
 	if err != nil {
 		return rule.BrowserResult{}, err
 	}
@@ -146,16 +193,16 @@ func (s *ReaderService) awaitBrowser(ctx context.Context, sourceURL, sourceID, u
 }
 
 // openBrowser 登记待办但不等待（页面展示给用户即可）。
-func (s *ReaderService) openBrowser(ctx context.Context, sourceURL, sourceID, userID string, req rule.BrowserTask) error {
-	_, err := s.registerBrowser(ctx, sourceURL, sourceID, userID, req, browserModeOpen)
+func (s *ReaderService) openBrowser(ctx context.Context, sourceURL, sourceID, userID string, cookies browserCookieTarget, req rule.BrowserTask) error {
+	_, err := s.registerBrowser(ctx, sourceURL, sourceID, userID, cookies, req, browserModeOpen)
 	return err
 }
 
 // registerBrowser 准备页面内容并登记待办。
-func (s *ReaderService) registerBrowser(ctx context.Context, sourceURL, sourceID, userID string, req rule.BrowserTask, mode string) (*pendingBrowser, error) {
+func (s *ReaderService) registerBrowser(ctx context.Context, sourceURL, sourceID, userID string, cookies browserCookieTarget, req rule.BrowserTask, mode string) (*pendingBrowser, error) {
 	// 先分配 ID：页面里的资源代理地址需要用它签名。
 	id := newBrowserID()
-	html, finalURL, err := s.prepareBrowserPage(ctx, sourceURL, id, req)
+	html, finalURL, err := s.prepareBrowserPage(ctx, sourceURL, id, cookies, req)
 	if err != nil {
 		return nil, err
 	}
@@ -168,11 +215,13 @@ func (s *ReaderService) registerBrowser(ctx context.Context, sourceURL, sourceID
 		sourceURL: sourceURL,
 		userID:    userID,
 		request:   req,
+		cookies:   cookies,
 		html:      html,
 		finalURL:  finalURL,
 		mode:      mode,
 		expires:   time.Now().Add(browserPageTTL),
 		done:      make(chan struct{}),
+		comments:  newCommentPager(),
 	}
 
 	s.browserMu.Lock()
@@ -180,6 +229,8 @@ func (s *ReaderService) registerBrowser(ctx context.Context, sourceURL, sourceID
 		s.browserPending = map[string]*pendingBrowser{}
 	}
 	s.pruneBrowsersLocked()
+	s.browserSeq++
+	entry.seq = s.browserSeq
 	s.browserPending[id] = entry
 	s.browserMu.Unlock()
 
@@ -312,7 +363,7 @@ func jsStringEscape(s string) string {
 //     退化成书源站点地址——书源自己的 BaseUrl() 也指向它）；
 //   - Cookie：页面常用 document.cookie 判断登录态，而真实 Cookie 在服务端，
 //     不预置的话「用户后台」会以为未登录并把浏览器导到 /login。
-func (s *ReaderService) prepareBrowserPage(ctx context.Context, sourceURL, id string, req rule.BrowserTask) (string, string, error) {
+func (s *ReaderService) prepareBrowserPage(ctx context.Context, sourceURL, id string, cookies browserCookieTarget, req rule.BrowserTask) (string, string, error) {
 	// 1) 书源自带 HTML（显式 html 参数或 data: URL）
 	if html := strings.TrimSpace(req.HTML); html != "" {
 		return injectBrowserBridge(html, sourceURL, s.browserCookieHeader(ctx, sourceURL, sourceURL)), req.URL, nil
@@ -324,9 +375,15 @@ func (s *ReaderService) prepareBrowserPage(ctx context.Context, sourceURL, id st
 	if !strings.HasPrefix(req.URL, "http://") && !strings.HasPrefix(req.URL, "https://") {
 		return "", "", fmt.Errorf("无法承载该地址: %s", truncateForLog(req.URL, 120))
 	}
-	body, finalURL, contentType, err := s.fetchBrowserPage(ctx, sourceURL, req.URL)
+	body, finalURL, contentType, err := s.fetchBrowserPage(ctx, sourceURL, cookies, req.URL)
 	if err != nil {
 		return "", "", fmt.Errorf("打开页面失败: %w", err)
+	}
+	// 空响应没有可展示的内容：以前照样包一层空 <pre> 交给 iframe，面板就是一片白，
+	// 用户看不出是地址有问题还是自己没登录。这里直接报错（如段评地址参数被改写、
+	// 上游按缺参数返回空 body 的情形）。
+	if strings.TrimSpace(body) == "" {
+		return "", "", fmt.Errorf("目标地址没有返回任何内容: %s", truncateForLog(req.URL, 120))
 	}
 	cookie := s.browserCookieHeader(ctx, sourceURL, finalURL)
 	if !strings.Contains(strings.ToLower(contentType), "html") {
@@ -348,8 +405,8 @@ func (s *ReaderService) browserCookieHeader(ctx context.Context, sourceURL, targ
 }
 
 // fetchBrowserPage 服务端抓取页面（附带书源 Cookie / 登录请求头 / 书源请求头）。
-func (s *ReaderService) fetchBrowserPage(ctx context.Context, sourceURL, target string) (string, string, string, error) {
-	contentType, _, data, finalURL, err := s.requestBrowserResource(ctx, sourceURL, target)
+func (s *ReaderService) fetchBrowserPage(ctx context.Context, sourceURL string, cookies browserCookieTarget, target string) (string, string, string, error) {
+	contentType, _, data, finalURL, err := s.requestBrowserResource(ctx, sourceURL, cookies, target)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -357,16 +414,25 @@ func (s *ReaderService) fetchBrowserPage(ctx context.Context, sourceURL, target 
 }
 
 // FetchBrowserAsset 代理拉取页面资源（带书源 Cookie/请求头），供 iframe 内引用。
-// 返回 (contentType, status, body, error)。
-func (s *ReaderService) FetchBrowserAsset(ctx context.Context, sourceURL, target string) (string, int, []byte, error) {
-	contentType, status, data, _, err := s.requestBrowserResource(ctx, sourceURL, target)
+// 返回 (contentType, status, body, error)。按待办 ID 找会话，顺带把响应
+// Set-Cookie 写回（页面可能靠资源响应续期会话）。
+func (s *ReaderService) FetchBrowserAsset(ctx context.Context, id, target string) (string, int, []byte, error) {
+	entry := s.lookupBrowser(id)
+	if entry == nil {
+		return "", 0, nil, errors.New("页面已过期，请重新打开")
+	}
+	contentType, status, data, _, err := s.requestBrowserResource(ctx, entry.sourceURL, entry.cookies, target)
 	return contentType, status, data, err
 }
 
 // requestBrowserResource 带书源凭据请求一个外部地址。
-func (s *ReaderService) requestBrowserResource(ctx context.Context, sourceURL, target string) (string, int, []byte, string, error) {
+func (s *ReaderService) requestBrowserResource(ctx context.Context, sourceURL string, cookies browserCookieTarget, target string) (string, int, []byte, string, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, browserFetchTimeout)
 	defer cancel()
+	// 挂上 sink，让重定向各跳的 Set-Cookie 也能被收集。
+	if cookies.state != nil {
+		reqCtx = withCookieSink(reqCtx, &cookieSink{})
+	}
 
 	state := s.newSourceState(reqCtx, sourceURL)
 	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodGet, target, nil)
@@ -384,7 +450,7 @@ func (s *ReaderService) requestBrowserResource(ctx context.Context, sourceURL, t
 	}
 	// 书源级请求头（含 Referer / UA），与阅读请求保持一致
 	if s.repo != nil {
-		if src, findErr := s.repo.GetSourceByURL(reqCtx, sourceURL); findErr == nil && src != nil && src.Header != "" {
+		if src, findErr := s.repo.GetSourceAnyByURL(reqCtx, sourceURL); findErr == nil && src != nil && src.Header != "" {
 			var headers map[string]any
 			if json.Unmarshal([]byte(src.Header), &headers) == nil {
 				for k, v := range headers {
@@ -412,6 +478,8 @@ func (s *ReaderService) requestBrowserResource(ctx context.Context, sourceURL, t
 	if resp.Request != nil && resp.Request.URL != nil {
 		finalURL = resp.Request.URL.String()
 	}
+	// 页面/资源响应下发的 Set-Cookie 也写回会话（含跳转各跳）。
+	cookies.captureFrom(reqCtx, resp)
 	contentType := resp.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "application/octet-stream"
@@ -447,8 +515,20 @@ func (s *ReaderService) ProxyBrowserXHR(ctx context.Context, id, method, target 
 	if method == "" {
 		method = http.MethodGet
 	}
+	// 段落评论接口：评论页按 page=N 翻页，而接口只认 cursor（见
+	// browser_comment_page.go）。改写发生在补书源凭据之前，Cookie/Referer
+	// 仍然按目标站点选取。
+	pagerKey := ""
+	if entry.comments != nil {
+		target, pagerKey = entry.comments.rewriteRequest(target)
+	}
 	reqCtx, cancel := context.WithTimeout(ctx, browserFetchTimeout)
 	defer cancel()
+	// 挂上 sink：页面自己发起的请求（如扫码登录的轮询/取票跳转）下发的
+	// Set-Cookie 要能落到书源会话里，否则「面板里登录成功」书源却始终未登录。
+	if entry.cookies.state != nil {
+		reqCtx = withCookieSink(reqCtx, &cookieSink{})
+	}
 
 	httpReq, err := http.NewRequestWithContext(reqCtx, strings.ToUpper(method), target, strings.NewReader(body))
 	if err != nil {
@@ -477,7 +557,7 @@ func (s *ReaderService) ProxyBrowserXHR(ctx context.Context, id, method, target 
 		}
 	}
 	if s.repo != nil {
-		if src, findErr := s.repo.GetSourceByURL(reqCtx, entry.sourceURL); findErr == nil && src != nil && src.Header != "" {
+		if src, findErr := s.repo.GetSourceAnyByURL(reqCtx, entry.sourceURL); findErr == nil && src != nil && src.Header != "" {
 			var extra map[string]any
 			if json.Unmarshal([]byte(src.Header), &extra) == nil {
 				for k, v := range extra {
@@ -499,6 +579,8 @@ func (s *ReaderService) ProxyBrowserXHR(ctx context.Context, id, method, target 
 		return nil, err
 	}
 	data = helper.DecompressBody(resp, data)
+	// 页面请求同样把 Set-Cookie 写回书源会话（含跳转各跳）。
+	entry.cookies.captureFrom(reqCtx, resp)
 	contentType := resp.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "text/plain"
@@ -506,6 +588,9 @@ func (s *ReaderService) ProxyBrowserXHR(ctx context.Context, id, method, target 
 	out := &BrowserXHRResult{Status: resp.StatusCode, ContentType: contentType}
 	if isTextualContent(contentType) {
 		out.Body = string(data)
+		if entry.comments != nil && pagerKey != "" {
+			out.Body = entry.comments.observeResponse(pagerKey, out.Body)
+		}
 	} else {
 		out.Body = base64.StdEncoding.EncodeToString(data)
 		out.Base64 = true
@@ -658,8 +743,34 @@ func (s *ReaderService) browserAssetSig(id, target string) string {
 	return s.browserSign("asset|" + id + "|" + target)
 }
 
-func (s *ReaderService) browserPageURL(id string) string {
-	return "/api/reader/browser/page?id=" + url.QueryEscape(id) + "&s=" + s.browserPageSig(id)
+// browserPageURL 生成 iframe 承载地址。
+//
+// 承载页面常常靠 location.search 取值：光遇聚合的段评页就是从 ?item_id&para&source
+// 读出「哪本书的哪一段、哪个来源」，再据此请求 /para_review。承载地址是我们自己的
+// 代理路径，页面看到的 query 只有 id/s，原地址的参数全丢了——页面于是按缺参数去
+// 请求评论接口，气泡数照样显示，点开却一条段评都没有。
+//
+// 所以把原地址的 query 原样拼在签名参数之后：页面看到的 search 与原站一致。
+// 我们自己的 id/s 放最前，Gin 取同名的第一个值，不会被原地址里的同名参数顶掉。
+func (s *ReaderService) browserPageURL(id, target string) string {
+	u := "/api/reader/browser/page?id=" + url.QueryEscape(id) + "&s=" + s.browserPageSig(id)
+	if q := browserTargetQuery(target); q != "" {
+		u += "&" + q
+	}
+	return u
+}
+
+// browserTargetQuery 取原地址的 query（不含 `?`）；data: 地址或解析失败时返回空串。
+func browserTargetQuery(target string) string {
+	target = strings.TrimSpace(target)
+	if target == "" || strings.HasPrefix(strings.ToLower(target), "data:") {
+		return ""
+	}
+	parsed, err := url.Parse(target)
+	if err != nil {
+		return ""
+	}
+	return parsed.RawQuery
 }
 
 // browserAssetProxyURL 生成资源代理地址（iframe 页面内引用用）。
@@ -716,6 +827,10 @@ func (s *ReaderService) PendingBrowserPages(userID, sourceID string) []BrowserPa
 		if e.sourceID != sourceID {
 			continue
 		}
+		// 已交付/已取消的页面不再返回：否则前端下一次轮询会把它当成新页面弹出来。
+		if e.finished {
+			continue
+		}
 		// 待办是短生命周期对象；未标注用户的老调用路径一律放行。
 		if e.userID != "" && userID != "" && e.userID != userID {
 			continue
@@ -726,14 +841,20 @@ func (s *ReaderService) PendingBrowserPages(userID, sourceID string) []BrowserPa
 }
 
 // ResolveBrowser 用户完成/取消页面后回传结果，解除 JS 侧的阻塞。
+//
+// 交付后立刻把条目移出待办表：open 模式（java.startBrowser）没有别的清理
+// 路径，留着会一直躺到 TTL 到期——光遇聚合的「❇️ 更新书源」就是这么在
+// 15 分钟内反复串到其它按钮上的。
 func (s *ReaderService) ResolveBrowser(id, otherUserID, body, finalURL string, cancelled bool) error {
 	entry := s.lookupBrowser(id)
 	if entry == nil {
 		return errors.New("页面已过期或已完成")
 	}
+	// 注意锁序：browserMu 必须在 entry.mu 之外获取（pruneBrowsersLocked 是
+	// browserMu → entry.mu），这里不能持着 entry.mu 去等 browserMu。
 	entry.mu.Lock()
-	defer entry.mu.Unlock()
 	if entry.finished {
+		entry.mu.Unlock()
 		return errors.New("该页面已完成")
 	}
 	if cancelled {
@@ -749,6 +870,9 @@ func (s *ReaderService) ResolveBrowser(id, otherUserID, body, finalURL string, c
 	if entry.done != nil {
 		close(entry.done)
 	}
+	entry.mu.Unlock()
+
+	s.dropBrowser(id)
 	return nil
 }
 
@@ -785,6 +909,14 @@ func (s *ReaderService) pruneBrowsersLocked() {
 	}
 }
 
+// browserPageOf 生成前端展示用的描述（自行加锁）。
+// registerBrowser 之后需要把页面直接回给调用方（如打开一条段评）时用它。
+func (s *ReaderService) browserPageOf(e *pendingBrowser) BrowserPage {
+	s.browserMu.Lock()
+	defer s.browserMu.Unlock()
+	return s.pageOfLocked(e)
+}
+
 // pageOfLocked 生成前端展示用的描述（调用方需持有 browserMu）。
 func (s *ReaderService) pageOfLocked(e *pendingBrowser) BrowserPage {
 	target := e.request.URL
@@ -795,7 +927,8 @@ func (s *ReaderService) pageOfLocked(e *pendingBrowser) BrowserPage {
 		ID:        e.id,
 		Title:     e.request.Title,
 		Mode:      e.mode,
-		PageURL:   s.browserPageURL(e.id),
+		Seq:       e.seq,
+		PageURL:   s.browserPageURL(e.id, e.request.URL),
 		Refetch:   e.request.Refetch,
 		SourceID:  e.sourceID,
 		TargetURL: target,

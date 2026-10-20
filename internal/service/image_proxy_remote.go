@@ -14,6 +14,10 @@ import (
 var errImageProxyRequestSetup = errors.New("image proxy request setup failed")
 var errImageProxyNonImageContent = errors.New("upstream returned non-image content")
 
+// errImageProxyUnauthorized 表示上游以 401/403 拒绝了回源凭据。它与普通失败
+// 分开，是为了让调用方对挂载 Emby 做一次重认证再重试，而不是直接下发占位图。
+var errImageProxyUnauthorized = errors.New("upstream rejected image credentials")
+
 // prefetchCardResizeOptions 对应前端 ARTWORK.posterCard（见 web/src/api/client.ts）：
 // 卡片是海报墙最常请求的档位，刮削阶段预生成它能让首个列表请求直接命中缓存。
 // 若前端调整该预设，这里只是白生成一份用不到的档位（约几十 KB），不影响正确性。
@@ -183,16 +187,27 @@ func (p *ImageProxy) removeUnusableImageCache(cachePath, failPath string) {
 }
 
 func (p *ImageProxy) fetchAndCacheRemoteImage(ctx context.Context, raw, host, cachePath, failPath string) (remoteImageFetchResult, error) {
-	var lastErr error
-	for _, candidate := range p.remoteImageFetchClients(host) {
-		result, err := p.fetchRemoteImageOnce(ctx, raw, host, candidate, cachePath, failPath)
-		if err == nil {
-			return result, nil
+	result, lastErr := p.fetchRemoteImageAcrossClients(ctx, raw, host, cachePath, failPath)
+	if lastErr == nil {
+		return result, nil
+	}
+	if errors.Is(lastErr, errImageProxyRequestSetup) {
+		return remoteImageFetchResult{}, lastErr
+	}
+	// 已挂载的远程 Emby 认 X-Emby-Token 请求头，但轮换前生成的图片 URL 里还留着
+	// 旧 api_key。上游拒绝时重新登录拥有该主机的账号一次再重试，而不是一直下发
+	// 占位图、等人工去改账号配置。
+	if errors.Is(lastErr, errImageProxyUnauthorized) {
+		token, refreshErr := p.refreshRemoteEmbyTokenForHost(ctx, host)
+		if refreshErr != nil {
+			logImageFetchError(p.log, "imageproxy: remote emby re-auth failed", host, "reauth", refreshErr)
+		} else if token != "" {
+			retried, retryErr := p.fetchRemoteImageAcrossClients(ctx, raw, host, cachePath, failPath)
+			if retryErr == nil {
+				return retried, nil
+			}
+			lastErr = retryErr
 		}
-		if errors.Is(err, errImageProxyRequestSetup) {
-			return remoteImageFetchResult{}, err
-		}
-		lastErr = err
 	}
 	if p.canUseExternalImageFallback() && isDoubanImageHost(host) {
 		data, ctype, _, err := fetchRemoteImageWithCurl(ctx, raw, host)
@@ -208,6 +223,24 @@ func (p *ImageProxy) fetchAndCacheRemoteImage(ctx context.Context, raw, host, ca
 		lastErr = errors.New("upstream image fetch failed")
 	}
 	return remoteImageFetchResult{}, redactSensitiveError(lastErr)
+}
+
+// fetchRemoteImageAcrossClients 按直连/代理顺序依次尝试，返回首个成功结果。
+// 请求构造失败立即中止（重试无意义）；401/403 会继续尝试另一个客户端，并把
+// errImageProxyUnauthorized 作为最终错误交给调用方去刷新挂载 token。
+func (p *ImageProxy) fetchRemoteImageAcrossClients(ctx context.Context, raw, host, cachePath, failPath string) (remoteImageFetchResult, error) {
+	var lastErr error
+	for _, candidate := range p.remoteImageFetchClients(host) {
+		result, err := p.fetchRemoteImageOnce(ctx, raw, host, candidate, cachePath, failPath)
+		if err == nil {
+			return result, nil
+		}
+		if errors.Is(err, errImageProxyRequestSetup) {
+			return remoteImageFetchResult{}, err
+		}
+		lastErr = err
+	}
+	return remoteImageFetchResult{}, lastErr
 }
 
 // fetchAndCacheRemoteImageShared coalesces concurrent requests for the same

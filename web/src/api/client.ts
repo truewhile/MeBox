@@ -2,9 +2,12 @@ import axios, { AxiosError, type InternalAxiosRequestConfig } from 'axios'
 
 import { useAuthStore } from '../stores/auth'
 import { getActivePlayProfileId, getActivePlayProfilePinToken } from '../stores/playProfile'
+import { createTokenPreflight, type RefreshOutcome } from '../utils/authRefresh'
 
 // Single axios instance used by every API helper. Adds the JWT to outgoing
-// requests and routes 401s back to the login page.
+// requests and refreshes it on 401. Only an explicit server-side rejection of
+// the refresh token sends the user back to the login page; transient failures
+// (deploy/restart window, gateway errors, timeouts) keep the stored session.
 export const api = axios.create({
   baseURL: '/api',
   timeout: 30000,
@@ -45,8 +48,27 @@ function isRefreshRequest(config?: InternalAxiosRequestConfig | null): boolean {
   return Boolean(config?.url?.includes('/auth/refresh'))
 }
 
+// 请求发出前的令牌预检。本地持久化的 token 往往已经过期，而首屏有多个各自
+// 独立的 useEffect 会并发发请求；不预检的话它们会一起拿到 401，控制台刷出
+// 一整屏红字（现场：2026-10-16 12:49，7 个请求同时 401），用户还要等拦截器
+// 刷新完才看到内容。预检把刷新提到请求之前，且刷新协调器本身是单飞的。
+const preflightAccessToken = createTokenPreflight({
+  readAccessToken: () => useAuthStore.getState().token,
+  refreshSession: () => useAuthStore.getState().refreshSession(),
+})
+
 // Add auth token to requests
-api.interceptors.request.use((config) => {
+api.interceptors.request.use(async (config) => {
+  // 刷新请求自己绝不能走预检，否则会递归刷新。
+  if (!isRefreshRequest(config)) {
+    try {
+      await preflightAccessToken()
+    } catch {
+      // 会话已被服务端判定失效：直接失败，不发无意义的 401 请求。
+      // 清空会话与跳转登录页由刷新协调器和 401 拦截器负责，保持一致。
+      throw new axios.Cancel('session expired')
+    }
+  }
   const token = useAuthStore.getState().token
   if (token) {
     config.headers = config.headers ?? {}
@@ -92,33 +114,30 @@ api.interceptors.response.use(
       originalRequest._retry = true
       isRefreshing = true
 
-      try {
-        const refreshed = await useAuthStore.getState().tokenRefresh()
-        if (refreshed) {
-          const newToken = useAuthStore.getState().token
-          if (newToken && originalRequest.headers) {
-            originalRequest.headers.Authorization = `Bearer ${newToken}`
-          }
-          onTokenRefreshed(newToken || '')
-          isRefreshing = false
-          return api(originalRequest)
+      // 刷新可能因为部署/重启窗口的瞬时故障失败。只有服务端明确判定
+      // 凭证失效（401/403）时才清空会话并跳登录页；网络错误、网关 502、
+      // 超时只是暂时不可用，保留本地令牌等下一次重试。
+      const outcome: RefreshOutcome = await useAuthStore
+        .getState()
+        .refreshSession()
+        .catch((): RefreshOutcome => 'transient')
+      isRefreshing = false
+
+      if (outcome === 'refreshed') {
+        const newToken = useAuthStore.getState().token
+        if (newToken && originalRequest.headers) {
+          originalRequest.headers.Authorization = `Bearer ${newToken}`
         }
-      } catch (refreshError) {
-        isRefreshing = false
-        onTokenRefreshFailed(refreshError)
+        onTokenRefreshed(newToken || '')
+        return api(originalRequest)
+      }
+
+      onTokenRefreshFailed(err)
+      if (outcome === 'invalid') {
         useAuthStore.getState().logout()
         if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
           window.location.href = '/login'
         }
-        return Promise.reject(refreshError)
-      }
-
-      // Refresh failed, logout
-      isRefreshing = false
-      onTokenRefreshFailed(err)
-      useAuthStore.getState().logout()
-      if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
-        window.location.href = '/login'
       }
       return Promise.reject(err)
     }

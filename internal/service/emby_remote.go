@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -38,6 +39,23 @@ import (
 
 // embyRemoteHTTPTimeout 远程 Emby 常规 API 请求超时（流式代理不在此列）。
 const embyRemoteHTTPTimeout = 15 * time.Second
+
+// embyRemoteViewsBudget 是网页端聚合远程媒体库时的总时间预算。
+//
+// 上游 Emby 整体不可用时（典型表现：Cloudflare 522，连接卡住近 20 秒），
+// 首页 /api/libraries 会被同步阻塞，而前端 axios 30 秒就放弃，于是一个挂掉的
+// 远端会把整个首页拖成加载失败。这里给聚合调用一个硬预算：超时即降级为
+// 「只返回本地库」，把首屏确定性地控制在几秒内。
+var embyRemoteViewsBudget = 5 * time.Second
+
+// embyRemoteViewsFailureTTL 是远程 Views 拉取失败后的负缓存时长。
+//
+// 失败结果也缓存一小段时间，避免每个请求都重新等满预算（首页每次刷新、
+// 每个并发客户端都会各打一次）。时间很短，远端恢复后最多 30 秒即可自动重试。
+var embyRemoteViewsFailureTTL = 30 * time.Second
+
+// errRemoteViewsRecentlyFailed 表示远程 Emby 刚失败过，当前处于负缓存窗口。
+var errRemoteViewsRecentlyFailed = errors.New("远程 Emby 暂时不可用（近期请求失败，稍后自动重试）")
 
 // embyRemoteUA 桌面浏览器 UA：远程 Emby 前方若有 Cloudflare/WAF 会拦截
 // Go-http-client 等非浏览器 UA（403 error code: 1010），必须伪装浏览器。
@@ -237,6 +255,88 @@ func (r *EmbyRemoteService) ConfiguredRemoteHosts(ctx context.Context) []string 
 	return hosts
 }
 
+// findAccountByHost 返回某条线路主机名匹配 host 的启用远程 Emby 账号（无则 nil）。
+func (r *EmbyRemoteService) findAccountByHost(ctx context.Context, host string) *model.StrmAccount {
+	host = normalizeHostKey(host)
+	if host == "" || r == nil || r.repo == nil || r.repo.StrmAccount == nil {
+		return nil
+	}
+	accounts, err := r.ListAccounts(ctx)
+	if err != nil {
+		return nil
+	}
+	for i := range accounts {
+		lines, _, err := r.LinesOf(&accounts[i])
+		if err != nil {
+			continue
+		}
+		for _, line := range lines {
+			u, err := url.Parse(line.URL)
+			if err != nil {
+				continue
+			}
+			if normalizeHostKey(u.Hostname()) == host {
+				return &accounts[i]
+			}
+		}
+	}
+	return nil
+}
+
+// normalizeHostKey 去掉端口并小写化，便于主机名字符串比较。
+func normalizeHostKey(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return ""
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return strings.ToLower(strings.TrimSpace(h))
+	}
+	return host
+}
+
+// RemoteEmbyImageTokenForHost 返回图片代理回源某个远程 Emby 主机所需的当前
+// api_key。host 不属于任何已配置账号时返回 ok=false。
+func (r *EmbyRemoteService) RemoteEmbyImageTokenForHost(ctx context.Context, host string) (string, bool) {
+	if r == nil || r.repo == nil {
+		return "", false
+	}
+	acct := r.findAccountByHost(ctx, host)
+	if acct == nil {
+		return "", false
+	}
+	cfg, err := r.configOf(acct)
+	if err != nil || strings.TrimSpace(cfg.Token) == "" {
+		return "", false
+	}
+	return cfg.Token, true
+}
+
+// RefreshRemoteEmbyImageTokenForHost 强制用用户名/密码重新登录拥有该主机的账号
+// 并持久化新 token，供图片代理在上游 401 时自愈。仅配置了 api_key、没有登录
+// 凭据的账号无法自动刷新，返回错误由调用方按原失败处理。
+func (r *EmbyRemoteService) RefreshRemoteEmbyImageTokenForHost(ctx context.Context, host string) (string, error) {
+	if r == nil || r.repo == nil {
+		return "", errors.New("远程 Emby 服务不可用")
+	}
+	acct := r.findAccountByHost(ctx, host)
+	if acct == nil {
+		return "", fmt.Errorf("未找到主机 %s 对应的远程 Emby 账号", host)
+	}
+	cfg, err := r.configOf(acct)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(cfg.Username) == "" || strings.TrimSpace(cfg.Password) == "" {
+		return "", errors.New("远程 Emby 账号未配置用户名/密码，无法自动刷新 api_key")
+	}
+	cfg.Token = "" // 强制走登录流程，忽略已失效的 api_key
+	if err := r.ensureToken(ctx, acct, cfg); err != nil {
+		return "", err
+	}
+	return cfg.Token, nil
+}
+
 // AccountByID 按 ID 查找远程 Emby 挂载账号（不存在或类型不符返回 nil）。
 func (r *EmbyRemoteService) AccountByID(ctx context.Context, id string) *model.StrmAccount {
 	if strings.TrimSpace(id) == "" {
@@ -337,6 +437,22 @@ func (r *EmbyRemoteService) DeleteMount(ctx context.Context, id string) error {
 		r.invalidateRemoteMediaCache(ctx)
 	}
 	return err
+}
+
+// SetMountsEnabled 批量启用/停用某账号下的全部挂载。
+//
+// 账号整体不可用时（远端宕机、线路全挂），管理员可以一键把所有挂载从媒体库
+// 中摘掉：网页端 /api/libraries 不再为该账号发起任何远程请求，首页恢复秒开；
+// 远端恢复后再一键启用即可，挂载配置和播放设置都不丢。
+func (r *EmbyRemoteService) SetMountsEnabled(ctx context.Context, accountID string, enabled bool) (int64, error) {
+	affected, err := r.repo.EmbyMount.SetEnabledByAccountID(ctx, accountID, enabled)
+	if err != nil {
+		return 0, err
+	}
+	// 启停会改变可见库集合，顺手清掉远程元数据缓存（含 Views 失败负缓存），
+	// 让下一次请求立刻按新状态重新探测，而不是继续吃 30 秒的负缓存。
+	r.invalidateRemoteMediaCache(ctx)
+	return affected, nil
 }
 
 // ReorderMounts 批量重排挂载媒体库顺序。
@@ -699,17 +815,23 @@ func (r *EmbyRemoteService) doGetOnLine(ctx context.Context, acct *model.StrmAcc
 			return err
 		}
 		if status == http.StatusUnauthorized && attempt == 0 {
-			// 401：只清当前线路的内存 token 并立即重认证；不在此时删除
-			// DB 里的 api_key——①外层还会按线路故障转移（其他线路可能
-			// 存有自己的 token）；②纯 api_key 账号删除后无法再认证，一次
-			// 线路误报就会把账号“砖化”。重认证成功后 persistToken 会用
-			// 新 token 覆盖 api_key。
+			// 401：只清当前线路的内存 token 并立即重认证；不先删 DB 里的
+			// api_key——纯 api_key 账号删除后无法再认证，一次线路误报就会
+			// 把账号“砖化”。重认证成功后把新 token 写回：既让重试用上正确
+			// 凭据，也避免每个后续请求都重新登录一次。
+			previous := cfg.Token
 			cfg.Token = ""
 			if err := r.ensureTokenOnLine(ctx, acct, cfg); err != nil {
 				return fmt.Errorf("认证重试失败: %w", err)
 			}
+			if q != nil {
+				q.Set("api_key", cfg.Token)
+			}
 			master.Token = cfg.Token
 			master.RemoteUserID = cfg.RemoteUserID
+			if cfg.Token != "" && cfg.Token != previous {
+				_ = r.persistToken(ctx, acct, cfg)
+			}
 			continue
 		}
 		if status >= 300 {
@@ -733,7 +855,13 @@ func (r *EmbyRemoteService) TestConnection(ctx context.Context, acct *model.Strm
 		return err
 	}
 	var out json.RawMessage
-	return r.doGet(ctx, acct, cfg, "/System/Info", nil, &out)
+	if err := r.doGet(ctx, acct, cfg, "/System/Info", nil, &out); err != nil {
+		return err
+	}
+	// 连通性恢复：清掉 Views 失败负缓存与旧元数据，让下一次媒体库列表请求
+	// 立即重新探测，而不是继续在负缓存窗口里显示「没有远程库」。
+	r.invalidateRemoteMediaCache(ctx)
+	return nil
 }
 
 // ProxyPlayOf 返回账号是否配置了播放代理（供账号列表/编辑回显）。
@@ -748,7 +876,34 @@ func (r *EmbyRemoteService) ProxyPlayOf(acct *model.StrmAccount) (bool, error) {
 // ─── 元数据 / 目录聚合 ─────────────────────────────────────────────────────────
 
 // RemoteViews 拉取远程媒体库（View）列表，返回远程原始 view map（未重写）。
+//
+// 失败时写入短时负缓存：远程整站不可用时，避免每次首页刷新都重新等满超时。
 func (r *EmbyRemoteService) RemoteViews(ctx context.Context, acct *model.StrmAccount) ([]map[string]any, error) {
+	if acct == nil {
+		return nil, errors.New("缺少远程 Emby 账号")
+	}
+	failKey := r.remoteCacheKey("views-fail", acct.ID)
+	var failed bool
+	if r.cache != nil && r.cache.GetJSON(ctx, failKey, &failed) && failed {
+		return nil, errRemoteViewsRecentlyFailed
+	}
+	views, err := r.remoteViewsUncached(ctx, acct)
+	if err != nil {
+		// 客户端主动断开（切换页面 / 关标签）不算上游故障，不能让它把
+		// 负缓存窗口写进去，否则正常用户会被别人的一次取消拖慢 30 秒。
+		if r.cache != nil && !errors.Is(err, context.Canceled) {
+			r.cache.SetJSON(ctx, failKey, true, embyRemoteViewsFailureTTL)
+		}
+		return nil, err
+	}
+	if r.cache != nil {
+		r.cache.SetJSON(ctx, failKey, false, embyRemoteViewsFailureTTL)
+	}
+	return views, nil
+}
+
+// remoteViewsUncached 是 RemoteViews 的实际拉取逻辑（含正常结果缓存）。
+func (r *EmbyRemoteService) remoteViewsUncached(ctx context.Context, acct *model.StrmAccount) ([]map[string]any, error) {
 	cfg, err := r.remoteConfigWithToken(ctx, acct)
 	if err != nil {
 		return nil, err
@@ -1498,7 +1653,22 @@ func (r *EmbyRemoteService) proxyVideoStreamOnLine(ctx context.Context, w http.R
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return redactSensitiveError(fmt.Errorf("远程 Emby 视频流失败(%d): %s", resp.StatusCode, strings.TrimSpace(string(data))))
+		detail := strings.TrimSpace(string(data))
+		// 远程 Emby 对「整部剧/目录」这类自身没有媒体源的条目会直接 500，正文是
+		// 一句 .NET 异常（如 Unable to cast object of type 'Series' to type
+		// 'IHasMediaSources'）。原样丢给用户没人看得懂，也没有排查线索——细节进日志，
+		// 给用户一句能照着做的提示。
+		if r.log != nil {
+			r.log.Warn("remote emby video stream rejected",
+				zap.String("remote_id", remoteID),
+				zap.Int("status", resp.StatusCode),
+				zap.String("detail", detail),
+			)
+		}
+		if resp.StatusCode >= 500 {
+			return redactSensitiveError(fmt.Errorf("远程 Emby 无法播放该条目（HTTP %d）：请在详情页选择具体集数后重试", resp.StatusCode))
+		}
+		return redactSensitiveError(fmt.Errorf("远程 Emby 视频流失败(%d): %s", resp.StatusCode, detail))
 	}
 	for _, header := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Cache-Control"} {
 		if value := resp.Header.Get(header); value != "" {

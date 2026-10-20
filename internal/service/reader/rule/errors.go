@@ -11,5 +11,5 @@ var (
 	// JS 引擎（goja + java.* 桥）在 P2 阶段接入，届时移除本错误路径。
 	ErrJsUnsupported = errors.New("书源使用了 JS 规则，当前阶段暂不支持")
 	// ErrWebJSUnsupported 书源依赖 webView/webJs 抓取，服务端无头浏览器不在支持范围。
-	ErrWebJSUnsupported = errors.New("书源依赖 webView 抓取，暂不支持")
+	ErrWebJSUnsupported = errors.New("书源依赖 webView/webJs（需要无头浏览器），服务端不支持；该源请在阅读 App 内使用")
 )

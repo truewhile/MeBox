@@ -44,7 +44,7 @@ services:
       # NAS 示例：source: /vol1/1000/Media
       # Windows Docker Desktop 示例：source: D:/Media
       # create_host_path=false 可以避免路径写错时 Docker 自动创建空文件夹。
-      - ./media: /media
+      - ./media:/media
 
     environment:
       TZ: Asia/Shanghai
@@ -87,7 +87,9 @@ services:
       MEBOX_TRANSCODER_IDLE_TIMEOUT_SECONDS: "120"
 
     healthcheck:
-      test: ["CMD-SHELL", "busybox wget -qO- http://127.0.0.1:8080/api/health || exit 1"]
+      # 不能写死 http://：开启 HTTPS 后 8080 只接受 TLS，固定明文探测会
+      # 每轮刷一条 TLS handshake error 并让容器一直 unhealthy。
+      test: ["CMD", "/usr/local/bin/mebox-healthcheck"]
       interval: 30s
       timeout: 10s
       retries: 5

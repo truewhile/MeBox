@@ -49,6 +49,7 @@ func AllModels() []interface{} {
 		&APIConfig{},
 		&UserPermission{},
 		&RefreshToken{},
+		&AuthSession{},
 		&PlayProfile{},
 		&RegistrationCode{},
 		&SignIn{},
@@ -65,6 +66,9 @@ func AllModels() []interface{} {
 		&ReaderSourceState{},
 		&ReaderBook{},
 		&ReaderChapter{},
+		&ReaderContentCache{},
 		&ReaderReplaceRule{},
+		&ReaderProfile{},
+		&ReaderBookGroups{},
 	}
 }

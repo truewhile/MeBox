@@ -98,6 +98,10 @@ func (r *JSRunner) openBrowser(req BrowserTask) error {
 		return nil
 	}
 	if r.cfg.Browser != nil {
+		// 宿主抓取待展示的页面同样是网络等待，不能吃掉 JS 执行预算
+		// （与 awaitBrowser 同一套暂停机制，见 pauseTimeout 的说明）。
+		resume := r.pauseTimeout()
+		defer resume()
 		return r.cfg.Browser.OpenBrowser(r.ctx(), req)
 	}
 	if r.state != nil {

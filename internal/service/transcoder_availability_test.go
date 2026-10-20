@@ -13,6 +13,8 @@ import (
 // be false both when transcoding is disabled by configuration and when no usable
 // ffmpeg can be resolved.
 func TestTranscoderAvailableGatesOnConfigAndBinary(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	t.Chdir(t.TempDir())
 	cases := []struct {
 		name       string
 		enabled    bool

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/truewhile/MeBox/internal/model"
+	"github.com/truewhile/MeBox/internal/repository"
 )
 
 func (e *EmbyService) mediaItems(ctx context.Context, p ItemsParams) (map[string]any, error) {
@@ -21,7 +22,11 @@ func (e *EmbyService) mediaItems(ctx context.Context, p ItemsParams) (map[string
 		q = q.Where("library_id IN ? OR series_id = ?", e.mergedLibraryIDs(ctx, p.ParentID), p.ParentID)
 	}
 	if p.SearchTerm != "" {
-		q = q.Where("title LIKE ? OR original_name LIKE ?", "%"+p.SearchTerm+"%", "%"+p.SearchTerm+"%")
+		// ILIKE（PostgreSQL）/ LIKE（SQLite）由方言决定，避免换库后搜索词
+		// 大小写不匹配就搜不到结果。
+		likeOp := repository.LikeOperator(e.repo.DB)
+		term := "%" + p.SearchTerm + "%"
+		q = q.Where("title "+likeOp+" ? OR original_name "+likeOp+" ?", term, term)
 	}
 	if containsEmbyFilter(p.Filters, "IsFavorite") {
 		if strings.TrimSpace(p.UserID) == "" {
@@ -264,7 +269,11 @@ func (e *EmbyService) seriesItemsForLibrary(ctx context.Context, libraryID strin
 		q = q.Where("library_id IN ?", e.mergedLibraryIDs(ctx, libraryID))
 	}
 	if p.SearchTerm != "" {
-		q = q.Where("title LIKE ? OR original_name LIKE ?", "%"+p.SearchTerm+"%", "%"+p.SearchTerm+"%")
+		// ILIKE（PostgreSQL）/ LIKE（SQLite）由方言决定，避免换库后搜索词
+		// 大小写不匹配就搜不到结果。
+		likeOp := repository.LikeOperator(e.repo.DB)
+		term := "%" + p.SearchTerm + "%"
+		q = q.Where("title "+likeOp+" ? OR original_name "+likeOp+" ?", term, term)
 	}
 	if containsEmbyFilter(p.Filters, "IsFavorite") {
 		if strings.TrimSpace(p.UserID) == "" {

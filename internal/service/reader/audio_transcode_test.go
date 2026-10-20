@@ -2,6 +2,7 @@ package reader
 
 import (
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -254,4 +255,51 @@ func indexOf(items []string, want string) int {
 		}
 	}
 	return -1
+}
+
+// 转码缓存上限是 1GB：单章语音约 1MB/分钟（96kbps），
+// 也就是一本 10 小时的有声书约 600MB，同时能保住「最近听过的书」在个位数。
+// 这里把常量与淘汰后的落点一起钉住，防止以后被无意改回大值。
+func TestAudioTranscodeCacheLimitIsOneGiB(t *testing.T) {
+	if maxAudioTranscodeCacheBytes != int64(1)<<30 {
+		t.Fatalf("转码缓存上限应为 1GB，实际 %d 字节", maxAudioTranscodeCacheBytes)
+	}
+	// 淘汰目标是上限的 90%：模拟缓存略超上限时，删掉最旧的若干章回到目标以下。
+	dir := t.TempDir()
+	limit := int64(1000)
+	perFile := int64(120)
+	for i := 0; i < 9; i++ { // 1080 > 1000，超限
+		name := filepath.Join(dir, fmt.Sprintf("ch%02d.mp3", i))
+		if err := os.WriteFile(name, make([]byte, perFile), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		ts := time.Now().Add(-time.Duration(9-i) * time.Minute)
+		if err := os.Chtimes(name, ts, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pruneAudioTranscodeCache(dir, limit)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var remain int64
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		remain += info.Size()
+	}
+	if remain > limit {
+		t.Fatalf("淘汰后应落回上限内: remain=%d limit=%d", remain, limit)
+	}
+	// 最新的那章必须还在（LRU 先删最旧的）。
+	if _, err := os.Stat(filepath.Join(dir, "ch08.mp3")); err != nil {
+		t.Fatalf("最新一章应保留: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ch00.mp3")); !os.IsNotExist(err) {
+		t.Fatalf("最旧一章应被删除，err=%v", err)
+	}
 }

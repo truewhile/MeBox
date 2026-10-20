@@ -73,7 +73,7 @@ type LoginResult struct {
 
 // GetSourceLogin 返回书源登录界面描述与当前登录状态。
 func (s *ReaderService) GetSourceLogin(ctx context.Context, userID, sourceID string) (*SourceLoginInfo, error) {
-	src, bs, err := s.loadSource(ctx, sourceID)
+	src, bs, err := s.loadSourceForUser(ctx, userID, sourceID)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +142,7 @@ func (s *ReaderService) resolveLoginFields(sess *sourceSession, bs *BookSource, 
 // fields 为前端提交的表单值，会与已保存的登录信息合并后作为 result 传入。
 // action 为空时执行 loginUrl 里的 login()（即 legado 的「确认登录」）。
 func (s *ReaderService) RunLoginAction(ctx context.Context, userID, sourceID, action string, fields map[string]string) (*LoginResult, error) {
-	src, bs, err := s.loadSource(ctx, sourceID)
+	src, bs, err := s.loadSourceForUser(ctx, userID, sourceID)
 	if err != nil {
 		return nil, err
 	}
@@ -206,11 +206,11 @@ func (s *ReaderService) RunLoginAction(ctx context.Context, userID, sourceID, ac
 
 // SetSourceVariable 覆盖保存书源变量（前端变量编辑器）。
 // 保存后书源 JS 的 getVariable() 即可读到。
-func (s *ReaderService) SetSourceVariable(ctx context.Context, sourceID, variable string) error {
+func (s *ReaderService) SetSourceVariable(ctx context.Context, userID, sourceID, variable string) error {
 	if strings.TrimSpace(variable) != "" && !json.Valid([]byte(variable)) {
 		return fmt.Errorf("变量必须是合法 JSON")
 	}
-	src, bs, err := s.loadSource(ctx, sourceID)
+	src, bs, err := s.loadSourceForUser(ctx, userID, sourceID)
 	if err != nil {
 		return err
 	}
@@ -222,8 +222,8 @@ func (s *ReaderService) SetSourceVariable(ctx context.Context, sourceID, variabl
 }
 
 // SetSourceLoginInfo 直接覆盖保存登录信息（前端表单保存，不触发登录动作）。
-func (s *ReaderService) SetSourceLoginInfo(ctx context.Context, sourceID string, fields map[string]string) error {
-	src, bs, err := s.loadSource(ctx, sourceID)
+func (s *ReaderService) SetSourceLoginInfo(ctx context.Context, userID, sourceID string, fields map[string]string) error {
+	src, bs, err := s.loadSourceForUser(ctx, userID, sourceID)
 	if err != nil {
 		return err
 	}
@@ -239,8 +239,8 @@ func (s *ReaderService) SetSourceLoginInfo(ctx context.Context, sourceID string,
 }
 
 // ClearSourceLogin 清除登录态：登录信息与全部 Cookie（对应 legado logout）。
-func (s *ReaderService) ClearSourceLogin(ctx context.Context, sourceID string) error {
-	src, bs, err := s.loadSource(ctx, sourceID)
+func (s *ReaderService) ClearSourceLogin(ctx context.Context, userID, sourceID string) error {
+	src, bs, err := s.loadSourceForUser(ctx, userID, sourceID)
 	if err != nil {
 		return err
 	}

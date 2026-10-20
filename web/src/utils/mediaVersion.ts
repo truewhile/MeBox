@@ -195,6 +195,32 @@ export function mediaVersionSourceLabel(media: Media): string {
   return isStrmMedia(media) ? '云端直链' : '本地文件'
 }
 
+/**
+ * 挑出「播放器该自动跳转到的那一集」。
+ *
+ * 传给 /play/:id 的可能是「整部剧」这类自身没有可播文件的条目——首页轮播、远程 Emby
+ * 剧集库的卡片、剧集详情页的播放按钮都会把剧集 ID 直接交给播放器。这种条目的选集接口
+ * 返回的是它下面的剧集，列表里没有它自己；若直接拿剧集 ID 去请求
+ * /api/stream/<剧集ID>，远程 Emby 会返回 HTTP 500（Unable to cast object of type
+ * 'Series' to type 'IHasMediaSources'），用户看到的就是「播放失败」。此时换成第一集，
+ * 播放、进度、上下集都落在真正可播的条目上。
+ *
+ * 返回 null 表示无需跳转：条目还没加载完、条目本身可播（含以其它版本形式出现在列表里）、
+ * 或该条目下没有任何可选剧集。
+ */
+export function autoPlayEpisodeFor(
+  media: Media | null | undefined,
+  requestedId: string,
+  episodes: Media[],
+): Media | null {
+  if (!media || !requestedId || media.id !== requestedId) return null
+  if (episodes.length === 0) return null
+  if (episodes.some((episode) => mediaVersionMatches(episode, media.id))) return null
+  const first = episodes[0]
+  if (!first?.id || first.id === media.id) return null
+  return first
+}
+
 /** 版本文件名（去掉目录，并剥掉 .strm 外层扩展名），用作版本选项的次要说明。 */
 export function mediaVersionFileName(media: Media): string {
   const path = (media.path || '').replace(/\\/g, '/').trim()

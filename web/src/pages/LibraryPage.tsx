@@ -32,12 +32,14 @@ import { useLibrarySeriesSelection } from './useLibrarySeriesSelection'
 import { useLibraryAdminActions } from './useLibraryAdminActions'
 import { usePermission } from '../hooks/usePermission'
 import { useFavourites } from '../hooks/useFavourites'
+import { mediaSearchReturnPath } from '../utils/mediaNavigation'
 
 export function LibraryPage() {
   const { id = '' } = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
   const location = useLocation()
   const navigate = useNavigate()
+  const searchFrom = mediaSearchReturnPath(location.state)
   const role = useAuthStore((s) => s.user?.role)
   const canFavorite = usePermission('can_favorite')
   const { isFavourite, toggleFavourite } = useFavourites()
@@ -358,7 +360,7 @@ export function LibraryPage() {
           void handleToggleFavourite(selectedSeries.rep.id)
         }}
         seriesToolBusy={seriesToolBusy}
-        onBack={clearSelectedSeries}
+        onBack={() => searchFrom ? navigate(searchFrom) : clearSelectedSeries()}
         onSmartScrape={handleSeriesSmartScrape}
         onManualScrape={() => setManualSeriesScrapeOpen(true)}
         onMetadataEdit={() => setSeriesMetadataEditOpen(true)}

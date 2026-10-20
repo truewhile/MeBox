@@ -3,6 +3,7 @@ package repository
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -95,6 +96,84 @@ func TestDeleteSourceAlsoClearsState(t *testing.T) {
 	}
 	if st != nil {
 		t.Fatalf("书源删除后登录态应一并清理，实际仍在: %+v", st)
+	}
+}
+
+// TestSaveSourceStateAfterSourceDeleted 回归：书源删除后，同一 source_url 的状态必须还能存。
+//
+// source_url 上的唯一索引覆盖软删行，而 DeleteSource 曾经只做软删：
+// 之后 SaveSourceState 的 First（默认排除软删行）查不到 → Create 撞唯一约束，
+// 表现为「保存书源会话状态失败: UNIQUE constraint failed」，
+// cookie / 登录态从此永远存不进去（删过或重导入过的书源必现）。
+func TestSaveSourceStateAfterSourceDeleted(t *testing.T) {
+	repo := newReaderTestRepo(t)
+	ctx := t.Context()
+	const url = "https://d.example.com"
+
+	src := &model.ReaderBookSource{Name: "源", SourceURL: url, Enabled: true}
+	if err := repo.CreateSource(ctx, src); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveSourceState(ctx, &model.ReaderSourceState{
+		SourceURL: url, Cookies: `{"example.com":"a=1"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.DeleteSource(ctx, src.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// 重新导入同 URL 的书源，再存一次状态
+	again := &model.ReaderBookSource{Name: "源", SourceURL: url, Enabled: true}
+	if err := repo.CreateSource(ctx, again); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveSourceState(ctx, &model.ReaderSourceState{
+		SourceURL: url, Cookies: `{"example.com":"a=2"}`,
+	}); err != nil {
+		t.Fatalf("书源删除/重导入后状态必须还能保存: %v", err)
+	}
+	st, err := repo.GetSourceState(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st == nil || st.Cookies != `{"example.com":"a=2"}` {
+		t.Fatalf("状态未写入: %+v", st)
+	}
+}
+
+// TestSaveSourceStateRevivesSoftDeletedRow 回归：老数据里已被软删的状态行要能复活。
+//
+// 修复前 DeleteSource 是软删，历史库里可能已经躺着软删行；
+// 保存时必须把它救活，不能去 INSERT 撞唯一约束。
+func TestSaveSourceStateRevivesSoftDeletedRow(t *testing.T) {
+	repo := newReaderTestRepo(t)
+	ctx := t.Context()
+	const url = "https://e.example.com"
+
+	if err := repo.SaveSourceState(ctx, &model.ReaderSourceState{
+		SourceURL: url, Cookies: `{"example.com":"old=1"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 造出老版本 DeleteSource 留下的样子：行还在但被软删
+	if err := repo.db.Exec(
+		"update reader_source_states set deleted_at = ? where source_url = ?",
+		time.Now(), url).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := repo.SaveSourceState(ctx, &model.ReaderSourceState{
+		SourceURL: url, Cookies: `{"example.com":"new=2"}`,
+	}); err != nil {
+		t.Fatalf("软删过的历史行应被复活，而不是撞唯一约束: %v", err)
+	}
+	st, err := repo.GetSourceState(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st == nil || st.Cookies != `{"example.com":"new=2"}` {
+		t.Fatalf("复活后状态未写入: %+v", st)
 	}
 }
 

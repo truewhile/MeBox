@@ -11,6 +11,7 @@ function check(name: string, condition: boolean) {
 }
 
 check('home remembers scroll', shouldRememberScroll('/'))
+check('media search remembers scroll', shouldRememberScroll('/search'))
 check('library list remembers scroll', shouldRememberScroll('/libraries'))
 check('library detail remembers scroll', shouldRememberScroll('/library/lib-1'))
 check('library series panel remembers scroll', shouldRememberScroll('/library/lib-1'))
