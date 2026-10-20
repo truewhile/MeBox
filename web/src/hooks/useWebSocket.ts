@@ -15,6 +15,7 @@ const SLOW_RECONNECT_INTERVAL = 60_000
 export function useWebSocket(onEvent: (topic: string, payload: unknown) => void) {
   const ref = useRef<WebSocket | null>(null)
   const token = useAuthStore((s) => s.token)
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
   const onEventRef = useRef(onEvent)
 
   useEffect(() => {
@@ -22,7 +23,7 @@ export function useWebSocket(onEvent: (topic: string, payload: unknown) => void)
   }, [onEvent])
 
   useEffect(() => {
-    if (!token) return
+    if (!token || !isAdmin) return
     let closed = false
     let timer: number | undefined
     let reconnectAttempts = 0
@@ -88,5 +89,5 @@ export function useWebSocket(onEvent: (topic: string, payload: unknown) => void)
       if (timer) window.clearTimeout(timer)
       ref.current?.close()
     }
-  }, [token])
+  }, [token, isAdmin])
 }

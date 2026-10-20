@@ -178,14 +178,6 @@ func (r *MediaRepository) YearRange(ctx context.Context, filter MediaQueryFilter
 	return min, max, nil
 }
 
-func (r *MediaRepository) indexMediaBestEffort(ctx context.Context, media model.Media) {
-	backend, ok := r.searchBackend.(MediaSearchSyncBackend)
-	if !ok {
-		return
-	}
-	_ = backend.IndexMedia(ctx, []model.Media{media})
-}
-
 // FindByID returns the media row or (nil, nil).
 func (r *MediaRepository) FindByID(ctx context.Context, id string) (*model.Media, error) {
 	var m model.Media

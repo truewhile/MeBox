@@ -21,6 +21,8 @@ func registerAuthedDLNARoutes(authed *gin.RouterGroup, svc *service.Container) {
 }
 
 func registerAuthedRealtimeRoutes(authed *gin.RouterGroup, svc *service.Container) {
-	authed.GET("/ws", wsHandler(svc))
-	authed.GET("/events", sseHandler(svc))
+	// These streams carry operator tasks, including filesystem paths and scan
+	// errors. Their payloads are not scoped to an individual user's libraries.
+	authed.GET("/ws", middleware.AdminRequired(), wsHandler(svc))
+	authed.GET("/events", middleware.AdminRequired(), sseHandler(svc))
 }

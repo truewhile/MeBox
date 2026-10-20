@@ -12,13 +12,14 @@ import (
 
 // MediaService offers high-level CRUD over libraries and media items.
 type MediaService struct {
-	cfg                 *config.Config
-	log                 *zap.Logger
-	repo                *repository.Container
-	cache               *RuntimeCacheService
-	groupedMediaFlight  singleflight.Group
-	libraryRowsFlight   singleflight.Group
-	recentSeriesFlight  singleflight.Group
+	cfg                *config.Config
+	log                *zap.Logger
+	repo               *repository.Container
+	cache              *RuntimeCacheService
+	groupedMediaFlight singleflight.Group
+	mediaSortFlight    singleflight.Group
+	libraryRowsFlight  singleflight.Group
+	recentSeriesFlight singleflight.Group
 }
 
 type MediaVisibility struct {
