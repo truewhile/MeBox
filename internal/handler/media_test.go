@@ -559,7 +559,10 @@ func TestSearchMediaHandlerIncludesEmbyRemote(t *testing.T) {
 	}))
 	defer server.Close()
 
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	// 唯一库名 + cache=shared：远程搜索与本地查询会并发读库，
+	// 而 :memory: 下每个连接各自一个空库，并发连接会读到「no such table」。
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}

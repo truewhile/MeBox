@@ -2611,14 +2611,14 @@ export function PlayerPage() {
       <button
         type="button"
         onClick={() => setDiagnosticsOpen((open) => !open)}
-        className="fixed bottom-5 right-4 z-[80] inline-flex items-center gap-2 rounded-full border border-white/15 bg-black/75 px-3 py-2 text-xs font-semibold text-white shadow-lg backdrop-blur hover:bg-black/90"
+        className="absolute right-2.5 top-14 z-[80] inline-flex items-center gap-2 rounded-full border border-white/15 bg-black/75 px-3 py-2 text-xs font-semibold text-white shadow-lg backdrop-blur hover:bg-black/90 sm:right-3.5 sm:top-16"
         title="播放诊断"
         aria-label="播放诊断"
       >
         <Activity size={15} />诊断
       </button>
       {diagnosticsOpen && (
-        <aside className="fixed bottom-16 right-4 z-[80] max-h-[70vh] w-[min(92vw,420px)] overflow-hidden rounded-2xl border border-white/15 bg-[#111827]/95 text-white shadow-2xl backdrop-blur">
+        <aside className="absolute right-2.5 top-[6.75rem] z-[80] flex max-h-[calc(100%-8.5rem)] w-[min(92vw,420px)] flex-col overflow-hidden rounded-2xl border border-white/15 bg-[#111827]/95 text-white shadow-2xl backdrop-blur sm:right-3.5 sm:top-[7.25rem]">
           <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
             <div><h2 className="text-sm font-bold">播放诊断</h2><p className="mt-1 text-[11px] text-white/60">记录最近 40 条本地播放事件</p></div>
             <div className="flex gap-2">
@@ -2626,7 +2626,7 @@ export function PlayerPage() {
               <button type="button" onClick={() => setDiagnosticsOpen(false)} className="rounded-lg p-1.5 hover:bg-white/10" aria-label="关闭"><X size={16} /></button>
             </div>
           </div>
-          <div className="max-h-[55vh] space-y-2 overflow-y-auto p-3">
+          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
             <div className="rounded-lg bg-white/5 px-3 py-2 text-xs text-white/70">模式：{mode === 'hls' ? `HLS / ${hlsSource}` : '直连'} · 来源：{isRemoteEmbyID(media?.id) ? '远程 Emby' : isStrmMedia(media) ? 'STRM' : '本地文件'}</div>
             {diagnosticEvents.length === 0 ? <p className="py-6 text-center text-xs text-white/50">等待播放事件…</p> : [...diagnosticEvents].reverse().map((event, index) => (
               <div key={`${event.at}-${index}`} className="rounded-lg bg-white/5 px-3 py-2">

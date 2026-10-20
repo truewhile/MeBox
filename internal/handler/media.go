@@ -4,6 +4,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"sort"
@@ -705,6 +706,8 @@ func searchMediaHandler(svc *service.Container) gin.HandlerFunc {
 		}
 		paginated := c.Query("page") != "" || c.Query("page_size") != ""
 		sortBy := normalizeMediaSearchSort(c.Query("sort"))
+		// 远程搜索与本地查询并行发起：本地结果不再排在远程超时之后才返回。
+		remoteCh := startRemoteMediaSearch(ctx, svc, query, visibility, filter)
 		// Sorting and grouping must operate on the same candidate set before
 		// either a page size or the caller's output limit is applied.
 		items, err := svc.Media.SearchMediaVisibleFiltered(ctx, query, 50000, visibility, filter)
@@ -712,12 +715,9 @@ func searchMediaHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		if svc.EmbyRemote != nil && query != "" && (filter.LibraryID == "" || service.IsEmbyRemoteID(filter.LibraryID)) {
-			remote, _ := svc.EmbyRemote.RemoteSearchMedia(ctx, query, 50000, visibility)
-			for _, item := range remote {
-				if remoteSearchMatchesFilter(item, filter) {
-					items = append(items, item)
-				}
+		if remoteCh != nil {
+			for _, item := range <-remoteCh {
+				items = append(items, item)
 			}
 		}
 		if c.DefaultQuery("group_series", "0") != "0" {
@@ -739,6 +739,100 @@ func searchMediaHandler(svc *service.Container) gin.HandlerFunc {
 		sortSearchMedia(items, sortBy)
 		writeMediaSearchResults(c, items, page, size, limit, paginated)
 	}
+}
+
+const (
+	// remoteSearchItemLimit 是每个远程 Emby 挂载点返回的条目上限。此前这里传
+	// 50000（等于让上游做一次全库查询），上游稍慢就会一路跑到 5 秒超时，把每次
+	// 搜索都拖成秒级；搜索场景只需要少量候选，多出来的结果也会被分页丢掉。
+	remoteSearchItemLimit = 100
+	// remoteSearchBudget 限制远程结果最多给一次请求增加多少延迟。
+	remoteSearchBudget = 2 * time.Second
+	// remoteSearchCacheTTL 让同一关键词的翻页与重复搜索复用远程结果，避免每翻
+	// 一页都重新打一遍远程挂载点。
+	remoteSearchCacheTTL = 30 * time.Second
+	// remoteSearchFailureCacheTTL 用于上游超时/失败时的短缓存：部分结果只保留
+	// 几秒，避免反复吃满 remoteSearchBudget，又不至于长期压住后续重试。
+	remoteSearchFailureCacheTTL = 5 * time.Second
+)
+
+// startRemoteMediaSearch 并发发起远程搜索，返回一个只投递一次结果的通道。
+// 不满足远程搜索条件时返回 nil。通道带缓冲，调用方即使提前返回也不会泄漏
+// goroutine；请求结束时请求上下文被取消，远程调用会随之退出。
+func startRemoteMediaSearch(
+	ctx context.Context,
+	svc *service.Container,
+	query string,
+	visibility service.MediaVisibility,
+	filter service.MediaSearchFilter,
+) <-chan []model.Media {
+	if svc == nil || svc.EmbyRemote == nil || query == "" {
+		return nil
+	}
+	if filter.LibraryID != "" && !service.IsEmbyRemoteID(filter.LibraryID) {
+		return nil
+	}
+	results := make(chan []model.Media, 1)
+	go func() {
+		results <- remoteMediaSearchItems(ctx, svc, query, visibility, filter)
+	}()
+	return results
+}
+
+func remoteMediaSearchItems(
+	ctx context.Context,
+	svc *service.Container,
+	query string,
+	visibility service.MediaVisibility,
+	filter service.MediaSearchFilter,
+) []model.Media {
+	cacheKey := remoteSearchCacheKey(query, visibility)
+	if svc.Cache != nil {
+		if cached, ok := svc.Cache.GetObject(cacheKey); ok {
+			if rows, ok := cached.([]model.Media); ok {
+				return filterRemoteSearchItems(rows, filter)
+			}
+		}
+	}
+	searchCtx, cancel := context.WithTimeout(ctx, remoteSearchBudget)
+	defer cancel()
+	remote, _ := svc.EmbyRemote.RemoteSearchMedia(searchCtx, query, remoteSearchItemLimit, visibility)
+	if svc.Cache != nil {
+		// 空结果也要缓存：否则查不到片名时每次都会重新等到 remoteSearchBudget。
+		if remote == nil {
+			remote = []model.Media{}
+		}
+		ttl := remoteSearchCacheTTL
+		if searchCtx.Err() != nil {
+			ttl = remoteSearchFailureCacheTTL
+		}
+		svc.Cache.SetObject(cacheKey, remote, ttl)
+	}
+	return filterRemoteSearchItems(remote, filter)
+}
+
+func filterRemoteSearchItems(remote []model.Media, filter service.MediaSearchFilter) []model.Media {
+	if len(remote) == 0 {
+		return nil
+	}
+	out := make([]model.Media, 0, len(remote))
+	for _, item := range remote {
+		if remoteSearchMatchesFilter(item, filter) {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// remoteSearchCacheKey 按可见范围隔离远程搜索结果，避免把某个用户可见挂载
+// 点的结果复用给可见范围不同的用户。
+func remoteSearchCacheKey(query string, visibility service.MediaVisibility) string {
+	allowed := append([]string(nil), visibility.AllowedLibraryIDs...)
+	hidden := append([]string(nil), visibility.HiddenLibraryIDs...)
+	sort.Strings(allowed)
+	sort.Strings(hidden)
+	return fmt.Sprintf("media:obj:remote-search:%t|%s|%s|%s",
+		visibility.IncludeNSFW, strings.Join(allowed, ","), strings.Join(hidden, ","), query)
 }
 
 func writeMediaSearchResults[T any](c *gin.Context, items []T, page, size, limit int, paginated bool) {
