@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,11 +13,15 @@ import (
 	"github.com/truewhile/MeBox/internal/model"
 )
 
-// RemovePath 移除磁盘上已不存在的媒体记录。普通的删除仍做物理删除；
-// 可确认是 STRM 扩展名改名的路径则先保留软删除墓碑，供后续 ingest 继承元数据。
+// RemovePath 将确认不存在的媒体标记为失联；只有可确认的 STRM 扩展名改名
+// 才保留软删除墓碑，供后续 ingest 继承元数据。
 func (s *ScannerService) RemovePath(ctx context.Context, path string) (int64, error) {
 	if _, err := os.Stat(path); err == nil {
 		return 0, nil // still exists; nothing to remove
+	} else if !errors.Is(err, os.ErrNotExist) {
+		// Permission, I/O, and mount errors are not evidence that a file was
+		// removed. Preserve records until the path can be inspected reliably.
+		return 0, nil
 	}
 	// 目录整体消失（删除/改名离开）：连同其子树下的媒体行一并移除。
 	// 此前只删 path 精确匹配的行——目录本身通常没有 media 行，导致目录
@@ -33,7 +38,7 @@ func (s *ScannerService) RemovePath(ctx context.Context, path string) (int64, er
 		return 0, err
 	}
 	softIDs := make([]string, 0, len(rows))
-	hardIDs := make([]string, 0, len(rows))
+	missingIDs := make([]string, 0, len(rows))
 	for _, row := range rows {
 		// LIKE 里的 % _ 是通配符（候选集只会偏大），用 Go 前缀精确过滤，
 		// 避免对含 % / _ 的路径误删。
@@ -43,12 +48,12 @@ func (s *ScannerService) RemovePath(ctx context.Context, path string) (int64, er
 		// A vanished STRM with a live sibling (foo.strm <-> foo.mkv.strm)
 		// is a rename. Keep a soft-deleted tombstone so the later ingest can
 		// adopt its ID and scraped metadata even if fsnotify delivers the
-		// remove event before the create event. A true deletion stays hard.
+		// remove event before the create event.
 		if row.Path == path && liveSTRMPathAlias(path) {
 			softIDs = append(softIDs, row.ID)
 			continue
 		}
-		hardIDs = append(hardIDs, row.ID)
+		missingIDs = append(missingIDs, row.ID)
 	}
 	var removed int64
 	if len(softIDs) > 0 {
@@ -60,14 +65,12 @@ func (s *ScannerService) RemovePath(ctx context.Context, path string) (int64, er
 		}
 		removed += res.RowsAffected
 	}
-	if len(hardIDs) > 0 {
-		res := s.repo.DB.WithContext(ctx).Unscoped().
-			Where("id IN ?", hardIDs).
-			Delete(&model.Media{})
-		if res.Error != nil {
-			return removed, res.Error
+	if len(missingIDs) > 0 {
+		count, err := s.markMediaMissingByIDs(ctx, missingIDs)
+		if err != nil {
+			return removed, err
 		}
-		removed += res.RowsAffected
+		removed += count
 	}
 	if removed > 0 {
 		s.invalidateMediaCache(ctx)
@@ -82,7 +85,7 @@ const strmRenameTombstoneRetention = 7 * 24 * time.Hour
 
 // purgeExpiredSTRMTombstones keeps the soft-delete grace period bounded.
 // It is deliberately restricted to deleted media rows under a STRM alias
-// workflow; normal deletions are still hard-deleted immediately.
+// workflow; ordinary missing files retain their metadata for recovery.
 func (s *ScannerService) purgeExpiredSTRMTombstones(ctx context.Context) {
 	cutoff := time.Now().Add(-strmRenameTombstoneRetention)
 	if err := s.repo.DB.WithContext(ctx).Unscoped().
@@ -121,7 +124,7 @@ func (s *ScannerService) pruneMissingMedia(ctx context.Context, libraryID string
 		}
 		stale = append(stale, row.ID)
 	}
-	return s.deleteMediaByIDs(ctx, stale, true)
+	return s.markMediaMissingByIDs(ctx, stale)
 }
 
 func (s *ScannerService) pruneMissingMediaForRoot(ctx context.Context, libraryID, rootID, rootPath string, seen map[string]struct{}) (int64, error) {
@@ -158,7 +161,33 @@ func (s *ScannerService) pruneMissingMediaForRoot(ctx context.Context, libraryID
 		}
 		stale = append(stale, row.ID)
 	}
-	return s.deleteMediaByIDs(ctx, stale, true)
+	return s.markMediaMissingByIDs(ctx, stale)
+}
+
+func (s *ScannerService) markMediaMissingByIDs(ctx context.Context, ids []string) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	const batch = 500
+	var changed int64
+	now := time.Now()
+	for i := 0; i < len(ids); i += batch {
+		end := i + batch
+		if end > len(ids) {
+			end = len(ids)
+		}
+		result := s.repo.DB.WithContext(ctx).Model(&model.Media{}).
+			Where("id IN ? AND (availability_state IS NULL OR availability_state <> ?)", ids[i:end], "missing").
+			Updates(map[string]any{"availability_state": "missing", "missing_since": now})
+		if result.Error != nil {
+			return changed, result.Error
+		}
+		changed += result.RowsAffected
+	}
+	if changed > 0 {
+		s.invalidateMediaCache(ctx)
+	}
+	return changed, nil
 }
 
 func pathBelongsToRoot(pathValue, rootPath string) bool {

@@ -89,6 +89,11 @@ export const MediaCard = memo(function MediaCard({
               <span>{displayRating.toFixed(1)}</span>
             </span>
           )}
+          {media.availability_state === 'missing' && (
+            <span className="absolute left-2 top-2 rounded-lg border border-amber-300/30 bg-[#111827]/90 px-2 py-1 text-[10px] font-bold text-amber-300 shadow-sm">
+              文件失联
+            </span>
+          )}
 
           {/* Premium Hover Overlay（CSS 过渡替代 framer-motion 逐卡动画实例） */}
           <div className={`absolute inset-0 bg-gradient-to-t from-[#111827]/90 via-[#111827]/30 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end ${

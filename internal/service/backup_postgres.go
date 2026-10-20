@@ -3,6 +3,7 @@ package service
 import (
 	"compress/gzip"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -87,7 +88,8 @@ func postgresBackupModelSchemas(db *gorm.DB) (map[string]*schema.Schema, map[str
 // createPostgresBackup 把全库导出成一个 gzip 压缩的 JSON Lines 文件。
 func (b *BackupService) createPostgresBackup(ctx context.Context, stamp string) (string, error) {
 	dst := filepath.Join(b.backupDir(), "mebox_"+stamp+postgresBackupSuffix)
-	file, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	tmp := dst + ".tmp"
+	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return "", err
 	}
@@ -96,7 +98,7 @@ func (b *BackupService) createPostgresBackup(ctx context.Context, stamp string) 
 		_ = file.Close()
 		if !complete {
 			// 半截备份文件比没有备份更危险：留着会让人以为有可用的还原点。
-			_ = os.Remove(dst)
+			_ = os.Remove(tmp)
 		}
 	}()
 
@@ -109,23 +111,42 @@ func (b *BackupService) createPostgresBackup(ctx context.Context, stamp string) 
 	}); err != nil {
 		return "", fmt.Errorf("写入备份头失败: %w", err)
 	}
-	for _, m := range model.AllModels() {
-		table, sch, err := parseModelSchema(b.db, m)
-		if err != nil {
-			return "", err
+	var options []*sql.TxOptions
+	if b.isPostgres() {
+		options = append(options, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	}
+	// Every table must come from the same snapshot, including while background
+	// workers are inserting related rows during an automatic backup.
+	if err := b.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		snapshot := *b
+		snapshot.db = tx
+		for _, m := range model.AllModels() {
+			table, sch, err := parseModelSchema(tx, m)
+			if err != nil {
+				return err
+			}
+			if !tx.Migrator().HasTable(table) {
+				continue
+			}
+			if err := snapshot.dumpPostgresTable(ctx, m, sch, table, enc); err != nil {
+				return err
+			}
 		}
-		if !b.db.Migrator().HasTable(table) {
-			continue
-		}
-		if err := b.dumpPostgresTable(ctx, m, sch, table, enc); err != nil {
-			return "", err
-		}
+		return nil
+	}, options...); err != nil {
+		return "", err
 	}
 	if err := zw.Close(); err != nil {
 		return "", fmt.Errorf("压缩备份失败: %w", err)
 	}
 	if err := file.Sync(); err != nil {
 		return "", fmt.Errorf("写入备份失败: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		return "", err
 	}
 	complete = true
 	return dst, nil

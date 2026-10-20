@@ -1,5 +1,7 @@
 package model
 
+import "time"
+
 // Library 表示一个逻辑媒体库。Path 保留为兼容字段，指向第一条 LibraryRoot。
 type Library struct {
 	Base
@@ -26,12 +28,15 @@ type LibraryRoot struct {
 // Media 是单个可播放项。剧集链接到 SeriesID；电影 SeriesID == ""。
 type Media struct {
 	Base
-	LibraryID     string `gorm:"index;size:36;index:idx_media_library_release,priority:1" json:"library_id"`
-	LibraryRootID string `gorm:"index;size:36" json:"library_root_id,omitempty"`
-	SeriesID      string `gorm:"index;size:128" json:"series_id,omitempty"`
-	Title         string `gorm:"size:255;not null" json:"title"`
-	OriginalName  string `gorm:"size:255" json:"original_name,omitempty"`
-	EpisodeTitle  string `gorm:"size:255" json:"episode_title,omitempty"`
+	AvailabilityState string     `gorm:"index;size:16;not null;default:available" json:"availability_state"`
+	MissingSince      *time.Time `json:"missing_since,omitempty"`
+	LastSeenAt        *time.Time `json:"last_seen_at,omitempty"`
+	LibraryID         string     `gorm:"index;size:36;index:idx_media_library_release,priority:1" json:"library_id"`
+	LibraryRootID     string     `gorm:"index;size:36" json:"library_root_id,omitempty"`
+	SeriesID          string     `gorm:"index;size:128" json:"series_id,omitempty"`
+	Title             string     `gorm:"size:255;not null" json:"title"`
+	OriginalName      string     `gorm:"size:255" json:"original_name,omitempty"`
+	EpisodeTitle      string     `gorm:"size:255" json:"episode_title,omitempty"`
 	// Path 的唯一性由 database 包按方言显式建索引，这里刻意不用 uniqueIndex：
 	// PostgreSQL 的 btree 单条索引项上限 2704 字节，而 varchar(1024) 在中文路径
 	// 下可达 3072 字节，直接对整列建唯一索引会让长路径的扫描插入直接失败

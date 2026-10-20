@@ -122,7 +122,7 @@ func (s *ScannerService) localMediaScanState(in localMediaScanStateInput) (bool,
 	}
 	existing, exists := in.existingMedia[in.cleanPath]
 	isNewMedia := !exists
-	if exists && in.ext != ".strm" && existing.SizeBytes == in.size && !localMetadataNeedsRefresh(existing, in.localMeta) && !localDerivedMetadataNeedsRefresh(existing, in.incoming) {
+	if exists && existing.AvailabilityState != "missing" && existing.MissingSince == nil && in.ext != ".strm" && existing.SizeBytes == in.size && !localMetadataNeedsRefresh(existing, in.localMeta) && !localDerivedMetadataNeedsRefresh(existing, in.incoming) {
 		// Unchanged rows are skipped, but a row that never received ffprobe data
 		// still needs a backfill probe so installing ffmpeg later repairs the library.
 		s.queueProbeBackfillIfNeeded(in.path, in.ext, existing)

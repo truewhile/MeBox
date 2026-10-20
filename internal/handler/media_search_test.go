@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -27,7 +28,8 @@ func TestSearchMediaSeriesKeepsRemoteLibrariesSeparate(t *testing.T) {
 			"TotalRecordCount": 1,
 			"Items": []map[string]any{{
 				"Id": "same-series", "Name": "龙珠改", "Type": "Series",
-				"ProviderIds": map[string]string{"Tmdb": "61709"},
+				"ProviderIds":    map[string]string{"Tmdb": "61709"},
+				"ProductionYear": 2024, "Genres": []string{"Science Fiction"},
 			}},
 		})
 	}))
@@ -107,5 +109,10 @@ func TestSearchMediaSeriesKeepsRemoteLibrariesSeparate(t *testing.T) {
 			t.Fatalf("page %d lost or repeated a library's series identity: %#v", page, item)
 		}
 		seen[item.DisplayLibraryID] = true
+	}
+	remoteLibraryID := service.EncodeEmbyRemoteID("mount-a", "view-a")
+	items, total := request("page=1&page_size=8&library_id=" + url.QueryEscape(remoteLibraryID) + "&year_min=2020&genre=Science+Fiction")
+	if total != 1 || len(items) != 1 || items[0].DisplayLibraryID != remoteLibraryID {
+		t.Fatalf("remote library/year/genre filters lost results: total=%d items=%#v", total, items)
 	}
 }

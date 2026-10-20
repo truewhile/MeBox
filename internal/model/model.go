@@ -61,6 +61,7 @@ func AllModels() []interface{} {
 		&StrmUploadTask{},
 		&StrmDirCache{},
 		&ScrapeTask{},
+		&BackgroundTaskRecord{},
 		&EmbyMount{},
 		&ReaderBookSource{},
 		&ReaderSourceState{},

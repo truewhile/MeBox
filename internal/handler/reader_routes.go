@@ -149,10 +149,10 @@ func readerDeleteSourceHandler(svc *service.Container) gin.HandlerFunc {
 }
 
 func readerDebugSourceHandler(svc *service.Container) gin.HandlerFunc {
-	var body struct {
-		Key string `json:"key" binding:"required"`
-	}
 	return func(c *gin.Context) {
+		var body struct {
+			Key string `json:"key" binding:"required"`
+		}
 		if err := c.ShouldBindJSON(&body); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return

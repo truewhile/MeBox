@@ -1,6 +1,8 @@
 import type { LucideIcon } from 'lucide-react'
 import {
   Clock,
+  AlertTriangle,
+  ListChecks as SetupIcon,
   FileOutput,
   FolderOpen,
   Heart,
@@ -41,6 +43,8 @@ export const LAYOUT_NAV_ITEMS: LayoutNavItem[] = [
   { to: '/profile', label: '个人资料', icon: User },
   { to: '/libraries?from=admin', label: '媒体库', icon: Library },
   { to: '/queue', label: '任务队列', icon: ListChecks, adminOnly: true },
+  { to: '/quality', label: '媒体质量', icon: AlertTriangle, adminOnly: true },
+  { to: '/setup', label: '首次配置', icon: SetupIcon, adminOnly: true },
   { to: '/admin', label: '用户管理', icon: Users, adminOnly: true },
   { to: '/files', label: '文件管理', icon: FolderOpen, adminOnly: true },
   { to: '/emby-mount', label: 'Emby 挂载', icon: Tv, adminOnly: true },
@@ -159,6 +163,8 @@ export function resolveHeaderBack(pathname: string): HeaderBackTarget | null {
     pathname === '/admin' ||
     pathname === '/files' ||
     pathname === '/queue' ||
+    pathname === '/quality' ||
+    pathname === '/setup' ||
     pathname === '/emby-mount' ||
     pathname === '/strm'
   ) {

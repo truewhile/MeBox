@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -163,6 +164,12 @@ func (r *MediaRepository) upsertWithDB(ctx context.Context, db *gorm.DB, m *mode
 		existing.Path = m.Path
 		existing.DeletedAt = gorm.DeletedAt{}
 	}
+	if _, ok := updates["availability_state"]; ok {
+		existing.AvailabilityState = "available"
+		existing.MissingSince = nil
+		now := updates["last_seen_at"].(time.Time)
+		existing.LastSeenAt = &now
+	}
 	*m = existing
 	return existing.ID, nil
 }
@@ -216,6 +223,10 @@ func (r *MediaRepository) findOrCreateMediaByPath(ctx context.Context, db *gorm.
 		if m.ScrapeStatus == "" {
 			m.ScrapeStatus = "pending"
 		}
+		now := time.Now()
+		m.AvailabilityState = "available"
+		m.MissingSince = nil
+		m.LastSeenAt = &now
 		// PostgreSQL 唯一键异常会中止整个事务，之后重查也会失败。
 		// DO NOTHING 保持事务可用，并兼容 path 的表达式唯一索引。
 		result := db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(m)
@@ -265,6 +276,11 @@ func (r *MediaRepository) findMediaByAlias(ctx context.Context, db *gorm.DB, cur
 
 func mediaUpsertUpdates(existing, incoming model.Media, reclaimLibrary bool) map[string]any {
 	updates := map[string]any{}
+	if existing.AvailabilityState != "available" || existing.MissingSince != nil {
+		updates["availability_state"] = "available"
+		updates["missing_since"] = nil
+		updates["last_seen_at"] = time.Now()
+	}
 	addMediaFileScanUpdates(updates, existing, incoming)
 	addMediaTitleUpdates(updates, existing, incoming)
 	addMediaExternalIDUpdates(updates, existing, incoming)

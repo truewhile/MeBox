@@ -79,6 +79,9 @@ func (a *application) start() error {
 		}
 	}
 
+	if err := database.ApplyPendingSQLiteRestore(context.Background(), a.cfg, a.logger); err != nil {
+		return fmt.Errorf("apply pending database restore: %w", err)
+	}
 	db, err := database.Open(a.cfg, a.logger)
 	if err != nil {
 		a.logger.Error("database open failed", zap.Error(err))

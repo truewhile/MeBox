@@ -21,10 +21,18 @@ export const aboutSettingsGroup: SettingGroup = {
   items: [],
 }
 
+export const backupSettingsGroup: SettingGroup = {
+  key: 'backup',
+  label: '备份',
+  description: '创建、下载、恢复和清理数据库备份',
+  items: [],
+}
+
 export const GROUPS: SettingGroup[] = [
   generalSettingsGroup,
   deviceNotifySettingsGroup,
   databaseSettingsGroup,
+  backupSettingsGroup,
   apiConfigsSettingsGroup,
   recognitionWordsSettingsGroup,
   adultSettingsGroup,

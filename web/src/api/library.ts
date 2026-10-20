@@ -262,7 +262,15 @@ export const mediaAPI = {
       })
       .then((r) => r.data),
 
-  searchPage: (q: string, page = 1, pageSize = 50, options?: { groupVersions?: boolean; groupSeries?: boolean }) =>
+  searchPage: (q: string, page = 1, pageSize = 50, options?: {
+    groupVersions?: boolean
+    groupSeries?: boolean
+    libraryId?: string
+    yearMin?: number
+    yearMax?: number
+    genres?: string[]
+    sort?: 'title_asc' | 'year_desc' | 'rating_desc'
+  }) =>
     api
       .get<MediaSearchPage>('/media', {
         params: {
@@ -271,6 +279,11 @@ export const mediaAPI = {
           page_size: pageSize,
           group_versions: options?.groupVersions === false ? 0 : undefined,
           ...(options?.groupSeries ? { group_series: 1 } : {}),
+          ...(options?.libraryId ? { library_id: options.libraryId } : {}),
+          ...(options?.yearMin ? { year_min: options.yearMin } : {}),
+          ...(options?.yearMax ? { year_max: options.yearMax } : {}),
+          ...(options?.genres?.length ? { genre: options.genres } : {}),
+          ...(options?.sort ? { sort: options.sort } : {}),
         },
         timeout: LONG_REQUEST_TIMEOUT,
       })
