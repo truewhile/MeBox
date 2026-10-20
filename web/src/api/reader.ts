@@ -249,6 +249,8 @@ export const readerAPI = {
   deleteSource: (id: string) => api.delete(`/reader/sources/${id}`),
   debugSource: (id: string, key: string) =>
     api.post<{ logs: string[] }>(`/reader/sources/${id}/debug`, { key }, longOpts).then((r) => r.data.logs),
+  smokeSource: (id: string, key: string) =>
+    api.post<{ logs: string[] }>(`/reader/sources/${id}/debug`, { key }, { timeout: 60_000 }).then((r) => r.data.logs),
 
   // ── 书源登录与源变量 ──
   // 取登录界面描述（loginUi 控件 + 已保存值 + 当前 Cookie 状态）

@@ -7,6 +7,7 @@ import { scraperAPI } from '../api/scraper'
 import { strmAPI } from '../api/strm'
 import { ScraperQueuePage } from './ScraperQueuePage'
 import { StrmQueuePanel } from './StrmQueuePage'
+import { BackgroundTasksPanel } from './BackgroundTasksPanel'
 
 type QueueType = 'all' | 'scrape' | 'download' | 'upload'
 
@@ -73,6 +74,7 @@ export function TaskQueuePage() {
 
   return (
     <div className="space-y-5">
+      <BackgroundTasksPanel />
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="font-display text-3xl font-bold text-ink-600">任务队列</h1>

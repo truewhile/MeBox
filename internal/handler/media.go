@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -654,6 +655,9 @@ func paginateSlice[T any](items []T, page, size int) []T {
 	if len(items) == 0 {
 		return []T{}
 	}
+	if page-1 > len(items)/size {
+		return []T{}
+	}
 	start := (page - 1) * size
 	if start >= len(items) {
 		return []T{}
@@ -668,125 +672,162 @@ func paginateSlice[T any](items []T, page, size int) []T {
 func searchMediaHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
-		q := c.Query("q")
+		query := strings.TrimSpace(c.Query("q"))
 		visibility := mediaVisibilityForRequest(c, svc)
-		groupVersions := c.DefaultQuery("group_versions", "1") != "0"
-
-		fetchRemote := func(limit int) []model.Media {
-			if svc.EmbyRemote == nil || strings.TrimSpace(q) == "" {
-				return nil
-			}
-			remoteItems, _ := svc.EmbyRemote.RemoteSearchMedia(ctx, q, limit, visibility)
-			return remoteItems
+		filter := service.MediaSearchFilter{
+			LibraryID: strings.TrimSpace(c.Query("library_id")),
+			YearMin:   boundedSearchYear(c.Query("year_min")),
+			YearMax:   boundedSearchYear(c.Query("year_max")),
 		}
-
-		if c.DefaultQuery("group_series", "0") != "0" {
-			localItems, err := svc.Media.SearchMediaVisible(ctx, q, 50000, visibility)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				return
+		for _, genre := range c.QueryArray("genre") {
+			if genre = strings.TrimSpace(genre); genre != "" && len(filter.Genres) < 8 {
+				filter.Genres = append(filter.Genres, genre)
 			}
-			remoteItems := fetchRemote(50000)
-			all := service.GroupMediaSeriesItems(append(localItems, remoteItems...))
-
-			if c.Query("page") != "" || c.Query("page_size") != "" {
-				page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-				size, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
-				paged := paginateSlice(all, page, size)
-				c.JSON(http.StatusOK, gin.H{
-					"items":     paged,
-					"total":     len(all),
-					"page":      page,
-					"page_size": size,
-				})
-				return
-			}
-
-			limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
-			if limit <= 0 {
-				limit = 50
-			}
-			if len(all) > limit {
-				all = all[:limit]
-			}
-			c.JSON(http.StatusOK, gin.H{"items": all})
-			return
 		}
-
-		if c.Query("page") != "" || c.Query("page_size") != "" {
-			page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-			size, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
-			if !groupVersions {
-				localItems, _, err := svc.Media.SearchMediaVisiblePage(ctx, q, 1, 50000, visibility)
-				if err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-					return
-				}
-				remoteItems := fetchRemote(size * 2)
-				all := append(localItems, remoteItems...)
-				paged := paginateSlice(all, page, size)
-				c.JSON(http.StatusOK, gin.H{
-					"items":     paged,
-					"total":     len(all),
-					"page":      page,
-					"page_size": size,
-				})
-				return
-			}
-			localItems, err := svc.Media.SearchMediaVisible(ctx, q, 50000, visibility)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				return
-			}
-			remoteItems := fetchRemote(size * 2)
-			all := append(localItems, remoteItems...)
-			grouped := service.GroupMediaVersions(all)
-			paged := service.PaginateMediaItems(grouped, page, size)
-			c.JSON(http.StatusOK, gin.H{
-				"items":     paged,
-				"total":     len(grouped),
-				"page":      page,
-				"page_size": size,
-			})
-			return
+		if filter.YearMin > 0 && filter.YearMax > 0 && filter.YearMin > filter.YearMax {
+			filter.YearMin, filter.YearMax = filter.YearMax, filter.YearMin
 		}
-
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		if page < 1 {
+			page = 1
+		}
+		size, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
+		if size < 1 {
+			size = 50
+		} else if size > 2000 {
+			size = 2000
+		}
 		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
-		if limit <= 0 {
+		if limit < 1 {
 			limit = 50
+		} else if limit > 50000 {
+			limit = 50000
 		}
-		if !groupVersions {
-			localItems, err := svc.Media.SearchMediaVisible(ctx, q, limit, visibility)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				return
-			}
-			remoteItems := fetchRemote(limit)
-			all := append(localItems, remoteItems...)
-			if len(all) > limit {
-				all = all[:limit]
-			}
-			if all == nil {
-				all = []model.Media{}
-			}
-			c.JSON(http.StatusOK, gin.H{"items": all})
-			return
-		}
-
-		localItems, err := svc.Media.SearchMediaVisible(ctx, q, 50000, visibility)
+		paginated := c.Query("page") != "" || c.Query("page_size") != ""
+		sortBy := normalizeMediaSearchSort(c.Query("sort"))
+		// Sorting and grouping must operate on the same candidate set before
+		// either a page size or the caller's output limit is applied.
+		items, err := svc.Media.SearchMediaVisibleFiltered(ctx, query, 50000, visibility, filter)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		remoteItems := fetchRemote(limit)
-		all := append(localItems, remoteItems...)
-		grouped := service.GroupMediaVersions(all)
-		items := service.FirstMediaItems(grouped, limit)
-		if items == nil {
-			items = []service.MediaItem{}
+		if svc.EmbyRemote != nil && query != "" && (filter.LibraryID == "" || service.IsEmbyRemoteID(filter.LibraryID)) {
+			remote, _ := svc.EmbyRemote.RemoteSearchMedia(ctx, query, 50000, visibility)
+			for _, item := range remote {
+				if remoteSearchMatchesFilter(item, filter) {
+					items = append(items, item)
+				}
+			}
 		}
-		c.JSON(http.StatusOK, gin.H{"items": items})
+		if c.DefaultQuery("group_series", "0") != "0" {
+			items = service.GroupMediaSeriesItems(items)
+			sortSearchMedia(items, sortBy)
+			writeMediaSearchResults(c, items, page, size, limit, paginated)
+			return
+		}
+		if c.DefaultQuery("group_versions", "1") != "0" {
+			grouped := service.GroupMediaVersions(items)
+			if sortBy != "" {
+				sort.SliceStable(grouped, func(i, j int) bool {
+					return mediaSearchSortLess(grouped[i].Media, grouped[j].Media, sortBy)
+				})
+			}
+			writeMediaSearchResults(c, grouped, page, size, limit, paginated)
+			return
+		}
+		sortSearchMedia(items, sortBy)
+		writeMediaSearchResults(c, items, page, size, limit, paginated)
 	}
+}
+
+func writeMediaSearchResults[T any](c *gin.Context, items []T, page, size, limit int, paginated bool) {
+	if items == nil {
+		items = []T{}
+	}
+	if paginated {
+		c.JSON(http.StatusOK, gin.H{
+			"items": paginateSlice(items, page, size),
+			"total": len(items), "page": page, "page_size": size,
+		})
+		return
+	}
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func remoteSearchMatchesFilter(item model.Media, filter service.MediaSearchFilter) bool {
+	if filter.LibraryID != "" && item.LibraryID != filter.LibraryID && item.DisplayLibraryID != filter.LibraryID {
+		return false
+	}
+	if filter.YearMin > 0 && item.Year < filter.YearMin || filter.YearMax > 0 && item.Year > filter.YearMax {
+		return false
+	}
+	if len(filter.Genres) == 0 {
+		return true
+	}
+	normalize := func(value string) string {
+		return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), " ", ""))
+	}
+	for _, genre := range strings.Split(strings.ReplaceAll(item.Genres, "，", ","), ",") {
+		for _, wanted := range filter.Genres {
+			if normalize(genre) == normalize(wanted) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func normalizeMediaSearchSort(value string) string {
+	value = strings.TrimSpace(value)
+	switch value {
+	case "title_asc", "year_desc", "rating_desc":
+		return value
+	default:
+		return ""
+	}
+}
+
+func sortSearchMedia(items []model.Media, sortBy string) {
+	if sortBy == "" {
+		return
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		return mediaSearchSortLess(items[i], items[j], sortBy)
+	})
+}
+
+func mediaSearchSortLess(a, b model.Media, sortBy string) bool {
+	switch sortBy {
+	case "title_asc":
+		left, right := strings.ToLower(strings.TrimSpace(a.Title)), strings.ToLower(strings.TrimSpace(b.Title))
+		if left != right {
+			return left < right
+		}
+	case "year_desc":
+		if a.Year != b.Year {
+			return a.Year > b.Year
+		}
+	case "rating_desc":
+		if a.Rating != b.Rating {
+			return a.Rating > b.Rating
+		}
+	}
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.After(b.CreatedAt)
+	}
+	return a.ID < b.ID
+}
+
+func boundedSearchYear(value string) int {
+	year, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || year < 1870 || year > 2200 {
+		return 0
+	}
+	return year
 }
 
 func streamHandler(svc *service.Container) gin.HandlerFunc {

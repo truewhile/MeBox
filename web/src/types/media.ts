@@ -1,5 +1,7 @@
 export interface Media {
   id: string
+  availability_state?: 'available' | 'missing' | string
+  missing_since?: string
   library_id: string
   library_root_id?: string
   library_name?: string

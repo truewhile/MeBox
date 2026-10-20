@@ -14,6 +14,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -144,32 +145,34 @@ type localMediaProbeTask struct {
 }
 
 type existingLocalMedia struct {
-	LibraryRootID string
-	RelativePath  string
-	Title         string
-	OriginalName  string
-	EpisodeTitle  string
-	SizeBytes     int64
-	DurationSec   int
-	Width         int
-	Height        int
-	VideoCodec    string
-	AudioCodec    string
-	Container     string
-	STRMURL       string
-	FileID        string
-	PosterURL     string
-	BackdropURL   string
-	Overview      string
-	Year          int
-	ReleaseDate   string
-	Rating        float32
-	TMDbID        int
-	BangumiID     int
-	DoubanID      string
-	TheTVDBID     string
-	SeasonNum     int
-	EpisodeNum    int
+	AvailabilityState string
+	MissingSince      *time.Time
+	LibraryRootID     string
+	RelativePath      string
+	Title             string
+	OriginalName      string
+	EpisodeTitle      string
+	SizeBytes         int64
+	DurationSec       int
+	Width             int
+	Height            int
+	VideoCodec        string
+	AudioCodec        string
+	Container         string
+	STRMURL           string
+	FileID            string
+	PosterURL         string
+	BackdropURL       string
+	Overview          string
+	Year              int
+	ReleaseDate       string
+	Rating            float32
+	TMDbID            int
+	BangumiID         int
+	DoubanID          string
+	TheTVDBID         string
+	SeasonNum         int
+	EpisodeNum        int
 	// EpisodeFraction 是集号的小数部分（S01E11.5 → 0.5）；变化同样要触发刷新，
 	// 否则已有行上的「半集」标记不会被写回。
 	EpisodeFraction float64

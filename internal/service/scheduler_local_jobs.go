@@ -11,6 +11,53 @@ import (
 	"go.uber.org/zap"
 )
 
+const lastAutomaticBackupDateKey = "backup.last_automatic_date"
+
+func (s *SchedulerService) jobDatabaseBackup(ctx context.Context) error {
+	if s == nil || s.backup == nil || s.repo == nil || s.repo.Setting == nil {
+		return nil
+	}
+	enabled, _ := s.repo.Setting.Get(ctx, "backup.auto_enabled")
+	if !parseBoolSetting(enabled, false) {
+		return nil
+	}
+	clock, _ := s.repo.Setting.Get(ctx, "backup.auto_time")
+	if clock == "" {
+		clock = "03:00"
+	}
+	parsed, err := time.Parse("15:04", clock)
+	if err != nil {
+		return nil
+	}
+	now := s.currentTime().In(time.Local)
+	dueAt := time.Date(now.Year(), now.Month(), now.Day(), parsed.Hour(), parsed.Minute(), 0, 0, now.Location())
+	if now.Before(dueAt) {
+		return nil
+	}
+	date := now.Format("2006-01-02")
+	last, _ := s.repo.Setting.Get(ctx, lastAutomaticBackupDateKey)
+	if last == date {
+		return nil
+	}
+	if _, err := s.backup.CreateAutomatic(ctx); err != nil {
+		return err
+	}
+	// Record the successful backup before pruning. If retention cleanup fails,
+	// the next scheduler tick must not create another copy for the same day.
+	if err := s.repo.Setting.Set(ctx, lastAutomaticBackupDateKey, date); err != nil {
+		return err
+	}
+	retentionValue, _ := s.repo.Setting.Get(ctx, "backup.retention")
+	retention, err := strconv.Atoi(strings.TrimSpace(retentionValue))
+	if err != nil || retention < 1 {
+		retention = 7
+	}
+	if err := s.backup.Prune(retention); err != nil {
+		return err
+	}
+	return nil
+}
+
 // jobScanLibraries re-walks every enabled library.
 //
 // 默认关闭：文件变更由 WatcherService 增量入库，无需周期性全量重扫。

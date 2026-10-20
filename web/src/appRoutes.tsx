@@ -50,6 +50,8 @@ const StrmUploadQueuePage = lazy(() =>
 )
 const ScraperQueuePage = lazy(() => import('./pages/ScraperQueuePage').then((m) => ({ default: m.ScraperQueuePage })))
 const TaskQueuePage = lazy(() => import('./pages/TaskQueuePage').then((m) => ({ default: m.TaskQueuePage })))
+const MediaQualityPage = lazy(() => import('./pages/MediaQualityPage').then((m) => ({ default: m.MediaQualityPage })))
+const SetupWizardPage = lazy(() => import('./pages/SetupWizardPage').then((m) => ({ default: m.SetupWizardPage })))
 
 // 常用页面的路由 chunk 空闲预取：应用加载完成后浏览器一空闲就把浏览路径
 // （库列表/库详情/媒体详情/收藏/历史等）的 chunk 拉下来，
@@ -125,5 +127,7 @@ export const appRoutes: AppRoute[] = [
   { path: 'strm/uploads', element: <StrmUploadQueuePage />, adminOnly: true },
   { path: 'scraper/queue', element: <ScraperQueuePage />, adminOnly: true },
   { path: 'queue', element: <TaskQueuePage />, adminOnly: true },
+  { path: 'quality', element: <MediaQualityPage />, adminOnly: true },
+  { path: 'setup', element: <SetupWizardPage />, adminOnly: true },
   { path: 'admin', element: <AdminPage />, adminOnly: true },
 ]

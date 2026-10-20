@@ -372,7 +372,14 @@ func TestScanLibraryPrunesMissingMedia(t *testing.T) {
 	if err := db.Model(&model.Media{}).Where("library_id = ?", lib.ID).Count(&count).Error; err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Fatalf("media count = %d, want 1", count)
+	if count != 2 {
+		t.Fatalf("media count = %d, want current and missing records preserved", count)
+	}
+	var missing model.Media
+	if err := db.First(&missing, "id = ?", stale.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if missing.AvailabilityState != "missing" {
+		t.Fatalf("stale media state = %q, want missing", missing.AvailabilityState)
 	}
 }

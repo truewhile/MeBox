@@ -13,6 +13,8 @@ func registerAdminRoutes(api *gin.RouterGroup, cfg *config.Config, svc *service.
 	admin := api.Group("/admin")
 	admin.Use(middleware.AuthRequired(cfg.Secrets.JWTSecret), middleware.AdminRequired())
 	registerAdminUserRoutes(admin, svc)
+	admin.GET("/tasks", backgroundTasksHandler(svc))
+	admin.GET("/quality", mediaQualityHandler(svc))
 	registerAdminPermissionRoutes(admin, svc)
 	registerAdminSystemRoutes(admin, svc)
 	registerAdminBackupRoutes(admin, svc)
@@ -143,6 +145,7 @@ func registerAdminSystemRoutes(admin *gin.RouterGroup, svc *service.Container) {
 func registerAdminBackupRoutes(admin *gin.RouterGroup, svc *service.Container) {
 	admin.GET("/backups", listBackupsHandler(svc))
 	admin.POST("/backups", createBackupHandler(svc))
+	admin.GET("/backups/download", downloadBackupHandler(svc))
 	admin.DELETE("/backups", deleteBackupHandler(svc))
 	admin.POST("/backups/restore", restoreBackupHandler(svc))
 }

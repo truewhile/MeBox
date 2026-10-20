@@ -11,6 +11,7 @@ import { FFToolsPanel } from '../components/FFToolsPanel'
 import { AboutSettingsPanel } from './AboutSettingsPanel'
 import { AdultSettingsPanel } from './AdultSettingsPanel'
 import { DatabaseSettingsPanel } from './DatabaseSettingsPanel'
+import { BackupSettingsPanel } from './BackupSettingsPanel'
 import { RecognitionWordsPanel } from './RecognitionWordsPanel'
 import { SettingRow } from './SettingsRow'
 import { TelegramNotifyPanel } from './TelegramNotifyPanel'
@@ -172,6 +173,7 @@ export function SettingsPage() {
       {!loading && (
         <div className="space-y-4">
           {group.key === 'database' && <DatabaseSettingsPanel />}
+          {group.key === 'backup' && <BackupSettingsPanel />}
           {group.key === 'api-configs' && <APIConfigsPanel />}
           {group.key === 'recognition-words' && <RecognitionWordsPanel />}
           {group.key === 'adult' && <AdultSettingsPanel />}

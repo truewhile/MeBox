@@ -50,6 +50,7 @@ type SchedulerService struct {
 	readerFilesTTLHours int
 
 	segments *MediaSegmentService
+	backup   *BackupService
 
 	mu     sync.Mutex
 	stopCh chan struct{}
@@ -63,6 +64,10 @@ var (
 
 func (s *SchedulerService) SetTaskTracker(tasks *TaskTrackerService) {
 	s.tasks = tasks
+}
+
+func (s *SchedulerService) SetBackupService(backup *BackupService) {
+	s.backup = backup
 }
 
 func (s *SchedulerService) SetOrganizePipeline(pipeline *OrganizePipelineService) {
@@ -194,6 +199,13 @@ func (s *SchedulerService) Start(ctx context.Context) {
 			name:     "telegram_expiry_warning",
 			interval: 24 * time.Hour,
 			run:      s.jobTelegramExpiryWarning,
+		})
+	}
+	if s.backup != nil {
+		s.jobs = append(s.jobs, &scheduledJob{
+			name:     "database_backup",
+			interval: 5 * time.Minute,
+			run:      s.jobDatabaseBackup,
 		})
 	}
 	for _, j := range s.jobs {

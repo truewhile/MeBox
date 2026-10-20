@@ -175,7 +175,7 @@ func TestIngestPathAdoptsSoftDeletedSTRMRenameTombstone(t *testing.T) {
 	}
 }
 
-func TestRemovePathStillHardDeletesTrueDeletionWithoutAlias(t *testing.T) {
+func TestRemovePathRetainsTrueDeletionWithoutAlias(t *testing.T) {
 	sc, repos := newScannerTestEnv(t)
 	root := t.TempDir()
 	lib := model.Library{Name: "Anime", Path: root, Type: "anime", Enabled: true}
@@ -197,8 +197,15 @@ func TestRemovePathStillHardDeletesTrueDeletionWithoutAlias(t *testing.T) {
 	if err := repos.DB.Unscoped().Model(&model.Media{}).Where("path = ?", path).Count(&count).Error; err != nil {
 		t.Fatal(err)
 	}
-	if count != 0 {
-		t.Fatalf("true deletion left %d tombstone row(s)", count)
+	if count != 1 {
+		t.Fatalf("missing media count = %d, want metadata retained", count)
+	}
+	var media model.Media
+	if err := repos.DB.Where("path = ?", path).First(&media).Error; err != nil {
+		t.Fatal(err)
+	}
+	if media.AvailabilityState != "missing" || media.MissingSince == nil {
+		t.Fatalf("true deletion did not record missing state: %#v", media)
 	}
 }
 

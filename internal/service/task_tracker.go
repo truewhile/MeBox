@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"html"
 	"strings"
 	"sync"
@@ -9,12 +10,16 @@ import (
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
+
+	"github.com/truewhile/MeBox/internal/model"
 )
 
 const (
-	TaskStatusRunning   = "running"
-	TaskStatusCompleted = "completed"
-	TaskStatusFailed    = "failed"
+	TaskStatusRunning     = "running"
+	TaskStatusCompleted   = "completed"
+	TaskStatusFailed      = "failed"
+	TaskStatusInterrupted = "interrupted"
 
 	TaskKindOrganize = "organize"
 	TaskKindScan     = "scan"
@@ -70,6 +75,26 @@ type TaskTrackerService struct {
 	recent    []BackgroundTask
 	maxRecent int
 	now       func() time.Time
+	db        *gorm.DB
+}
+
+// SetPersistence enables durable task history and marks tasks left running by
+// a previous process as interrupted. Actual task execution is never resumed
+// automatically; this record is an operator-visible recovery point.
+func (t *TaskTrackerService) SetPersistence(db *gorm.DB) {
+	if t == nil || db == nil {
+		return
+	}
+	t.mu.Lock()
+	t.db = db
+	now := t.currentTime()
+	t.mu.Unlock()
+	err := db.Model(&model.BackgroundTaskRecord{}).
+		Where("status = ?", TaskStatusRunning).
+		Updates(map[string]any{"status": TaskStatusInterrupted, "error": "服务在任务完成前重启；请检查文件状态后重新执行", "updated_at": now, "finished_at": now}).Error
+	if err != nil && t.log != nil {
+		t.log.Warn("recover interrupted background tasks failed", zap.Error(err))
+	}
 }
 
 type TaskHandle struct {
@@ -105,9 +130,11 @@ func (t *TaskTrackerService) Start(kind, name string, update TaskUpdate) *TaskHa
 		StartedAt:  now,
 		UpdatedAt:  now,
 	}
+	applyTaskUpdate(task, update)
 	t.mu.Lock()
 	t.active[task.ID] = task
 	snapshot := cloneBackgroundTask(*task)
+	t.persist(snapshot)
 	t.mu.Unlock()
 	t.publish(snapshot)
 	return &TaskHandle{tracker: t, id: task.ID}
@@ -132,16 +159,45 @@ func (t *TaskTrackerService) Snapshot() TaskSnapshot {
 		return TaskSnapshot{}
 	}
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	active := make([]BackgroundTask, 0, len(t.active))
 	for _, task := range t.active {
 		active = append(active, cloneBackgroundTask(*task))
 	}
 	recent := make([]BackgroundTask, 0, len(t.recent))
+	db := t.db
+	limit := t.maxRecent
+	if limit < 1 {
+		limit = 30
+	}
 	for _, task := range t.recent {
 		recent = append(recent, cloneBackgroundTask(task))
 	}
+	t.mu.Unlock()
+	if db != nil {
+		var rows []model.BackgroundTaskRecord
+		if err := db.Where("status <> ?", TaskStatusRunning).Order("started_at DESC").Limit(limit).Find(&rows).Error; err == nil {
+			recent = make([]BackgroundTask, 0, len(rows))
+			for _, row := range rows {
+				recent = append(recent, backgroundTaskFromRecord(row))
+			}
+		} else if t.log != nil {
+			t.log.Warn("load background task history failed; using memory history", zap.Error(err))
+		}
+	}
 	return TaskSnapshot{Active: active, Recent: recent}
+}
+
+func backgroundTaskFromRecord(row model.BackgroundTaskRecord) BackgroundTask {
+	task := BackgroundTask{
+		ID: row.ID, Kind: row.Kind, Name: row.Name, Status: row.Status,
+		Stage: row.Stage, SourcePath: row.SourcePath, DestPath: row.DestPath,
+		Message: row.Message, Error: row.Error, StartedAt: row.StartedAt,
+		UpdatedAt: row.UpdatedAt, FinishedAt: row.FinishedAt,
+	}
+	_ = json.Unmarshal([]byte(row.Details), &task.Details)
+	_ = json.Unmarshal([]byte(row.Metrics), &task.Metrics)
+	_ = json.Unmarshal([]byte(row.Items), &task.Items)
+	return task
 }
 
 func (t *TaskTrackerService) update(id string, update TaskUpdate) {
@@ -155,6 +211,7 @@ func (t *TaskTrackerService) update(id string, update TaskUpdate) {
 	applyTaskUpdate(task, update)
 	task.UpdatedAt = now
 	snapshot := cloneBackgroundTask(*task)
+	t.persist(snapshot)
 	t.mu.Unlock()
 	t.publish(snapshot)
 }
@@ -186,12 +243,33 @@ func (t *TaskTrackerService) finish(id string, err error, update TaskUpdate) {
 		t.recent = t.recent[:t.maxRecent]
 	}
 	notifier := t.failureNotifier
+	t.persist(snapshot)
 	t.mu.Unlock()
 	t.publish(snapshot)
 
 	// 失败通知放在锁外发送：网络请求绝不能阻塞任务状态机。
 	if err != nil && notifier != nil {
 		notifier(context.Background(), formatTaskFailureAlert(snapshot))
+	}
+}
+
+func (t *TaskTrackerService) persist(task BackgroundTask) {
+	if t == nil || t.db == nil {
+		return
+	}
+	encode := func(value any) string {
+		data, _ := json.Marshal(value)
+		return string(data)
+	}
+	row := model.BackgroundTaskRecord{
+		ID: task.ID, Kind: task.Kind, Name: task.Name, Status: task.Status,
+		Stage: task.Stage, SourcePath: task.SourcePath, DestPath: task.DestPath,
+		Message: task.Message, Error: task.Error, Details: encode(task.Details),
+		Metrics: encode(task.Metrics), Items: encode(task.Items), StartedAt: task.StartedAt,
+		UpdatedAt: task.UpdatedAt, FinishedAt: task.FinishedAt,
+	}
+	if err := t.db.Save(&row).Error; err != nil && t.log != nil {
+		t.log.Warn("persist background task failed", zap.String("task_id", task.ID), zap.Error(err))
 	}
 }
 

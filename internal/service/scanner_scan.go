@@ -202,7 +202,7 @@ func (s *ScannerService) scanLocalLibraryFiles(ctx context.Context, lib *model.L
 func existingLocalMediaFileIDs(existingMedia map[string]existingLocalMedia) map[string]string {
 	seenInodes := make(map[string]string)
 	for path, existing := range existingMedia {
-		if existing.FileID != "" {
+		if existing.FileID != "" && existing.AvailabilityState != "missing" {
 			seenInodes[existing.FileID] = path
 		}
 	}

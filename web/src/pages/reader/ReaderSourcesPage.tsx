@@ -39,6 +39,9 @@ export default function ReaderSourcesPage() {
   const [debugKey, setDebugKey] = useState('')
   const [debugLogs, setDebugLogs] = useState<string[] | null>(null)
   const [debugging, setDebugging] = useState(false)
+  const [batchKey, setBatchKey] = useState('')
+  const [batchTesting, setBatchTesting] = useState(false)
+  const [batchResults, setBatchResults] = useState<Record<string, { ok: boolean; message: string }>>({})
   // 登录面板：记录正在登录的书源
   const [loginSource, setLoginSource] = useState<ReaderSource | null>(null)
   const [loggedInIds, setLoggedInIds] = useState<Record<string, boolean>>({})
@@ -120,6 +123,30 @@ export default function ReaderSourcesPage() {
     } finally {
       setDebugging(false)
     }
+  }
+
+  const testEnabledSources = async () => {
+    const key = batchKey.trim()
+    const enabled = (sources ?? []).filter((source) => source.enabled)
+    if (!key) { toast.error('先填写用于检测的书名关键词'); return }
+    if (!enabled.length) { toast.error('没有已启用的书源'); return }
+    setBatchTesting(true)
+    setBatchResults({})
+    for (let offset = 0; offset < enabled.length; offset += 3) {
+      const batch = enabled.slice(offset, offset + 3)
+      const results = await Promise.all(batch.map(async (source) => {
+        try {
+          const logs = await readerAPI.smokeSource(source.id, key)
+          const error = logs.find((line) => line.startsWith('[错误]'))
+          return [source.id, { ok: !error, message: error ? error.replace(/https?:\/\/[^\s"'<>]+/gi, '[URL]') : '搜索、目录和正文链路通过' }] as const
+        } catch (error) {
+          const message = ((error as { response?: { data?: { error?: string } } })?.response?.data?.error || '检测超时或请求失败').replace(/https?:\/\/[^\s"'<>]+/gi, '[URL]')
+          return [source.id, { ok: false, message }] as const
+        }
+      }))
+      setBatchResults((current) => ({ ...current, ...Object.fromEntries(results) }))
+    }
+    setBatchTesting(false)
   }
 
   return (
@@ -205,6 +232,14 @@ export default function ReaderSourcesPage() {
         </div>
       )}
 
+      <div className="mt-4 flex flex-wrap items-center gap-2 rounded-2xl border border-[var(--app-border)] bg-[var(--app-panel)] p-3">
+        <input value={batchKey} onChange={(event) => setBatchKey(event.target.value)} placeholder="全链路检测关键词，例如：斗破苍穹" className="min-w-48 flex-1 rounded-xl border border-[var(--app-border)] bg-[var(--app-panel-soft)] px-3 py-2 text-xs text-[var(--app-text)] outline-none" />
+        <button type="button" className="btn-outline text-xs" disabled={batchTesting || !sources?.some((source) => source.enabled)} onClick={() => void testEnabledSources()}>
+          {batchTesting ? <><Loader2 size={12} className="mr-1 inline animate-spin" />检测中</> : '检测全部已启用书源'}
+        </button>
+        <span className="text-[10px] text-[var(--app-muted)]">每源检查搜索、详情、目录和一章正文，并发最多 3 个</span>
+      </div>
+
       <div className="mt-6 space-y-2">
         {sources === null && (
           <div className="flex items-center justify-center py-24 text-[var(--app-muted)]">
@@ -228,6 +263,7 @@ export default function ReaderSourcesPage() {
                   {src.group && <span className="truncate text-2xs font-normal text-[var(--app-muted)]">{src.group}</span>}
                 </p>
                 <p className="mt-0.5 truncate text-xs text-[var(--app-muted)]">{hostOf(src.source_url)}</p>
+                {batchResults[src.id] && <p className={`mt-1 truncate text-[10px] ${batchResults[src.id].ok ? 'text-emerald-500' : 'text-red-400'}`}>{batchResults[src.id].message}</p>}
               </div>
               {/* 登录入口：仅对声明了 loginUrl/loginUi 的书源显示 */}
               {src.has_login && (

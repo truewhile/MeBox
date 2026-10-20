@@ -548,7 +548,7 @@ func TestScanLibraryMapsPersistedHostLibraryPath(t *testing.T) {
 	}
 }
 
-func TestRemovePathDeletesVanishedMedia(t *testing.T) {
+func TestRemovePathRetainsVanishedMedia(t *testing.T) {
 	sc, repos := newScannerTestEnv(t)
 	cache := NewRuntimeCacheService(&config.Config{}, zap.NewNop())
 	sc.SetRuntimeCache(cache)
@@ -589,8 +589,15 @@ func TestRemovePathDeletesVanishedMedia(t *testing.T) {
 	if removed != 1 {
 		t.Fatalf("removed = %d, want 1", removed)
 	}
-	if countMedia(t, repos) != 0 {
-		t.Fatal("expected 0 media after removal")
+	if countMedia(t, repos) != 1 {
+		t.Fatal("missing media metadata must be retained")
+	}
+	var missing model.Media
+	if err := repos.DB.Where("path = ?", file).First(&missing).Error; err != nil {
+		t.Fatal(err)
+	}
+	if missing.AvailabilityState != "missing" || missing.MissingSince == nil {
+		t.Fatalf("missing state not recorded: %#v", missing)
 	}
 	if cache.GetJSON(t.Context(), "media:list:test", &cached) {
 		t.Fatal("vanished media removal should invalidate media cache")

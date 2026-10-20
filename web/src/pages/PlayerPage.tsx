@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import type Hls from 'hls.js'
 import toast from 'react-hot-toast'
+import { Activity, Clipboard, X } from 'lucide-react'
 
 import { mediaAPI, libraryAPI } from '../api/library'
 import { cloudHlsURL, hlsURL, postPlaybackProgressKeepalive, stopHLSJob, streamURL } from '../api/client'
@@ -80,6 +81,8 @@ type PlaybackProgressSession = {
   sequence: number
 }
 
+type PlayerDiagnosticEvent = { at: string; phase: string; mode: string; message: string }
+
 // 自动跳过片头后，「已跳过 · 撤销」提示停留的时长。
 const SKIP_NOTICE_MS = 6000
 
@@ -148,6 +151,10 @@ export function PlayerPage() {
     vr360DirectProxyRef.current = vr360DirectProxy
   }, [vr360DirectProxy])
   const [mode, setMode] = useState<PlayerMode>('direct')
+  const diagnosticModeRef = useRef(mode)
+  useEffect(() => { diagnosticModeRef.current = mode }, [mode])
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false)
+  const [diagnosticEvents, setDiagnosticEvents] = useState<PlayerDiagnosticEvent[]>([])
   const [subs, setSubs] = useState<SubtitleTrack[]>([])
   const [subtitleIndex, setSubtitleIndex] = useState<number>(0)
   const authUser = useAuthStore((state) => state.user)
@@ -498,6 +505,8 @@ export function PlayerPage() {
   // 切换视频时重置媒体与弹幕状态，确保新视频自动重新识别并加载弹幕
   useEffect(() => {
     setMedia(null)
+    setDiagnosticEvents([])
+    setDiagnosticsOpen(false)
     setLoadError('')
     vr360TouchedRef.current = false
     vr360TextureRetryUsedRef.current = false
@@ -556,6 +565,33 @@ export function PlayerPage() {
     setMode(next)
   }, [])
 
+  const recordDiagnostic = useCallback((phase: string, message: string) => {
+    const safeMessage = message
+      .replace(/https?:\/\/[^\s"'<>]+/gi, '[URL]')
+      .replace(/\b(token|auth|api[_-]?key|password)=([^\s&]+)/gi, '$1=[redacted]')
+    setDiagnosticEvents((current) => [...current.slice(-39), {
+      at: new Date().toISOString(), phase, mode: diagnosticModeRef.current, message: safeMessage.slice(0, 300),
+    }])
+  }, [])
+
+  useEffect(() => {
+    const video = ref.current
+    if (!video) return
+    const bindings: Array<[string, string]> = [
+      ['loadedmetadata', '已读取媒体信息'],
+      ['playing', '开始播放'],
+      ['waiting', '等待缓冲'],
+      ['stalled', '媒体数据停止到达'],
+      ['seeked', '定位完成'],
+    ]
+    const listeners = bindings.map(([event, message]) => {
+      const listener = () => recordDiagnostic(event === 'waiting' || event === 'stalled' ? 'buffer' : 'play', message)
+      video.addEventListener(event, listener)
+      return [event, listener] as const
+    })
+    return () => { for (const [event, listener] of listeners) video.removeEventListener(event, listener) }
+  }, [media?.id, recordDiagnostic])
+
   const clearFallbackTimer = useCallback(() => {
     if (fallbackTimerRef.current) {
       clearTimeout(fallbackTimerRef.current)
@@ -569,9 +605,10 @@ export function PlayerPage() {
    * 只有画面没有声音」）不走这里，它们播起来之后依然成立。
    */
   const showPlayFailure = useCallback((message: string) => {
+    recordDiagnostic('error', message)
     transientPlayErrorRef.current = message
     setPlayerError(message)
-  }, [])
+  }, [recordDiagnostic])
 
   const clearPlayFailure = useCallback(() => {
     const stale = transientPlayErrorRef.current
@@ -1199,6 +1236,7 @@ export function PlayerPage() {
     if (Date.now() < directSeekGraceUntilRef.current) return
     const current = ref.current
     if (current && current.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) return
+    recordDiagnostic('fallback', `直连失败，原因：${reason}`)
     if (isRemoteEmbyID(mediaRef.current?.id) || isDirectStreamMedia(mediaRef.current)) {
       const copy = directPlayFailureCopy('remote-emby', reason)
       showPlayFailure(copy.banner)
@@ -1234,6 +1272,7 @@ export function PlayerPage() {
     directOnly,
     hlsUnavailable,
     playbackInfo,
+    recordDiagnostic,
     selectedQuality,
     setPlaybackMode,
     showPlayFailure,
@@ -2381,6 +2420,32 @@ export function PlayerPage() {
   // 桌面端与横屏手机保持原来的全屏居中沉浸式布局。
   const isMobileTheater = useIsMobileTheater()
 
+  const copyDiagnostics = async () => {
+    const video = ref.current
+    const snapshot = {
+      title: media?.title || '',
+      sourceType: isRemoteEmbyID(media?.id) ? 'remote_emby' : isStrmMedia(media) ? 'strm' : 'local',
+      mode,
+      hlsSource: mode === 'hls' ? hlsSource : undefined,
+      quality: selectedQuality || undefined,
+      browser: navigator.userAgent,
+      video: video ? {
+        errorCode: video.error?.code ?? null,
+        readyState: video.readyState,
+        networkState: video.networkState,
+        currentTime: Number.isFinite(video.currentTime) ? Math.round(video.currentTime) : null,
+        duration: Number.isFinite(video.duration) ? Math.round(video.duration) : null,
+      } : null,
+      events: diagnosticEvents,
+    }
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(snapshot, null, 2))
+      toast.success('播放诊断信息已复制（未包含播放地址或登录凭证）')
+    } catch {
+      toast.error('复制失败，请检查浏览器剪贴板权限')
+    }
+  }
+
   return (
     <div className="relative flex h-full w-full flex-1 flex-col overflow-hidden bg-black">
       <PlayerTopBar
@@ -2543,6 +2608,35 @@ export function PlayerPage() {
           }
         />
       ) : null}
+      <button
+        type="button"
+        onClick={() => setDiagnosticsOpen((open) => !open)}
+        className="fixed bottom-5 right-4 z-[80] inline-flex items-center gap-2 rounded-full border border-white/15 bg-black/75 px-3 py-2 text-xs font-semibold text-white shadow-lg backdrop-blur hover:bg-black/90"
+        title="播放诊断"
+        aria-label="播放诊断"
+      >
+        <Activity size={15} />诊断
+      </button>
+      {diagnosticsOpen && (
+        <aside className="fixed bottom-16 right-4 z-[80] max-h-[70vh] w-[min(92vw,420px)] overflow-hidden rounded-2xl border border-white/15 bg-[#111827]/95 text-white shadow-2xl backdrop-blur">
+          <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+            <div><h2 className="text-sm font-bold">播放诊断</h2><p className="mt-1 text-[11px] text-white/60">记录最近 40 条本地播放事件</p></div>
+            <div className="flex gap-2">
+              <button type="button" onClick={() => void copyDiagnostics()} className="inline-flex items-center gap-1 rounded-lg bg-white/10 px-2.5 py-1.5 text-xs hover:bg-white/15"><Clipboard size={13} />复制</button>
+              <button type="button" onClick={() => setDiagnosticsOpen(false)} className="rounded-lg p-1.5 hover:bg-white/10" aria-label="关闭"><X size={16} /></button>
+            </div>
+          </div>
+          <div className="max-h-[55vh] space-y-2 overflow-y-auto p-3">
+            <div className="rounded-lg bg-white/5 px-3 py-2 text-xs text-white/70">模式：{mode === 'hls' ? `HLS / ${hlsSource}` : '直连'} · 来源：{isRemoteEmbyID(media?.id) ? '远程 Emby' : isStrmMedia(media) ? 'STRM' : '本地文件'}</div>
+            {diagnosticEvents.length === 0 ? <p className="py-6 text-center text-xs text-white/50">等待播放事件…</p> : [...diagnosticEvents].reverse().map((event, index) => (
+              <div key={`${event.at}-${index}`} className="rounded-lg bg-white/5 px-3 py-2">
+                <div className="flex justify-between gap-2 text-[10px] text-white/45"><span>{event.phase} · {event.mode}</span><time>{new Date(event.at).toLocaleTimeString()}</time></div>
+                <p className="mt-1 break-words text-xs">{event.message}</p>
+              </div>
+            ))}
+          </div>
+        </aside>
+      )}
     </div>
   )
 }

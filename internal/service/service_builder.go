@@ -63,6 +63,9 @@ func (b *serviceContainerBuilder) startRealtimeServices() {
 	b.c.WSHub = NewHub(b.log)
 	helper.Go(b.log, "ws.hub", b.c.WSHub.Run)
 	b.c.Tasks = NewTaskTrackerService(b.log, b.c.WSHub)
+	if b.repos != nil {
+		b.c.Tasks.SetPersistence(b.repos.DB)
+	}
 	b.c.SystemUpdate = NewSystemUpdateService(b.cfg, b.log, b.repos, b.c.Tasks, b.version)
 
 	b.c.SSEHub = NewSSEHub(b.log)
@@ -206,6 +209,7 @@ func (b *serviceContainerBuilder) initAccessAndStorageServices() {
 		b.c.Organizer, b.c.WSHub, b.cfg.Cache.CacheDir,
 	)
 	b.c.Scheduler.SetTaskTracker(b.c.Tasks)
+	b.c.Scheduler.SetBackupService(b.c.Backup)
 	b.c.Scheduler.SetOrganizePipeline(b.c.OrganizePipeline)
 	b.c.Scheduler.SetSegments(b.c.Segments)
 	b.c.Scheduler.SetImageCachePolicyProvider(func() ImageCachePolicy {

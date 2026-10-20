@@ -67,8 +67,16 @@ func TestScanLibraryScansMultipleRootsAndPrunesPerRoot(t *testing.T) {
 	if err := db.Find(&rows).Error; err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 1 || rows[0].Path != fileB {
-		t.Fatalf("remaining rows = %#v, want offline root media preserved", rows)
+	if len(rows) != 2 {
+		t.Fatalf("remaining rows = %#v, want both media records preserved", rows)
+	}
+	for _, row := range rows {
+		if row.Path == fileA && row.AvailabilityState != "missing" {
+			t.Fatalf("vanished file was not marked missing: %#v", row)
+		}
+		if row.Path == fileB && row.AvailabilityState != "available" {
+			t.Fatalf("offline root status was changed: %#v", row)
+		}
 	}
 }
 
