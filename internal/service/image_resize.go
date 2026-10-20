@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -138,8 +139,8 @@ func fitSize(srcW, srcH, maxW, maxH int) (int, int) {
 
 var errImageResizeTooLarge = errors.New("image source exceeds resize pixel budget")
 
-// resizeImageData 按选项缩放图片并重新编码。返回 unchanged=true 表示原图
-// 本身已满足目标尺寸，调用方应直接输出原始字节（不重复编码、不损失质量）。
+// resizeImageData 按选项缩放图片并重新编码。返回 unchanged=true 表示源图
+// 已经是可直接下发的紧凑字节，调用方应直接输出原始字节（不重复编码）。
 func resizeImageData(data []byte, o imageResizeOptions) (out []byte, ctype string, unchanged bool, err error) {
 	if len(data) == 0 || !o.active() {
 		return data, detectContentType(data), true, nil
@@ -151,12 +152,21 @@ func resizeImageData(data []byte, o imageResizeOptions) (out []byte, ctype strin
 	if cfg.Width <= 0 || cfg.Height <= 0 {
 		return nil, "", false, errors.New("invalid image dimensions")
 	}
-	// 先用 DecodeConfig 判断是否需要解码整图：图已够小就零成本返回原字节。
+	// 先用 DecodeConfig 判断是否需要缩放。尺寸已在目标框内时仍要重编码：
+	// 刮削来源的海报常是 1000×1500、1MB 以上的 PNG，直接原样下发会让一处
+	// 海报墙就从「几十 KB 缩略图」变成「几十 MB 原图」——外部网络下每张
+	// 都要十几秒。只有本来就是紧凑 Web 格式（JPEG/WebP）且体积很小的源图
+	// 才值得零成本直出。
 	dstW, dstH := fitSize(cfg.Width, cfg.Height, o.MaxWidth, o.MaxHeight)
-	if dstW == cfg.Width && dstH == cfg.Height {
+	unchangedSize := dstW == cfg.Width && dstH == cfg.Height
+	if unchangedSize && isCompactWebFormat(format) && len(data) <= compactImageSkipBytes {
 		return data, detectContentType(data), true, nil
 	}
 	if int64(cfg.Width)*int64(cfg.Height) > imageResizeMaxSourcePixels {
+		if unchangedSize {
+			// 尺寸已满足但像素量超出解码预算：宁可直出原图，也不冒 OOM 风险。
+			return data, detectContentType(data), true, nil
+		}
 		return nil, "", false, errImageResizeTooLarge
 	}
 
@@ -165,7 +175,12 @@ func resizeImageData(data []byte, o imageResizeOptions) (out []byte, ctype strin
 		return nil, "", false, err
 	}
 	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
-	resizeScaled(dst, src, cfg.Width, cfg.Height)
+	if unchangedSize {
+		// 不缩放时省掉一次全图重采样，只做格式转换。
+		draw.Draw(dst, dst.Bounds(), src, src.Bounds().Min, draw.Src)
+	} else {
+		resizeScaled(dst, src, cfg.Width, cfg.Height)
+	}
 
 	// 只有可能带透明的源格式才需要逐像素确认，避免 JPEG 的无谓遍历。
 	// 写实海报的 PNG 通常比等价 JPEG 大一个数量级，因此在确认不含透明
@@ -231,9 +246,12 @@ func isOpaqueImage(img *image.RGBA) bool {
 // resizeSourceKey 生成源图身份键：只覆盖源文件身份（路径 + 大小 + mtime），不含
 // 目标尺寸。同一源图的所有尺寸档位共用这个前缀，才能互相列举与派生（小图直接
 // 从已缓存的大图缩小，而不是重新解码原图）。
+//
+// 前缀里的 v3 是缓存格式版本：v2 时期「尺寸已在目标框内」的 PNG 会原样直出、
+// 不写缓存，而现在同样条件会重编码成 JPEG，旧缓存与新结果语义不同，必须换键。
 func (o imageResizeOptions) resizeSourceKey(sourceID string, stat os.FileInfo) string {
 	h := sha256.New()
-	_, _ = fmt.Fprintf(h, "v2|%s", sourceID)
+	_, _ = fmt.Fprintf(h, "v3|%s", sourceID)
 	if stat != nil {
 		_, _ = fmt.Fprintf(h, "|%d|%d", stat.Size(), stat.ModTime().UnixNano())
 	}
@@ -356,13 +374,53 @@ func (p *ImageProxy) tryAcquireResizeSlot() (func(), bool) {
 	}
 }
 
-// acquireResizeSlotFor 对中等体积的图只尝试一次槽位。忙则放弃缩放，
-// 避免背景图墙在 2 核机器上排成数秒。超大原图仍等待，以免直出多兆字节。
+func (p *ImageProxy) resizeQueueTimeout() time.Duration {
+	if p != nil && p.resizeQueueWait > 0 {
+		return p.resizeQueueWait
+	}
+	return defaultResizeQueueWait
+}
+
+// acquireResizeSlotFor 对紧凑小图只尝试一次槽位，其余情况最多排队
+// resizeQueueTimeout。
+//
+// 从前这里对 1.5MB 以下的图一律「槽位忙就跳过缩放」，结果是并发加载海报墙
+// 时几乎每张图都回退成 1MB 上下的 PNG 原图：一页要传几十 MB，外部网络下单张
+// 图就要二十多秒。缩略图本身只有几十 KB，排队几百毫秒明显更划算；只有真正
+// 大到会拖慢页面的原图才值得在超时后直出。
 func (p *ImageProxy) acquireResizeSlotFor(ctx context.Context, size int64) (func(), bool) {
-	if size > 0 && size <= resizeQueueBypassBytes {
+	if size > 0 && size <= compactImageSkipBytes {
 		return p.tryAcquireResizeSlot()
 	}
-	return p.acquireResizeSlot(ctx)
+	return p.acquireResizeSlotWithin(ctx, p.resizeQueueTimeout())
+}
+
+// acquireResizeSlotWithin 在 timeout 内等待一格解码槽；超时或请求取消返回
+// false，调用方回退原图。
+func (p *ImageProxy) acquireResizeSlotWithin(ctx context.Context, timeout time.Duration) (func(), bool) {
+	if p == nil {
+		return func() {}, true
+	}
+	if timeout <= 0 {
+		return p.tryAcquireResizeSlot()
+	}
+	p.resizeSemMu.Lock()
+	if p.resizeSem == nil {
+		p.resizeSem = make(chan struct{}, imageResizeConcurrency())
+	}
+	sem := p.resizeSem
+	p.resizeSemMu.Unlock()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, true
+	case <-timer.C:
+		return nil, false
+	case <-ctx.Done():
+		return nil, false
+	}
 }
 
 // serveResizedFromFile 从 srcPath 读取图片，按选项缩放后写出，并把结果缓存
@@ -472,10 +530,6 @@ func (p *ImageProxy) ensureResizeCache(ctx context.Context, srcPath string, o im
 // ponytail: 200KB 覆盖这台机器上的典型海报（平均约 100KB）；更大的图仍尝试缩放。
 const compactImageSkipBytes = 200 * 1024
 
-// resizeQueueBypassBytes 是“槽位忙就放弃缩放”的上限。超过它的原图继续排队，
-// 以免把未压缩的剧照直接发给客户端。
-const resizeQueueBypassBytes = 1536 * 1024
-
 // serveCompactOriginal 在源文件已经很小且是浏览器可直接显示的 JPEG/WebP 时
 // 跳过解码。返回 false 表示仍应走缩放路径。
 func serveCompactOriginal(w http.ResponseWriter, r *http.Request, srcPath string, stat os.FileInfo) bool {
@@ -502,6 +556,17 @@ func isCompactWebImage(header []byte) bool {
 	return len(header) >= 12 &&
 		string(header[0:4]) == "RIFF" &&
 		string(header[8:12]) == "WEBP"
+}
+
+// isCompactWebFormat 判断 image.DecodeConfig 报告的格式是否已经适合直接下发
+// 给浏览器。PNG/BMP/GIF 即使尺寸很小也可能有几百 KB，需要重编码成 JPEG。
+func isCompactWebFormat(format string) bool {
+	switch strings.ToLower(format) {
+	case "jpeg", "jpg", "webp":
+		return true
+	default:
+		return false
+	}
 }
 
 // writeResizeCache 原子写入缩放结果；失败只记日志，不影响本次响应。

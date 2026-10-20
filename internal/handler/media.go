@@ -42,6 +42,11 @@ type webLibraryPayload struct {
 	Cards        []service.SeriesCardView `json:"cards,omitempty"`
 }
 
+// remoteLibraryPreviewBudget 限制 /api/libraries?with_preview=1 里远程 Emby
+// 库预览（总条数 + 最新卡片）的总耗时。这些预览只用于首页卡片，值得为它
+// 排队等待的量很小；此前它跟随请求上下文，上游超时会让整页等 15 秒以上。
+var remoteLibraryPreviewBudget = 3 * time.Second
+
 // remoteLibraryItemTypes 远程库内容拉取时按 CollectionType 过滤直属条目，
 // 避免电影库里的合集文件夹(Folder) 漏出为电影卡片。
 func remoteLibraryItemTypes(collectionType string) string {
@@ -178,6 +183,12 @@ func listLibrariesHandler(svc *service.Container) gin.HandlerFunc {
 					remotePayloads[i] = webLibraryPayload{Library: v.Library, IsRemoteEmby: true, RemoteSource: v.AccountName}
 				}
 				if withPreview && len(allowedViews) > 0 {
+					// 远程库预览只是首页卡片上的「最新几条」，绝不能拖住整个
+					// 库列表：上游 Emby 一旦超时，每个远程库都要等满
+					// embyRemoteHTTPTimeout（15s），串起来就是 17–30 秒。
+					// 给整段预览一个总预算，超时就只返回库名，卡片留给下一次刷新。
+					previewCtx, cancelPreview := context.WithTimeout(ctx, remoteLibraryPreviewBudget)
+					defer cancelPreview()
 					const maxRemotePreviewWorkers = 6
 					sem := make(chan struct{}, maxRemotePreviewWorkers)
 					var wg sync.WaitGroup
@@ -189,11 +200,11 @@ func listLibrariesHandler(svc *service.Container) gin.HandlerFunc {
 							select {
 							case sem <- struct{}{}:
 								defer func() { <-sem }()
-							case <-ctx.Done():
+							case <-previewCtx.Done():
 								return
 							}
 							helper.Run(svc.Log, "media.remotePreview", func() {
-								acct := svc.EmbyRemote.AccountByID(ctx, v.AccountID)
+								acct := svc.EmbyRemote.AccountByID(previewCtx, v.AccountID)
 								if acct == nil {
 									return
 								}
@@ -205,10 +216,10 @@ func listLibrariesHandler(svc *service.Container) gin.HandlerFunc {
 									Name:           v.Library.Name,
 								}
 								itemTypes := remoteLibraryItemTypes(v.CollectionType)
-								if _, total, err := svc.EmbyRemote.RemoteLibraryMedia(ctx, tmpMount, acct, v.RemoteID, itemTypes, 0, 1); err == nil {
+								if _, total, err := svc.EmbyRemote.RemoteLibraryMedia(previewCtx, tmpMount, acct, v.RemoteID, itemTypes, 0, 1); err == nil {
 									remotePayloads[i].Total = total
 								}
-								if cards, err := svc.EmbyRemote.RemoteLatestCards(ctx, tmpMount, acct, v.RemoteID, limit); err == nil {
+								if cards, err := svc.EmbyRemote.RemoteLatestCards(previewCtx, tmpMount, acct, v.RemoteID, limit); err == nil {
 									remotePayloads[i].Cards = service.NewSeriesCardViews(cards)
 								}
 							})

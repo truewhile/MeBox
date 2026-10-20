@@ -123,17 +123,58 @@ func TestResizeImageDataScalesDownAndReencodesAsJPEG(t *testing.T) {
 	}
 }
 
-func TestResizeImageDataLeavesImagesWithinBoundsUntouched(t *testing.T) {
+// 尺寸已经在目标框内的 PNG 也必须转成 JPEG。刮削来的海报常是 1000×1500、
+// 1MB 级的 PNG；此前这种情况原样直出，一处海报墙就要下载几十 MB，外部网络下
+// 每张图要十几秒（线上实测单张 1.3MB / 20 多秒）。
+func TestResizeImageDataReencodesPNGWithinBounds(t *testing.T) {
 	data := encodeTestPNG(t, 200, 300, 255)
-	out, _, unchanged, err := resizeImageData(data, imageResizeOptions{MaxWidth: 400, MaxHeight: 600})
+	out, ctype, unchanged, err := resizeImageData(data, imageResizeOptions{MaxWidth: 400, MaxHeight: 600, Quality: 80})
+	if err != nil {
+		t.Fatalf("resize: %v", err)
+	}
+	if unchanged {
+		t.Fatal("PNG within the target box must still be re-encoded as a compact web format")
+	}
+	if ctype != "image/jpeg" {
+		t.Fatalf("content type = %q, want image/jpeg", ctype)
+	}
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(out))
+	if err != nil {
+		t.Fatalf("decode re-encoded image: %v", err)
+	}
+	if format != "jpeg" {
+		t.Fatalf("format = %q, want jpeg", format)
+	}
+	if cfg.Width != 200 || cfg.Height != 300 {
+		t.Fatalf("re-encoded to %dx%d, want the original 200x300 (no upscaling)", cfg.Width, cfg.Height)
+	}
+}
+
+// 已经是紧凑 Web 格式且体积很小的源图仍然零成本直出。
+func TestResizeImageDataLeavesSmallCompactSourceUntouched(t *testing.T) {
+	var buf bytes.Buffer
+	img := image.NewRGBA(image.Rect(0, 0, 200, 300))
+	for y := 0; y < 300; y++ {
+		for x := 0; x < 200; x++ {
+			img.Set(x, y, color.RGBA{R: uint8(x % 16 * 16), G: uint8(y % 16 * 16), B: 200, A: 255})
+		}
+	}
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 80}); err != nil {
+		t.Fatalf("encode test jpeg: %v", err)
+	}
+	data := buf.Bytes()
+	if len(data) > compactImageSkipBytes {
+		t.Fatalf("test jpeg is %d bytes, expected a compact source", len(data))
+	}
+	out, ctype, unchanged, err := resizeImageData(data, imageResizeOptions{MaxWidth: 400, MaxHeight: 600})
 	if err != nil {
 		t.Fatalf("resize: %v", err)
 	}
 	if !unchanged {
-		t.Fatal("expected an image already within bounds to be returned unchanged")
+		t.Fatal("a compact JPEG already within bounds should be served unchanged")
 	}
-	if !bytes.Equal(out, data) {
-		t.Fatal("expected the original bytes to be returned verbatim")
+	if !bytes.Equal(out, data) || ctype != "image/jpeg" {
+		t.Fatalf("expected the original jpeg bytes back, got %d bytes of %q", len(out), ctype)
 	}
 }
 
@@ -302,7 +343,9 @@ func TestServeResizedFromFileSkipsDecodeForCompactJPEG(t *testing.T) {
 	}
 }
 
-func TestServeResizedFromFileDoesNotQueueWhenResizeBusy(t *testing.T) {
+// 排队上限：槽位一直不空时，请求最多等 resizeQueueWait，然后回退原图，
+// 不会被无限期挂住。这条约束保护的是请求本身，而不是「不等就直出原图」。
+func TestServeResizedFromFileFallsBackWhenResizeQueueStaysBusy(t *testing.T) {
 	dir := t.TempDir()
 	src := dir + string(os.PathSeparator) + "backdrop.jpg"
 	data := make([]byte, compactImageSkipBytes+1024)
@@ -310,7 +353,7 @@ func TestServeResizedFromFileDoesNotQueueWhenResizeBusy(t *testing.T) {
 	if err := os.WriteFile(src, data, 0o644); err != nil {
 		t.Fatalf("write source: %v", err)
 	}
-	proxy := &ImageProxy{cacheDir: dir + string(os.PathSeparator) + "cache"}
+	proxy := &ImageProxy{cacheDir: dir + string(os.PathSeparator) + "cache", resizeQueueWait: 50 * time.Millisecond}
 	var releases []func()
 	for i := 0; i < imageResizeConcurrency(); i++ {
 		release, ok := proxy.acquireResizeSlot(context.Background())
@@ -327,10 +370,77 @@ func TestServeResizedFromFileDoesNotQueueWhenResizeBusy(t *testing.T) {
 
 	start := time.Now()
 	handled := proxy.serveResizedFromFile(httptest.NewRecorder(), httptest.NewRequest("GET", "/x?maxWidth=480", nil), src, imageResizeOptions{MaxWidth: 480})
-	if time.Since(start) > 200*time.Millisecond {
-		t.Fatal("resize slot was busy but the request still waited in the queue")
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("request waited %v with every slot held; the queue wait must be bounded", elapsed)
 	}
 	if handled {
-		t.Fatal("expected a busy resize slot to fall back so the caller can serve the original")
+		t.Fatal("expected a permanently busy queue to fall back so the caller can serve the original")
+	}
+}
+
+// 槽位只是短暂忙碌时必须排队等待并产出缩略图，而不是直出多兆字节原图。
+// 这是线上「海报墙每张图 20 多秒」的根因：并发加载时槽位全忙，旧逻辑把
+// 1MB 级 PNG 原样下发。
+// encodeNoisyPNG 生成难以压缩的 PNG：规则色块会被压到 1KB 级别，测不出
+// 「大体积 PNG 被原样下发」这条回归。
+func encodeNoisyPNG(t *testing.T, w, h int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	seed := uint32(0x9e3779b9)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			seed = seed*1664525 + 1013904223
+			img.Set(x, y, color.RGBA{R: uint8(seed >> 24), G: uint8(seed >> 16), B: uint8(seed >> 8), A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode noisy png: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func TestServeResizedFromFileWaitsForSlotInsteadOfServingOriginal(t *testing.T) {
+	dir := t.TempDir()
+	src := dir + string(os.PathSeparator) + "poster.png"
+	original := encodeNoisyPNG(t, 378, 540)
+	if len(original) <= compactImageSkipBytes {
+		t.Fatalf("test poster is %d bytes, want a source above the compact threshold", len(original))
+	}
+	if err := os.WriteFile(src, original, 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	proxy := &ImageProxy{cacheDir: dir + string(os.PathSeparator) + "cache"}
+	var releases []func()
+	for i := 0; i < imageResizeConcurrency(); i++ {
+		release, ok := proxy.acquireResizeSlot(context.Background())
+		if !ok {
+			t.Fatal("expected a resize slot")
+		}
+		releases = append(releases, release)
+	}
+	go func() {
+		time.Sleep(40 * time.Millisecond)
+		releases[0]()
+	}()
+
+	rec := httptest.NewRecorder()
+	if !proxy.serveResizedFromFile(rec, httptest.NewRequest("GET", "/x?maxWidth=480&maxHeight=600", nil), src, imageResizeOptions{MaxWidth: 480, MaxHeight: 600}) {
+		t.Fatal("expected the request to wait for the slot and serve a thumbnail")
+	}
+	body := rec.Body.Bytes()
+	if bytes.Equal(body, original) {
+		t.Fatal("served the multi-hundred-KB PNG original instead of a re-encoded thumbnail")
+	}
+	if rec.Header().Get("Content-Type") != "image/jpeg" {
+		t.Fatalf("content type = %q, want image/jpeg", rec.Header().Get("Content-Type"))
+	}
+	// 同一请求第二次必须直接命中缩放缓存。
+	rec2 := httptest.NewRecorder()
+	if !proxy.serveResizedFromFile(rec2, httptest.NewRequest("GET", "/x?maxWidth=480&maxHeight=600", nil), src, imageResizeOptions{MaxWidth: 480, MaxHeight: 600}) {
+		t.Fatal("expected the cached thumbnail to be reused")
+	}
+	if !bytes.Equal(rec2.Body.Bytes(), body) {
+		t.Fatal("expected the cached thumbnail bytes to be identical")
 	}
 }

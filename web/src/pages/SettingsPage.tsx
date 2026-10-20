@@ -36,27 +36,34 @@ export function SettingsPage() {
     }
   }, [searchParams])
 
+  // refresh 只等真正需要的设置项返回。媒体库列表仅供「成人库」等下拉选项
+  // 使用，晚到不影响设置项渲染；此前用 Promise.all 一并等待，远程 Emby
+  // 挂载枚举偶尔要 10–17 秒，整页就一直空转。
   const refresh = async () => {
     setLoading(true)
     try {
-      const [all, libs] = await Promise.all([
-        adminAPI.listSettings(),
-        libraryAPI.list({ includeHidden: true }).catch(() => [] as Library[]),
-      ])
+      const all = await adminAPI.listSettings()
       const idx: Record<string, string> = {}
       for (const s of all as Setting[]) {
         if (ALL_KEYS.has(s.key)) idx[s.key] = s.value
       }
       setValues(idx)
-      setLibraries(libs as Library[])
       setDirty(new Set())
     } finally {
       setLoading(false)
     }
   }
 
+  const refreshLibraries = () => {
+    libraryAPI
+      .list({ includeHidden: true })
+      .then((libs) => setLibraries(libs as Library[]))
+      .catch(() => undefined)
+  }
+
   useEffect(() => {
     refresh().catch(() => undefined)
+    refreshLibraries()
   }, [])
 
   const onChange = (key: string, value: string) => {

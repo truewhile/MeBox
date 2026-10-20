@@ -49,6 +49,10 @@ type ImageProxy struct {
 	resizeSemMu sync.Mutex
 	resizeSem   chan struct{}
 
+	// resizeQueueWait 是一次请求最多为一格解码槽排队的时长。为 0 时用
+	// defaultResizeQueueWait；测试会把它调小以免真的等待两秒。
+	resizeQueueWait time.Duration
+
 	// libraryRootsFn returns the configured media library roots so that
 	// sidecar poster/artwork files stored alongside media (under arbitrary
 	// per-library paths) are allowed by isAllowedLocalPath. It is provided
@@ -86,6 +90,12 @@ const (
 	// imageRenditionCacheSubdir 存放挂载 Emby 直接按尺寸产出的成品图：它们
 	// 已经是客户端要的最终尺寸，和派生缩略图一样属于长期保留的热路径缓存。
 	imageRenditionCacheSubdir = "renditions"
+
+	// defaultResizeQueueWait 是请求为一格解码槽排队的最长时间。一张 3MP
+	// 海报的解码+缩放约 0.15s，2 核机器两格槽位足以在几秒内消化一整屏
+	// 海报；等待远好于「槽位忙就回退多兆字节原图」（那样每张图在外部网络
+	// 下要十几秒）。超时后仍回退原图，保证请求不会被无限期挂住。
+	defaultResizeQueueWait = 3 * time.Second
 )
 
 // NewImageProxy is the constructor.
