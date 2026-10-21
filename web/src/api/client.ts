@@ -175,7 +175,7 @@ export function streamURL(mediaId: string, options: { proxy?: boolean } = {}): s
 
 // hlsURL returns the m3u8 playlist URL fed into hls.js.
 // startSec > 0 asks the server to (re)start ffmpeg from that source offset.
-export function hlsURL(mediaId: string, startSec = 0, subtitleStream?: number, quality?: string): string {
+export function hlsURL(mediaId: string, startSec = 0, subtitleStream?: number, quality?: string, sessionID?: string): string {
   const safeStart = Math.max(0, Math.round(startSec * 1000) / 1000)
   // Always send start= (including 0) so the server can tell an intentional
   // restart-from-head apart from a missing query on a stale refresh.
@@ -188,7 +188,8 @@ export function hlsURL(mediaId: string, startSec = 0, subtitleStream?: number, q
       ? `&subtitle=${encodeURIComponent(String(subtitleStream))}`
       : ''
   const qualityQuery = quality ? `&quality=${encodeURIComponent(quality)}` : ''
-  return `/api/hls/${encodeURIComponent(mediaId)}/index.m3u8?${tokenQuery()}${profileQuery()}${start}${subtitle}${qualityQuery}${bust}`
+  const session = sessionID ? `&session_id=${encodeURIComponent(sessionID)}` : ''
+  return `/api/hls/${encodeURIComponent(mediaId)}/index.m3u8?${tokenQuery()}${profileQuery()}${start}${subtitle}${qualityQuery}${bust}${session}`
 }
 
 // cloudHlsURL returns the MeBox-proxied 115 cloud HLS master playlist URL.
@@ -202,8 +203,9 @@ export function cloudHlsURL(mediaId: string, definition: string): string {
 
 // Stop an on-demand HLS job. keepalive makes the request survive page
 // navigation/tab close, where an axios promise can be discarded by browsers.
-export function stopHLSJob(mediaId: string): void {
-  const url = `/api/hls/${encodeURIComponent(mediaId)}?${tokenQuery()}${profileQuery()}`
+export function stopHLSJob(mediaId: string, sessionID?: string): void {
+  const session = sessionID ? `&session_id=${encodeURIComponent(sessionID)}` : ''
+  const url = `/api/hls/${encodeURIComponent(mediaId)}?${tokenQuery()}${profileQuery()}${session}`
   void fetch(url, {
     method: 'DELETE',
     credentials: 'same-origin',

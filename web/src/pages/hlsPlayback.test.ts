@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert'
-import { applyPendingHlsSeek, attachNativeHls, bindPendingHlsSeek, hlsManifestTimeoutMs, playbackPositionSec } from './hlsPlayback.ts'
+import { applyPendingHlsSeek, attachNativeHls, bindPendingHlsSeek, hlsManifestTimeoutMs, playbackPositionSec, playbackTimeSec } from './hlsPlayback.ts'
 
 class FakeVideo extends EventTarget {
   src = ''
@@ -55,4 +55,8 @@ assert.equal(hlsManifestTimeoutMs('cloud', 1800), 60_000)
 assert.equal(playbackPositionSec('hls', 'cloud', 420, 600), 600, 'cloud subtitle/quality switches must not add an old local offset')
 assert.equal(playbackPositionSec('hls', 'local', 420, 60), 480, 'local subtitle switches preserve the source position')
 assert.equal(playbackPositionSec('direct', 'local', 420, 60), 60)
+assert.equal(playbackTimeSec('hls', 'cloud', 600, 640), 640, 'cloud skip/undo uses the absolute target, not target minus a former local offset')
+assert.equal(playbackTimeSec('hls', 'local', 600, 640), 40)
+assert.equal(playbackTimeSec('direct', 'local', 600, 640), 640)
+assert.equal(playbackTimeSec('hls', 'local', 600, 100), 0, 'targets before a local start clamp to zero')
 console.log('hlsPlayback.test.ts ok')

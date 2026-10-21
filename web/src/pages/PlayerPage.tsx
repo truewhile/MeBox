@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import type Hls from 'hls.js'
 import toast from 'react-hot-toast'
@@ -41,7 +41,9 @@ import { pickPlayerMode, needsTranscodeForBrowser, isDirectStreamMedia, isStrmMe
 import { classifyDirectPlayError, directPlayFailureCopy, directStallTimeoutMs, DIRECT_SEEK_GRACE_MS } from './directPlayError'
 import type { DirectPlayFailureReason } from './directPlayError'
 import { canSeekDirectNow, DIRECT_SEEK_WAIT_MS } from './directPlaySeek'
-import { applyPendingHlsSeek, attachNativeHls, bindPendingHlsSeek, hlsManifestTimeoutMs, playbackPositionSec } from './hlsPlayback'
+import { applyPendingHlsSeek, attachNativeHls, bindPendingHlsSeek, hlsManifestTimeoutMs, playbackPositionSec, playbackTimeSec } from './hlsPlayback'
+import { availableLocalQuality, defaultLocalQualityId, findPlaybackQualityById } from './playbackQuality'
+import { createPlaybackRequestGuard } from './playbackRequestGuard'
 import { apiErrorMessage } from './StrmManagePage'
 import { PlayerTopBar } from './PlayerTopBar'
 import { PlayerVideoStage } from './PlayerVideoStage'
@@ -118,6 +120,14 @@ export function PlayerPage() {
   const hlsRef = useRef<Hls | null>(null)
   const lastSentRef = useRef(0)
   const progressSessionRef = useRef<PlaybackProgressSession | null>(null)
+  const cloudRequestGuardRef = useRef(createPlaybackRequestGuard())
+  const currentMediaIdRef = useRef(id)
+  useLayoutEffect(() => {
+    const guard = cloudRequestGuardRef.current
+    currentMediaIdRef.current = id
+    guard.invalidate()
+    return () => guard.invalidate()
+  }, [id])
   const directRetryRef = useRef(false)
   const retryingDirectRef = useRef(false)
   // 程序化续播 seek 后的宽限截止时间；期内直连误报不升到 HLS。
@@ -563,6 +573,7 @@ export function PlayerPage() {
   const setPlaybackMode = useCallback((next: PlayerMode) => {
     // 一旦显式决定过播放方式，URL 上的 ?mode= 就不再是权威（避免它把状态打回去）。
     requestedModeRef.current = null
+    if (next === 'direct') cloudRequestGuardRef.current.invalidate()
     setMode(next)
   }, [])
 
@@ -767,6 +778,11 @@ export function PlayerPage() {
    */
   const handleDirectSeekStalled = useCallback(
     (target: number) => {
+      cloudRequestGuardRef.current.invalidate()
+      if (directOnly || isDirectStreamMedia(mediaRef.current)) {
+        toast.error('当前播放方式不提供 HLS 转码，请使用外部播放器定位')
+        return
+      }
       const cloudQuality =
         findPlaybackQualityById(playbackInfo, selectedQuality) ??
         findPlaybackQualityById(playbackInfo, playbackInfo?.default_quality ?? '')
@@ -780,9 +796,7 @@ export function PlayerPage() {
         toast('直连定位失败，已切到 115 云 HLS 跳转')
         return
       }
-      const localQuality =
-        findPlaybackQualityById(playbackInfo, selectedQuality) ??
-        findPlaybackQualityById(playbackInfo, defaultLocalQualityId(playbackInfo))
+      const localQuality = availableLocalQuality(playbackInfo, selectedQuality)
       if (localQuality?.available) {
         setSelectedQuality(localQuality.id)
         setHlsSource('local')
@@ -795,7 +809,7 @@ export function PlayerPage() {
       }
       toast.error('直连定位失败，且当前没有可用的 HLS 转码档位')
     },
-    [playbackInfo, selectedQuality, setPlaybackMode],
+    [directOnly, playbackInfo, selectedQuality, setPlaybackMode],
   )
 
   // Load metadata and pick a default mode.
@@ -1032,17 +1046,22 @@ export function PlayerPage() {
 
   const switchToLocalHLS = useCallback(
     (position?: number) => {
+      cloudRequestGuardRef.current.invalidate()
       pendingSeekRef.current = null
       setHlsSource('local')
       setCloudWaiting(false)
-      setSelectedQuality((prev) => {
-        if (playbackInfo?.local_qualities?.some((quality) => quality.id === prev)) return prev
-        return defaultLocalQualityId(playbackInfo)
-      })
+      const quality = availableLocalQuality(playbackInfo, selectedQuality)
+      if (playbackInfo && !quality) {
+        setHlsUnavailable(true)
+        showPlayFailure('本地 HLS 转码不可用，请配置 ffmpeg 或使用外部播放器。')
+        setPlaybackMode('direct')
+        return
+      }
+      setSelectedQuality(quality?.id ?? defaultLocalQualityId(playbackInfo))
       if (position !== undefined) setHlsStartSec(Math.max(0, position))
       setPlaybackMode('hls')
     },
-    [playbackInfo, setPlaybackMode],
+    [playbackInfo, selectedQuality, setPlaybackMode, showPlayFailure],
   )
 
   /**
@@ -1080,8 +1099,11 @@ export function PlayerPage() {
   const startCloudTranscode = useCallback(
     async (definition: number) => {
       if (!mediaId) return
+      const isCurrentRequest = cloudRequestGuardRef.current.begin()
+      const isCurrent = () => isCurrentRequest() && currentMediaIdRef.current === mediaId && !directOnlyRef.current
       try {
         const info = await mediaAPI.startCloudTranscode(mediaId, definition)
+        if (!isCurrent() || info.media_id !== mediaId) return
         setPlaybackInfo(info)
         if (info.transcode.state === 'ready') {
           setCloudWaiting(false)
@@ -1094,6 +1116,7 @@ export function PlayerPage() {
         setCloudWaitMessage(info.transcode.message || '115 正在转码…')
         setCloudWaitStartedAt(Date.now())
       } catch {
+        if (!isCurrent()) return
         switchToLocalHLS()
         toast.error('115 云端转码触发失败，已切换本地转码')
       }
@@ -1105,6 +1128,7 @@ export function PlayerPage() {
   // 的自愈逻辑共用，避免两处各写一遍云端/本地选择。
   const enterHlsPlayback = useCallback(
     (startSec: number, infoOverride?: PlaybackInfo | null) => {
+      cloudRequestGuardRef.current.invalidate()
       const position = Math.max(0, startSec)
       // 允许传入刚拿到的能力信息：从 URL 强制 HLS 时不想等到 state 更新后才选线路。
       const info = infoOverride ?? playbackInfo
@@ -1127,6 +1151,7 @@ export function PlayerPage() {
         }
       } else {
         switchToLocalHLS(position)
+        return
       }
       setPlaybackMode('hls')
     },
@@ -1165,7 +1190,7 @@ export function PlayerPage() {
         setCloudWaitMessage(info.transcode.message || '115 正在转码…')
         cloudPollTimerRef.current = setTimeout(poll, cloudRetryRef.current * 1000)
       } catch {
-        cloudPollTimerRef.current = setTimeout(poll, 5000)
+        if (!cancelled) cloudPollTimerRef.current = setTimeout(poll, 5000)
       }
     }
     cloudPollTimerRef.current = setTimeout(poll, cloudRetryRef.current * 1000)
@@ -1338,6 +1363,7 @@ export function PlayerPage() {
     if (!currentMedia) return
     let cancelled = false
     let cleanupHlsResume: (() => void) | undefined
+    let stopLocalPlayback: (() => void) | undefined
     let onDirectMetadata: (() => void) | undefined
     teardownHls()
 
@@ -1348,10 +1374,17 @@ export function PlayerPage() {
         teardownHls()
         return
       }
+      // Each wired local source owns its job, including seek/quality changes.
+      // Capture the ID in cleanup so a delayed DELETE cannot stop a newer run.
+      const localSessionID = hlsSource === 'local' ? newPlaybackProgressSession(mediaId).id : undefined
+      if (localSessionID) {
+        stopLocalPlayback = () => stopHLSJob(mediaId, localSessionID)
+        window.addEventListener('pagehide', stopLocalPlayback)
+      }
       const url =
         hlsSource === 'cloud'
           ? cloudHlsURL(mediaId, selectedQuality)
-          : hlsURL(mediaId, hlsStartSec, activeBurnedSubtitleStream, selectedQuality)
+          : hlsURL(mediaId, hlsStartSec, activeBurnedSubtitleStream, selectedQuality, localSessionID)
       void import('hls.js').then(({ default: HlsCtor }) => {
         if (cancelled || !ref.current) return
         if (HlsCtor.isSupported()) {
@@ -1494,6 +1527,10 @@ export function PlayerPage() {
       if (onDirectMetadata) video.removeEventListener('loadedmetadata', onDirectMetadata)
       cleanupHlsResume?.()
       teardownHls()
+      if (stopLocalPlayback) {
+        window.removeEventListener('pagehide', stopLocalPlayback)
+        stopLocalPlayback()
+      }
     }
   }, [
     activeBurnedSubtitleStream,
@@ -1517,24 +1554,6 @@ export function PlayerPage() {
     teardownHls,
     vr360DirectProxy,
   ])
-
-  // Stop host ffmpeg when leaving this HLS player. The keepalive request also
-  // survives route navigation while the component is being torn down.
-  useEffect(() => {
-    if (!mediaId || mode !== 'hls' || hlsSource !== 'local') return
-    return () => {
-      stopHLSJob(mediaId)
-    }
-  }, [hlsSource, mediaId, mode])
-
-  // React cleanup is not guaranteed when a tab/window closes. pagehide fires
-  // while the document can still dispatch a keepalive request.
-  useEffect(() => {
-    if (!mediaId || mode !== 'hls' || hlsSource !== 'local') return
-    const stopOnPageExit = () => stopHLSJob(mediaId)
-    window.addEventListener('pagehide', stopOnPageExit)
-    return () => window.removeEventListener('pagehide', stopOnPageExit)
-  }, [hlsSource, mediaId, mode])
 
   // 自动拉取已有的播放进度并恢复播放位置
   useEffect(() => {
@@ -1828,8 +1847,7 @@ export function PlayerPage() {
     const sync = () => {
       // HLS 转码时 <video>.currentTime 是相对转码起点的，必须把起点加回来。这里与
       // 进度上报用的算法保持一致，否则转码场景下整段判断都会错位。
-      const offset = modeRef.current === 'hls' ? hlsStartSecRef.current : 0
-      const absolute = offset + (video.currentTime || 0)
+      const absolute = playbackPositionSec(modeRef.current, hlsSourceRef.current, hlsStartSecRef.current, video.currentTime || 0)
       const next = resolveActiveSkip(absolute, skipSegments, {
         hasNextEpisode: Boolean(nextEpisode),
         excludedKinds: dismissedSkipKinds,
@@ -1854,8 +1872,7 @@ export function PlayerPage() {
         selfSkipSeekRef.current = false
         return
       }
-      const offset = modeRef.current === 'hls' ? hlsStartSecRef.current : 0
-      const absolute = offset + (video.currentTime || 0)
+      const absolute = playbackPositionSec(modeRef.current, hlsSourceRef.current, hlsStartSecRef.current, video.currentTime || 0)
       const hit = skipSegments.find(
         (segment) =>
           (segment.kind === 'intro' || segment.kind === 'recap') &&
@@ -2169,7 +2186,7 @@ export function PlayerPage() {
           return
         }
         selfSkipSeekRef.current = true
-        video.currentTime = Math.max(0, target - hlsStartSec)
+        video.currentTime = playbackTimeSec(mode, hlsSource, hlsStartSec, target)
         return
       }
       if (isStrmMedia(mediaRef.current)) {
@@ -2277,6 +2294,7 @@ export function PlayerPage() {
 
   const selectPlaybackQuality = useCallback(
     (quality: PlaybackQuality) => {
+      cloudRequestGuardRef.current.invalidate()
       const video = ref.current
       const localTime = video?.currentTime || 0
       // 云 HLS 的 currentTime 本来就在绝对时间轴上；本地 HLS 的 t=0 对应 hlsStartSec。
@@ -2657,21 +2675,6 @@ function formatEpisodeDisplay(ep: Media, siblings: Media[]): string {
 
   const episodeLabel = formatEpisodeLabel(ep)
   return episodeLabel || mediaTitle || title || '未命名'
-}
-
-function findPlaybackQualityById(info: PlaybackInfo | null, id: string): PlaybackQuality | undefined {
-  if (!info || !id) return undefined
-  return [...(info.cloud_qualities ?? []), ...(info.local_qualities ?? [])].find(
-    (quality) => quality.id === id,
-  )
-}
-
-function defaultLocalQualityId(info: PlaybackInfo | null): string {
-  const qualities = info?.local_qualities ?? []
-  for (const id of ['1080', '720', '480', 'source']) {
-    if (qualities.some((quality) => quality.id === id)) return id
-  }
-  return qualities[0]?.id ?? '720'
 }
 
 function looksLikeSeriesTitle(ep: Media, title: string, siblings: Media[]): boolean {

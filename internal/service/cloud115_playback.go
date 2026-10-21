@@ -104,11 +104,13 @@ func (s *Cloud115PlaybackService) HLSProxy() *Cloud115HLSProxy {
 	return s.proxy
 }
 
-// PlaybackInfo 返回媒体在 direct/115-cloud/local 三种模式下的能力描述。
-//
-// requestedDefinition 为空或 0 时默认选择 1080P；该档位不可用时返回
-// transcoding 状态（并只触发一次加速转码，避免轮询风暴）。
+// PlaybackInfo only reads direct/115-cloud/local playback capabilities.
+// Cloud work is queued exclusively by StartTranscode, never by polling.
 func (s *Cloud115PlaybackService) PlaybackInfo(ctx context.Context, mediaID string, requestedDefinition int) (*PlaybackInfo, error) {
+	return s.playbackInfo(ctx, mediaID, requestedDefinition, false)
+}
+
+func (s *Cloud115PlaybackService) playbackInfo(ctx context.Context, mediaID string, requestedDefinition int, startTranscode bool) (*PlaybackInfo, error) {
 	if s == nil || s.repo == nil || s.repo.Media == nil {
 		return nil, ErrMediaNotFound
 	}
@@ -179,13 +181,26 @@ func (s *Cloud115PlaybackService) PlaybackInfo(ctx context.Context, mediaID stri
 		return info, nil
 	}
 
-	info.Transcode = s.ensureCloudTranscode(ctx, account.ID, pickCode, selected, client)
+	if startTranscode {
+		info.Transcode = s.ensureCloudTranscode(ctx, account.ID, pickCode, selected, client)
+	} else {
+		info.Transcode = Cloud115TranscodeState{
+			State: "idle", Definition: selected.ID, Message: "该清晰度尚未就绪，可请求 115 云端转码", RetryAfterSec: 5,
+		}
+		s.mu.Lock()
+		if last, ok := s.pushState[account.ID+":"+pickCode]; ok {
+			info.Transcode.State = "transcoding"
+			info.Transcode.Message = last.message
+			info.Transcode.StartedAt = last.at.Unix()
+		}
+		s.mu.Unlock()
+	}
 	return info, nil
 }
 
 // StartTranscode 显式触发某个清晰度的云端转码，返回最新状态。
 func (s *Cloud115PlaybackService) StartTranscode(ctx context.Context, mediaID string, definition int) (*PlaybackInfo, error) {
-	return s.PlaybackInfo(ctx, mediaID, definition)
+	return s.playbackInfo(ctx, mediaID, definition, true)
 }
 
 // ResolveCloud115URL 返回指定清晰度的 115 云端 m3u8 地址。
@@ -258,6 +273,9 @@ func (s *Cloud115PlaybackService) ensureCloudTranscode(
 			}
 		}
 	}
+	// Reserve the in-flight attempt before releasing the lock. Two simultaneous
+	// explicit starts must not both submit a push while the first awaits 115.
+	s.pushState[key] = cloud115PushAttempt{at: now, message: "正在提交 115 云端转码请求…"}
 	s.mu.Unlock()
 
 	err := client.SubmitVideoPush(ctx, pickCode, "vip_push")

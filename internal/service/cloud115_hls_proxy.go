@@ -20,8 +20,9 @@ import (
 )
 
 var (
-	ErrCloud115HLSSessionNotFound = errors.New("115 hls session not found")
-	ErrCloud115HLSUpstreamExpired = errors.New("115 hls upstream expired")
+	ErrCloud115HLSSessionNotFound      = errors.New("115 hls session not found")
+	ErrCloud115HLSUpstreamExpired      = errors.New("115 hls upstream expired")
+	ErrCloud115HLSSessionMediaMismatch = errors.New("115 hls session media mismatch")
 )
 
 const (
@@ -131,6 +132,9 @@ func (p *Cloud115HLSProxy) ServeChild(ctx context.Context, w http.ResponseWriter
 	if !ok {
 		return ErrCloud115HLSSessionNotFound
 	}
+	if r == nil || strings.TrimSpace(r.URL.Query().Get("media_id")) != session.MediaID {
+		return ErrCloud115HLSSessionMediaMismatch
+	}
 	resp, err := p.fetchUpstream(ctx, upstream, r.Header.Get("Range"))
 	if err != nil {
 		return err
@@ -184,6 +188,15 @@ func (p *Cloud115HLSProxy) ServeChild(ctx context.Context, w http.ResponseWriter
 		_, err = io.Copy(w, resp.Body)
 	}
 	return err
+}
+
+// SessionMediaID resolves the server-owned media identity before handler authorization.
+func (p *Cloud115HLSProxy) SessionMediaID(sessionID, key string) (string, error) {
+	session, _, ok := p.lookup(sessionID, key)
+	if !ok {
+		return "", ErrCloud115HLSSessionNotFound
+	}
+	return session.MediaID, nil
 }
 
 func (p *Cloud115HLSProxy) newSession(mediaID string, definition int) *cloud115HLSSession {

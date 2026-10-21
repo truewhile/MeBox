@@ -124,10 +124,32 @@ func cloud115HLSSessionHandler(svc *service.Container) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "missing media_id"})
 			return
 		}
-		if !enforceScopedPlaybackToken(c, mediaID) {
+		if c.Request.Context().Err() != nil {
+			c.AbortWithStatus(499)
 			return
 		}
-		err := svc.Cloud115.HLSProxy().ServeChild(
+		actualMediaID, err := svc.Cloud115.HLSProxy().SessionMediaID(c.Param("session"), c.Param("key"))
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"code": "hls_session_not_found", "error": "hls session not found"})
+			return
+		}
+		if mediaID != actualMediaID {
+			c.JSON(http.StatusForbidden, gin.H{"error": "playback session media mismatch"})
+			return
+		}
+		if !enforceScopedPlaybackToken(c, actualMediaID) {
+			return
+		}
+		if svc.Repo == nil || svc.Repo.Media == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "media not found"})
+			return
+		}
+		m, findErr := svc.Repo.Media.FindByID(c.Request.Context(), actualMediaID)
+		if findErr != nil || m == nil || !mediaVisibleForRequest(c, svc, m) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "media not found"})
+			return
+		}
+		err = svc.Cloud115.HLSProxy().ServeChild(
 			c.Request.Context(),
 			c.Writer,
 			c.Request,

@@ -49,16 +49,18 @@ func (t *TranscoderService) runFFmpeg(ctx context.Context, job *hlsJob, input tr
 
 	t.mu.Lock()
 	// Only update the map entry if we are still the registered generation.
-	if cur, ok := t.jobs[job.mediaID]; ok && cur == job {
+	if cur, ok := t.jobs[job.key()]; ok && cur == job {
 		if err == nil && ctx.Err() == nil {
 			job.completed = true
 		} else {
-			delete(t.jobs, job.mediaID)
+			delete(t.jobs, job.key())
 		}
 	}
 	t.mu.Unlock()
 	if err != nil || ctx.Err() != nil {
 		job.cancel()
+		_ = os.RemoveAll(job.outputDir)
+		_ = os.Remove(filepath.Dir(job.outputDir)) // Remove the scope root only if empty.
 	}
 
 	t.hub.Publish("transcode", map[string]any{

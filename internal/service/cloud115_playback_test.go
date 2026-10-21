@@ -16,7 +16,7 @@ import (
 	"github.com/truewhile/MeBox/internal/service/cloud115"
 )
 
-func TestCloud115PlaybackInfoTriggersTranscodeOnce(t *testing.T) {
+func TestCloud115PlaybackInfoIsReadOnlyAndStartTriggersTranscodeOnce(t *testing.T) {
 	var playCalls int32
 	var pushCalls int32
 	var ready int32
@@ -93,9 +93,16 @@ func TestCloud115PlaybackInfoTriggersTranscodeOnce(t *testing.T) {
 	}
 	svc := NewCloud115PlaybackService(nil, zap.NewNop(), repos, strm)
 
-	info, err := svc.PlaybackInfo(ctx, media.ID, 0)
+	if _, err := svc.PlaybackInfo(ctx, media.ID, 0); err != nil {
+		t.Fatalf("read playback info: %v", err)
+	}
+	if got := atomic.LoadInt32(&pushCalls); got != 0 {
+		t.Fatalf("read-only playback info triggered %d cloud transcode pushes", got)
+	}
+
+	info, err := svc.StartTranscode(ctx, media.ID, 0)
 	if err != nil {
-		t.Fatalf("first playback info: %v", err)
+		t.Fatalf("start transcode: %v", err)
 	}
 	if info.Provider != model.StrmProvider115 || info.DefaultQuality != "4" {
 		t.Fatalf("unexpected playback info: %#v", info)

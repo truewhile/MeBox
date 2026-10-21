@@ -41,3 +41,8 @@ export function attachNativeHls(video: HlsVideo, url: string, pending: PendingSe
 export function playbackPositionSec(mode: 'direct' | 'hls', source: 'cloud' | 'local', startSec: number, currentTime: number): number {
   return mode === 'hls' && source === 'local' ? startSec + currentTime : currentTime
 }
+
+/** Convert an absolute source target to the current media element's timeline. */
+export function playbackTimeSec(mode: 'direct' | 'hls', source: 'cloud' | 'local', startSec: number, absoluteSec: number): number {
+  return Math.max(0, mode === 'hls' && source === 'local' ? absoluteSec - startSec : absoluteSec)
+}

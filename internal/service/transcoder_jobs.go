@@ -26,16 +26,18 @@ func (t *TranscoderService) WaitReady(ctx context.Context, mediaID string, timeo
 		job, ok := t.jobs[mediaID]
 		var started time.Time
 		var completed bool
+		var playlist string
 		if ok {
 			started = job.startedAt
 			completed = job.completed
+			playlist = t.jobPlaylistPath(job)
 		}
 		t.mu.Unlock()
 		if !ok {
 			return false // A failed/exited job cannot become ready later.
 		}
 		if ok {
-			if info, err := os.Stat(t.PlaylistPath(mediaID)); err == nil {
+			if info, err := os.Stat(playlist); err == nil {
 				// Allow a small clock skew; reject anything older than this job.
 				if !info.ModTime().Before(started.Add(-2 * time.Second)) {
 					t.mu.Lock()
@@ -66,9 +68,8 @@ func (t *TranscoderService) WaitReady(ctx context.Context, mediaID string, timeo
 // briefly for it to exit so a subsequent EnsureJobFrom cannot race-write the
 // same HLS directory.
 func (t *TranscoderService) StopJob(mediaID string) {
-	gate := t.mediaStartGate(mediaID)
-	gate.Lock()
-	defer gate.Unlock()
+	unlock := t.lockJobStart(mediaID)
+	defer unlock()
 
 	t.mu.Lock()
 	prev := t.detachJobLocked(mediaID)
@@ -170,7 +171,7 @@ func (t *TranscoderService) monitorIdle(ctx context.Context, job *hlsJob) {
 			return
 		case <-ticker.C:
 			t.mu.Lock()
-			current, ok := t.jobs[job.mediaID]
+			current, ok := t.jobs[job.key()]
 			if !ok || current != job {
 				t.mu.Unlock()
 				return
@@ -185,11 +186,10 @@ func (t *TranscoderService) monitorIdle(ctx context.Context, job *hlsJob) {
 }
 
 func (t *TranscoderService) stopIdleJob(job *hlsJob, timeout time.Duration) bool {
-	gate := t.mediaStartGate(job.mediaID)
-	gate.Lock()
-	defer gate.Unlock()
+	unlock := t.lockJobStart(job.key())
+	defer unlock()
 	t.mu.Lock()
-	current := t.jobs[job.mediaID]
+	current := t.jobs[job.key()]
 	if current != job {
 		t.mu.Unlock()
 		return true
@@ -199,9 +199,12 @@ func (t *TranscoderService) stopIdleJob(job *hlsJob, timeout time.Duration) bool
 		t.mu.Unlock()
 		return false
 	}
-	t.detachJobLocked(job.mediaID)
+	t.detachJobLocked(job.key())
 	t.mu.Unlock()
 	waitJobExit(job, 12*time.Second)
+	if job.jobKey != "" {
+		_ = os.RemoveAll(t.HLSDir(job.key()))
+	}
 	t.log.Info("transcode idle timeout", zap.String("media_id", job.mediaID),
 		zap.Duration("idle_for", idleFor), zap.Duration("timeout", timeout))
 	return true

@@ -1,7 +1,8 @@
 // Package service — HLS on-demand transcoder.
 //
 // TranscoderService spawns ffmpeg processes that segment a source media file
-// into HLS (.m3u8 + .ts). The output lives under cache.cache_dir/hls/<id>.
+// into HLS (.m3u8 + .ts). Each playback scope owns a cache directory and
+// every ffmpeg run writes to its own run-* subdirectory.
 // The HTTP layer serves these files directly with a normal http.FileServer.
 //
 // Encoder selection (read once at startup from the config):
@@ -15,9 +16,11 @@
 //	                         plus the kernel module loaded)
 //
 // Concurrency model:
-//   - Each Media has at most one active ffmpeg job.
-//   - jobs[mediaID] tracks the running goroutine + cancel func.
-//   - Calling Start while a job already exists is a no-op.
+//   - Each authenticated user/player scope has at most one active ffmpeg job.
+//   - jobs[jobKey] tracks the running goroutine + cancel func; mediaID remains
+//     the actual media identity for database access and activity reporting.
+//   - Legacy internal callers keep media-keyed behaviour.
+//   - Equivalent requests within one scope reuse the current output.
 //   - When the playlist file appears on disk we consider the job "ready"
 //     and unblock the HTTP handler that was waiting on it.
 package service
@@ -49,9 +52,10 @@ type TranscoderService struct {
 
 	mu   sync.Mutex
 	jobs map[string]*hlsJob
-	// startGates serializes EnsureJobFrom / StopJob per media so concurrent
-	// playlist hits cannot spawn multiple ffmpeg writers into one HLS dir.
-	startGates  sync.Map // mediaID -> *sync.Mutex
+	// Start gates are reference-counted so random playback session keys do not
+	// accumulate after their last starter/stopper has left.
+	startGateMu sync.Mutex
+	startGates  map[string]*hlsStartGate
 	strmResolve func(ctx context.Context, raw string) (*StrmPlayResult, error)
 	probe       *FFprobeService
 
@@ -66,6 +70,7 @@ type TranscoderService struct {
 
 // hlsJob holds the live state of one ffmpeg run.
 type hlsJob struct {
+	jobKey     string
 	mediaID    string
 	outputDir  string
 	cancel     context.CancelFunc
@@ -156,14 +161,19 @@ func (t *TranscoderService) transcodeConfig() *config.Config {
 	}
 }
 
-// HLSDir is the per-media directory that holds index.m3u8 + segment files.
-func (t *TranscoderService) HLSDir(mediaID string) string {
-	return filepath.Join(t.cfg.Cache.CacheDir, "hls", mediaID)
+// HLSDir is the cache root for one internal playback job key.
+func (t *TranscoderService) HLSDir(jobKey string) string {
+	return filepath.Join(t.cfg.Cache.CacheDir, "hls", jobKey)
 }
 
 // PlaylistPath returns the absolute path of the m3u8 playlist for a media.
-func (t *TranscoderService) PlaylistPath(mediaID string) string {
-	return filepath.Join(t.HLSDir(mediaID), "index.m3u8")
+func (t *TranscoderService) PlaylistPath(jobKey string) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if job := t.jobs[jobKey]; job != nil {
+		return t.jobPlaylistPath(job)
+	}
+	return filepath.Join(t.HLSDir(jobKey), "index.m3u8")
 }
 
 // EnsureJob makes sure a transcode is running for mediaID from the start of
@@ -194,7 +204,8 @@ func (t *TranscoderService) EnsureJobFromSubtitle(ctx context.Context, mediaID s
 
 // EnsureJobFromSubtitleQuality is EnsureJobFromSubtitle with an explicit local
 // HLS quality profile. Empty qualityID keeps the global transcoder config.
-func (t *TranscoderService) EnsureJobFromSubtitleQuality(ctx context.Context, mediaID string, startSec float64, seekGen int64, subtitleStream int, qualityID string) (string, error) {
+func (t *TranscoderService) EnsureJobFromSubtitleQuality(ctx context.Context, mediaID string, startSec float64, seekGen int64, subtitleStream int, qualityID string, scopes ...HLSPlaybackScope) (string, error) {
+	jobKey := hlsPlaybackJobKey(mediaID, scopes)
 	cfg := t.transcodeConfig()
 	if !cfg.Transcoder.Enabled {
 		return "", ErrTranscodeDisabled
@@ -219,28 +230,31 @@ func (t *TranscoderService) EnsureJobFromSubtitleQuality(ctx context.Context, me
 		return "", ErrMediaNotFound
 	}
 
-	gate := t.mediaStartGate(mediaID)
-	gate.Lock()
-	defer gate.Unlock()
+	unlock := t.lockJobStart(jobKey)
+	defer unlock()
 
 	t.mu.Lock()
-	if existing, ok := t.jobs[mediaID]; ok {
+	if existing, ok := t.jobs[jobKey]; ok {
 		reusable := true
+		playlist := t.jobPlaylistPath(existing)
 		if existing.completed {
-			info, err := os.Stat(t.PlaylistPath(mediaID))
+			info, err := os.Stat(playlist)
 			reusable = err == nil && info.Size() > 0
 		}
 		if reusable && sameHLSConfiguration(existing, startSec, subtitleStream, qualityID) {
-			t.touchJobLocked(mediaID)
+			if seekGen > existing.seekGen {
+				existing.seekGen = seekGen
+			}
+			t.touchJobLocked(jobKey)
 			t.mu.Unlock()
-			return t.PlaylistPath(mediaID), nil
+			return playlist, nil
 		}
 		if reusable && !shouldReplaceHLSJobConfigurationQuality(existing, startSec, seekGen, subtitleStream, qualityID) {
-			t.touchJobLocked(mediaID)
+			t.touchJobLocked(jobKey)
 			t.mu.Unlock()
-			return t.PlaylistPath(mediaID), nil
+			return playlist, nil
 		}
-		prev := t.detachJobLocked(mediaID)
+		prev := t.detachJobLocked(jobKey)
 		t.mu.Unlock()
 		waitJobExit(prev, 12*time.Second)
 	} else {
@@ -267,12 +281,23 @@ func (t *TranscoderService) EnsureJobFromSubtitleQuality(ctx context.Context, me
 		return "", err
 	}
 
-	outDir := t.HLSDir(mediaID)
-	// Wipe prior segments so a mid-file restart cannot serve stale early chunks.
-	// Only safe after the previous ffmpeg has exited (waited above / via gate).
-	if err := resetHLSDir(outDir); err != nil {
+	rootDir := t.HLSDir(jobKey)
+	// Runs use distinct directories even when Windows keeps an old segment
+	// open. A delayed request can never read a newer run's seg_00000.ts.
+	if err := resetHLSDir(rootDir); err != nil {
 		return "", err
 	}
+	outDir, err := os.MkdirTemp(rootDir, "run-")
+	if err != nil {
+		return "", err
+	}
+	registered := false
+	defer func() {
+		if !registered {
+			_ = os.RemoveAll(outDir)
+			_ = os.Remove(rootDir)
+		}
+	}()
 
 	t.mu.Lock()
 	if max := t.maxConcurrent(); max > 0 && t.runningJobCountLocked() >= max {
@@ -288,6 +313,7 @@ func (t *TranscoderService) EnsureJobFromSubtitleQuality(ctx context.Context, me
 		jobEncoder = "software (subtitle burn-in)"
 	}
 	job := &hlsJob{
+		jobKey:         jobKey,
 		mediaID:        mediaID,
 		outputDir:      outDir,
 		cancel:         cancel,
@@ -302,7 +328,8 @@ func (t *TranscoderService) EnsureJobFromSubtitleQuality(ctx context.Context, me
 		ffmpegPath:     bin,
 		config:         cfg,
 	}
-	t.jobs[mediaID] = job
+	t.jobs[jobKey] = job
+	registered = true
 	t.mu.Unlock()
 
 	helper.Go(t.log, "transcoder.monitorIdle", func() { t.monitorIdle(jobCtx, job) })
@@ -310,7 +337,7 @@ func (t *TranscoderService) EnsureJobFromSubtitleQuality(ctx context.Context, me
 		defer close(job.done)
 		t.runFFmpeg(jobCtx, job, input)
 	})
-	return t.PlaylistPath(mediaID), nil
+	return filepath.Join(outDir, "index.m3u8"), nil
 }
 
 // shouldReplaceHLSJob reports whether an incoming playlist request may cancel
@@ -357,9 +384,33 @@ func sameHLSConfiguration(existing *hlsJob, startSec float64, subtitleStream int
 		sameHLSStart(existing.startSec, startSec)
 }
 
-func (t *TranscoderService) mediaStartGate(mediaID string) *sync.Mutex {
-	v, _ := t.startGates.LoadOrStore(mediaID, &sync.Mutex{})
-	return v.(*sync.Mutex)
+type hlsStartGate struct {
+	mu    sync.Mutex
+	users int
+}
+
+func (t *TranscoderService) lockJobStart(key string) func() {
+	t.startGateMu.Lock()
+	if t.startGates == nil {
+		t.startGates = make(map[string]*hlsStartGate)
+	}
+	gate := t.startGates[key]
+	if gate == nil {
+		gate = &hlsStartGate{}
+		t.startGates[key] = gate
+	}
+	gate.users++
+	t.startGateMu.Unlock()
+	gate.mu.Lock()
+	return func() {
+		gate.mu.Unlock()
+		t.startGateMu.Lock()
+		gate.users--
+		if gate.users == 0 {
+			delete(t.startGates, key)
+		}
+		t.startGateMu.Unlock()
+	}
 }
 
 // detachJobLocked cancels and removes a job from the map without waiting.

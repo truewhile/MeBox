@@ -17,7 +17,8 @@ import (
 // Optional query `start` (seconds) restarts ffmpeg from that source offset so
 // the web player can scrub the full timeline without waiting for a full
 // head-to-tail transcode.
-func (s *StreamService) ServeHLSPlaylist(w http.ResponseWriter, r *http.Request, mediaID string) error {
+func (s *StreamService) ServeHLSPlaylist(w http.ResponseWriter, r *http.Request, mediaID string, scopes ...HLSPlaybackScope) error {
+	jobKey := hlsPlaybackJobKey(mediaID, scopes)
 	// 「客户端直连解码」模式下宿主机不提供转码，HLS 一律拒绝，
 	// 迫使播放器走 direct play 本地解码。
 	if s.directPlayOnly(r.Context()) {
@@ -27,19 +28,23 @@ func (s *StreamService) ServeHLSPlaylist(w http.ResponseWriter, r *http.Request,
 	seekGen := parseHLSSeekGen(r)
 	subtitleStream := parseHLSSubtitleStream(r)
 	quality := parseHLSQuality(r)
-	if _, err := s.transcoder.EnsureJobFromSubtitleQuality(r.Context(), mediaID, startSec, seekGen, subtitleStream, quality); err != nil {
+	if _, err := s.transcoder.EnsureJobFromSubtitleQuality(r.Context(), mediaID, startSec, seekGen, subtitleStream, quality, scopes...); err != nil {
 		return err
 	}
-	s.transcoder.TouchJob(mediaID)
+	s.transcoder.TouchJob(jobKey)
 	readyTimeout := 45 * time.Second
 	if startSec > 0.05 {
 		// Mid-file HTTP seeks (esp. WMV) need longer before the first segment appears.
 		readyTimeout = 120 * time.Second
 	}
-	if !s.transcoder.WaitReady(r.Context(), mediaID, readyTimeout) {
+	if !s.transcoder.WaitReady(r.Context(), jobKey, readyTimeout) {
 		return errors.New("hls playlist not ready")
 	}
-	playlist := s.transcoder.PlaylistPath(mediaID)
+	outputDir, err := s.transcoder.hlsOutputDir(jobKey, seekGen)
+	if err != nil {
+		return err
+	}
+	playlist := filepath.Join(outputDir, "index.m3u8")
 	f, err := os.Open(playlist) // #nosec G304 -- playlist path is generated under the transcoder cache directory for this media ID.
 	if err != nil {
 		return err
@@ -49,12 +54,18 @@ func (s *StreamService) ServeHLSPlaylist(w http.ResponseWriter, r *http.Request,
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Content-Disposition", "inline")
-	if r.URL.RawQuery != "" {
+	rawQuery := r.URL.RawQuery
+	if len(scopes) > 0 && scopes[0].SessionID != "" {
+		query := r.URL.Query()
+		query.Set("session_id", scopes[0].SessionID)
+		rawQuery = query.Encode()
+	}
+	if rawQuery != "" {
 		data, err := io.ReadAll(f)
 		if err != nil {
 			return err
 		}
-		playlist := appendQueryToHLSSegments(string(data), r.URL.RawQuery)
+		playlist := appendQueryToHLSSegments(string(data), rawQuery)
 		_, err = io.WriteString(w, playlist)
 		return err
 	}
@@ -171,19 +182,26 @@ func filterHLSSegmentQuery(rawQuery string) string {
 }
 
 // ServeHLSSegment writes a single .ts segment from the on-disk cache.
-func (s *StreamService) ServeHLSSegment(w http.ResponseWriter, r *http.Request, mediaID, segment string) error {
-	s.transcoder.TouchJob(mediaID)
+func (s *StreamService) ServeHLSSegment(w http.ResponseWriter, r *http.Request, mediaID, segment string, scopes ...HLSPlaybackScope) error {
+	jobKey := hlsPlaybackJobKey(mediaID, scopes)
+	outputDir, err := s.transcoder.hlsOutputDir(jobKey, parseHLSSeekGen(r))
+	if err != nil {
+		if len(scopes) > 0 || parseHLSSeekGen(r) > 0 {
+			return err
+		}
+		outputDir = s.transcoder.HLSDir(jobKey) // Legacy internal static-file callers.
+	}
 	// Only allow segments that look like seg_NNNNN.ts so we cannot be tricked
 	// into reading arbitrary files via path traversal.
 	if !strings.HasPrefix(segment, "seg_") || !strings.HasSuffix(segment, ".ts") {
 		return errors.New("bad segment")
 	}
-	full := filepath.Join(s.transcoder.HLSDir(mediaID), segment)
+	full := filepath.Join(outputDir, segment)
 	abs, err := filepath.Abs(full)
 	if err != nil {
 		return err
 	}
-	dir, _ := filepath.Abs(s.transcoder.HLSDir(mediaID))
+	dir, _ := filepath.Abs(outputDir)
 	if !pathWithin(abs, dir) {
 		return errors.New("path escape")
 	}

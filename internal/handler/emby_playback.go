@@ -418,7 +418,11 @@ func embyVideoHLSPlaylistHandler(svc *service.Container) gin.HandlerFunc {
 			c.Status(http.StatusNotFound)
 			return
 		}
-		err = svc.Stream.ServeHLSPlaylist(c.Writer, c.Request, c.Param("id"))
+		scope, ok := localHLSPlaybackScope(c)
+		if !ok {
+			return
+		}
+		err = svc.Stream.ServeHLSPlaylist(c.Writer, c.Request, c.Param("id"), scope)
 		if errors.Is(err, service.ErrTranscodeDisabled) {
 			c.JSON(http.StatusConflict, gin.H{"error": "transcode disabled"})
 			return
@@ -444,7 +448,11 @@ func embyVideoHLSSegmentHandler(svc *service.Container) gin.HandlerFunc {
 			c.Status(http.StatusNotFound)
 			return
 		}
-		if err := svc.Stream.ServeHLSSegment(c.Writer, c.Request, c.Param("id"), c.Param("seg")); err != nil {
+		scope, ok := localHLSPlaybackScope(c)
+		if !ok {
+			return
+		}
+		if err := svc.Stream.ServeHLSSegment(c.Writer, c.Request, c.Param("id"), c.Param("seg"), scope); err != nil {
 			c.Status(http.StatusNotFound)
 		}
 	}

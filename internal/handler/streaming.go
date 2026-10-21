@@ -27,7 +27,15 @@ func hlsPlaylistHandler(svc *service.Container) gin.HandlerFunc {
 		if !enforceScopedPlaybackToken(c, m.ID) {
 			return
 		}
-		err = svc.Stream.ServeHLSPlaylist(c.Writer, c.Request, c.Param("id"))
+		scope, ok := localHLSPlaybackScope(c)
+		if !ok {
+			return
+		}
+		err = svc.Stream.ServeHLSPlaylist(c.Writer, c.Request, c.Param("id"), scope)
+		if errors.Is(err, service.ErrHLSGenerationSuperseded) {
+			c.JSON(http.StatusConflict, gin.H{"code": "hls_generation_superseded", "error": err.Error()})
+			return
+		}
 		if errors.Is(err, service.ErrMediaNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
@@ -62,7 +70,11 @@ func hlsSegmentHandler(svc *service.Container) gin.HandlerFunc {
 		if !enforceScopedPlaybackToken(c, m.ID) {
 			return
 		}
-		err = svc.Stream.ServeHLSSegment(c.Writer, c.Request, c.Param("id"), c.Param("seg"))
+		scope, ok := localHLSPlaybackScope(c)
+		if !ok {
+			return
+		}
+		err = svc.Stream.ServeHLSSegment(c.Writer, c.Request, c.Param("id"), c.Param("seg"), scope)
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return
@@ -72,9 +84,37 @@ func hlsSegmentHandler(svc *service.Container) gin.HandlerFunc {
 
 func stopTranscodeHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		svc.Transcoder.StopJob(c.Param("id"))
+		m, err := findMediaForPlaybackEndpoint(c, svc, c.Param("id"))
+		if err != nil || m == nil || !mediaVisibleForRequest(c, svc, m) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "media not found"})
+			return
+		}
+		if !enforceScopedPlaybackToken(c, m.ID) {
+			return
+		}
+		scope, ok := localHLSPlaybackScope(c)
+		if !ok {
+			return
+		}
+		if svc.Transcoder != nil {
+			svc.Transcoder.StopPlayback(m.ID, scope)
+		}
 		c.Status(http.StatusNoContent)
 	}
+}
+
+func localHLSPlaybackScope(c *gin.Context) (service.HLSPlaybackScope, bool) {
+	userID := currentUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing playback owner"})
+		return service.HLSPlaybackScope{}, false
+	}
+	scope, err := service.HLSPlaybackScopeForRequest(c.Request, userID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return service.HLSPlaybackScope{}, false
+	}
+	return scope, true
 }
 
 func imageProxyHandler(svc *service.Container) gin.HandlerFunc {
