@@ -24,6 +24,14 @@ func (s *ApiConfigService) TestConnection(ctx context.Context, provider string) 
 	switch provider {
 	case "tmdb":
 		return s.testTMDb(cfg)
+	case "bangumi":
+		return s.testBangumi(ctx, cfg)
+	case "thetvdb":
+		return s.testTheTVDB(ctx, cfg)
+	case "fanart":
+		return s.testFanart(ctx, cfg)
+	case "douban":
+		return s.testDouban(ctx, cfg)
 	case "openai":
 		return s.testOpenAI(cfg)
 	case "deepseek":
