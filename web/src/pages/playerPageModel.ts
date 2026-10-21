@@ -3,6 +3,10 @@ import { isRemoteEmbyID } from '../utils/remoteEmby'
 
 export type PlayerMode = 'direct' | 'hls'
 
+export function shouldShowPlayerDiagnostics(playerError: string, loadError: string): boolean {
+  return Boolean(playerError || loadError)
+}
+
 const directContainers = ['mp4', 'webm', 'm4v']
 const directVideoCodecs = ['h264', 'avc', 'avc1']
 const directAudioCodecs = ['aac', 'mp3', 'opus']

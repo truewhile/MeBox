@@ -37,7 +37,7 @@ import {
   type SubtitlePosition,
   type SubtitleStylePreset,
 } from '../utils/subtitleDisplay'
-import { pickPlayerMode, needsTranscodeForBrowser, isDirectStreamMedia, isStrmMedia, type PlayerMode } from './playerPageModel'
+import { pickPlayerMode, needsTranscodeForBrowser, isDirectStreamMedia, isStrmMedia, shouldShowPlayerDiagnostics, type PlayerMode } from './playerPageModel'
 import { classifyDirectPlayError, directPlayFailureCopy, directStallTimeoutMs, DIRECT_SEEK_GRACE_MS } from './directPlayError'
 import type { DirectPlayFailureReason } from './directPlayError'
 import { canSeekDirectNow, DIRECT_SEEK_WAIT_MS } from './directPlaySeek'
@@ -181,6 +181,7 @@ export function PlayerPage() {
   const [playerError, setPlayerError] = useState('')
   // 媒体元数据加载失败（404 / 无权限等）：舞台区直接展示错误而不是永远「加载中」
   const [loadError, setLoadError] = useState('')
+  const diagnosticsVisible = shouldShowPlayerDiagnostics(playerError, loadError)
   // 「客户端直连解码」模式：宿主机不转码，播放器强制 direct play、隐藏 HLS 切换。
   const [directOnly, setDirectOnly] = useState(false)
   const [directOnlyKnown, setDirectOnlyKnown] = useState(false)
@@ -2608,16 +2609,18 @@ export function PlayerPage() {
           }
         />
       ) : null}
-      <button
-        type="button"
-        onClick={() => setDiagnosticsOpen((open) => !open)}
-        className="absolute right-2.5 top-14 z-[80] inline-flex items-center gap-2 rounded-full border border-white/15 bg-black/75 px-3 py-2 text-xs font-semibold text-white shadow-lg backdrop-blur hover:bg-black/90 sm:right-3.5 sm:top-16"
-        title="播放诊断"
-        aria-label="播放诊断"
-      >
-        <Activity size={15} />诊断
-      </button>
-      {diagnosticsOpen && (
+      {diagnosticsVisible && (
+        <button
+          type="button"
+          onClick={() => setDiagnosticsOpen((open) => !open)}
+          className="absolute right-2.5 top-14 z-[80] inline-flex items-center gap-2 rounded-full border border-white/15 bg-black/75 px-3 py-2 text-xs font-semibold text-white shadow-lg backdrop-blur hover:bg-black/90 sm:right-3.5 sm:top-16"
+          title="播放诊断"
+          aria-label="播放诊断"
+        >
+          <Activity size={15} />诊断
+        </button>
+      )}
+      {diagnosticsVisible && diagnosticsOpen && (
         <aside className="absolute right-2.5 top-[6.75rem] z-[80] flex max-h-[calc(100%-8.5rem)] w-[min(92vw,420px)] flex-col overflow-hidden rounded-2xl border border-white/15 bg-[#111827]/95 text-white shadow-2xl backdrop-blur sm:right-3.5 sm:top-[7.25rem]">
           <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
             <div><h2 className="text-sm font-bold">播放诊断</h2><p className="mt-1 text-[11px] text-white/60">记录最近 40 条本地播放事件</p></div>
