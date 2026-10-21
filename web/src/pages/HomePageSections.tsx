@@ -464,7 +464,9 @@ export function HomeLibrariesSection({
             pinned={pinnedIds.includes(lib.id)}
             onTogglePin={onTogglePin ? () => onTogglePin(lib.id) : undefined}
             onVisible={() => {
-              if (!lib.cover_url) {
+              // 服务端会生成库封面时不必再为首屏卡片拉成员预览；
+              // 远程挂载库的封面仍由卡片拼图兜底。
+              if (!lib.cover_url && !lib.cover_image_url) {
                 queuePreview(lib.id)
               }
             }}

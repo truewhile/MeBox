@@ -131,14 +131,6 @@ export const generalSettingsGroup: SettingGroup = {
       placeholder: '256',
     },
     {
-      key: 'cache.images_originals_ttl_hours',
-      label: '原图保留时长 (小时)',
-      type: 'number',
-      hint: '原图缓存的最长保留时间，超过即删除（默认 168 小时 = 7 天）。缩略图都已生成时原图就不再需要，缩短它可以让原图缓存保持在一个滚动窗口内。设为 0 表示不按时间淘汰',
-      defaultValue: '168',
-      placeholder: '168',
-    },
-    {
       key: 'https.enabled',
       label: '启用 HTTPS',
       type: 'toggle',

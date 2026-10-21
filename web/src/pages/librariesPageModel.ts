@@ -43,5 +43,12 @@ export function getLibraryArtworks(
   if (library.cover_url) {
     return [{ src: library.cover_url, version: library.updated_at }]
   }
+  // 服务端生成的库封面（成员海报竖切拼图）：所有客户端共用一张图，
+  // 不再由前端拿两张卡片自己拼格子。
+  // version 里带一个版次后缀：接口地址是固定的，靠它让浏览器在拼图规则
+  // 调整（如田字格改成竖切）后丢掉旧缓存重新拉图。
+  if (library.cover_image_url) {
+    return [{ src: library.cover_image_url, version: `${library.updated_at}-c3` }]
+  }
   return libraryArtworkItems(cards)
 }

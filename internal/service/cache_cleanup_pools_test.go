@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// writePoolFile ?????????????????????????
+// writePoolFile ??????????????? mtime ???????
 func writePoolFile(t *testing.T, path string, size int, modTime time.Time) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
@@ -39,42 +39,38 @@ func mustExist(t *testing.T, path string) {
 	}
 }
 
-// currentVariantPath ????????????????.<??x<??q<??>.img??
-// ??????????????????????????
+// currentVariantPath ???????????????????
+// <64 ????>.<?>x<?>q<??>.img
 func currentVariantPath(dir, keyChar string, width, height, quality int) string {
 	key := strings.Repeat(keyChar, sha256HexLength)
 	return filepath.Join(dir, fmt.Sprintf("%s.%dx%dq%d.img", key, width, height, quality))
 }
 
-// TestPruneImageCachePoolsOriginalTTL ????????????????????
-// ?? TTL ??????????????????????
-func TestPruneImageCachePoolsOriginalTTL(t *testing.T) {
+// TestPruneImageCachePoolsKeepsOldFilesUnderQuota ????????????
+// ???????????????????????? / TTL ????
+func TestPruneImageCachePoolsKeepsOldFilesUnderQuota(t *testing.T) {
 	imagesDir := t.TempDir()
 	now := time.Now()
 
-	stale := filepath.Join(imagesDir, imageOriginalCacheSubdir, "stale-original")
-	fresh := filepath.Join(imagesDir, imageOriginalCacheSubdir, "fresh-original")
-	thumb := currentVariantPath(filepath.Join(imagesDir, imageResizeCacheSubdir), "b", 480, 600, 80)
-	writePoolFile(t, stale, 400, now.Add(-8*24*time.Hour))
-	writePoolFile(t, fresh, 400, now.Add(-1*time.Hour))
-	// ??????????TTL ????
-	writePoolFile(t, thumb, 400, now.Add(-8*24*time.Hour))
+	oldOriginal := filepath.Join(imagesDir, imageOriginalCacheSubdir, "old-original")
+	oldThumb := currentVariantPath(filepath.Join(imagesDir, imageResizeCacheSubdir), "b", 480, 600, 80)
+	writePoolFile(t, oldOriginal, 400, now.Add(-90*24*time.Hour))
+	writePoolFile(t, oldThumb, 400, now.Add(-90*24*time.Hour))
 
-	pools := ImageCachePools(imagesDir, 0, 7*24*time.Hour)
+	pools := ImageCachePools(imagesDir, 0)
 	res, err := PruneImageCachePools(pools, 100*1024*1024)
 	if err != nil {
 		t.Fatalf("prune failed: %v", err)
 	}
-	if res.DeletedFiles != 1 {
-		t.Fatalf("deleted files = %d, want 1", res.DeletedFiles)
+	if res.DeletedFiles != 0 {
+		t.Fatalf("deleted files = %d, want 0 (age must not trigger deletion)", res.DeletedFiles)
 	}
-	mustNotExist(t, stale)
-	mustExist(t, fresh)
-	mustExist(t, thumb)
+	mustExist(t, oldOriginal)
+	mustExist(t, oldThumb)
 }
 
 // TestPruneImageCachePoolsEvictsOriginalsBeforeDerived ????????????
-// ????????????????????
+// ????????????????
 func TestPruneImageCachePoolsEvictsOriginalsBeforeDerived(t *testing.T) {
 	imagesDir := t.TempDir()
 	now := time.Now()
@@ -82,13 +78,13 @@ func TestPruneImageCachePoolsEvictsOriginalsBeforeDerived(t *testing.T) {
 	original := filepath.Join(imagesDir, imageOriginalCacheSubdir, "original")
 	rendition := filepath.Join(imagesDir, imageRenditionCacheSubdir, "rendition")
 	thumb := currentVariantPath(filepath.Join(imagesDir, imageResizeCacheSubdir), "c", 480, 600, 80)
-	// ?????????????????
+	// ?????????????????????????
 	writePoolFile(t, original, 1024*1024, now.Add(-72*time.Hour))
 	writePoolFile(t, rendition, 1024*1024, now.Add(-2*time.Hour))
 	writePoolFile(t, thumb, 1024*1024, now.Add(-1*time.Hour))
 
-	pools := ImageCachePools(imagesDir, 0, 0)
-	// ?? 3MB????2.4MB -> ????? 1.92MB??
+	pools := ImageCachePools(imagesDir, 0)
+	// ?? 3MB??? 2.4MB -> ??? 1.92MB ???
 	res, err := PruneImageCachePools(pools, 2*1024*1024+400*1024)
 	if err != nil {
 		t.Fatalf("prune failed: %v", err)
@@ -104,8 +100,8 @@ func TestPruneImageCachePoolsEvictsOriginalsBeforeDerived(t *testing.T) {
 	}
 }
 
-// TestPruneImageCachePoolsOriginalQuotaKeepsDerived ????????????
-// ??????????????
+// TestPruneImageCachePoolsOriginalQuotaKeepsDerived ???????????
+// ????????????
 func TestPruneImageCachePoolsOriginalQuotaKeepsDerived(t *testing.T) {
 	imagesDir := t.TempDir()
 	now := time.Now()
@@ -117,8 +113,8 @@ func TestPruneImageCachePoolsOriginalQuotaKeepsDerived(t *testing.T) {
 	writePoolFile(t, newOriginal, 800, now.Add(-1*time.Hour))
 	writePoolFile(t, thumb, 800, now.Add(-2*time.Hour))
 
-	// ???? 1000 ??????????1600 -> ????800????? 1 ????
-	pools := ImageCachePools(imagesDir, 1000, 0)
+	// ???? 1000??? 1600 ?? -> ??? 800??? 1 ???????
+	pools := ImageCachePools(imagesDir, 1000)
 	res, err := PruneImageCachePools(pools, 0)
 	if err != nil {
 		t.Fatalf("prune failed: %v", err)
@@ -131,24 +127,26 @@ func TestPruneImageCachePoolsOriginalQuotaKeepsDerived(t *testing.T) {
 	mustExist(t, thumb)
 }
 
-// TestPruneImageCachePoolsCleansFailMarkers ????????????????
-// ????????????????
+// TestPruneImageCachePoolsCleansFailMarkers ???????????????
+// ???????????????????????????????????
 func TestPruneImageCachePoolsCleansFailMarkers(t *testing.T) {
 	imagesDir := t.TempDir()
 	now := time.Now()
 
 	entry := filepath.Join(imagesDir, imageOriginalCacheSubdir, "entry")
 	entryMarker := entry + ".fail"
+	kept := filepath.Join(imagesDir, imageOriginalCacheSubdir, "kept")
+	keptMarker := kept + ".fail"
 	orphanMarker := filepath.Join(imagesDir, imageOriginalCacheSubdir, "orphan.fail")
-	freshMarker := filepath.Join(imagesDir, imageOriginalCacheSubdir, "fresh.fail")
 
-	writePoolFile(t, entry, 900, now.Add(-10*time.Hour))
-	writePoolFile(t, entryMarker, 35, now.Add(-10*time.Hour))
+	writePoolFile(t, entry, 900, now.Add(-2*time.Hour))
+	writePoolFile(t, entryMarker, 35, now.Add(-2*time.Hour))
+	writePoolFile(t, kept, 300, now.Add(-1*time.Hour))
+	writePoolFile(t, keptMarker, 35, now.Add(-1*time.Hour))
 	writePoolFile(t, orphanMarker, 35, now.Add(-48*time.Hour))
-	writePoolFile(t, freshMarker, 35, now.Add(-1*time.Minute))
 
-	// ???? 500????900 ?????????????????
-	pools := ImageCachePools(imagesDir, 500, 0)
+	// ???? 500??? 900+300=1200 ???? mtime ????? entry ? 400?
+	pools := ImageCachePools(imagesDir, 500)
 	res, err := PruneImageCachePools(pools, 0)
 	if err != nil {
 		t.Fatalf("prune failed: %v", err)
@@ -158,26 +156,27 @@ func TestPruneImageCachePoolsCleansFailMarkers(t *testing.T) {
 	}
 	mustNotExist(t, entry)
 	mustNotExist(t, entryMarker)
+	mustExist(t, kept)
+	mustExist(t, keptMarker)
 	mustNotExist(t, orphanMarker)
-	mustExist(t, freshMarker)
 }
 
-// TestPruneImageCachePoolsSkipsTemporaryFiles ????????????????
+// TestPruneImageCachePoolsSkipsTemporaryFiles ??????????????
 // ?????????????????
 func TestPruneImageCachePoolsSkipsTemporaryFiles(t *testing.T) {
 	imagesDir := t.TempDir()
 	tmp := filepath.Join(imagesDir, imageOriginalCacheSubdir, "img-1234.tmp")
 	writePoolFile(t, tmp, 4096, time.Now().Add(-48*time.Hour))
 
-	pools := ImageCachePools(imagesDir, 1, 0)
+	pools := ImageCachePools(imagesDir, 1)
 	if _, err := PruneImageCachePools(pools, 1); err != nil {
 		t.Fatalf("prune failed: %v", err)
 	}
 	mustExist(t, tmp)
 }
 
-// TestPruneImageCachePoolsDropsLegacyResizeVariants ????????.img????
-// ?????????????????????????????????????
+// TestPruneImageCachePoolsDropsLegacyResizeVariants ?????? .img ??
+// ???????????????????????????
 func TestPruneImageCachePoolsDropsLegacyResizeVariants(t *testing.T) {
 	imagesDir := t.TempDir()
 	resized := filepath.Join(imagesDir, imageResizeCacheSubdir)
@@ -188,7 +187,7 @@ func TestPruneImageCachePoolsDropsLegacyResizeVariants(t *testing.T) {
 	writePoolFile(t, current, 400, time.Now())
 	writePoolFile(t, other, 400, time.Now())
 
-	pools := ImageCachePools(imagesDir, 0, 0)
+	pools := ImageCachePools(imagesDir, 0)
 	res, err := PruneImageCachePools(pools, 0)
 	if err != nil {
 		t.Fatalf("prune failed: %v", err)
@@ -201,8 +200,8 @@ func TestPruneImageCachePoolsDropsLegacyResizeVariants(t *testing.T) {
 	}
 }
 
-// TestPruneImageCachePoolsCountsLegacyFlatLayout ??????images/ ????
-// ?????????????????
+// TestPruneImageCachePoolsCountsLegacyFlatLayout ???????images/ ???
+// ???????????????????????
 func TestPruneImageCachePoolsCountsLegacyFlatLayout(t *testing.T) {
 	imagesDir := t.TempDir()
 	legacy := filepath.Join(imagesDir, "legacy-flat-cache")
@@ -210,7 +209,8 @@ func TestPruneImageCachePoolsCountsLegacyFlatLayout(t *testing.T) {
 	writePoolFile(t, legacy, 900, time.Now().Add(-30*24*time.Hour))
 	writePoolFile(t, thumb, 900, time.Now().Add(-30*24*time.Hour))
 
-	pools := ImageCachePools(imagesDir, 0, 24*time.Hour)
+	// ???? 500??????????????????????????
+	pools := ImageCachePools(imagesDir, 500)
 	res, err := PruneImageCachePools(pools, 0)
 	if err != nil {
 		t.Fatalf("prune failed: %v", err)

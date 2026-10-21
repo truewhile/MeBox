@@ -80,10 +80,10 @@ func (s *SchedulerService) SetExpiryWatcher(watcher *TelegramExpiryWatcher) {
 }
 
 // ImageCachePolicy 是一次图片缓存清理要用的策略（全部为 0 表示不做任何清理）。
+// 只有容量配额，没有保留时长：淘汰只看占用，不按文件年龄删除。
 type ImageCachePolicy struct {
 	TotalBytes     int64
 	OriginalsBytes int64
-	OriginalsAge   time.Duration
 }
 
 func (s *SchedulerService) SetImageCachePolicyProvider(fn func() ImageCachePolicy) {

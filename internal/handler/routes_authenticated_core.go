@@ -36,6 +36,9 @@ func registerAuthedLibraryRoutes(authed *gin.RouterGroup, svc *service.Container
 	authed.GET("/libraries", listLibrariesHandler(svc))
 	authed.POST("/libraries", middleware.AdminRequired(), createLibraryHandler(svc))
 	authed.GET("/libraries/:id", getLibraryHandler(svc))
+	// 服务端生成的媒体库封面（成员海报拼图），Web / App / Emby 共用同一份。
+	authed.GET("/libraries/:id/cover", libraryCoverHandler(svc))
+	authed.HEAD("/libraries/:id/cover", libraryCoverHandler(svc))
 	authed.PATCH("/libraries/:id", middleware.AdminRequired(), updateLibraryHandler(svc))
 	authed.PUT("/libraries/reorder", middleware.AdminRequired(), reorderLibrariesHandler(svc))
 	authed.DELETE("/libraries/:id", middleware.AdminRequired(), deleteLibraryHandler(svc))

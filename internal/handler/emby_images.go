@@ -50,6 +50,25 @@ func embyServeImage(c *gin.Context, svc *service.Container, id, imageType, tag s
 		embyServePlaceholderImage(c)
 		return
 	}
+	// 媒体库主图：按 Emby 的做法，用库内几张成员海报拼一张封面（folder
+	// image）。没有自定义封面时才生成；自定义封面继续走下面的代理路径。
+	if svc.ImageProxy != nil && strings.EqualFold(strings.TrimSpace(imageType), "Primary") {
+		if sources, lib := service.LibraryCoverSourcesForLibrary(ctx, svc.Repo, id); lib != nil &&
+			strings.TrimSpace(lib.CoverURL) == "" && len(sources) > 0 {
+			width, height := libraryCoverRequestSize(c)
+			if data, err := svc.ImageProxy.LibraryCoverImage(ctx, id, sources, width, height); err == nil && len(data) > 0 {
+				c.Header("Cache-Control", "public, max-age=300, stale-while-revalidate=86400")
+				c.Header("Content-Type", "image/jpeg")
+				c.Header("Content-Length", strconv.Itoa(len(data)))
+				if c.Request.Method == http.MethodHead {
+					c.Status(http.StatusOK)
+					return
+				}
+				c.Data(http.StatusOK, "image/jpeg", data)
+				return
+			}
+		}
+	}
 	// PersonImageURL handles TMDb/remote people first and falls back to regular
 	// media/library artwork, so the official /Items/{personId}/Images route
 	// works for synthetic person IDs as well as normal item IDs.

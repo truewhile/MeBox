@@ -15,6 +15,12 @@ export interface Library {
   path: string
   type: string
   cover_url?: string
+  /**
+   * 服务端生成的封面地址（成员海报拼图）。管理员自定义 cover_url 时等于
+   * 该地址，否则指向 `/api/libraries/:id/cover`。Web/App 统一读这个字段，
+   * 不用再自己用卡片拼格子。
+   */
+  cover_image_url?: string
   enabled: boolean
   sort_order?: number
   carousel_enabled?: boolean

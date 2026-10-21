@@ -56,6 +56,17 @@ type EmbyService struct {
 	virtualSeries  map[string]embySeriesCacheEntry
 	virtualSeasons map[string]embySeasonCacheEntry
 	virtualArtwork map[string]embyArtworkCacheEntry
+	// virtualGroups 把「整库虚拟剧集分组」的扫描折叠成一次。
+	//
+	// 客户端刷新首页时会同时请求 73 个库的 Latest，每个库的卡片和海报都要
+	// 各自的虚拟 series 分组。不同剧的分组缓存键不同，singleflight 键也不同，
+	// 于是第一波请求会并发重扫整张 media 表（生产环境实测冷启动 14-17s）。
+	// 按用户折叠成一次扫描后，同一波请求共享结果并整批进缓存。
+	virtualGroups singleflight.Group
+	// virtualScanAt 记录每个用户最近一次整库扫描的时间，用于避免为同一个
+	// 不存在的 id 反复重扫（必须按用户区分：可见性不同，别人的快照不能当
+	// 自己的答案）。由 virtualMu 保护。
+	virtualScanAt map[string]time.Time
 
 	visibilityMu    sync.RWMutex
 	visibilityCache map[string]embyVisibilityCacheEntry
@@ -186,6 +197,15 @@ const (
 	embyVirtualSeriesCap  = 8000
 	embyVirtualSeasonCap  = 16000
 	embyVirtualArtworkCap = 24000
+	// embySeriesGroupBulkCacheEpisodes 限制一次批量记忆的剧集行数。
+	//
+	// 批量记忆把「一次扫描服务整页卡片 + 整页海报」的收益拿满，但同时让整库
+	// 剧集常驻内存。超过该量级时退回只缓存命中的那一部，避免大库吃光内存。
+	embySeriesGroupBulkCacheEpisodes = 8000
+	// embyVirtualScanGrace 是「刚做过整库虚拟剧集扫描」的保护窗口。窗口内再
+	// 请求一个不在缓存里的虚拟 series ID，直接按不存在处理，避免为同一个
+	// 未知 id 反复重扫整库。
+	embyVirtualScanGrace = 10 * time.Second
 	// Clients that already cached the 1x1 placeholder treat a stable tag as
 	// immutable. Virtual ids are the ones that served that placeholder, so
 	// only those tags get a suffix that forces a refetch.

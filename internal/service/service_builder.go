@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"time"
 
 	"go.uber.org/zap"
 
@@ -221,9 +220,6 @@ func (b *serviceContainerBuilder) initAccessAndStorageServices() {
 		}
 		if b.cfg.Cache.ImagesOriginalsMaxSizeMB > 0 {
 			policy.OriginalsBytes = int64(b.cfg.Cache.ImagesOriginalsMaxSizeMB) * 1024 * 1024
-		}
-		if b.cfg.Cache.ImagesOriginalsTTLHours > 0 {
-			policy.OriginalsAge = time.Duration(b.cfg.Cache.ImagesOriginalsTTLHours) * time.Hour
 		}
 		return policy
 	})

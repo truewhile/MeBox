@@ -136,7 +136,12 @@ func (e *EmbyService) RecordProgressWithSession(ctx context.Context, userID, med
 		SessionID:          playSessionID,
 		SessionStartedAtMs: embyPlaySessionStartedAtMs(playSessionID),
 	})
-	if err == nil {
+	// 普通进度上报不清列表载荷缓存。播放期间客户端每 5-10 秒上报一次，
+	// 每次清空 media:emby:* 会让「最新添加」整批 payload（客户端刷新首页时
+	// 一次并发 73 个库）反复回源 SQL，生产环境实测因此出现 8-25s 的加载。
+	// 续播位置由 /Items/Resume 与条目详情实时查库，列表里的进度条允许滞后；
+	// 只有「已看完」这类状态翻转才让缓存失效（position 到达片尾 30s 内）。
+	if err == nil && playbackProgressCompleted(pos, dur) {
 		e.invalidateEmbyItemsCache(ctx)
 	}
 	return err
@@ -287,10 +292,11 @@ func applyMeBoxUserData(raw any, history *model.PlaybackHistory, favorite bool) 
 	return userData
 }
 
-// embyInvalMu 节流全量缓存失效：播放期间客户端每 5-10s 上报一次进度，
-// 每次都 SCAN+DEL 全部 media:emby:* 缓存会把缓存命中率持续打穿（其他
-// 客户端每次翻页都回源 SQL）。条目载荷的 UserData 在请求时动态合并，
-// 进度类变更做 30s 节流即可，不影响正确性观感。
+// embyInvalMu 节流全量缓存失效：收藏/标记已看这类显式操作会改变列表里的
+// UserData，必须让 payload 失效。客户端连续点选时会短时间触发多次，节流到
+// 30s 一次即可，避免每次都 SCAN+DEL 全部 media:emby:* 缓存。
+// 播放进度上报不走这里（见 RecordProgressWithSession）：续播位置实时查库，
+// 列表里的进度条允许滞后，不值得为它把整批首页载荷打回源 SQL。
 var (
 	embyInvalMu   sync.Mutex
 	embyInvalLast time.Time

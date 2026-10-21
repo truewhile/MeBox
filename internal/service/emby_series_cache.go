@@ -26,19 +26,45 @@ func (e *EmbyService) rememberSeriesGroup(group embySeriesGroup) {
 	if e == nil || strings.TrimSpace(group.ID) == "" {
 		return
 	}
+	e.rememberSeriesGroups([]embySeriesGroup{group})
+}
+
+// rememberSeriesGroups 批量记住一组剧集分组（含派生季与封面）。
+//
+// 一次全表扫描会同时算出整库的剧集分组，而调用方往往只关心其中一部。若只
+// 逐个 rememberSeriesGroup，同一次首页刷新里 16 张卡片 + 16 张海报都要各自
+// 命中自己的虚拟 series ID，未命中就重扫整张 media 表（生产环境实测单次
+// 1.3s，73 个库并发时把连接池排满，首页要 8-25s）。批量写入后冷缓存只付
+// 一次扫描，其余全部是 O(1) 命中。
+func (e *EmbyService) rememberSeriesGroups(groups []embySeriesGroup) {
+	if e == nil || len(groups) == 0 {
+		return
+	}
 	expiresAt := time.Now().Add(embyVirtualCacheTTL)
 	e.virtualMu.Lock()
 	defer e.virtualMu.Unlock()
 	if e.virtualSeries == nil {
-		e.virtualSeries = make(map[string]embySeriesCacheEntry)
+		e.virtualSeries = make(map[string]embySeriesCacheEntry, len(groups))
 	}
 	if e.virtualSeasons == nil {
-		e.virtualSeasons = make(map[string]embySeasonCacheEntry)
+		e.virtualSeasons = make(map[string]embySeasonCacheEntry, len(groups))
 	}
 	if e.virtualArtwork == nil {
-		e.virtualArtwork = make(map[string]embyArtworkCacheEntry)
+		e.virtualArtwork = make(map[string]embyArtworkCacheEntry, len(groups)*2)
 	}
+	for _, group := range groups {
+		e.rememberSeriesGroupLocked(group, expiresAt)
+	}
+	// 写入后再裁剪：逐条裁剪会让整批写入退化成 O(n²)，且中途裁剪可能把
+	// 同一批里刚写进去的分组又淘汰掉。
 	e.trimVirtualCachesLocked(time.Now())
+}
+
+// rememberSeriesGroupLocked 写入单个分组，调用方必须已持有 virtualMu。
+func (e *EmbyService) rememberSeriesGroupLocked(group embySeriesGroup, expiresAt time.Time) {
+	if strings.TrimSpace(group.ID) == "" {
+		return
+	}
 	e.virtualSeries[group.ID] = embySeriesCacheEntry{group: group, expiresAt: expiresAt}
 	e.virtualArtwork[group.ID] = embyArtworkCacheEntry{primary: group.PosterURL, backdrop: group.BackdropURL, expiresAt: expiresAt}
 	e.virtualArtwork[group.ID+"-bd"] = embyArtworkCacheEntry{primary: group.PosterURL, backdrop: group.BackdropURL, expiresAt: expiresAt}

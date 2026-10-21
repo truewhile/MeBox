@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,6 +41,25 @@ type webLibraryPayload struct {
 	RemoteSource string                   `json:"remote_source,omitempty"`
 	Total        int64                    `json:"total,omitempty"`
 	Cards        []service.SeriesCardView `json:"cards,omitempty"`
+	// CoverImageURL 是客户端可直接使用的「有效封面」：管理员自定义的
+	// cover_url 优先，否则指向服务端生成的成员海报拼图接口。Web / App 都
+	// 读这一个字段，避免各自用卡片在前端拼格子、长得还不一样。
+	CoverImageURL string `json:"cover_image_url,omitempty"`
+}
+
+// effectiveLibraryCoverURL 计算库封面的有效地址。远程挂载库的封面由上游
+// Emby 决定，这里返回空串，调用方继续用卡片拼图兜底。
+func effectiveLibraryCoverURL(lib model.Library, isRemote bool) string {
+	if isRemote {
+		return ""
+	}
+	if raw := strings.TrimSpace(lib.CoverURL); raw != "" {
+		return raw
+	}
+	if strings.TrimSpace(lib.ID) == "" {
+		return ""
+	}
+	return "/api/libraries/" + url.PathEscape(lib.ID) + "/cover"
 }
 
 // remoteLibraryPreviewBudget 限制 /api/libraries?with_preview=1 里远程 Emby
@@ -124,9 +144,10 @@ func listLibrariesHandler(svc *service.Container) gin.HandlerFunc {
 			}
 			for _, p := range previews {
 				out = append(out, webLibraryPayload{
-					Library: p.Library,
-					Total:   p.Total,
-					Cards:   service.NewSeriesCardViews(p.Cards),
+					Library:       p.Library,
+					Total:         p.Total,
+					Cards:         service.NewSeriesCardViews(p.Cards),
+					CoverImageURL: effectiveLibraryCoverURL(p.Library, false),
 				})
 			}
 		} else {
@@ -145,7 +166,7 @@ func listLibrariesHandler(svc *service.Container) gin.HandlerFunc {
 				if counts != nil {
 					total = counts[l.ID]
 				}
-				out = append(out, webLibraryPayload{Library: l, Total: total})
+				out = append(out, webLibraryPayload{Library: l, Total: total, CoverImageURL: effectiveLibraryCoverURL(l, false)})
 			}
 		}
 		// 精确指定目标库时，如果目标全是本地库，就不必枚举远程挂载。
@@ -272,9 +293,9 @@ func getLibraryHandler(svc *service.Container) gin.HandlerFunc {
 				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 				return
 			}
-			c.JSON(http.StatusOK, webLibraryPayload{Library: libs[0]})
+			c.JSON(http.StatusOK, webLibraryPayload{Library: libs[0], CoverImageURL: effectiveLibraryCoverURL(libs[0], false)})
 		} else {
-			c.JSON(http.StatusOK, webLibraryPayload{Library: *lib})
+			c.JSON(http.StatusOK, webLibraryPayload{Library: *lib, CoverImageURL: effectiveLibraryCoverURL(*lib, false)})
 		}
 	}
 }

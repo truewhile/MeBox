@@ -299,18 +299,18 @@ func (s *SchedulerService) jobCleanTranscodeCache(ctx context.Context) error {
 	return walkAndPrune(s.cacheDir+"/hls", cutoff)
 }
 
-// jobCleanImageCache prunes the image proxy cache: 原图按保留时长与独立配额
-// 优先淘汰，总量超限时再淘汰派生成品。
+// jobCleanImageCache prunes the image proxy cache: 原图按独立配额优先淘汰，
+// 总量超限时再淘汰派生成品。全程只看占用，不按文件年龄删除。
 func (s *SchedulerService) jobCleanImageCache(ctx context.Context) error {
 	if s.cacheDir == "" {
 		return nil
 	}
 	policy := s.imageCachePolicy()
-	if policy.TotalBytes <= 0 && policy.OriginalsBytes <= 0 && policy.OriginalsAge <= 0 {
+	if policy.TotalBytes <= 0 && policy.OriginalsBytes <= 0 {
 		return nil
 	}
 	imagesDir := filepath.Join(s.cacheDir, "images")
-	pools := ImageCachePools(imagesDir, policy.OriginalsBytes, policy.OriginalsAge)
+	pools := ImageCachePools(imagesDir, policy.OriginalsBytes)
 	res, err := PruneImageCachePools(pools, policy.TotalBytes)
 	if err != nil {
 		if s.log != nil {

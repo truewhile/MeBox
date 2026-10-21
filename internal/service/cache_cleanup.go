@@ -74,21 +74,19 @@ type ImageCacheScope struct {
 	DropUnknownResizeVariants bool
 }
 
-// ImageCachePool 描述一个图片缓存池：范围 + 自身配额 + 保留时长。
+// ImageCachePool 描述一个图片缓存池：范围 + 自身配额。
 //
 // 分池的意义在于两类缓存的“可再生成本”完全不同：原图只是生成缩略图的原料，
 // 丢了可以重新回源；派生缩略图是客户端热路径真正读取的成品，重新生成代价高。
-// 因此原图配小配额、短保留，总量超限时也优先淘汰原图。
+// 因此原图配小配额，总量超限时也优先淘汰原图。
+//
+// 淘汰只看占用（配额头寸），不按文件年龄删除：缩略图生成成本高，只要磁盘还
+// 放得下就该留着，让再次浏览直接命中缓存。
 type ImageCachePool struct {
 	Name     string
 	Scopes   []ImageCacheScope
-	MaxBytes int64         // 0 = 不单独限制
-	MaxAge   time.Duration // 0 = 不按时间淘汰
+	MaxBytes int64 // 0 = 不单独限制
 }
-
-// imageFailMarkerMaxAge 是失败标记文件的保留时长：标记只用于观测/重试，
-// 过期即视为噪音清掉（不会因为标记残留而阻止重新抓取）。
-const imageFailMarkerMaxAge = 24 * time.Hour
 
 // tempImageCacheFile 报告文件名是否是下载/缩放过程中的临时文件。它们正在被
 // 并发写入，清理时必须跳过。
@@ -182,11 +180,13 @@ func removeImageCacheEntry(entry imageCacheFileEntry, result *PruneImageCacheRes
 	_ = os.Remove(entry.path + ".fail")
 }
 
-// PruneImageCachePools 按池清理图片缓存：
-//  1. 删除超过池 MaxAge 的文件（原图按保留时长淘汰）；
-//  2. 池自身超过 MaxBytes 时按 mtime 淘汰到 80%（留水位，避免连续写入即触发）；
-//  3. 全部池合计超过 totalBytes 时，仍按“先原图、后派生”的顺序淘汰最旧文件，
+// PruneImageCachePools 按池清理图片缓存，只做占用淘汰：
+//  1. 池自身超过 MaxBytes 时按 mtime 淘汰到 80%（留水位，避免连续写入即触发）；
+//  2. 全部池合计超过 totalBytes 时，仍按“先原图、后派生”的顺序淘汰最旧文件，
 //     使总量上限始终是硬保证，同时让客户端热路径的缩略图活得更久。
+//
+// 不按文件年龄删除：过期即删会让一张几天前看过的海报重新解码（2 核机器上
+// 每张约 0.2 秒），代价远高于占着那几十 KB 磁盘。
 //
 // 传入的池顺序即总量超限时的淘汰优先级（排在前面的先被淘汰）。
 func PruneImageCachePools(pools []ImageCachePool, totalBytes int64) (PruneImageCacheResult, error) {
@@ -207,16 +207,18 @@ func PruneImageCachePools(pools []ImageCachePool, totalBytes int64) (PruneImageC
 	}
 	result.RemainingBytes = result.TotalBytesBefore
 
-	// 过期的失败标记直接清掉：它们不计容量，只用于观测与重试。
-	cutoffMarkers := time.Now().Add(-imageFailMarkerMaxAge)
+	// 失败标记不计入容量：只清掉对应缓存文件已经不存在的孤儿标记（它们只是
+	// 观测/重试用的噪音，留着没有任何作用）。
 	for _, marker := range failMarkers {
-		if marker.modTime.Before(cutoffMarkers) {
-			_ = os.Remove(marker.path)
+		base := strings.TrimSuffix(marker.path, ".fail")
+		if _, err := os.Stat(base); err == nil {
+			continue
 		}
+		_ = os.Remove(marker.path)
 	}
 
-	now := time.Now()
 	deleted := make(map[string]bool, len(entries))
+
 	deleteEntry := func(entry imageCacheFileEntry) {
 		if deleted[entry.path] {
 			return
@@ -225,20 +227,7 @@ func PruneImageCachePools(pools []ImageCachePool, totalBytes int64) (PruneImageC
 		removeImageCacheEntry(entry, &result)
 	}
 
-	// 1. 按池保留时长淘汰（原图池）。
-	for i := range pools {
-		if pools[i].MaxAge <= 0 {
-			continue
-		}
-		cutoff := now.Add(-pools[i].MaxAge)
-		for _, entry := range entries {
-			if entry.pool == i && entry.modTime.Before(cutoff) {
-				deleteEntry(entry)
-			}
-		}
-	}
-
-	// 2. 池自身配额。
+	// 1. 池自身配额。
 	for i := range pools {
 		maxBytes := pools[i].MaxBytes
 		if maxBytes <= 0 {
@@ -263,7 +252,7 @@ func PruneImageCachePools(pools []ImageCachePool, totalBytes int64) (PruneImageC
 		}
 	}
 
-	// 3. 总量硬上限：跨池按淘汰优先级（池顺序）再按 mtime 淘汰。
+	// 2. 总量硬上限：跨池按淘汰优先级（池顺序）再按 mtime 淘汰。
 	if totalBytes > 0 && result.RemainingBytes > totalBytes {
 		target := totalBytes * 80 / 100
 		for _, entry := range evictionOrder(entries, deleted) {
@@ -357,11 +346,10 @@ func PruneImageCache(imagesDir string, maxSizeBytes int64) (PruneImageCacheResul
 // 第一个池是原图：历史版本平铺在 images/ 下的旧缓存也归入此池，升级后会被
 // 逐步淘汰；第二个池是派生成品（本地缩放结果 + 挂载 Emby 按尺寸返回的成品）。
 // 池顺序即总量超限时的淘汰优先级。
-func ImageCachePools(imagesDir string, originalsMaxBytes int64, originalsMaxAge time.Duration) []ImageCachePool {
+func ImageCachePools(imagesDir string, originalsMaxBytes int64) []ImageCachePool {
 	originals := ImageCachePool{
 		Name:     "originals",
 		MaxBytes: originalsMaxBytes,
-		MaxAge:   originalsMaxAge,
 		Scopes: []ImageCacheScope{
 			{Root: imagesDir, Recursive: false}, // 旧版平铺布局
 			{Root: filepath.Join(imagesDir, imageOriginalCacheSubdir), Recursive: true},

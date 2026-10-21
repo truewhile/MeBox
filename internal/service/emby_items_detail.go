@@ -153,7 +153,7 @@ func (e *EmbyService) loadLatestItemsCached(ctx context.Context, userID, parentI
 		}
 		if e.cache != nil {
 			freshTTL := time.Duration(e.embyLatestCacheTTLSeconds()) * time.Second
-			e.cache.SetJSONWithStale(loadCtx, cacheKey, value, freshTTL, freshTTL+30*time.Minute)
+			e.cache.SetJSONWithStale(loadCtx, cacheKey, value, freshTTL, freshTTL+embyLatestStaleWindow)
 		}
 		e.rememberArtworkRefs(value.Artwork)
 		return value, nil

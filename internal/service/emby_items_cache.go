@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type embyItemsCacheValue struct {
@@ -77,7 +78,15 @@ func (e *EmbyService) embySimilarCacheKey(mediaID, userID string, limit int) str
 }
 
 // defaultEmbyLatestCacheTTLSeconds 是 Emby「最新添加」缓存的兜底时长。
-const defaultEmbyLatestCacheTTLSeconds = 300
+const defaultEmbyLatestCacheTTLSeconds = 900
+
+// embyLatestStaleWindow 是「最新添加」载荷在进程内保留的陈旧副本时长。
+//
+// 客户端空闲很久之后再打开首页时，新鲜期早已过去：生产环境观察到这时
+// 73 个媒体库的 Latest 同时回源，首批请求要 8-25s 才回来，客户端等不及
+// 还会重试，进一步放大压力。保留陈旧副本后，这类请求立刻拿到上次的结果，
+// 由后台异步重建（见 refreshLatestItemsAsync），用户不再等 SQL。
+const embyLatestStaleWindow = 24 * time.Hour
 
 // embyLatestCacheTTLSeconds 返回「最新添加」列表的缓存时长。它刻意比通用
 // 媒体缓存更长：客户端刷新首页时会同时请求全部媒体库的 Latest（生产环境

@@ -2,6 +2,9 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -278,6 +281,20 @@ func isSupportedEmbyCollectionType(t string) bool {
 	return false
 }
 
+// libraryCoverTag 生成媒体库拼图封面的图片版本号。
+//
+// 第三方客户端把库主图按 (URL, ImageTag) 缓存，tag 不变就不会重新请求。
+// 用成员海报列表的指纹做 tag，库内容变化或生成规则调整时客户端自然会刷新。
+func libraryCoverTag(libraryID string, sources []string) string {
+	h := sha256.New()
+	_, _ = io.WriteString(h, libraryID)
+	for _, src := range sources {
+		_, _ = io.WriteString(h, src)
+		_, _ = h.Write([]byte{0})
+	}
+	return libraryID + "-" + hex.EncodeToString(h.Sum(nil))[:8]
+}
+
 func (e *EmbyService) libraryAsView(ctx context.Context, l *model.Library) map[string]any {
 	collectionType := "movies"
 	switch l.Type {
@@ -292,9 +309,17 @@ func (e *EmbyService) libraryAsView(ctx context.Context, l *model.Library) map[s
 	}
 	// 库封面:与剧集/电影一样,只有在能解析出封面时才广告 ImageTags.Primary,
 	// 否则客户端会认为该库无主图而不去请求 /Images/Primary。
+	//
+	// 拼图封面的 tag 带上「成员海报」的指纹：库内容变化或生成规则调整（例如
+	// 从 2×2 改成竖切）时 tag 会变，客户端才会丢缓存重新拉图；固定用库 ID
+	// 会让第三方客户端永远显示第一次缓存下来的封面。
 	imageTags := map[string]string{}
-	if e.LibraryHasCover(ctx, l.ID) {
-		imageTags["Primary"] = l.ID
+	if sources, lib := LibraryCoverSourcesForLibrary(ctx, e.repo, l.ID); lib != nil {
+		if len(sources) > 0 {
+			imageTags["Primary"] = libraryCoverTag(l.ID, sources)
+		} else if strings.TrimSpace(lib.CoverURL) != "" {
+			imageTags["Primary"] = l.ID
+		}
 	}
 	return map[string]any{
 		"Id":                       l.ID,

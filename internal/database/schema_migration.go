@@ -376,6 +376,11 @@ func ensurePerformanceIndexes(db *gorm.DB) error {
 		`DROP INDEX IF EXISTS idx_media_library_release_active`,
 		`CREATE INDEX IF NOT EXISTS idx_media_library_created_active ON media(library_id, created_at DESC) WHERE deleted_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_media_library_episode_active ON media(library_id, season_num, episode_num, created_at DESC) WHERE deleted_at IS NULL`,
+		// 虚拟剧集分组索引：series_id 为空的剧集行要按
+		// (season_num, episode_num, episode_fraction, created_at) 排序后做内存
+		// 分组。没有它 SQLite 只能全表扫描再建临时 B-tree，而 Emby 的
+		// 卡片/海报查询每次只关心其中一部剧（生产环境实测单次 1.3s）。
+		`CREATE INDEX IF NOT EXISTS idx_media_virtual_series_group ON media(season_num, episode_num, episode_fraction, created_at) WHERE deleted_at IS NULL AND (series_id IS NULL OR series_id = '')`,
 		`CREATE INDEX IF NOT EXISTS idx_media_library_root_active ON media(library_id, library_root_id) WHERE deleted_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_media_series_active ON media(series_id, season_num, episode_num) WHERE deleted_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_media_library_series_active ON media(library_id, series_id, season_num, episode_num) WHERE deleted_at IS NULL`,

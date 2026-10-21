@@ -50,9 +50,6 @@ func (c *Config) normalize() error {
 	if c.Cache.ImagesOriginalsMaxSizeMB < 0 {
 		c.Cache.ImagesOriginalsMaxSizeMB = 0
 	}
-	if c.Cache.ImagesOriginalsTTLHours < 0 {
-		c.Cache.ImagesOriginalsTTLHours = 0
-	}
 	if c.Cache.MemoryMaxSizeMB <= 0 {
 		c.Cache.MemoryMaxSizeMB = DefaultCacheMemoryMaxSizeMB
 	}
