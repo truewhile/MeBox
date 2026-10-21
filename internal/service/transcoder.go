@@ -272,6 +272,9 @@ func (t *TranscoderService) EnsureJobFromSubtitleQuality(ctx context.Context, me
 	input.Quality = quality
 	t.maybeFillDuration(ctx, m, input)
 	settings := ffmpegArgSettingsFromConfig(cfg, quality)
+	// 「原画」档位遇到浏览器可解的 H.264 源时只换封装，避免慢机器上重编码
+	// 追不上播放（两核软件编码实测 0.1～0.2 倍速）。其它档位要改分辨率，仍重编码。
+	input.CopyVideo = t.remuxEligible(ctx, m, quality, subtitleStream)
 	jobEncoder := settings.encoder
 	if settings.noScale || subtitleStream >= 0 {
 		jobEncoder = ""
@@ -311,6 +314,9 @@ func (t *TranscoderService) EnsureJobFromSubtitleQuality(ctx context.Context, me
 	}
 	if subtitleStream >= 0 {
 		jobEncoder = "software (subtitle burn-in)"
+	}
+	if input.CopyVideo {
+		jobEncoder = remuxEncoderLabel
 	}
 	job := &hlsJob{
 		jobKey:         jobKey,

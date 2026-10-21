@@ -16,6 +16,9 @@ type transcodeInput struct {
 	StartSec       float64
 	SubtitleStream *int
 	Quality        *LocalHLSQuality
+	// CopyVideo 为 true 时视频流只换封装（-c:v copy），不重编码。
+	// 仅当源视频是浏览器可解的老三样（H.264/8bit/4:2:0）且不需要缩放时启用。
+	CopyVideo bool
 }
 
 type ffmpegArgSettings struct {
@@ -52,6 +55,7 @@ func buildFFmpegArgsForInput(cfg *config.Config, input transcodeInput, playlist,
 		// 原画档位不做硬件缩放的兼容处理，直接走软件编码，保持源分辨率。
 		settings.encoder = ""
 	}
+	copyVideo := input.CopyVideo && input.SubtitleStream == nil
 	video := ffmpegVideoPlanForSettings(settings)
 	if input.SubtitleStream != nil {
 		// Bitmap subtitles must be composited in software. Keeping CUDA/QSV/
@@ -60,13 +64,17 @@ func buildFFmpegArgsForInput(cfg *config.Config, input transcodeInput, playlist,
 		settings.encoder = ""
 		video = ffmpegVideoPlanForSettings(settings)
 	}
+	if copyVideo {
+		// 直通：不做缩放、不挂滤镜、不选编码器，整条视频流原样塞进 TS。
+		video = ffmpegVideoPlan{codec: "copy"}
+	}
 
 	// Mid-file restarts must not use -re: output -ss would otherwise crawl to the
 	// seek point at 1x wall-clock before emitting the first HLS segment.
 	realtime := settings.realtime && input.StartSec <= 0.05
 	args := baseFFmpegArgs(video.preInput, realtime)
-	args = appendInputAndVideoArgs(args, input, settings, video)
-	args = appendOutputHLSArgs(args, settings, segments, playlist)
+	args = appendInputAndVideoArgs(args, input, settings, video, copyVideo)
+	args = appendOutputHLSArgs(args, settings, segments, playlist, copyVideo)
 	return args
 }
 
@@ -161,7 +169,7 @@ func baseFFmpegArgs(preInput string, realtime bool) []string {
 	return args
 }
 
-func appendInputAndVideoArgs(args []string, input transcodeInput, settings ffmpegArgSettings, video ffmpegVideoPlan) []string {
+func appendInputAndVideoArgs(args []string, input transcodeInput, settings ffmpegArgSettings, video ffmpegVideoPlan, copyVideo bool) []string {
 	args = append(args, ffmpegHTTPInputArgs(input)...)
 	ss := ""
 	if input.StartSec > 0.05 {
@@ -172,6 +180,11 @@ func appendInputAndVideoArgs(args []string, input transcodeInput, settings ffmpe
 	// scrubbing; CDNs with Range support jump via demuxer seek instead.
 	if ss != "" {
 		args = append(args, "-ss", ss)
+		if copyVideo {
+			// 复制视频流时 ffmpeg 不能解码，精确 seek 会把关键帧之前的分组丢掉，
+			// 输出从 P 帧开始（花屏）。退到前一个关键帧，最多提前一两秒。
+			args = append(args, "-noaccurate_seek")
+		}
 	}
 	args = append(args, "-i", input.Source)
 	if input.SubtitleStream != nil {
@@ -197,7 +210,23 @@ func appendInputAndVideoArgs(args []string, input transcodeInput, settings ffmpe
 	return args
 }
 
-func appendOutputHLSArgs(args []string, settings ffmpegArgSettings, segments, playlist string) []string {
+func appendOutputHLSArgs(args []string, settings ffmpegArgSettings, segments, playlist string, copyVideo bool) []string {
+	if copyVideo {
+		// 视频是复制进来的，编码参数一律不适用；只保留音频转 AAC 与切片参数。
+		// -avoid_negative_ts 让带 B 帧的源在 -ss 之后不会出现负时间戳。
+		return append(args,
+			"-avoid_negative_ts", "make_zero",
+			"-c:a", "aac",
+			"-ar", "48000",
+			"-b:a", "128k",
+			"-ac", "2",
+			"-f", "hls",
+			"-hls_time", fmt.Sprintf("%d", settings.segmentSeconds),
+			"-hls_list_size", "0",
+			"-hls_segment_filename", segments,
+			playlist,
+		)
+	}
 	return append(args,
 		"-pix_fmt", "yuv420p",
 		"-b:v", settings.bitrate,
