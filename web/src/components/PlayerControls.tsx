@@ -290,6 +290,8 @@ export function PlayerControls({
   const vr360ActiveRef = useRef(Boolean(vr360))
   /** 画面是否已锁住（VR 锁）。事件回调里读它，避免闭包读到过期值。 */
   const uiLockedRef = useRef(uiLocked)
+  /** 控制栏当前是否可见：方向键只续期计时器，不改变可见性。 */
+  const uiVisibleRef = useRef(uiVisible)
   /** VR 画布上的按下状态：按住拖动 = 转动视角，不唤出控制栏。 */
   const vrDragRef = useRef<{ x: number; y: number; moved: boolean } | null>(null)
   const pendingSeekRef = useRef<number | null>(null)
@@ -317,6 +319,10 @@ export function PlayerControls({
   useEffect(() => {
     uiLockedRef.current = uiLocked
   }, [uiLocked])
+
+  useEffect(() => {
+    uiVisibleRef.current = uiVisible
+  }, [uiVisible])
 
   // 「保持显示」条件集中在这里：悬停控制栏、拖动进度条、打开任何菜单或面板。
   // 事件回调里读 ref，渲染里读派生值，两边始终一致。
@@ -682,10 +688,12 @@ export function PlayerControls({
     setSeekHover(clampRatio((event.clientX - rect.left) / rect.width))
   }
 
-  const revealControls = useCallback(() => {
-    // 锁住时键盘操作（方向键调进度/音量）不应该把控制栏唤回来。
-    if (uiLockedRef.current) return
-    onUiVisibleChange(true)
+  /**
+   * 方向键调进度时只续期自动隐藏计时器，不主动唤出操作栏：控制栏原本隐藏时
+   * 保持画面干净（只留轻量的快进/回退提示），原本可见时也不会在连续按键中途消失。
+   */
+  const refreshControlsTimer = useCallback(() => {
+    if (uiLockedRef.current || !uiVisibleRef.current) return
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
     const el = video()
     if (!el || el.paused || holdControlsRef.current) {
@@ -728,7 +736,7 @@ export function PlayerControls({
       dir: applied < 0 ? 'back' : 'forward',
       seconds: Math.abs(Math.round(applied)),
     })
-    revealControls()
+    refreshControlsTimer()
 
     if (seekHintTimerRef.current) clearTimeout(seekHintTimerRef.current)
     seekHintTimerRef.current = setTimeout(() => setSeekHint(null), SEEK_HINT_MS)
@@ -750,7 +758,7 @@ export function PlayerControls({
       if (!burst) return
       applySeekRef.current(burst.base + burst.delta)
     }, SEEK_APPLY_MS)
-  }, [revealControls, streamOffset, video])
+  }, [refreshControlsTimer, streamOffset, video])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
