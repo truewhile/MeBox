@@ -242,6 +242,15 @@ type PlayerVideoStageProps = {
   /** 自动跳过后的撤销提示；null 表示不显示。 */
   skipNotice?: { text: string } | null
   onUndoSkip?: () => void
+  /** 手动标记：把当前位置记为片头结束 / 片尾开始。 */
+  onMarkIntro?: () => void
+  onMarkOutro?: () => void
+  /** 长按清除已有的片头 / 片尾标记。 */
+  onClearIntroMark?: () => void
+  onClearOutroMark?: () => void
+  /** 当前是否已有对应类型的标记（决定按钮文案与长按是否可用）。 */
+  hasIntroMark?: boolean
+  hasOutroMark?: boolean
   waiting?: boolean
   waitingMessage?: string
 }
@@ -312,6 +321,12 @@ export function PlayerVideoStage({
   onSkipPrompt,
   skipNotice = null,
   onUndoSkip,
+  onMarkIntro,
+  onMarkOutro,
+  onClearIntroMark,
+  onClearOutroMark,
+  hasIntroMark = false,
+  hasOutroMark = false,
   waiting = false,
   waitingMessage = '',
 }: PlayerVideoStageProps) {
@@ -966,6 +981,48 @@ export function PlayerVideoStage({
           ) : null}
           {danmakuPanel}
           {playlistPanel}
+          {/* 手动标记片头/片尾：数据源查不到时用户自己标一次，服务端会按季传播。
+              放在左下角，与右侧的「跳过」按钮分开，避免误触。 */}
+          {!locked && (onMarkIntro || onMarkOutro) ? (
+            <div
+              className="absolute bottom-16 left-3 z-30 flex items-center gap-1.5 rounded-xl border border-white/15 bg-black/70 px-1.5 py-1.5 text-xs text-white shadow-[0_8px_28px_rgba(0,0,0,0.5)] backdrop-blur-md sm:bottom-20 sm:left-5"
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              <span className="px-1.5 text-white/55">标记</span>
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onMarkIntro?.()
+                }}
+                onContextMenu={(event) => {
+                  if (!hasIntroMark) return
+                  event.preventDefault()
+                  onClearIntroMark?.()
+                }}
+                title={hasIntroMark ? '点击重新标记片头，右键清除' : '把当前位置标为片头结束'}
+                className="rounded-lg bg-white/10 px-2.5 py-1 font-medium transition hover:bg-white/20"
+              >
+                片头
+              </button>
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onMarkOutro?.()
+                }}
+                onContextMenu={(event) => {
+                  if (!hasOutroMark) return
+                  event.preventDefault()
+                  onClearOutroMark?.()
+                }}
+                title={hasOutroMark ? '点击重新标记片尾，右键清除' : '把当前位置标为片尾开始'}
+                className="rounded-lg bg-white/10 px-2.5 py-1 font-medium transition hover:bg-white/20"
+              >
+                片尾
+              </button>
+            </div>
+          ) : null}
         </>
       ) : loadError ? (
         <p className="max-w-[92%] text-center text-sm text-rose-400">{loadError}</p>

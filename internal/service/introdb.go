@@ -41,15 +41,6 @@ const (
 	introDBMaxRetryDelay = 3 * time.Second
 )
 
-// IntroDBSpan is one resolved skip range, still in provider terms.
-// EndMs == 0 means "runs to the end of the media" (TheIntroDB returns
-// end_ms: null for end credits); the caller resolves it against the duration.
-type IntroDBSpan struct {
-	Kind    string
-	StartMs int64
-	EndMs   int64
-}
-
 // IntroDBService queries TheIntroDB for one media item.
 type IntroDBService struct {
 	log        *zap.Logger
@@ -113,7 +104,7 @@ type introDBResponse struct {
 // 429/503 会重试一次（社区库在短时间连发下确实会限流）。重试前会先确认调用方
 // 的 deadline 还够用；预算不够就直接返回错误，让调用方保留自己的缓存，
 // 把「拿不到片段」维持在「少一个跳过按钮」的量级。
-func (s *IntroDBService) Fetch(ctx context.Context, tmdbID, season, episode int) ([]IntroDBSpan, error) {
+func (s *IntroDBService) Fetch(ctx context.Context, tmdbID, season, episode int) ([]SegmentSpan, error) {
 	if s == nil || s.client == nil {
 		return nil, errors.New("introdb service nil")
 	}
@@ -135,9 +126,20 @@ func (s *IntroDBService) Fetch(ctx context.Context, tmdbID, season, episode int)
 	}
 }
 
+// Source implements SegmentProvider.
+func (s *IntroDBService) Source() string { return IntroDBSource }
+
+// FetchSegments implements SegmentProvider. TheIntroDB 以 TMDb id 寻址。
+func (s *IntroDBService) FetchSegments(ctx context.Context, q SegmentQuery) ([]SegmentSpan, error) {
+	if q.IsMovie {
+		return s.Fetch(ctx, q.TMDbID, 0, 0)
+	}
+	return s.Fetch(ctx, q.TMDbID, q.Season, q.Episode)
+}
+
 // introDBFetchAttempt 是一次请求的结果：数据或错误，外加「值不值得重试」。
 type introDBFetchAttempt struct {
-	spans      []IntroDBSpan
+	spans      []SegmentSpan
 	err        error
 	retryable  bool
 	retryAfter time.Duration
@@ -246,7 +248,7 @@ func (s *IntroDBService) mediaURL(tmdbID, season, episode int) string {
 // parseIntroDBResponse flattens the per-type arrays into spans, preserving the
 // intro -> recap -> credits -> preview order so the player sees the earliest
 // range first.
-func parseIntroDBResponse(body []byte) ([]IntroDBSpan, error) {
+func parseIntroDBResponse(body []byte) ([]SegmentSpan, error) {
 	var raw introDBResponse
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("parse introdb json: %w", err)
@@ -260,7 +262,7 @@ func parseIntroDBResponse(body []byte) ([]IntroDBSpan, error) {
 		{"credits", raw.Credits},
 		{"preview", raw.Preview},
 	}
-	spans := make([]IntroDBSpan, 0, len(raw.Intro)+len(raw.Credits))
+	spans := make([]SegmentSpan, 0, len(raw.Intro)+len(raw.Credits))
 	for _, group := range groups {
 		for _, r := range group.ranges {
 			var start int64
@@ -274,12 +276,24 @@ func parseIntroDBResponse(body []byte) ([]IntroDBSpan, error) {
 			if start < 0 {
 				start = 0
 			}
-			// end == 0 表示「延续到片尾」，是合法值；其余情况 end 必须大于 start，
-			// 否则这段区间没有任何可跳过的内容，直接丢弃避免在播放器里出现空按钮。
-			if end != 0 && end <= start {
+			// 官方规范（theintrodb.org/openapi.yaml，SegmentTimestamp）区分了两种
+			// 「没有数值」的写法，含义完全不同，必须按指针区分而不能都归零：
+			//   end_ms: null —— Credits/Preview 专用，「一直到片尾」，合法，
+			//                   落成 0 作为哨兵值由客户端结合片长补齐；
+			//   end_ms: 0    —— 「no segment」，即这一段不存在。
+			// 早期实现把两者都当成「到片尾」，于是 intro:[{start_ms:null,end_ms:0}]
+			// 被解释成 [0, 片长]，整集都落在「片头」区间里：一开播就弹跳过按钮，
+			// 开了自动跳过更是直接跳到片尾。实测约三分之一的剧集会返回这种占位。
+			if r.EndMs != nil && end <= start {
 				continue
 			}
-			spans = append(spans, IntroDBSpan{Kind: group.kind, StartMs: start, EndMs: end})
+			// 只有片尾类区间才允许「开放结束点」（end_ms: null 落成 0）。片头/回顾
+			// 如果出现 null 结束点，补齐后的区间会覆盖到片尾，等于把整集判成片头，
+			// 所以宁可不显示也不猜。
+			if r.EndMs == nil && group.kind != "credits" && group.kind != "preview" {
+				continue
+			}
+			spans = append(spans, SegmentSpan{Kind: group.kind, StartMs: start, EndMs: end})
 		}
 	}
 	return spans, nil

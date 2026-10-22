@@ -33,8 +33,11 @@ export function skippedNoticeText(kind: PlaybackSegmentKind): string {
 /**
  * 把服务端返回的片段换算成源时间轴上的秒区间。
  *
- * end_ms === 0 表示区间延续到片尾，用媒体总时长补齐；时长未知（0 / 非有限值）
- * 时丢弃该区间——否则会算出一个永远命中的区间，浮层上的按钮就再也点不掉了。
+ * end_ms === 0 是「一直到片尾」的哨兵值，只有片尾类（credits / preview）会这么
+ * 返回，用媒体总时长补齐。片头 / 回顾出现 0 一律丢弃：那通常意味着数据源根本没
+ * 给出结束点（TheIntroDB 用 end_ms: 0 表示「这段不存在」），补成总时长会让整集
+ * 都落在「片头」区间里，一开播就弹跳过按钮。时长未知（0 / 非有限值）同样丢弃，
+ * 否则会算出一个永远命中的区间，浮层上的按钮就再也点不掉了。
  */
 export function toSkipSegments(
   segments: PlaybackSegment[] | null | undefined,
@@ -44,9 +47,16 @@ export function toSkipSegments(
   const out: SkipSegment[] = []
   for (const segment of segments) {
     const startSec = Math.max(0, segment.start_ms / 1000)
-    const endSec = segment.end_ms > 0 ? segment.end_ms / 1000 : durationSec
-    if (!Number.isFinite(endSec) || endSec <= startSec) continue
-    out.push({ kind: segment.kind, startSec, endSec })
+    const openEnded = segment.kind === 'credits' || segment.kind === 'preview'
+    if (segment.end_ms > 0) {
+      const endSec = segment.end_ms / 1000
+      if (!Number.isFinite(endSec) || endSec <= startSec) continue
+      out.push({ kind: segment.kind, startSec, endSec })
+      continue
+    }
+    if (!openEnded) continue
+    if (!Number.isFinite(durationSec) || durationSec <= startSec) continue
+    out.push({ kind: segment.kind, startSec, endSec: durationSec })
   }
   return out.sort((a, b) => a.startSec - b.startSec)
 }

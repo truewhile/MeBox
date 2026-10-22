@@ -385,7 +385,9 @@ func TestListForPlaybackRespectsCallerDeadline(t *testing.T) {
 	}
 }
 
-func TestPreferSegmentsBySourcePrefersManualThenIntroDBThenPropagated(t *testing.T) {
+// 优先级体现「用户意图强度」：manual > propagated > 社区库。
+// 传播值来自用户在同季其它集的手动标记，是人给的，必须压过自动抓取的数据。
+func TestPreferSegmentsBySourcePrefersManualThenPropagatedThenIntroDB(t *testing.T) {
 	rows := []model.MediaSegment{
 		{Kind: model.SegmentKindIntro, StartMs: 1, EndMs: 2, Source: SegmentSourcePropagated},
 		{Kind: model.SegmentKindIntro, StartMs: 10, EndMs: 20, Source: IntroDBSource},
@@ -395,13 +397,14 @@ func TestPreferSegmentsBySourcePrefersManualThenIntroDBThenPropagated(t *testing
 	}
 	got := preferSegmentsBySource(rows)
 	if len(got) != 2 {
-		t.Fatalf("got %#v, want manual intro + introdb credits", got)
+		t.Fatalf("got %#v, want manual intro + propagated credits", got)
 	}
 	if got[0].Source != SegmentSourceManual || got[0].StartMs != 100 {
 		t.Fatalf("intro = %#v, want manual", got[0])
 	}
-	if got[1].Source != IntroDBSource || got[1].StartMs != 2000 {
-		t.Fatalf("credits = %#v, want theintrodb", got[1])
+	// 片尾没有 manual，propagated 应当压过社区库。
+	if got[1].Source != SegmentSourcePropagated || got[1].StartMs != 1000 {
+		t.Fatalf("credits = %#v, want propagated", got[1])
 	}
 }
 

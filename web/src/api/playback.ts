@@ -54,6 +54,16 @@ export const playbackAPI = {
       .get<PlaybackSegmentsResponse>(`/playback/${encodeURIComponent(mediaId)}/segments`)
       .then((r) => r.data),
 
+  // 手动标记：把当前位置记为片头结束 / 片尾开始（clear 则清除）。服务端会按季
+  // 传播到同季其它尚未标记的集，并返回合并后的完整片段列表。
+  markSegment: (
+    mediaId: string,
+    payload: { kind: 'intro' | 'credits'; position_ms?: number; clear?: boolean },
+  ) =>
+    api
+      .put<PlaybackSegmentsResponse>(`/playback/${encodeURIComponent(mediaId)}/segments`, payload)
+      .then((r) => r.data),
+
   recordProgress: (payload: PlaybackProgressRequest) =>
     api.post('/history', payload).then((r) => r.data),
 

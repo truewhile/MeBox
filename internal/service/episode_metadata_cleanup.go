@@ -144,3 +144,43 @@ func (c *Container) NormalizePollutedEpisodeMetadata(ctx context.Context) (int, 
 	}
 	return cleaned, nil
 }
+
+// segmentRangeCleanupSettingKey marks the one-time removal of impossible
+// skip ranges written by the older end_ms: 0 interpretation.
+const segmentRangeCleanupSettingKey = "segment.range_cleanup_v1_done"
+
+// NormalizeImpossibleSegments 删除历史误写进来的「不可能区间」。
+//
+// 旧解析把 TheIntroDB 的 end_ms: 0 当成「延续到片尾」，于是
+// intro:[{start_ms:null,end_ms:0}] 被落成 intro (0, 0)，客户端补齐后覆盖整集；
+// 同理 recap (0,0) 也会让整集变成回顾。这类行只会让播放器一开播就弹跳过按钮，
+// 没有任何保留价值，直接硬删。
+//
+// 幂等：完成后写 setting 标记。只处理片头/回顾——片尾类允许开放结束点。
+func (c *Container) NormalizeImpossibleSegments(ctx context.Context) (int, error) {
+	if c == nil || c.Repo == nil || c.Repo.DB == nil {
+		return 0, nil
+	}
+	if c.Repo.Setting != nil {
+		if v, err := c.Repo.Setting.Get(ctx, segmentRangeCleanupSettingKey); err == nil && strings.TrimSpace(v) == "true" {
+			return 0, nil
+		}
+	}
+	res := c.Repo.DB.WithContext(ctx).Unscoped().
+		Where("kind IN ?", []string{model.SegmentKindIntro, model.SegmentKindRecap}).
+		Where("end_ms <= start_ms").
+		Delete(&model.MediaSegment{})
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	cleaned := int(res.RowsAffected)
+	if c.Repo.Setting != nil {
+		if err := c.Repo.Setting.Set(ctx, segmentRangeCleanupSettingKey, "true"); err != nil && c.Log != nil {
+			c.Log.Warn("mark segment range cleanup done failed", zap.Error(err))
+		}
+	}
+	if cleaned > 0 && c.Log != nil {
+		c.Log.Info("impossible skip segments removed", zap.Int("rows", cleaned))
+	}
+	return cleaned, nil
+}

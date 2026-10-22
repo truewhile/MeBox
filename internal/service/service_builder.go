@@ -134,8 +134,14 @@ func (b *serviceContainerBuilder) initContentServices() {
 	b.c.Media = NewMediaService(b.cfg, b.log, b.repos).SetRuntimeCache(b.c.Cache)
 	b.c.Stream = NewStreamService(b.cfg, b.log, b.repos, b.c.Transcoder)
 	b.c.Playback = NewPlaybackService(b.log, b.repos).SetEmbyRemote(b.c.EmbyRemote)
-	// 片头/片尾片段：播放时按需向 TheIntroDB 补齐并落库，供下次直接命中。
-	b.c.Segments = NewMediaSegmentService(b.log, b.repos).SetIntroDB(NewIntroDBService(b.log))
+	// 片头/片尾片段：播放时按需向社区库补齐并落库，供下次直接命中。
+	// 三个源都注册，具体用哪个由设置项 segment.source 决定（默认 theintrodb）。
+	b.c.Segments = NewMediaSegmentService(b.log, b.repos).
+		SetIntroDB(NewIntroDBService(b.log)).
+		SetIntroDBApp(NewIntroDBAppService(b.log)).
+		SetTODb(NewTODbService(b.log)).
+		// IntroDB 只认 IMDb id，需要经 TMDb 的 external_ids 解析。
+		SetIMDbResolver(b.c.TMDb)
 	b.c.Subtitle = NewSubtitleService(b.cfg, b.log, b.repos)
 	b.c.Profile = NewProfileService(b.log, b.repos)
 	b.c.Audit = NewAuditService(b.log, b.repos)

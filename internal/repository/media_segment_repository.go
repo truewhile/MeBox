@@ -56,6 +56,23 @@ func (r *MediaSegmentRepository) ReplaceForMedia(ctx context.Context, mediaID, s
 	})
 }
 
+// ReplaceForMediaSourceKind swaps the segments of one (media, source, kind)
+// triple in a single transaction. Used by manual marking, where the user sets
+// one boundary at a time and must not disturb the other kinds.
+func (r *MediaSegmentRepository) ReplaceForMediaSourceKind(ctx context.Context, mediaID, source, kind string, rows []model.MediaSegment) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Unscoped().
+			Where("media_id = ? AND source = ? AND kind = ?", mediaID, source, kind).
+			Delete(&model.MediaSegment{}).Error; err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			return nil
+		}
+		return tx.Create(&rows).Error
+	})
+}
+
 // GetFetch returns the fetch ledger row for (media, source), or (nil, nil).
 func (r *MediaSegmentRepository) GetFetch(ctx context.Context, mediaID, source string) (*model.MediaSegmentFetch, error) {
 	var row model.MediaSegmentFetch

@@ -55,9 +55,9 @@ func registerLowercaseEmbyItemRoutes(auth *gin.RouterGroup, svc *service.Contain
 	auth.GET("/items/:id/similar", embySimilarHandler(svc))
 	auth.GET("/items/:id/thumbnailset", embyEmptyItemsHandler(svc))
 	auth.GET("/items/:id/thememedia", embyThemeMediaHandler(svc))
-	auth.GET("/users/:userId/items/:id/specialfeatures", embyEmptyItemsHandler(svc))
+	auth.GET("/users/:userId/items/:id/specialfeatures", embyEmptyArrayHandler(svc))
 	auth.GET("/users/:userId/items/:id/intros", embyEmptyItemsHandler(svc))
-	auth.GET("/items/:id/specialfeatures", embyEmptyItemsHandler(svc))
+	auth.GET("/items/:id/specialfeatures", embyEmptyArrayHandler(svc))
 	auth.GET("/items/:id/intros", embyEmptyItemsHandler(svc))
 }
 

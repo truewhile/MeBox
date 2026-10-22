@@ -113,6 +113,14 @@ func (a *application) start() error {
 		a.logger.Info("polluted episode metadata cleanup completed", zap.Int("media_count", cleaned))
 	}
 
+	// 一次性删除旧版解析误写的「整集片头/回顾」区间（end_ms <= start_ms），
+	// 否则升级后播放器仍会一开播就弹跳过按钮。
+	if cleaned, err := a.services.NormalizeImpossibleSegments(context.Background()); err != nil {
+		a.logger.Warn("impossible skip segment cleanup failed", zap.Error(err))
+	} else if cleaned > 0 {
+		a.logger.Info("impossible skip segments removed", zap.Int("rows", cleaned))
+	}
+
 	if err := a.services.Auth.SeedAdmin(context.Background()); err != nil {
 		a.logger.Warn("seed admin failed", zap.Error(err))
 	}

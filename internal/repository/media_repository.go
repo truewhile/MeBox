@@ -237,10 +237,16 @@ func (r *MediaRepository) ListSeasonSiblings(ctx context.Context, m *model.Media
 	} else {
 		libraryID := strings.TrimSpace(m.LibraryID)
 		title := strings.TrimSpace(m.Title)
-		if libraryID == "" || title == "" || m.TMDbID <= 0 {
+		if libraryID == "" || title == "" {
 			return nil, nil
 		}
-		query = query.Where("library_id = ? AND title = ? AND tm_db_id = ?", libraryID, title, m.TMDbID)
+		// 没有 series_id 也没有 TMDb id 时，退到「同库 + 同标题」：手动标记的按季
+		// 传播是用户显式操作，同库同名已经足够可靠；而在缺 id 时直接放弃会让这个
+		// 功能在未刮削的库上完全不生效。
+		query = query.Where("library_id = ? AND title = ?", libraryID, title)
+		if m.TMDbID > 0 {
+			query = query.Where("tm_db_id = ?", m.TMDbID)
+		}
 	}
 	var rows []model.Media
 	if err := query.Find(&rows).Error; err != nil {

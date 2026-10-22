@@ -15,7 +15,7 @@ function equal<T>(name: string, actual: T, expected: T) {
 check('空片段返回空数组', toSkipSegments(null, 600).length === 0)
 check('空数组返回空数组', toSkipSegments([], 600).length === 0)
 
-// end_ms: 0 表示延续到片尾，用媒体时长补齐。
+// end_ms: 0 只在片尾类（credits/preview）表示「延续到片尾」，用媒体时长补齐。
 const resolved = toSkipSegments(
   [
     { kind: 'intro', start_ms: 228_664, end_ms: 246_143 },
@@ -27,6 +27,17 @@ equal('区间数量', resolved.length, 2)
 equal('片头起点(秒)', resolved[0].startSec, 228.664)
 equal('片头终点(秒)', resolved[0].endSec, 246.143)
 equal('片尾终点补齐为总时长', resolved[1].endSec, 3600)
+
+// 片头 / 回顾的 end_ms: 0 是数据源的「这段不存在」占位（TheIntroDB 官方语义），
+// 绝不能补齐成总时长——那会让整集都落在片头区间里，一开播就弹跳过按钮。
+check(
+  '片头 end_ms=0 不得补齐为整集',
+  toSkipSegments([{ kind: 'intro', start_ms: 0, end_ms: 0 }], 3600).length === 0,
+)
+check(
+  '回顾 end_ms=0 不得补齐为整集',
+  toSkipSegments([{ kind: 'recap', start_ms: 0, end_ms: 0 }], 3600).length === 0,
+)
 
 // 时长未知时，开放区间必须丢弃：否则会算出一个永远命中的区间。
 check(

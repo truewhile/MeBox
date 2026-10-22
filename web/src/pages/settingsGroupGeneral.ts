@@ -24,10 +24,23 @@ export const generalSettingsGroup: SettingGroup = {
       defaultValue: 'false',
     },
     {
+      key: 'segment.source',
+      label: '片头/片尾数据源',
+      type: 'select',
+      hint: '选择查询哪个社区库来补全片头/片尾时间点。TheIntroDB 数据最全（按 TMDb id）；IntroDB 只认 IMDb id，需要 TMDb 已配置 API key 才能解析；TODb 偏华语片源、按平台版本记录。选「关闭」后只使用本地已有数据（含手动标记），不再请求外网。',
+      defaultValue: 'theintrodb',
+      options: [
+        { value: 'theintrodb', label: 'TheIntroDB' },
+        { value: 'introdb', label: 'IntroDB' },
+        { value: 'todb', label: 'TODb（TheOtherDB）' },
+        { value: 'off', label: '关闭' },
+      ],
+    },
+    {
       key: 'segment.prewarm_enabled',
-      label: '后台预热 IntroDB 片头片段',
+      label: '后台预热片头片段',
       type: 'toggle',
-      hint: '默认关闭。开启后每 6 小时在后台向 TheIntroDB 拉取可识别媒体的片头/片尾区间并写入本地；关闭时仅在播放时按需请求。',
+      hint: '默认关闭。开启后每 6 小时在后台向上面选择的数据源拉取可识别媒体的片头/片尾区间并写入本地；关闭时仅在播放时按需请求。',
       defaultValue: 'false',
     },
     {

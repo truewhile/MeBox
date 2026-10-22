@@ -20,6 +20,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -132,4 +134,35 @@ func (t *TMDbProvider) getJSON(ctx context.Context, url string, out any) error {
 		return fmt.Errorf("tmdb %s: %d", url, resp.StatusCode)
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// ResolveIMDbID 用 TMDb 的 external_ids 端点把 TMDb 条目解析成 IMDb id。
+//
+// 这是为只认 IMDb id 的片段源（IntroDB）准备的。结果不做本地缓存：TMDb 的
+// external_ids 响应很小，而片段查询本身已经有 30 天/24 小时的正负缓存兜底，
+// 再叠一层只会引入失效问题。
+//
+// TMDb 未配置或上游不可达时返回空字符串与 error，调用方据此跳过该源，
+// 而不是把所有媒体都记成「查不到」。
+func (t *TMDbProvider) ResolveIMDbID(ctx context.Context, tmdbID int, isMovie bool) (string, error) {
+	if t == nil || t.cfg == nil || tmdbID <= 0 {
+		return "", nil
+	}
+	apiKey := t.resolveAPIKey(ctx)
+	if apiKey == "" {
+		return "", nil
+	}
+	mediaType := "tv"
+	if isMovie {
+		mediaType = "movie"
+	}
+	u := t.resolveBaseURL(ctx) + "/" + mediaType + "/" + fmt.Sprint(tmdbID) +
+		"/external_ids?api_key=" + url.QueryEscape(apiKey)
+	var r struct {
+		IMDbID string `json:"imdb_id"`
+	}
+	if err := t.getJSON(ctx, u, &r); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(r.IMDbID), nil
 }

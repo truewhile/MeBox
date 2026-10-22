@@ -88,6 +88,16 @@ type PlayerDiagnosticEvent = { at: string; phase: string; mode: string; message:
 // 自动跳过片头后，「已跳过 · 撤销」提示停留的时长。
 const SKIP_NOTICE_MS = 6000
 
+// 手动标记的提示里展示的时间点（mm:ss 或 h:mm:ss）。
+function formatMarkTime(totalSec: number): string {
+  const safe = Math.max(0, Math.floor(totalSec))
+  const hours = Math.floor(safe / 3600)
+  const minutes = Math.floor((safe % 3600) / 60)
+  const seconds = safe % 60
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`
+}
+
 // 115 云 HLS 中途断流后，允许在窗口内重建几次会话再退回本地转码。
 const CLOUD_HLS_RELOAD_MAX = 3
 const CLOUD_HLS_RELOAD_WINDOW_MS = 10 * 60 * 1000
@@ -2245,6 +2255,73 @@ export function PlayerPage() {
     if (activeSkip) performSkip(activeSkip)
   }, [activeSkip, performSkip])
 
+  // ── 手动标记片头/片尾 ──────────────────────────────────────────────────────
+  // 服务端把手动标记的优先级排在最前，并按季传播到还没标记的集，所以这里只需
+  // 把「当前播放位置」发过去，再用返回的合并结果替换本地片段。
+  const manualMarkBusyRef = useRef(false)
+  const submitManualMark = useCallback(
+    (kind: 'intro' | 'credits', clear: boolean) => {
+      const current = mediaRef.current
+      if (!current?.id || manualMarkBusyRef.current) return
+      // 位置必须是源时间轴上的绝对秒数：本地 HLS 的 t=0 对应 hlsStartSec。
+      const video = ref.current
+      const positionSec = playbackPositionSec(
+        modeRef.current,
+        hlsSourceRef.current,
+        hlsStartSecRef.current,
+        video?.currentTime || 0,
+      )
+      const positionMs = Math.max(0, Math.round(positionSec * 1000))
+      if (!clear && positionMs <= 0) {
+        toast.error('当前位置为 0，请播放到片头结束后再标记')
+        return
+      }
+      manualMarkBusyRef.current = true
+      const markLabel = kind === 'intro' ? '片头' : '片尾'
+      const markTime = formatMarkTime(positionSec)
+      playbackAPI
+        .markSegment(current.id, {
+          kind,
+          position_ms: clear ? undefined : positionMs,
+          clear,
+        })
+        .then((res) => {
+          setRawSkipSegments(res.segments ?? [])
+          setAutoSkipIntro(Boolean(res.auto_skip))
+          setActiveSkip(null)
+          activeSkipKeyRef.current = ''
+          setDismissedSkipKinds([])
+          setAutoSuppressedKinds([])
+          if (clear) {
+            toast.success(`已清除${markLabel}标记`)
+          } else {
+            toast.success(`已标记${markLabel}：${markTime}（同季其它集已同步）`)
+          }
+        })
+        .catch(() => toast.error('标记保存失败，请稍后重试'))
+        .finally(() => {
+          manualMarkBusyRef.current = false
+        })
+    },
+    [],
+  )
+
+  const handleMarkIntro = useCallback(() => submitManualMark('intro', false), [submitManualMark])
+  const handleMarkOutro = useCallback(() => submitManualMark('credits', false), [submitManualMark])
+  const handleClearIntroMark = useCallback(() => submitManualMark('intro', true), [submitManualMark])
+  const handleClearOutroMark = useCallback(() => submitManualMark('credits', true), [submitManualMark])
+
+  // 已有手动标记的类型：用于按钮提示文案。只有手动标记可以清除，外部源的不算。
+  const markPresence = useMemo(() => {
+    let intro = false
+    let outro = false
+    for (const segment of rawSkipSegments) {
+      if (segment.kind === 'intro') intro = true
+      if (segment.kind === 'credits') outro = true
+    }
+    return { intro, outro }
+  }, [rawSkipSegments])
+
   const handleUndoSkip = useCallback(() => {
     const notice = skipNotice
     setSkipNotice(null)
@@ -2547,6 +2624,12 @@ export function PlayerPage() {
         onSkipPrompt={handleSkipClick}
         skipNotice={skipNotice ? { text: skipNotice.text } : null}
         onUndoSkip={handleUndoSkip}
+        onMarkIntro={handleMarkIntro}
+        onMarkOutro={handleMarkOutro}
+        onClearIntroMark={handleClearIntroMark}
+        onClearOutroMark={handleClearOutroMark}
+        hasIntroMark={markPresence.intro}
+        hasOutroMark={markPresence.outro}
         playlistPanel={
           isMobileTheater
             ? undefined

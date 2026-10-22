@@ -345,8 +345,24 @@ func (e *EmbyService) Items(ctx context.Context, p ItemsParams) (map[string]any,
 		}
 	}
 
+	// 客户端刷新首页时常用 Movie,Series,Video 这种混合类型一次取「最新」行。
+	// 只有剧集库才该折叠成剧集卡片：seriesItemsForLibrary 只查
+	// (season_num>0 OR episode_num>0)，电影库走到这里会让整行返回 0 条。
 	if containsItemType(p.IncludeItemTypes, "Series") && !containsItemType(p.IncludeItemTypes, "Episode") {
-		return e.seriesItemsForLibrary(ctx, p.ParentID, p)
+		episodic := true
+		if p.ParentID != "" {
+			if value, err := e.libraryIsEpisodic(ctx, p.ParentID); err == nil {
+				episodic = value
+			}
+		}
+		if episodic {
+			return e.seriesItemsForLibrary(ctx, p.ParentID, p)
+		}
+		// 非剧集库：只请求 Series 时确实没有可返回的条目；混合类型则落回
+		// mediaItems，由它按 Movie 过滤，而不是整行判空。
+		if !containsItemType(p.IncludeItemTypes, "Movie") && !containsItemType(p.IncludeItemTypes, "Video") {
+			return emptyItemsEnvelope(p.StartIndex), nil
+		}
 	}
 
 	// 电影库的「常规浏览」(未指定 IncludeItemTypes): 电影库里偶尔混入按

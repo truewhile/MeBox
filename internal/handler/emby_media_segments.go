@@ -86,6 +86,12 @@ func embySegmentItems(m *model.Media, rows []model.MediaSegment, want map[string
 		}
 		endMs := row.EndMs
 		if endMs <= 0 {
+			// 只有片尾类允许「延续到片尾」。片头/回顾的结束点缺失意味着这段区间
+			// 本身不可信（数据源用 0 表示「这段不存在」），补成片长会让客户端把
+			// 整集标成片头，所以直接丢弃。
+			if row.Kind != model.SegmentKindCredits && row.Kind != model.SegmentKindPreview {
+				continue
+			}
 			if durationMs <= 0 {
 				continue
 			}

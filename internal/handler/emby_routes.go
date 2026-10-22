@@ -212,9 +212,11 @@ func registerEmbyAuthenticatedItemRoutes(auth *gin.RouterGroup, svc *service.Con
 	auth.GET("/Items/:id/Similar", embySimilarHandler(svc))
 	auth.GET("/Items/:id/ThumbnailSet", embyEmptyItemsHandler(svc))
 	auth.GET("/Items/:id/ThemeMedia", embyThemeMediaHandler(svc))
-	auth.GET("/Users/:userId/Items/:id/SpecialFeatures", embyEmptyItemsHandler(svc))
+	// SpecialFeatures 在 Emby 官方 schema 里是 BaseItemDto[]（裸数组），
+	// 返回 {"Items":[]} 会让按 List 强转的客户端抛 type cast 异常。
+	auth.GET("/Users/:userId/Items/:id/SpecialFeatures", embyEmptyArrayHandler(svc))
 	auth.GET("/Users/:userId/Items/:id/Intros", embyEmptyItemsHandler(svc))
-	auth.GET("/Items/:id/SpecialFeatures", embyEmptyItemsHandler(svc))
+	auth.GET("/Items/:id/SpecialFeatures", embyEmptyArrayHandler(svc))
 	auth.GET("/Items/:id/Intros", embyEmptyItemsHandler(svc))
 	auth.GET("/api/danmu/:id/raw", embyDanmuRawHandler(svc))
 }
