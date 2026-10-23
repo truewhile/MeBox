@@ -1025,7 +1025,7 @@ export function PlayerVideoStage({
             <div
               ref={markDockRef}
               aria-hidden={!markDockVisible}
-              className={`absolute left-0 top-[70%] z-30 -translate-y-1/2 select-none transition duration-200 ${
+              className={`absolute left-0 top-[78%] z-30 -translate-y-1/2 select-none transition duration-200 ${
                 markDockVisible ? 'opacity-100' : 'pointer-events-none -translate-x-1 opacity-0'
               }`}
               onPointerDown={(event) => event.stopPropagation()}
@@ -1049,11 +1049,11 @@ export function PlayerVideoStage({
                     if (!markDockOpen) setControlsVisible(true)
                     setMarkDockOpen((open) => !open)
                   }}
-                  className="group flex h-16 items-center bg-transparent pl-0 pr-3 focus-visible:outline-none"
+                  className="group flex h-12 items-center bg-transparent pl-0 pr-3 focus-visible:outline-none"
                 >
                   <span
-                    className={`block h-16 rounded-r-full bg-white/40 shadow-[0_0_8px_rgba(0,0,0,0.55)] transition-all duration-200 group-hover:w-2 group-hover:bg-white/70 group-focus-visible:w-2 group-focus-visible:bg-white/90 ${
-                      markDockOpen ? 'w-2 bg-white/70' : 'w-1.5'
+                    className={`block h-10 rounded-r-full bg-white/40 shadow-[0_0_8px_rgba(0,0,0,0.55)] transition-all duration-200 group-hover:w-1.5 group-hover:bg-white/70 group-focus-visible:w-1.5 group-focus-visible:bg-white/90 ${
+                      markDockOpen ? 'w-1.5 bg-white/70' : 'w-1'
                     }`}
                   />
                 </button>
