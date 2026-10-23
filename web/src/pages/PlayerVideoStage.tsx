@@ -350,6 +350,39 @@ export function PlayerVideoStage({
   const lockRevealTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lockVisible = lockHovered || lockShown
   const vrActive = Boolean(vr360)
+  // 手动标记入口：画面左边缘一条半透明小白条，常态常驻（锁画面时才收），
+  // 点开才展开「片头 / 片尾」——展开的动作面板跟下面进度条同进同出。
+  // 悬停白条时按住操作栏：它不在操作栏自身的悬停判定范围内，鼠标停在上面时
+  // 操作栏会照常在三秒后收起，否则展开的面板会被一起带走。
+  const [markBarHovered, setMarkBarHovered] = useState(false)
+  const [markDockOpen, setMarkDockOpen] = useState(false)
+  const markDockRef = useRef<HTMLDivElement>(null)
+  const markDockVisible = !locked
+  const markPanelVisible = markDockVisible && controlsVisible
+
+  // 进度条收起（或画面锁定）就关掉标记面板：展开的动作跟操作栏同一套显隐规则。
+  useEffect(() => {
+    if (!markPanelVisible) setMarkDockOpen(false)
+  }, [markPanelVisible])
+
+  // 点画面别处、换片或按 Esc 都收起面板，避免它挂在那里挡住画面。
+  useEffect(() => {
+    if (!markDockOpen) return
+    const onDocPointerDown = (event: Event) => {
+      const dock = markDockRef.current
+      if (dock && event.target instanceof Node && dock.contains(event.target)) return
+      setMarkDockOpen(false)
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMarkDockOpen(false)
+    }
+    document.addEventListener('pointerdown', onDocPointerDown, true)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onDocPointerDown, true)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [markDockOpen])
   // VR 渲染器是否已经画出第一帧（在此之前给出「正在启动」提示，避免只看到黑屏）。
   // 只按「媒体 ID」记录：切换投影方式/画幅布局不会重建画布，也就不能清掉这个
   // 状态——渲染器只在挂载后上报一次就绪，清掉之后提示会一直停在「正在启动」。
@@ -567,6 +600,7 @@ export function PlayerVideoStage({
     // 锁上时立刻收起操作栏；解锁时也保持收起，这样画面在任何一侧都不会突然
     // 弹出一整条浮层。解锁那一下顺带显示「已解锁」提示。
     setControlsVisible(false)
+    setMarkBarHovered(false)
     revealLock(!next)
   }
 
@@ -576,6 +610,8 @@ export function PlayerVideoStage({
     setLockShown(false)
     setLockHint(false)
     setLockHovered(false)
+    setMarkBarHovered(false)
+    setMarkDockOpen(false)
     if (lockRevealTimerRef.current) {
       clearTimeout(lockRevealTimerRef.current)
       lockRevealTimerRef.current = null
@@ -907,7 +943,7 @@ export function PlayerVideoStage({
             onPlaybackRateChange={onPlayerPlaybackRateChange}
             uiVisible={controlsVisible && !locked}
             onUiVisibleChange={setControlsVisible}
-            uiHold={vrUiHovered}
+            uiHold={vrUiHovered || markBarHovered}
             uiLocked={locked}
             subs={subs}
             subtitleIndex={subtitleIndex}
@@ -982,45 +1018,77 @@ export function PlayerVideoStage({
           {danmakuPanel}
           {playlistPanel}
           {/* 手动标记片头/片尾：数据源查不到时用户自己标一次，服务端会按季传播。
-              放在左下角，与右侧的「跳过」按钮分开，避免误触。 */}
-          {!locked && (onMarkIntro || onMarkOutro) ? (
+              常态只有画面左边缘一条半透明小白条；点开才展开「片头 / 片尾」，展开的
+              动作跟下面进度条同进同出。全屏时也一样，静止画面里只有这条小白条。
+              位置避开左侧居中的锁定按钮，不与它的悬停感应区重叠。 */}
+          {onMarkIntro || onMarkOutro ? (
             <div
-              className="absolute bottom-16 left-3 z-30 flex items-center gap-1.5 rounded-xl border border-white/15 bg-black/70 px-1.5 py-1.5 text-xs text-white shadow-[0_8px_28px_rgba(0,0,0,0.5)] backdrop-blur-md sm:bottom-20 sm:left-5"
+              ref={markDockRef}
+              aria-hidden={!markDockVisible}
+              className={`absolute left-0 top-[70%] z-30 -translate-y-1/2 select-none transition duration-200 ${
+                markDockVisible ? 'opacity-100' : 'pointer-events-none -translate-x-1 opacity-0'
+              }`}
               onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => event.stopPropagation()}
+              onDoubleClick={(event) => event.stopPropagation()}
+              onPointerEnter={(event) => {
+                // 只有真鼠标才按住操作栏：触摸端抬起后拿不到可靠的离开信号。
+                if (event.pointerType === 'mouse') setMarkBarHovered(true)
+              }}
+              onPointerLeave={() => setMarkBarHovered(false)}
             >
-              <span className="px-1.5 text-white/55">标记</span>
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.stopPropagation()
-                  onMarkIntro?.()
-                }}
-                onContextMenu={(event) => {
-                  if (!hasIntroMark) return
-                  event.preventDefault()
-                  onClearIntroMark?.()
-                }}
-                title={hasIntroMark ? '点击重新标记片头，右键清除' : '把当前位置标为片头结束'}
-                className="rounded-lg bg-white/10 px-2.5 py-1 font-medium transition hover:bg-white/20"
-              >
-                片头
-              </button>
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.stopPropagation()
-                  onMarkOutro?.()
-                }}
-                onContextMenu={(event) => {
-                  if (!hasOutroMark) return
-                  event.preventDefault()
-                  onClearOutroMark?.()
-                }}
-                title={hasOutroMark ? '点击重新标记片尾，右键清除' : '把当前位置标为片尾开始'}
-                className="rounded-lg bg-white/10 px-2.5 py-1 font-medium transition hover:bg-white/20"
-              >
-                片尾
-              </button>
+              <div className="flex items-center">
+                <button
+                  type="button"
+                  tabIndex={markDockVisible ? 0 : -1}
+                  aria-expanded={markDockOpen}
+                  aria-label={markDockOpen ? '收起片头片尾标记' : '标记片头 / 片尾'}
+                  title={markDockOpen ? '收起' : '标记片头 / 片尾'}
+                  onClick={() => {
+                    // 展开的动作面板跟进度条走：操作栏收着时先把它亮出来。
+                    if (!markDockOpen) setControlsVisible(true)
+                    setMarkDockOpen((open) => !open)
+                  }}
+                  className="group flex h-16 items-center bg-transparent pl-0 pr-3 focus-visible:outline-none"
+                >
+                  <span
+                    className={`block h-16 rounded-r-full bg-white/40 shadow-[0_0_8px_rgba(0,0,0,0.55)] transition-all duration-200 group-hover:w-2 group-hover:bg-white/70 group-focus-visible:w-2 group-focus-visible:bg-white/90 ${
+                      markDockOpen ? 'w-2 bg-white/70' : 'w-1.5'
+                    }`}
+                  />
+                </button>
+                {markDockOpen && markPanelVisible ? (
+                  <div className="flex items-center gap-0.5 rounded-full border border-white/10 bg-black/70 py-0.5 pl-2 pr-0.5 text-[11px] text-white shadow-[0_6px_24px_rgba(0,0,0,0.45)] backdrop-blur-md">
+                    <span className="pr-0.5 text-[10px] tracking-wide text-white/40">标记</span>
+                    <button
+                      type="button"
+                      onClick={() => onMarkIntro?.()}
+                      onContextMenu={(event) => {
+                        if (!hasIntroMark) return
+                        event.preventDefault()
+                        onClearIntroMark?.()
+                      }}
+                      title={hasIntroMark ? '点击重新标记片头，右键清除' : '把当前位置标为片头结束'}
+                      className="rounded-full px-2.5 py-1 font-medium leading-4 text-white/75 transition hover:bg-white/15 hover:text-white"
+                    >
+                      片头
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onMarkOutro?.()}
+                      onContextMenu={(event) => {
+                        if (!hasOutroMark) return
+                        event.preventDefault()
+                        onClearOutroMark?.()
+                      }}
+                      title={hasOutroMark ? '点击重新标记片尾，右键清除' : '把当前位置标为片尾开始'}
+                      className="rounded-full px-2.5 py-1 font-medium leading-4 text-white/75 transition hover:bg-white/15 hover:text-white"
+                    >
+                      片尾
+                    </button>
+                  </div>
+                ) : null}
+              </div>
             </div>
           ) : null}
         </>
