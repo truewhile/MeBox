@@ -27,12 +27,22 @@ import (
 
 // historyListHandler returns the caller's history rows joined with the
 // matching media in a single response.
+//
+// include_media=0 只返回历史行本身。客户端判断「继续播放」指向哪一集时只
+// 需要 media_id/position_ms；带上整条 media 会让 300 条的响应从 ~40KB 涨到
+// ~420KB，手机链路上光传输就要十几秒，详情页的续播解析会被它拖住。
 func historyListHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		uid, _ := c.Get(middleware.CtxUserID)
 		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
 		if limit <= 0 || limit > 500 {
 			limit = 50
+		}
+		includeMedia := true
+		if raw := strings.TrimSpace(c.Query("include_media")); raw != "" {
+			if parsed, err := strconv.ParseBool(raw); err == nil {
+				includeMedia = parsed
+			}
 		}
 		items, err := svc.Playback.RecentHistory(c.Request.Context(), toString(uid), limit)
 		if err != nil {
@@ -42,7 +52,11 @@ func historyListHandler(svc *service.Container) gin.HandlerFunc {
 		visibility := mediaVisibilityForRequest(c, svc)
 		filtered := make([]service.HistoryItem, 0, len(items))
 		for _, item := range items {
+			// 可见性仍然按 media 判断，只是决定要不要把它写进响应。
 			if item.Media == nil || visibility.Allows(item.Media) {
+				if !includeMedia {
+					item.Media = nil
+				}
 				filtered = append(filtered, item)
 			}
 		}
