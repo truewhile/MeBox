@@ -139,6 +139,10 @@ export function PlayerPage() {
     return () => guard.invalidate()
   }, [id])
   const directRetryRef = useRef(false)
+  // 直连 302 被网盘 CDN 按 UA 防盗链拒绝后（115 直链绑定换链时的 UA，电视
+  // WebView、按站点改 UA 的扩展、改写 UA 的代理都会让「页面请求」与「取流
+  // 请求」的 UA 不一致而 403），改用服务端同源转发（?proxy=1）再试的标记。
+  const directViaProxyRef = useRef(false)
   const retryingDirectRef = useRef(false)
   // 程序化续播 seek 后的宽限截止时间；期内直连误报不升到 HLS。
   const directSeekGraceUntilRef = useRef(0)
@@ -556,6 +560,7 @@ export function PlayerPage() {
     setDanmakuInfo(null)
     setDanmakuSearching(true)
     directRetryRef.current = false
+    directViaProxyRef.current = false
     retryingDirectRef.current = false
     directSeekGraceUntilRef.current = 0
     transientPlayErrorRef.current = ''
@@ -1485,7 +1490,7 @@ export function PlayerPage() {
     } else {
       // VR 全景需要浏览器能读帧：STRM/网盘直链会被 302 到跨域 CDN，此时改为
       // 服务端同源转发（原画，不转码）；普通播放仍走 302 直连，省服务器流量。
-      const url = streamURL(mediaId, { proxy: vr360DirectProxyRef.current })
+      const url = streamURL(mediaId, { proxy: vr360DirectProxyRef.current || directViaProxyRef.current })
       const absoluteURL = new URL(url, window.location.href).href
       // 其它异步播放器状态更新不应重启同一个直连请求；STRM 的重定向/换链
       // 比本地文件慢，重启请求可能产生一个短暂但会触发 onError 的中断。
@@ -2455,7 +2460,7 @@ export function PlayerPage() {
     if (retryingDirectRef.current) return
 
     const expectedSrc = mediaId
-      ? new URL(streamURL(mediaId, { proxy: vr360DirectProxyRef.current }), window.location.href).href
+      ? new URL(streamURL(mediaId, { proxy: vr360DirectProxyRef.current || directViaProxyRef.current }), window.location.href).href
       : ''
     const action = classifyDirectPlayError({
       errorCode: video?.error?.code,
@@ -2493,8 +2498,32 @@ export function PlayerPage() {
       return
     }
 
+    // STRM/115 直连重试仍失败：最常见的原因是 115 防盗链按 UA 拒绝——直链
+    // 绑定换链（302）时浏览器的 UA，但取流请求的 UA 可能不同（电视/WebView
+    // 的内核播放器、按站点改 UA 的扩展、改写 UA 的代理）。这在本机无法修复，
+    // 而服务端同源转发（?proxy=1）由 MeBox 用绑定 UA 取流、必然通过校验。
+    // 先用转发续播原画；仍失败再走 scheduleDirectFallback 退转码线路。
+    if (
+      video &&
+      mediaId &&
+      !directViaProxyRef.current &&
+      !vr360DirectProxyRef.current &&
+      isStrmMedia(mediaRef.current)
+    ) {
+      directViaProxyRef.current = true
+      clearFallbackTimer()
+      recordDiagnostic('error', '直连被 CDN 拒绝（多为 UA 防盗链），改用服务端转发重试')
+      const resumeAt = pendingDirectSeekRef.current ?? (video.currentTime > 2 ? video.currentTime : 0)
+      pendingDirectSeekRef.current = null
+      video.src = streamURL(mediaId, { proxy: true })
+      void video.play().catch(() => undefined)
+      if (resumeAt > 1) seekStrmDirectTo(resumeAt)
+      armDirectStallWatchdog()
+      return
+    }
+
     scheduleDirectFallback()
-  }, [mediaId, mode, scheduleDirectFallback, seekStrmDirectTo, showPlayFailure])
+  }, [armDirectStallWatchdog, clearFallbackTimer, mediaId, mode, recordDiagnostic, scheduleDirectFallback, seekStrmDirectTo, showPlayFailure])
 
   const changeSubtitlePosition = useCallback((nextPosition: SubtitlePosition) => {
     setSubtitlePosition(nextPosition)
