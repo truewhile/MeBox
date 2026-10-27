@@ -79,6 +79,15 @@ const SEEK_STEP_SEC = 10
 const SEEK_REPEAT_MS = 160
 const SEEK_APPLY_MS = 220
 const SEEK_HINT_MS = 700
+/**
+ * 一次 seek 之后，播放事件在这段时间内不得把控制栏唤出来。
+ *
+ * 方向键/进度条跳转会让 <video> 走一遍 seeking → waiting → playing：
+ * 直连要重新拉 Range，本地 HLS 甚至要重起一段转码，缓冲恢复时的 playing
+ * 事件会把「播放器自己恢复」误当成用户操作，控制栏（连同整条进度条）就又
+ * 冒出来了。键盘处理本身早就不再唤出控制栏，漏的就是这条事件链。
+ */
+const SEEK_CONTROLS_SUPPRESS_MS = 1500
 const PLAYBACK_RATE_REPEAT_MS = 140
 const PLAYBACK_RATE_HINT_MS = 900
 /** 播放中控制栏无操作自动隐藏的延时。 */
@@ -292,6 +301,8 @@ export function PlayerControls({
   const uiLockedRef = useRef(uiLocked)
   /** 控制栏当前是否可见：方向键只续期计时器，不改变可见性。 */
   const uiVisibleRef = useRef(uiVisible)
+  /** 最近一次真正下发 seek 的时间（含键盘与进度条），用于压掉 seek 引发的播放事件。 */
+  const lastSeekActivityRef = useRef(0)
   /** VR 画布上的按下状态：按住拖动 = 转动视角，不唤出控制栏。 */
   const vrDragRef = useRef<{ x: number; y: number; moved: boolean } | null>(null)
   const pendingSeekRef = useRef<number | null>(null)
@@ -493,9 +504,26 @@ export function PlayerControls({
       onUiVisibleChange(false)
     }
 
+    /**
+     * 播放状态变化：图标永远同步，但只有「暂停」这种明确需要操作栏的动作才
+     * 主动唤出控制栏。
+     *
+     * `playing` 在 seek 之后缓冲恢复时同样会派发（直连要重拉 Range、本地 HLS
+     * 甚至重起一段转码），把它当成用户操作，方向键快进时整条控制栏（进度条）
+     * 就会自己冒出来。所以 play / playing 只同步图标并续期自动隐藏计时器，
+     * 不改变可见性；pause 才唤出控制栏，并且要避开刚下发 seek 的那一小段时间。
+     */
+    const seekSuppressed = () =>
+      Date.now() - lastSeekActivityRef.current < SEEK_CONTROLS_SUPPRESS_MS
     const syncPlay = () => {
       setPlaying(!el.paused)
+      if (seekSuppressed()) return
       onMove()
+    }
+    /** 播放/缓冲恢复：只同步状态并续期隐藏计时器，绝不主动唤出控制栏。 */
+    const syncPlaying = () => {
+      setPlaying(!el.paused)
+      resetTimer()
     }
     const syncTime = () => {
       const ranges = el.buffered
@@ -545,8 +573,11 @@ export function PlayerControls({
     stage.addEventListener('pointerup', endVrDrag)
     stage.addEventListener('pointercancel', endVrDrag)
 
-    el.addEventListener('play', syncPlay)
-    el.addEventListener('playing', syncPlay)
+    // 播放开始/缓冲恢复都不唤出控制栏：播放本身几乎总是由点击画面、播放按钮
+    // 或 seek 触发，这些入口要么已经在控制栏里，要么会被显式显示；事件再顶一次
+    // 就会让方向键快进时整条进度条冒出来。只有暂停需要主动亮出控制栏。
+    el.addEventListener('play', syncPlaying)
+    el.addEventListener('playing', syncPlaying)
     el.addEventListener('pause', syncPlay)
     el.addEventListener('timeupdate', syncTime)
     el.addEventListener('progress', syncTime)
@@ -567,8 +598,8 @@ export function PlayerControls({
       stage.removeEventListener('pointermove', onVrPointerMove)
       stage.removeEventListener('pointerup', endVrDrag)
       stage.removeEventListener('pointercancel', endVrDrag)
-      el.removeEventListener('play', syncPlay)
-      el.removeEventListener('playing', syncPlay)
+      el.removeEventListener('play', syncPlaying)
+      el.removeEventListener('playing', syncPlaying)
       el.removeEventListener('pause', syncPlay)
       el.removeEventListener('timeupdate', syncTime)
       el.removeEventListener('progress', syncTime)
@@ -638,6 +669,8 @@ export function PlayerControls({
     (absolute: number) => {
       const el = video()
       if (!el) return
+      // 记下这次 seek：随后由它触发的 waiting/playing 不算用户操作。
+      lastSeekActivityRef.current = Date.now()
       if (onSeekAbsolute?.(absolute)) {
         pendingSeekRef.current = absolute
         setCurrentTime(absolute)
@@ -731,6 +764,8 @@ export function PlayerControls({
     }
 
     pendingSeekRef.current = target
+    // 方向键也是一次真实 seek：播放事件在抑制窗口内不得唤出控制栏。
+    lastSeekActivityRef.current = Date.now()
     setCurrentTime(target)
     setSeekHint({
       dir: applied < 0 ? 'back' : 'forward',
