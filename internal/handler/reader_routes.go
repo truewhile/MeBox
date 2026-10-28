@@ -2,11 +2,16 @@
 package handler
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -869,12 +874,18 @@ func readerMediaProxyHandler(svc *service.Container) gin.HandlerFunc {
 		// 图片地址可自带 ",{headers:{...}}" 选项段：拆分后 headers 逐图应用，
 		// 代理地址里只保留不带选项的地址（见 ProxyURL）。
 		rawURL, mediaOptions, _ := readerrule.ParseMediaOptions(rawURL)
-		resp, err := svc.Reader.FetchMediaWithOptions(c.Request.Context(), book, rawURL, c.GetHeader("Range"), mediaOptions.Headers)
+		// 只有 200 的 GET 需要嗅探响应体（判播放列表 / 判错误页）；
+		// 206 的体是二进制分片、HEAD 没有体，读了反而要额外拼回去。
+		probeBody := c.Request.Method == http.MethodGet
+		media, err := fetchReaderMedia(c.Request.Context(), svc, book, rawURL, c.GetHeader("Range"), mediaOptions.Headers, probeBody)
 		if err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "媒体拉取失败: " + err.Error()})
 			return
 		}
+		resp := media.resp
 		defer resp.Body.Close()
+		// 换过票时用新地址：m3u8 里的相对分片要按新地址解析。
+		rawURL = media.url
 
 		ct := resp.Header.Get("Content-Type")
 		// 书源声明了 imageDecode 时，图片字节需要服务端二次解密。
@@ -885,6 +896,7 @@ func readerMediaProxyHandler(svc *service.Container) gin.HandlerFunc {
 				c.JSON(http.StatusBadGateway, gin.H{"error": "图片过大或读取失败"})
 				return
 			}
+			sniffed = append(append([]byte(nil), media.head...), sniffed...)
 			decoded, decErr := svc.Reader.DecodeImageBytes(c.Request.Context(), book, rawURL, false, sniffed)
 			if decErr != nil {
 				c.JSON(http.StatusBadGateway, gin.H{"error": "图片解密失败: " + decErr.Error()})
@@ -897,20 +909,21 @@ func readerMediaProxyHandler(svc *service.Container) gin.HandlerFunc {
 			c.Data(resp.StatusCode, contentType, decoded)
 			return
 		}
-		// m3u8 判定不能只看 Content-Type 或 URL 后缀：上游经常把播放列表标成
-		// application/octet-stream，或者地址是 /index.m3u8?token=...（后缀判断不命中）。
-		// 先读一小段用 #EXTM3U 标记确认；不是播放列表就把这段拼回响应体继续流式透传。
+		// 200 的 GET：media.head 已经读过一小段，先用它判播放列表与错误页。
 		//
-		// 只嗅探 200 的 GET：206 的体是二进制分片、HEAD 没有体，都不需要判断。
-		if c.Request.Method == http.MethodGet && resp.StatusCode == http.StatusOK {
-			head, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-			if readErr == nil && reader.BodyIsPlaylist(head, ct) {
+		// m3u8 判定不能只看 Content-Type 或 URL 后缀：上游经常把播放列表标成
+		// application/octet-stream，或者地址是 /index.m3u8?token=...（后缀判断不命中），
+		// 所以以 #EXTM3U 标记为准。
+		if probeBody && resp.StatusCode == http.StatusOK {
+			head := media.head
+			if reader.BodyIsPlaylist(head, ct) {
 				rest, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 				rewritten := svc.Reader.RewritePlaylist(bookID, rawURL, string(head)+string(rest))
 				c.Data(http.StatusOK, "application/vnd.apple.mpegurl", []byte(rewritten))
 				return
 			}
-			// 不是播放列表：透传时 Content-Length 可能因为已经读过一部分而失配，
+			// 走到这里说明 head 不是错误页（fetchReaderMedia 已经把错误页换票重试过了），
+			// 原样拼回去继续流式透传。Content-Length 因为已读过一部分会失配，
 			// 直接省略交给 net/http 按 chunked 处理，避免少写/多写导致截断。
 			for _, h := range []string{"Content-Type", "Content-Range", "Accept-Ranges"} {
 				if v := resp.Header.Get(h); v != "" {
@@ -921,7 +934,7 @@ func readerMediaProxyHandler(svc *service.Container) gin.HandlerFunc {
 			if len(head) > 0 {
 				_, _ = c.Writer.Write(head)
 			}
-			_, _ = io.Copy(c.Writer, resp.Body)
+			streamReaderMediaBody(c.Writer, resp.Body)
 			return
 		}
 		// 流式透传（含 206 Partial Content，支持音频拖动进度）
@@ -931,12 +944,228 @@ func readerMediaProxyHandler(svc *service.Container) gin.HandlerFunc {
 			}
 		}
 		c.Status(resp.StatusCode)
-		_, _ = io.Copy(c.Writer, resp.Body)
+		streamReaderMediaBody(c.Writer, resp.Body)
+	}
+}
+
+// streamReaderMediaBody 把上游响应体写到客户端，并在上游中途断开时**主动掐断**连接。
+//
+// 这是修复「播放器拿到半首歌」的关键：以前这里 `_, _ = io.Copy(...)` 把错误直接
+// 丢掉，上游（腾讯 CDN 边缘）在跨境链路上 RST 连接时，客户端收到的是一个正常
+// 结束、但字节数不足的响应 —— 播放器无从判断，只能报
+// ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED（看起来像「格式不支持」，实际是被截断）。
+//
+// 现在改成：上游没读完就中止这个响应，客户端因此拿到「传输不完整」而不是「正常结束」，
+// 播放器可以按常规的重试/重连逻辑处理，而不是误判成格式问题。
+func streamReaderMediaBody(w io.Writer, body io.Reader) {
+	if _, err := io.Copy(w, body); err != nil {
+		// panic(http.ErrAbortHandler) 是 net/http 约定的「异常中止」：不再补写
+		// chunked 结尾，直接关闭连接，客户端据此判定响应不完整。
+		panic(http.ErrAbortHandler)
 	}
 }
 
 // readerImageDecodeMaxBytes 需要服务端解密的单张图片上限。
 const readerImageDecodeMaxBytes = 32 << 20
+
+// readerMediaProbeBytes 媒体代理嗅探上游响应体用的前缀长度。
+//
+// 这个前缀同时用于三件事：判定 HLS 播放列表（#EXTM3U）、判定「其实是错误页」、
+// 以及把已读出的字节原样拼回响应体继续流式透传。
+const readerMediaProbeBytes = 64 << 10
+
+// readerMediaResult 一次媒体拉取的结果。
+type readerMediaResult struct {
+	resp *http.Response
+	// url 是本次真正请求的媒体地址（换过票时是新票），m3u8 重写要用它做 base。
+	url string
+	// head 是已从响应体读出的前缀（仅 200 的 GET 才有），调用方写响应时要先写它。
+	head []byte
+	// rejected 表示 200 的响应体其实是错误页（HTML/JSON 报错），不能喂给播放器。
+	rejected bool
+}
+
+// fetchReaderMedia 拉取媒体，并在「签名票失效」时换票重试一次。
+//
+// 听书源的播放地址是第三方中转现签的 CDN 直链（vkey/uid 带时效），票被上游判掉时
+// 有两种表现，这里都要兜住：
+//
+//	① 空的 401：没有 Content-Type、没有 body（腾讯 CDN 对无效 vkey/uid 的固定回答）；
+//	② 200 + HTML/JSON 错误页：中转自己出错时把它的报错页当成媒体回给我们。
+//
+// 旧行为是两种都原样透传给播放器：① 变成连续多个 401（播放器重试的是同一个
+// 必然失败的地址），② 变成 ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED（19 个
+// extractor 一个都不认）。两者的根因都是「这张票已经不能用了」，所以统一处理成
+// 回源换一张新票再拉：
+//
+//   - 换票成功 → 用新地址重拉，新票同时写回章节缓存，后续请求自然有效；
+//   - 地址不属于可换票的音轨（漫画图片防盗链的 403 等）→ 原样透传上游状态，
+//     不改变原有行为；
+//   - 该换票但换不到、或换票后依然不可用 → 返回错误，由调用方给出明确文案，
+//     而不是让播放器对着必然失败的地址反复重试。
+func fetchReaderMedia(
+	ctx context.Context,
+	svc *service.Container,
+	book *model.ReaderBook,
+	rawURL, rangeHeader string,
+	options map[string]string,
+	probeBody bool,
+) (*readerMediaResult, error) {
+	// 上游 CDN 在并发/跨境链路上偶发 reset 连接（实测同一章重试即可成功），
+	// 探测阶段读到一半断开不能直接判死，先按退避重试几次。
+	out, refreshable, err := fetchReaderMediaWithRetry(ctx, svc, book, rawURL, rangeHeader, options, probeBody)
+	if err != nil || !refreshable {
+		return out, err
+	}
+	fresh, canRefresh, refreshErr := svc.Reader.RefreshMediaURL(ctx, book, rawURL)
+	if !canRefresh {
+		// 换不动（漫画图片防盗链的 403 等）：原样透传上游状态，保持既有行为。
+		// 但有两类失败例外——它们透传给播放器毫无意义（播放器只会一直重试
+		// 同一个必然失败的地址，或者把网页当成音频），改成明确错误让前端提示。
+		switch {
+		case out.rejected:
+			_ = out.resp.Body.Close()
+			return nil, fmt.Errorf("音源返回了非媒体内容（%s），请稍后重试或换源",
+				strings.TrimSpace(out.resp.Header.Get("Content-Type")))
+		case out.resp.StatusCode == http.StatusUnauthorized:
+			_, _ = io.Copy(io.Discard, io.LimitReader(out.resp.Body, 1<<16))
+			_ = out.resp.Body.Close()
+			return nil, fmt.Errorf("音源鉴权被拒（上游 401），请稍后重试或换源")
+		}
+		return out, nil
+	}
+	// 换得动就必须先释放这张失败响应的连接，再发新请求。
+	_, _ = io.Copy(io.Discard, io.LimitReader(out.resp.Body, 1<<16))
+	_ = out.resp.Body.Close()
+	if refreshErr != nil {
+		return nil, fmt.Errorf("音源签名失效且重新取票失败: %w", refreshErr)
+	}
+	retried, _, retryErr := fetchReaderMediaOnce(ctx, svc, book, fresh, rangeHeader, options, probeBody)
+	if retryErr != nil {
+		return nil, retryErr
+	}
+	if retried.rejected {
+		_ = retried.resp.Body.Close()
+		return nil, fmt.Errorf("音源换票后仍返回非媒体内容，请稍后重试或换源")
+	}
+	if reader.MediaNeedsRefresh(retried.resp.StatusCode) {
+		return nil, fmt.Errorf("音源换票后仍被拒绝（上游 %d），请稍后重试或换源", retried.resp.StatusCode)
+	}
+	return retried, nil
+}
+
+// readerMediaProbeAttempts 探测阶段遇到连接中断（reset/EOF）的最大尝试次数。
+//
+// 上游 CDN（腾讯 CDN 的跨境边缘）在并发或长传输时会直接 RST 连接，同一章
+// 重试一次往往就好。以前这里读 body 失败就直接回 502，把一次可恢复的抖动
+// 变成了「这本书播不了」。
+const readerMediaProbeAttempts = 3
+
+// readerMediaProbeRetryDelay 探测重试的退避基数。
+const readerMediaProbeRetryDelay = 300 * time.Millisecond
+
+// readerMediaProbeError 探测阶段的可重试错误（连接被 reset / 提前 EOF）。
+type readerMediaProbeError struct{ err error }
+
+func (e *readerMediaProbeError) Error() string { return e.err.Error() }
+func (e *readerMediaProbeError) Unwrap() error { return e.err }
+
+// fetchReaderMediaWithRetry 探测阶段按退避重试，只对「连接中断」类错误重试：
+// 上游明确回了 4xx 时重试同一张票没有意义（那是换票流程的事）。
+func fetchReaderMediaWithRetry(
+	ctx context.Context,
+	svc *service.Container,
+	book *model.ReaderBook,
+	rawURL, rangeHeader string,
+	options map[string]string,
+	probeBody bool,
+) (*readerMediaResult, bool, error) {
+	var lastErr error
+	for attempt := 1; attempt <= readerMediaProbeAttempts; attempt++ {
+		if attempt > 1 {
+			select {
+			case <-ctx.Done():
+				return nil, false, ctx.Err()
+			case <-time.After(readerMediaProbeRetryDelay * time.Duration(attempt-1)):
+			}
+		}
+		out, refreshable, err := fetchReaderMediaOnce(ctx, svc, book, rawURL, rangeHeader, options, probeBody)
+		if err == nil {
+			return out, refreshable, nil
+		}
+		var probeErr *readerMediaProbeError
+		if !errors.As(err, &probeErr) {
+			return nil, false, err
+		}
+		lastErr = err
+	}
+	return nil, false, lastErr
+}
+
+// fetchReaderMediaOnce 发一次媒体请求并做可用性判定。
+//
+// 返回的 refreshable 表示「这次失败值得换一张签名票再试」：
+// 上游 401/403/410，或 200 但响应体其实是错误页（详见 fetchReaderMedia 的说明）。
+// rejected 表示「200 但内容不是媒体」——调用方据此在无法换票时报明确错误，
+// 而不是把网页喂给播放器。
+func fetchReaderMediaOnce(
+	ctx context.Context,
+	svc *service.Container,
+	book *model.ReaderBook,
+	rawURL, rangeHeader string,
+	options map[string]string,
+	probeBody bool,
+) (*readerMediaResult, bool, error) {
+	resp, err := svc.Reader.FetchMediaWithOptions(ctx, book, rawURL, rangeHeader, options)
+	if err != nil {
+		return nil, false, err
+	}
+	if reader.MediaNeedsRefresh(resp.StatusCode) {
+		return &readerMediaResult{resp: resp, url: rawURL}, true, nil
+	}
+	if !probeBody || resp.StatusCode != http.StatusOK {
+		return &readerMediaResult{resp: resp, url: rawURL}, false, nil
+	}
+	// 先读一小段判断是不是错误页/播放列表；不是就原样拼回去继续流式透传。
+	head, readErr := io.ReadAll(io.LimitReader(resp.Body, readerMediaProbeBytes))
+	if readErr != nil {
+		_ = resp.Body.Close()
+		// 连接被 reset / 提前 EOF 属于上游抖动，交给上层退避重试。
+		return nil, false, &readerMediaProbeError{err: fmt.Errorf("读取媒体响应失败: %w", readErr)}
+	}
+	rejected := readerMediaPayloadRejected(head, resp.Header.Get("Content-Type"))
+	return &readerMediaResult{resp: resp, url: rawURL, head: head, rejected: rejected}, rejected, nil
+}
+
+// readerMediaPayloadRejected 判断上游 200 响应体其实是错误页而不是媒体。
+//
+// 直链失效的另一个变种：CDN/中转不返回 4xx，而是回一段 HTML 错误页或 JSON
+// 报错（Content-Type 是 text/html、application/json）。这类字节喂给播放器，
+// ExoPlayer 的 19 个 extractor 全都不认，报出来的是
+// ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED —— 看起来像「格式不支持」，
+// 实际是「拿到了一张网页」。这里按 Content-Type + 首字符识别出来，直接判失败。
+func readerMediaPayloadRejected(head []byte, contentType string) bool {
+	if len(head) == 0 {
+		return false
+	}
+	lower := strings.ToLower(contentType)
+	errish := strings.Contains(lower, "html") ||
+		strings.Contains(lower, "json") ||
+		strings.HasPrefix(lower, "text/")
+	if !errish {
+		return false
+	}
+	trimmed := bytes.TrimSpace(head)
+	if len(trimmed) == 0 {
+		return false
+	}
+	switch trimmed[0] {
+	case '<', '{', '[':
+		return true
+	default:
+		return false
+	}
+}
 
 // isMediaPlaylistRequest 判断响应是否可能已是 HLS 播放列表。
 // 播放列表太小、不该走图片解密分支（书源的 imageDecode 只会用于图片）。

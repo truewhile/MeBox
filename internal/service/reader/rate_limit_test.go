@@ -71,3 +71,36 @@ func TestRetryableStatus(t *testing.T) {
 		}
 	}
 }
+
+// TestMediaRetryableStatus 媒体直链的 410（对象已下线）与 403/429 一样值得原地重试，
+// 但 401「签名票被拒」原地重试一定是同样的结果，只能靠回源换票。
+func TestMediaRetryableStatus(t *testing.T) {
+	for _, code := range []int{403, 410, 429, 500, 503} {
+		if !mediaRetryableStatus(code) {
+			t.Errorf("媒体状态码 %d 应当可重试", code)
+		}
+	}
+	for _, code := range []int{200, 206, 301, 400, 401, 404} {
+		if mediaRetryableStatus(code) {
+			t.Errorf("媒体状态码 %d 不该原地重试", code)
+		}
+	}
+	// 规则请求的判定不能被放宽：登录态失效的 401 反复重试只会白等。
+	if retryableStatus(401) || retryableStatus(410) {
+		t.Error("retryableStatus 不应包含 401/410")
+	}
+}
+
+// TestMediaNeedsRefresh 只有「票被拒」这一类状态才值得回源换票。
+func TestMediaNeedsRefresh(t *testing.T) {
+	for _, code := range []int{401, 403, 410} {
+		if !MediaNeedsRefresh(code) {
+			t.Errorf("状态码 %d 应当换票重试", code)
+		}
+	}
+	for _, code := range []int{200, 206, 304, 400, 404, 429, 500} {
+		if MediaNeedsRefresh(code) {
+			t.Errorf("状态码 %d 不该换票", code)
+		}
+	}
+}

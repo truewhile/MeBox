@@ -7,6 +7,7 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"compress/zlib"
+	"crypto/tls"
 	"io"
 	"net/http"
 	"net/url"
@@ -88,10 +89,51 @@ func StripAcceptEncoding(h http.Header) {
 //
 // When useProxy is false, the client is created without proxy plumbing so
 // the request goes out direct, matching the user's checkbox intent.
+//
+// 注意 http.Client.Timeout 是「整个请求」的上限，包含读完响应体。书源的
+// 搜索/目录/正文都是小响应，30 秒足够；但同一个 client 也被用来流转发
+// 音频/视频（见 NewMediaHTTPClient），那里必须换一个没有整体超时的 client。
 func NewSiteHTTPClient(timeoutSeconds int, useProxy bool) *http.Client {
 	if timeoutSeconds <= 0 {
 		timeoutSeconds = 15
 	}
+	return &http.Client{
+		Timeout:   time.Duration(timeoutSeconds) * time.Second,
+		Transport: newSiteTransport(useProxy),
+	}
+}
+
+// NewMediaHTTPClient 拉取并转发媒体流（音频/视频/大图）的客户端。
+//
+// 为什么不能用 NewSiteHTTPClient：http.Client.Timeout 会覆盖「读完 body」这个
+// 阶段。一个 4MB 的 m4a 在跨境链路上很容易超过 30 秒，一旦超时，net/http 会
+// 直接掐断响应体，而调用方的 io.Copy 只是正常返回 —— 表现为**静默截断**
+// （播放器拿到半首歌，或判「格式不支持」），或者上游慢到 Do 本身报错 → 502。
+//
+// 为什么强制 HTTP/1.1：实测腾讯 CDN（vb.stream.tencentmusic.com）的 h2 边缘在
+// 长连接大文件上不按预期回 WINDOW_UPDATE，Go 的 http2 Transport 初始连接窗口
+// 是 1MiB，于是下载**稳定卡在 1MiB/2MiB/3MiB 整数倍**处断开；同一 URL 用
+// HTTP/1.1（wget、curl --http1.1）从头到尾都完整。因此媒体通路固定走 h1.1：
+// 音视频本来就没有「多路复用省请求」的收益，反而是流控 bug 的受害者。
+func NewMediaHTTPClient(useProxy bool) *http.Client {
+	tr := newSiteTransport(useProxy)
+	// 等响应头最多 90 秒：跨境 CDN 首包偶发要几十秒，但绝不能无上限挂着。
+	tr.ResponseHeaderTimeout = 90 * time.Second
+	// 媒体是长连接大流量，连接池开大一些，避免并发取图/拖动进度时互相排队。
+	tr.MaxIdleConns = 32
+	tr.MaxIdleConnsPerHost = 16
+	// 关闭 HTTP/2：见上面的流控说明。
+	tr.ForceAttemptHTTP2 = false
+	tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	// 不复用连接：实测腾讯 CDN 的边缘在「同一条 keep-alive 连接上连续取多个
+	// 大对象」时会直接 RST 第二个请求的响应体（容器内 wget/curl 每次新建连接
+	// 就完全正常）。音视频请求本来就稀疏，为省一次 TLS 握手去冒截断风险不划算。
+	tr.DisableKeepAlives = true
+	return &http.Client{Transport: tr}
+}
+
+// newSiteTransport 书源请求共用的 Transport（媒体与规则请求配置一致的部分）。
+func newSiteTransport(useProxy bool) *http.Transport {
 	tr := &http.Transport{
 		MaxIdleConns:          16,
 		MaxIdleConnsPerHost:   4,
@@ -104,10 +146,7 @@ func NewSiteHTTPClient(timeoutSeconds int, useProxy bool) *http.Client {
 			return ProxyFromEnvironmentOrSystem(r)
 		}
 	}
-	return &http.Client{
-		Timeout:   time.Duration(timeoutSeconds) * time.Second,
-		Transport: tr,
-	}
+	return tr
 }
 
 // HTTPHeaderPresets returns a map of realistic browser HTTP headers.

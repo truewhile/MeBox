@@ -43,7 +43,14 @@ type ReaderService struct {
 	log    *zap.Logger
 	repo   *repository.ReaderRepository
 	http   *http.Client
-	crypto *helper.SecretCipher
+	// mediaHTTP 用于转发媒体流（音频/视频/漫画大图）。
+	//
+	// 必须与 http 分开：http 设了 30 秒的「整体」超时（含读完 body），而一个
+	// 4MB 的音频在跨境链路上很容易超过它，超时后 net/http 直接掐断 body，
+	// 调用方的 io.Copy 却只是正常返回 —— 表现为静默截断（播放器拿到半首歌）
+	// 或 502。见 helper.NewMediaHTTPClient 的说明。
+	mediaHTTP *http.Client
+	crypto    *helper.SecretCipher
 
 	// browserMu / browserPending 保护「待用户完成的页面」表
 	// （java.startBrowser / startBrowserAwait，见 browser_panel.go）。
@@ -71,6 +78,10 @@ type ReaderService struct {
 	// 阅读页与批量预取会并发请求同一章（见 fetchChapterContentShared）。
 	contentFlightsMu sync.Mutex
 	contentFlights   map[string]*contentFlight
+
+	// mediaRefresh 记录「已失效直链 → 重新签到的新直链」的短缓存：
+	// CDN 判掉某张签名票后，播放器的多次重试共用一次回源（见 media_refresh.go）。
+	mediaRefresh mediaRefreshState
 }
 
 // NewReaderService 创建服务。
@@ -83,10 +94,19 @@ func NewReaderService(cfg *config.Config, log *zap.Logger, repos *repository.Con
 		log:                log,
 		repo:               repos.Reader,
 		http:               client,
+		mediaHTTP:          helper.NewMediaHTTPClient(true),
 		crypto:             helper.NewSecretCipher(firstNonEmpty(cfg.Secrets.EncryptionKey, cfg.Secrets.JWTSecret)),
 		limiter:            newSourceRateLimiter(),
 		coverDecodeOrigins: map[string]bool{},
 	}
+}
+
+// mediaClient 返回转发媒体流用的客户端（未注入时退回规则请求的 client）。
+func (s *ReaderService) mediaClient() *http.Client {
+	if s != nil && s.mediaHTTP != nil {
+		return s.mediaHTTP
+	}
+	return s.http
 }
 
 // markSourceCoverDecode 记录某书源是否声明了 coverDecodeJs（导入/更新书源时调用）。
@@ -1942,12 +1962,14 @@ func (s *ReaderService) FetchMediaWithOptions(ctx context.Context, book *model.R
 		if err != nil {
 			return nil, err
 		}
-		resp, err := s.http.Do(httpReq)
+		// 媒体用无整体超时的 client：4MB 音频在跨境链路上常超过 30 秒，
+		// 用带整体超时的 client 会在读完 body 前被掐断（静默截断）。
+		resp, err := s.mediaClient().Do(httpReq)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		if attempt == mediaFetchAttempts || !retryableStatus(resp.StatusCode) {
+		if attempt == mediaFetchAttempts || !mediaRetryableStatus(resp.StatusCode) {
 			return resp, nil
 		}
 		// 可重试的状态码：读完并关闭响应体再试，避免连接泄漏。
@@ -2511,7 +2533,7 @@ func (s *ReaderService) fetchSourceResource(ctx context.Context, sourceURL, rawU
 			httpReq.Header.Set("Referer", referer)
 		}
 	}
-	return s.http.Do(httpReq)
+	return s.mediaClient().Do(httpReq)
 }
 
 // ─── 书架 ──────────────────────────────────────────────────────────────────

@@ -86,9 +86,38 @@ const (
 
 // retryableStatus 该状态码是否值得重试：限流（403/429）与上游抖动（5xx）可重试，
 // 404/400 这类确定性错误不重试。规则请求与媒体代理共用。
+//
+// 注意 401 不在这里：书源的规则请求返回 401 通常是「登录态失效」，反复重试
+// 只会白等退避时间。媒体直链另有语义，见 mediaRetryableStatus。
 func retryableStatus(code int) bool {
 	switch code {
 	case 403, 408, 425, 429, 500, 502, 503, 504:
+		return true
+	default:
+		return false
+	}
+}
+
+// mediaRetryableStatus 媒体拉取专用的可重试判定。
+//
+// 与规则请求不同，CDN 直链的 410 表示「对象已下线」，与 403/429 一样属于
+// 上游抖动，同一张票稍后重试可能就恢复；而 401 是「签名票被拒」，重试同一张票
+// 一定还是 401，必须由调用方回源换票（见 MediaNeedsRefresh）。
+// 所以这里只补 410，不把 401 加进来。
+func mediaRetryableStatus(code int) bool {
+	if retryableStatus(code) {
+		return true
+	}
+	return code == 410
+}
+
+// MediaNeedsRefresh 判断媒体上游状态是否值得「换一张签名票再试」。
+//
+// 401 是 CDN 对无效 vkey/uid 的固定回答（空 body、无 Content-Type），410 是
+// 对象已下线，403 常见于票与资源不匹配。这三类都值得回到书源重新签票。
+func MediaNeedsRefresh(code int) bool {
+	switch code {
+	case 401, 403, 410:
 		return true
 	default:
 		return false
