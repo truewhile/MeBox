@@ -299,30 +299,33 @@ func (s *SchedulerService) jobCleanTranscodeCache(ctx context.Context) error {
 	return walkAndPrune(s.cacheDir+"/hls", cutoff)
 }
 
-// jobCleanImageCache prunes the image proxy cache: 原图按独立配额优先淘汰，
-// 总量超限时再淘汰派生成品。全程只看占用，不按文件年龄删除。
-func (s *SchedulerService) jobCleanImageCache(ctx context.Context) error {
+// jobCleanCache enforces the global disk-cache capacity: when the total size of
+// hls + images + library-covers exceeds the configured limit, the pools are
+// evicted strictly in that order (oldest file first within each pool) until
+// usage falls back to 80% of the limit. reader-audio is not part of the total;
+// it has its own 1 GB eviction on write. The images original sub-quota is
+// enforced afterwards as an independent constraint.
+func (s *SchedulerService) jobCleanCache(ctx context.Context) error {
 	if s.cacheDir == "" {
 		return nil
 	}
-	policy := s.imageCachePolicy()
+	policy := s.cacheCleanupPolicy()
 	if policy.TotalBytes <= 0 && policy.OriginalsBytes <= 0 {
 		return nil
 	}
-	imagesDir := filepath.Join(s.cacheDir, "images")
-	pools := ImageCachePools(imagesDir, policy.OriginalsBytes)
-	res, err := PruneImageCachePools(pools, policy.TotalBytes)
+	res, err := PruneCache(s.cacheDir, policy.TotalBytes, policy.OriginalsBytes)
 	if err != nil {
 		if s.log != nil {
-			s.log.Warn("scheduled image cache cleanup failed", zap.Error(err))
+			s.log.Warn("scheduled cache cleanup failed", zap.Error(err))
 		}
 		return err
 	}
 	if res.DeletedFiles > 0 && s.log != nil {
-		s.log.Info("scheduled image cache cleanup completed",
+		s.log.Info("scheduled cache cleanup completed",
 			zap.Int("deleted_files", res.DeletedFiles),
 			zap.Int64("freed_bytes", res.FreedBytes),
 			zap.Int64("remaining_bytes", res.RemainingBytes),
+			zap.Any("freed_by_pool", res.FreedByPool),
 		)
 	}
 	return nil

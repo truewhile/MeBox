@@ -8,6 +8,9 @@
 //	organize_source   opt-in        — organize the configured staging folder.
 //	transcode_cleanup every 24 h   — purge HLS transcode artefacts
 //	                                  older than 24 h.
+//	cache_cleanup     every 1 h    — enforce the global disk-cache capacity
+//	                                  (hls → images → library-covers; reader-audio
+//	                                  has its own 1 GB eviction on write).
 //	segment_prewarm   every 6 h    — fill IntroDB skip segments for queryable media.
 //
 // Each job runs at most once at a time (an in-flight run blocks the
@@ -41,7 +44,7 @@ type SchedulerService struct {
 	cacheDir         string
 	now              func() time.Time
 
-	imagesPolicyProvider func() ImageCachePolicy
+	cachePolicyProvider func() CacheCleanupPolicy
 
 	// readerContentCleaner 阅读正文缓存的清理钩子（由阅读模块注入）。
 	readerContentCleaner func(context.Context)
@@ -79,22 +82,24 @@ func (s *SchedulerService) SetExpiryWatcher(watcher *TelegramExpiryWatcher) {
 	s.expiryWatcher = watcher
 }
 
-// ImageCachePolicy 是一次图片缓存清理要用的策略（全部为 0 表示不做任何清理）。
+// CacheCleanupPolicy 是一次全缓存容量清理要用的策略（全部为 0 表示不做任何清理）。
+// TotalBytes 是 hls / images / library-covers 三个池的总容量上限；OriginalsBytes
+// 是 images 原图池的独立子配额。reader-audio 由自身 1GB 配额管理，不在此列。
 // 只有容量配额，没有保留时长：淘汰只看占用，不按文件年龄删除。
-type ImageCachePolicy struct {
+type CacheCleanupPolicy struct {
 	TotalBytes     int64
 	OriginalsBytes int64
 }
 
-func (s *SchedulerService) SetImageCachePolicyProvider(fn func() ImageCachePolicy) {
-	s.imagesPolicyProvider = fn
+func (s *SchedulerService) SetCacheCleanupPolicyProvider(fn func() CacheCleanupPolicy) {
+	s.cachePolicyProvider = fn
 }
 
-func (s *SchedulerService) imageCachePolicy() ImageCachePolicy {
-	if s.imagesPolicyProvider != nil {
-		return s.imagesPolicyProvider()
+func (s *SchedulerService) cacheCleanupPolicy() CacheCleanupPolicy {
+	if s.cachePolicyProvider != nil {
+		return s.cachePolicyProvider()
 	}
-	return ImageCachePolicy{}
+	return CacheCleanupPolicy{}
 }
 
 // SetReaderContentCleaner 注入阅读正文缓存的清理钩子（TTL 过期 + 容量 LRU）。
@@ -166,9 +171,9 @@ func (s *SchedulerService) Start(ctx context.Context) {
 			run:      s.jobCleanTranscodeCache,
 		},
 		{
-			name:     "image_cache_cleanup",
+			name:     "cache_cleanup",
 			interval: 1 * time.Hour,
-			run:      s.jobCleanImageCache,
+			run:      s.jobCleanCache,
 		},
 	}
 	// 阅读正文缓存清理只在注入钩子后注册（见 SetReaderContentCleaner）。

@@ -364,3 +364,197 @@ func ImageCachePools(imagesDir string, originalsMaxBytes int64) []ImageCachePool
 	}
 	return []ImageCachePool{originals, derived}
 }
+
+// CacheCleanupResult 是全缓存容量淘汰的统计。
+type CacheCleanupResult struct {
+	TotalFilesBefore int
+	TotalBytesBefore int64
+	DeletedFiles     int
+	FreedBytes       int64
+	RemainingBytes   int64
+	// FreedByPool 记录每个池释放的字节数，方便日志定位到底是哪类缓存占满了。
+	FreedByPool map[string]int64
+}
+
+// cacheEvictionEntry 是全局容量淘汰里的一个候选文件。
+type cacheEvictionEntry struct {
+	path    string
+	pool    string
+	size    int64
+	modTime time.Time
+}
+
+// cacheEvictionPoolOrder 是全局容量清理的固定优先级。
+// 顺序即“先清谁”：超限时前面的池会被整池清空，才会轮到后面的池。
+// reader-audio 不在其中：它由自身 1GB 配额在写入时独立淘汰。
+var cacheEvictionPoolOrder = []string{
+	"hls",
+	"images",
+	"library-covers",
+}
+
+// cacheCleanupKeepPercent 是触发清理后回落到的水位（占上限的百分比）。
+// 留出余量，避免刚清完又被下一次写入立刻顶到上限。
+const cacheCleanupKeepPercent = 80
+
+// tempCacheFile 判断文件名是否是缓存写入中的临时产物。这些文件正在被并发
+// 写入，容量统计和清理都应跳过。
+func tempCacheFile(name string) bool {
+	if tempImageCacheFile(name) {
+		return true
+	}
+	if strings.HasSuffix(name, ".part") {
+		return true
+	}
+	// 各缓存目录的原子写入临时文件前缀：.content- / .cover- / .audio- / .js-cache-。
+	return strings.HasPrefix(name, ".content-") ||
+		strings.HasPrefix(name, ".cover-") ||
+		strings.HasPrefix(name, ".audio-") ||
+		strings.HasPrefix(name, ".js-cache-")
+}
+
+// collectCachePoolFiles 递归收集一个普通缓存池里的候选文件，按 mtime 从旧到新。
+func collectCachePoolFiles(root, pool string) []cacheEvictionEntry {
+	if strings.TrimSpace(root) == "" {
+		return nil
+	}
+	var out []cacheEvictionEntry
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		name := info.Name()
+		if tempCacheFile(name) || strings.HasSuffix(name, ".fail") {
+			return nil
+		}
+		out = append(out, cacheEvictionEntry{
+			path:    path,
+			pool:    pool,
+			size:    info.Size(),
+			modTime: info.ModTime(),
+		})
+		return nil
+	})
+	sort.Slice(out, func(i, j int) bool { return out[i].modTime.Before(out[j].modTime) })
+	return out
+}
+
+// collectImageCacheEntries 收集图片缓存候选文件。返回顺序沿用图片池的优先级：
+// 先原图、后派生成品，池内按 mtime 从旧到新。
+func collectImageCacheEntries(imagesDir string) []cacheEvictionEntry {
+	if strings.TrimSpace(imagesDir) == "" {
+		return nil
+	}
+	if _, err := os.Stat(imagesDir); err != nil {
+		return nil
+	}
+	pools := ImageCachePools(imagesDir, 0)
+	var entries []imageCacheFileEntry
+	var failMarkers []imageCacheFileEntry
+	for i, pool := range pools {
+		collectImageCachePoolFiles(pool, i, &entries, &failMarkers)
+	}
+	ordered := evictionOrder(entries, map[string]bool{})
+	out := make([]cacheEvictionEntry, 0, len(ordered))
+	for _, e := range ordered {
+		out = append(out, cacheEvictionEntry{
+			path:    e.path,
+			pool:    "images",
+			size:    e.size,
+			modTime: e.modTime,
+		})
+	}
+	return out
+}
+
+// removeEmptyDirsUnder 删除 root 下淘汰后留下的空子目录（不含 root 本身）。
+func removeEmptyDirsUnder(root string) {
+	if strings.TrimSpace(root) == "" {
+		return
+	}
+	if _, err := os.Stat(root); err != nil {
+		return
+	}
+	dirs := []string{}
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil {
+			return nil
+		}
+		if info.IsDir() && path != root {
+			dirs = append(dirs, path)
+		}
+		return nil
+	})
+	for i := len(dirs) - 1; i >= 0; i-- {
+		_ = os.Remove(dirs[i])
+	}
+}
+
+// PruneCache 按全局容量池清理磁盘缓存。
+//
+// 总量口径是 hls、images、library-covers 三个池之和；reader-audio 及正文缓存、
+// 书源文件缓存都不参与这里的总量计算——reader-audio 由自身 1GB 配额在写入时
+// 淘汰，正文缓存和书源文件缓存另有自己的 TTL / 配额。超过 totalBytes 时严格
+// 按 hls → images → library-covers 的顺序淘汰最旧文件，直到回落到上限的 80%。
+// originalsMaxBytes 是 images 原图池的独立子配额，在总量淘汰之后单独执行
+// （即使总量没超也会把原图压回配额）。
+func PruneCache(cacheDir string, totalBytes, originalsMaxBytes int64) (CacheCleanupResult, error) {
+	result := CacheCleanupResult{FreedByPool: map[string]int64{}}
+	if strings.TrimSpace(cacheDir) == "" {
+		return result, nil
+	}
+
+	imagesDir := filepath.Join(cacheDir, "images")
+	ordered := make([]cacheEvictionEntry, 0, 1024)
+	for _, name := range cacheEvictionPoolOrder {
+		if name == "images" {
+			ordered = append(ordered, collectImageCacheEntries(imagesDir)...)
+			continue
+		}
+		ordered = append(ordered, collectCachePoolFiles(filepath.Join(cacheDir, name), name)...)
+	}
+
+	result.TotalFilesBefore = len(ordered)
+	for _, entry := range ordered {
+		result.TotalBytesBefore += entry.size
+	}
+	result.RemainingBytes = result.TotalBytesBefore
+
+	// 1. 全局总量：严格按池优先级淘汰，直到回落到水位。
+	if totalBytes > 0 && result.RemainingBytes > totalBytes {
+		target := totalBytes * cacheCleanupKeepPercent / 100
+		for _, entry := range ordered {
+			if result.RemainingBytes <= target {
+				break
+			}
+			if err := os.Remove(entry.path); err != nil {
+				continue
+			}
+			result.DeletedFiles++
+			result.FreedBytes += entry.size
+			result.RemainingBytes -= entry.size
+			result.FreedByPool[entry.pool] += entry.size
+			_ = os.Remove(entry.path + ".fail")
+		}
+	}
+
+	// 2. 图片原图子配额独立于总量：即使总量没超，也要把原图压回自己的配额，
+	//    同时清掉旧命名变体和孤儿失败标记。
+	if _, err := os.Stat(imagesDir); err == nil {
+		pools := ImageCachePools(imagesDir, originalsMaxBytes)
+		if sub, err := PruneImageCachePools(pools, 0); err == nil {
+			result.DeletedFiles += sub.DeletedFiles
+			result.FreedBytes += sub.FreedBytes
+			result.RemainingBytes -= sub.FreedBytes
+			result.FreedByPool["images"] += sub.FreedBytes
+		}
+	}
+
+	for _, name := range cacheEvictionPoolOrder {
+		removeEmptyDirsUnder(filepath.Join(cacheDir, name))
+	}
+	return result, nil
+}

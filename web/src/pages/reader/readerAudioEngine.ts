@@ -22,8 +22,15 @@ import { readerCoverSrc } from '../../utils/readerCover'
 const PROGRESS_SAVE_INTERVAL_MS = 5_000
 /** -15s / +15s 步长（对齐面板与 legado SEEK_STEP）。 */
 const SEEK_STEP = 15
-/** 音源加载失败后自动重试（重新换取签名地址）的次数上限。 */
-const AUDIO_RETRY_LIMIT = 2
+/**
+ * 音源加载失败后自动重试的退避间隔（毫秒），数组长度即自动重试次数。
+ *
+ * 别调得太短：服务端媒体代理要回源换票、拉整章音频，失败一次本身就要十几秒，
+ * 立刻重试只会让用户对着转圈更久。第一次 3 秒、第二次 9 秒，总等待可控。
+ */
+const AUDIO_RETRY_DELAYS_MS = [3_000, 9_000]
+/** 自动重试次数上限（与退避表的长度一致）。 */
+const AUDIO_RETRY_LIMIT = AUDIO_RETRY_DELAYS_MS.length
 
 export interface LoadChapterInput {
   bookId: string
@@ -183,8 +190,21 @@ class ReaderAudioEngine {
   }
 
   toggle(): void {
+    // 失败态下播放键就是「重试」：重新解析本章音轨（换一张签名票）再装源，
+    // 而不是对着一份已经出错的 src 再调 play()。
+    if (useReaderAudioStore.getState().status === 'error') {
+      this.retry()
+      return
+    }
     if (this.audio.paused) this.play()
     else this.pause()
+  }
+
+  /** 用户手动重试：清掉自动重试计数与待执行定时器，立刻重新解析本章音轨。 */
+  retry(): void {
+    this.resetRetry()
+    useReaderAudioStore.setState({ status: 'loading', error: '' })
+    void this.reloadCurrentChapter()
   }
 
   seekBy(delta: number): void {
@@ -482,13 +502,23 @@ class ReaderAudioEngine {
     }
   }
 
-  /** 退避后再重新解析本章音轨；期间保持 loading 态，不给用户闪错误。 */
+  /**
+   * 退避后再重新解析本章音轨。
+   *
+   * 期间刻意停留在 error 态而不是 loading：服务端这次请求本来就要十几秒才判定
+   * 失败，再挂一个转圈只会让人以为卡死。明确告诉他「几秒后自动重试」，并且这
+   * 行提示本身可以点，等于把等待权交回用户。
+   */
   private scheduleRetry(): void {
     if (this.retryTimer !== null) window.clearTimeout(this.retryTimer)
-    useReaderAudioStore.setState({ status: 'loading', error: '' })
-    const delay = 800 * this.retryCount
+    const delay = AUDIO_RETRY_DELAYS_MS[Math.min(this.retryCount - 1, AUDIO_RETRY_LIMIT - 1)]
+    useReaderAudioStore.setState({
+      status: 'error',
+      error: `音源暂时取不到，${Math.round(delay / 1000)} 秒后自动重试`,
+    })
     this.retryTimer = window.setTimeout(() => {
       this.retryTimer = null
+      useReaderAudioStore.setState({ status: 'loading', error: '' })
       void this.reloadCurrentChapter()
     }, delay)
   }
@@ -615,7 +645,7 @@ class ReaderAudioEngine {
 
     audio.addEventListener('error', () => {
       const code = audio.error?.code
-      // 服务端代理拉的是腾讯 CDN 的直链，跨境链路会偶发 502 / 中途断流。
+      // 服务端代理拉的是第三方 CDN 的直链，跨境链路会偶发被上游拒绝 / 中途断流。
       // 浏览器对这两种情况都报 SRC_NOT_SUPPORTED（看起来像「格式不支持」），
       // 实际上重新取一次章节（换一张签名票）通常就能播，所以先自动重试。
       const retryable =
@@ -625,11 +655,12 @@ class ReaderAudioEngine {
         this.scheduleRetry()
         return
       }
+      // 重试用完：文案要能解释「为什么播不了」，并且面板上这行本身就是重试按钮。
       this.fail(
         code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
-          ? '音频加载失败：服务端多次重试后仍取不到音源，请稍后再试'
+          ? '音源暂时被上游拒绝'
           : code === MediaError.MEDIA_ERR_NETWORK
-            ? '音频加载失败，请检查网络后重试'
+            ? '网络异常，音源没取到'
             : '音频无法播放',
       )
     })

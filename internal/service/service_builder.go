@@ -217,11 +217,11 @@ func (b *serviceContainerBuilder) initAccessAndStorageServices() {
 	b.c.Scheduler.SetBackupService(b.c.Backup)
 	b.c.Scheduler.SetOrganizePipeline(b.c.OrganizePipeline)
 	b.c.Scheduler.SetSegments(b.c.Segments)
-	b.c.Scheduler.SetImageCachePolicyProvider(func() ImageCachePolicy {
+	b.c.Scheduler.SetCacheCleanupPolicyProvider(func() CacheCleanupPolicy {
 		if b.cfg == nil {
-			return ImageCachePolicy{}
+			return CacheCleanupPolicy{}
 		}
-		policy := ImageCachePolicy{
+		policy := CacheCleanupPolicy{
 			TotalBytes: int64(b.cfg.Cache.ImagesMaxSizeMB) * 1024 * 1024,
 		}
 		if b.cfg.Cache.ImagesOriginalsMaxSizeMB > 0 {

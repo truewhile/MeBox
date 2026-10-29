@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronLeft, ChevronRight, Gauge, ListMusic, Loader2, Pause, Play, Scissors, Timer, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Gauge, ListMusic, Loader2, Pause, Play, RefreshCw, Scissors, Timer, X } from 'lucide-react'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 
 import { useReaderAudioStore } from '../../stores/readerAudio'
@@ -196,9 +196,21 @@ export function ReaderAudioPanel({ theme, onToggleMenu }: ReaderAudioPanelProps)
           </p>
           <p className="mt-1 text-2xs opacity-60" style={{ color: theme.text }}>
             {audioError ? (
-              <span className="font-bold" style={{ color: theme.accent }}>
-                {audioError}
-              </span>
+              // 失败态下这行就是重试入口：服务端这一轮要十几秒才判定失败，
+              // 与其让用户对着转圈，不如把「为什么」和「再试一次」一起给他。
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  engine.retry()
+                }}
+                className="inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-2xs font-bold opacity-100"
+                style={{ backgroundColor: theme.accent + '1a', color: theme.accent }}
+                title="重新请求音源"
+              >
+                <RefreshCw size={12} />
+                {audioError} · 立即重试
+              </button>
             ) : (
               <>
                 {loading ? (transcoding ? '服务端转码中，请稍候…' : '加载中…') : playing ? '播放中' : '已暂停'} ·

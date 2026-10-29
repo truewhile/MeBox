@@ -120,8 +120,12 @@ type LoggingConfig struct {
 
 // CacheConfig 控制磁盘转写缓存和进程内热缓存。
 type CacheConfig struct {
-	CacheDir        string `mapstructure:"cache_dir"`
-	ImagesMaxSizeMB int    `mapstructure:"images_max_size_mb"`
+	CacheDir string `mapstructure:"cache_dir"`
+	// ImagesMaxSizeMB 是整个磁盘缓存的总容量上限（MB），不是 images 子目录
+	// 的配额。参与统计的池为 hls、images、library-covers；超限时按该顺序淘汰
+	// 最旧文件。reader-audio 由自身 1GB 配额在写入时独立淘汰，不参与总容量。
+	// 0 表示不限制。
+	ImagesMaxSizeMB int `mapstructure:"images_max_size_mb"`
 	// ImagesOriginalsMaxSizeMB 限制 cache/images 下原图子配额（MB）。原图只是
 	// 生成缩略图的原料，丢了可以重新回源；0 表示不单独限制（只受总量约束）。
 	ImagesOriginalsMaxSizeMB int `mapstructure:"images_originals_max_size_mb"`

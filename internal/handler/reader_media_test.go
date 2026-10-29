@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -94,6 +95,99 @@ func TestReaderMediaProxyFailsClearlyWhenRefreshImpossible(t *testing.T) {
 	}
 	if !strings.Contains(body, "签名失效") {
 		t.Fatalf("错误文案应说明是音源签名失效: %s", body)
+	}
+}
+
+// TestReaderMediaProxyStopsResendingRejectedTicket 上游成批拒绝时（连新签的票
+// 也是空 401），不能在播放器那一次请求里把同一张被拒的票打上十几遍：连续两轮
+// 换票都是同一个状态码就立刻失败，把明确文案交出去。
+func TestReaderMediaProxyStopsResendingRejectedTicket(t *testing.T) {
+	svc, srv, book := prepareMediaTicketBook(t)
+	router := mediaRouterForTest(svc)
+
+	signed := primeTicketBook(t, svc, book.ID)
+	srv.denyAlways()
+
+	code, body := getReaderMedia(t, router, signed)
+	if code != http.StatusBadGateway {
+		t.Fatalf("上游持续拒绝应返回 502，实际 %d body=%s", code, body)
+	}
+	if !strings.Contains(body, "401") {
+		t.Fatalf("错误文案应带上上游状态码: %s", body)
+	}
+	// 每轮 fetchReaderMedia = 首拉(401) + 换票后重拉(401)，两轮即收手。
+	if got := srv.mediaRequests(); got > 4 {
+		t.Fatalf("无进展的拒绝应当两轮就收手，实际上游请求 %d 次", got)
+	}
+}
+
+// TestReaderAudioCacheResumesTruncatedUpstream 上游中途 RST 后用 Range 续传：
+// 播放器最终拿到的仍是完整的一章，而不是从头重下。
+func TestReaderAudioCacheResumesTruncatedUpstream(t *testing.T) {
+	const bodyBytes = 300 << 10
+	payload := bytes.Repeat([]byte("m4a!"), bodyBytes/4)
+	var ranges []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		ranges = append(ranges, r.Header.Get("Range"))
+		count := len(ranges)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "audio/mp4")
+		w.Header().Set("Accept-Ranges", "bytes")
+		start := 0
+		if count > 1 {
+			// 第二次起按 Range 续传。
+			start = bodyBytes / 2
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, bodyBytes-1, bodyBytes))
+			w.WriteHeader(http.StatusPartialContent)
+		} else {
+			w.Header().Set("Content-Length", strconv.Itoa(bodyBytes))
+		}
+		chunk := payload[start:]
+		if count == 1 {
+			// 第一次只写一半就断开。
+			chunk = payload[:bodyBytes/2]
+		}
+		for written := 0; written < len(chunk); written += 8 << 10 {
+			end := written + 8<<10
+			if end > len(chunk) {
+				end = len(chunk)
+			}
+			if _, err := w.Write(chunk[written:end]); err != nil {
+				return
+			}
+		}
+		w.(http.Flusher).Flush()
+		if count == 1 {
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					_ = conn.Close()
+				}
+			}
+		}
+	}))
+	defer srv.Close()
+
+	svc, _, book := prepareMediaTicketBookWithUpstream(t, srv.URL)
+	router := mediaRouterForTest(svc)
+	signed := svc.Reader.ProxyURL(book.ID, srv.URL+"/media")
+
+	code, body := getReaderMedia(t, router, signed)
+	if code != http.StatusOK {
+		t.Fatalf("续传后应当成功，实际 status=%d body=%.120s", code, body)
+	}
+	if len(body) != bodyBytes {
+		t.Fatalf("交付字节 = %d，期望 %d", len(body), bodyBytes)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(ranges) < 2 || ranges[0] != "" {
+		t.Fatalf("请求序列 = %q，期望先整段再续传", ranges)
+	}
+	if !strings.HasPrefix(ranges[1], "bytes=") {
+		t.Fatalf("第二轮应当带 Range，实际 %q", ranges[1])
 	}
 }
 
@@ -347,12 +441,13 @@ func primeTicketBook(t *testing.T, svc *service.Container, bookID string) string
 //   - /img/*   图片资源，固定 403（模拟防盗链）
 type mediaTicketServer struct {
 	*httptest.Server
-	mu        sync.Mutex
-	issued    []string
-	hits      int
-	mediaHits int
-	noToken   bool
-	errorPage bool
+	mu         sync.Mutex
+	issued     []string
+	hits       int
+	mediaHits  int
+	noToken    bool
+	errorPage  bool
+	alwaysDeny bool
 }
 
 func newMediaTicketServer(t *testing.T) *mediaTicketServer {
@@ -379,7 +474,13 @@ func newMediaTicketServer(t *testing.T) *mediaTicketServer {
 		case r.URL.Path == "/media":
 			s.mu.Lock()
 			s.mediaHits++
+			deny := s.alwaysDeny
 			s.mu.Unlock()
+			if deny {
+				// 与腾讯 CDN 一致：连新签的票也直接空 401（成批拒绝的那几分钟）。
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
 			if s.errorPageNow() {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				_, _ = w.Write([]byte(`<html><body>ticket expired</body></html>`))
@@ -432,6 +533,13 @@ func (s *mediaTicketServer) stopIssuing() {
 func (s *mediaTicketServer) serveErrorPage() {
 	s.mu.Lock()
 	s.errorPage = true
+	s.mu.Unlock()
+}
+
+// denyAlways 让媒体端点连新签的票也一律空 401（模拟上游成批拒绝的那几分钟）。
+func (s *mediaTicketServer) denyAlways() {
+	s.mu.Lock()
+	s.alwaysDeny = true
 	s.mu.Unlock()
 }
 

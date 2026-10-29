@@ -199,17 +199,19 @@ func imageResizeConcurrency() int {
 	return n
 }
 
-// Prune removes oldest cached images until disk usage is within the configured limit.
-// 原图池按独立配额优先淘汰，客户端热路径读取的成品图最后淘汰。
+// Prune 只执行图片原图子配额与旧缓存清理；整个磁盘缓存的总量淘汰由调度器的
+// cache_cleanup 任务（PruneCache）负责。
 func (p *ImageProxy) Prune() (PruneImageCacheResult, error) {
-	if p.cfg == nil || p.cfg.Cache.ImagesMaxSizeMB <= 0 {
+	if p.cfg == nil {
 		return PruneImageCacheResult{}, nil
 	}
 	var originalsMaxBytes int64
 	if p.cfg.Cache.ImagesOriginalsMaxSizeMB > 0 {
 		originalsMaxBytes = int64(p.cfg.Cache.ImagesOriginalsMaxSizeMB) * 1024 * 1024
 	}
-	totalBytes := int64(p.cfg.Cache.ImagesMaxSizeMB) * 1024 * 1024
+	if originalsMaxBytes <= 0 {
+		return PruneImageCacheResult{}, nil
+	}
 	pools := ImageCachePools(p.cacheDir, originalsMaxBytes)
-	return PruneImageCachePools(pools, totalBytes)
+	return PruneImageCachePools(pools, 0)
 }

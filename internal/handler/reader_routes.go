@@ -993,12 +993,8 @@ func streamReaderMediaBody(w io.Writer, body io.Reader) {
 
 const (
 	// readerAudioCacheAttempts 首次落盘的最多尝试次数（每次内部都会走「失败换票」）。
+	// 续传只补没下完的部分，所以这里的次数比过去更可用：每次失败都能推进进度。
 	readerAudioCacheAttempts = 4
-	// readerAudioCacheRetryDelay 重试退避基数，实际等待为 (attempt-1) 倍。
-	readerAudioCacheRetryDelay = 500 * time.Millisecond
-	// readerAudioCacheMaxBytes 单个音频的落盘上限。有声书一章约 3–5MB，
-	// 给到 64MB 足够容纳长章节，也能挡住误当成音频的超大对象。
-	readerAudioCacheMaxBytes = 64 << 20
 	// readerMediaReissueAttempts 换票重试次数：跨境 CDN 的「空 401」是概率性的，
 	// 一张票不行往往换一张就好；旧实现只换一次，第二次失败就把 502 交给播放器。
 	readerMediaReissueAttempts = 3
@@ -1082,8 +1078,9 @@ func ensureCachedRemoteAudio(
 	return path, nil
 }
 
-// downloadReaderAudioToCache 整段拉取并落盘：上游断流/换票失败时重试，
-// 落盘后按 Content-Length 校验长度，防止把截断的音频缓存下来。
+// downloadReaderAudioToCache 整段拉取并落盘，支持断点续传：
+// 上游 RST/超时后用 Range 从已写入的位置接着下，不再整段重下；
+// 只有字节数与上游声明的总长一致时才会生成正式缓存文件。
 func downloadReaderAudioToCache(
 	ctx context.Context,
 	svc *service.Container,
@@ -1091,76 +1088,30 @@ func downloadReaderAudioToCache(
 	bookID, rawURL string,
 	headers map[string]string,
 ) error {
-	var lastErr error
-	for attempt := 1; attempt <= readerAudioCacheAttempts; attempt++ {
-		if attempt > 1 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(readerAudioCacheRetryDelay * time.Duration(attempt-1)):
-			}
-		}
-		out, err := fetchReaderMediaResilient(ctx, svc, book, rawURL, "", headers, true)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if out == nil || out.resp == nil {
-			lastErr = fmt.Errorf("音源响应为空")
-			continue
-		}
-		resp := out.resp
-		status := resp.StatusCode
-		if status != http.StatusOK && status != http.StatusPartialContent {
-			_ = resp.Body.Close()
-			lastErr = fmt.Errorf("音源返回 %d", status)
-			continue
-		}
-		expected := resp.ContentLength
-		path, storeErr := svc.Reader.StoreCachedRemoteAudio(bookID, rawURL, func(w io.Writer) error {
-			if len(out.head) > 0 {
-				if _, err := w.Write(out.head); err != nil {
-					return err
+	_, err := svc.Reader.DownloadRemoteAudio(ctx, bookID, rawURL, readerAudioCacheAttempts,
+		func(rangeHeader string) (*http.Response, []byte, error) {
+			// 只有整段请求才需要嗅探响应体（判 HLS/错误页）；续传拿到的是 206
+			// 二进制分片，读了还得再补写一次，没必要。
+			out, fetchErr := fetchReaderMediaResilient(ctx, svc, book, rawURL, rangeHeader, headers, rangeHeader == "")
+			if fetchErr != nil {
+				if isReaderMediaNoRetry(fetchErr) {
+					return nil, nil, &reader.NoRetryError{Err: fetchErr}
 				}
+				return nil, nil, fetchErr
 			}
-			return copyLimited(w, resp.Body, readerAudioCacheMaxBytes)
+			return out.resp, out.head, nil
 		})
-		_ = resp.Body.Close()
-		if storeErr != nil {
-			lastErr = storeErr
-			continue
-		}
-		if expected > 0 {
-			info, statErr := os.Stat(path)
-			if statErr != nil {
-				_ = os.Remove(path)
-				lastErr = fmt.Errorf("音频缓存写入后不可读: %w", statErr)
-				continue
-			}
-			if info.Size() != expected {
-				_ = os.Remove(path)
-				lastErr = fmt.Errorf("音频写入不完整（%d/%d 字节）", info.Size(), expected)
-				continue
-			}
-		}
-		return nil
-	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("音源拉取失败")
-	}
-	return fmt.Errorf("已重试 %d 次: %w", readerAudioCacheAttempts, lastErr)
+	return err
 }
 
-// copyLimited 复制响应体，超过上限时报错（避免把超大对象写进缓存）。
-func copyLimited(w io.Writer, r io.Reader, limit int64) error {
-	n, err := io.Copy(w, io.LimitReader(r, limit+1))
-	if err != nil {
-		return err
+// isReaderMediaNoRetry 判断这次失败是否「换个花样重试也没用」。
+// 用于让外层下载循环立刻收手，而不是把同一张被拒的票再打四遍。
+func isReaderMediaNoRetry(err error) bool {
+	if errors.Is(err, errReaderMediaStaleTicket) {
+		return true
 	}
-	if n > limit {
-		return fmt.Errorf("音源超过 %d 字节上限", limit)
-	}
-	return nil
+	var rejected *readerMediaRejectedError
+	return errors.As(err, &rejected)
 }
 
 // readerAudioExt 取音频地址的后缀（用于推断 Content-Type）。
@@ -1230,6 +1181,33 @@ type readerMediaResult struct {
 //     不改变原有行为；
 //   - 该换票但换不到、或换票后依然不可用 → 返回错误，由调用方给出明确文案，
 //     而不是让播放器对着必然失败的地址反复重试。
+//
+// readerMediaRejectedError 上游拒绝了这张票，继续走同一条重试路径不会有进展。
+//
+//	status    —— 上游状态码（401/403/410）
+//	refreshed —— 这次拒绝发生在「已经换过一张新票」之后
+//	message   —— 对外文案（留空时按状态码生成）
+//
+// 上游的拒绝常常成批出现（几分钟一波，随后自己恢复）：换票拿到的是新票，但
+// 同一时刻仍被同一个状态码挡回。连续两轮都这样时立刻停止重试——继续重试只会
+// 让播放器多等十几秒，结果并不会更好。
+type readerMediaRejectedError struct {
+	status    int
+	refreshed bool
+	message   string
+}
+
+func (e *readerMediaRejectedError) Error() string {
+	if e.message != "" {
+		return e.message
+	}
+	return fmt.Sprintf("音源暂时被上游拒绝（HTTP %d），请稍后重试或换源", e.status)
+}
+
+// errReaderMediaStaleTicket 换票没有拿到新票（书源还是给回同一张、或干脆给不出），
+// 再重试同一个书源不会有不同结果。具体原因由外层用 %w 串上。
+var errReaderMediaStaleTicket = errors.New("音源签名失效且重新取票失败")
+
 func fetchReaderMedia(
 	ctx context.Context,
 	svc *service.Container,
@@ -1257,7 +1235,10 @@ func fetchReaderMedia(
 		case out.resp.StatusCode == http.StatusUnauthorized:
 			_, _ = io.Copy(io.Discard, io.LimitReader(out.resp.Body, 1<<16))
 			_ = out.resp.Body.Close()
-			return nil, fmt.Errorf("音源签名失效（上游 401 拒绝），请稍后重试或换源")
+			return nil, &readerMediaRejectedError{
+				status:  http.StatusUnauthorized,
+				message: "音源签名失效（上游 401 拒绝），请稍后重试或换源",
+			}
 		}
 		return out, nil
 	}
@@ -1265,7 +1246,7 @@ func fetchReaderMedia(
 	_, _ = io.Copy(io.Discard, io.LimitReader(out.resp.Body, 1<<16))
 	_ = out.resp.Body.Close()
 	if refreshErr != nil {
-		return nil, fmt.Errorf("音源签名失效且重新取票失败: %w", refreshErr)
+		return nil, fmt.Errorf("%w: %v", errReaderMediaStaleTicket, refreshErr)
 	}
 	retried, _, retryErr := fetchReaderMediaOnce(ctx, svc, book, fresh, rangeHeader, options, probeBody)
 	if retryErr != nil {
@@ -1273,10 +1254,16 @@ func fetchReaderMedia(
 	}
 	if retried.rejected {
 		_ = retried.resp.Body.Close()
-		return nil, fmt.Errorf("音源换票后仍返回非媒体内容，请稍后重试或换源")
+		return nil, &readerMediaRejectedError{
+			status:    retried.resp.StatusCode,
+			refreshed: true,
+			message:   "音源换票后仍返回非媒体内容，请稍后重试或换源",
+		}
 	}
 	if reader.MediaNeedsRefresh(retried.resp.StatusCode) {
-		return nil, fmt.Errorf("音源换票后仍被拒绝（上游 %d），请稍后重试或换源", retried.resp.StatusCode)
+		status := retried.resp.StatusCode
+		_ = retried.resp.Body.Close()
+		return nil, &readerMediaRejectedError{status: status, refreshed: true}
 	}
 	return retried, nil
 }
@@ -1285,8 +1272,11 @@ func fetchReaderMedia(
 //
 // 跨境 CDN 判掉签名票是概率性的：换一张票往往就能取到，而旧实现只换一次，
 // 第二次失败直接把 502 交给播放器。这里最多再重来 readerMediaReissueAttempts 轮，
-// 每轮都会作废章节缓存、重新回源签票。不可恢复的 4xx（如 404）原样返回，
-// 不做无意义的等待。
+// 每轮都会作废章节缓存、重新回源签票。
+//
+// 但"没有进展"的失败会提前收手，否则用户要对着转圈干等三十多秒：
+//   - 换票拿不到新票（errReaderMediaStaleTicket）→ 立即结束；
+//   - 换过票仍是同一个拒绝状态码 → 两轮即结束（见 readerMediaRejectedError）。
 func fetchReaderMediaResilient(
 	ctx context.Context,
 	svc *service.Container,
@@ -1296,6 +1286,7 @@ func fetchReaderMediaResilient(
 	probeBody bool,
 ) (*readerMediaResult, error) {
 	var lastErr error
+	lastRejected := 0
 	for attempt := 1; attempt <= readerMediaReissueAttempts; attempt++ {
 		if attempt > 1 {
 			select {
@@ -1313,13 +1304,29 @@ func fetchReaderMediaResilient(
 			if !out.rejected && !reader.MediaNeedsRefresh(out.resp.StatusCode) {
 				return out, nil
 			}
-			lastErr = fmt.Errorf("音源换票后仍不可用（上游 %d）", out.resp.StatusCode)
+			status := out.resp.StatusCode
 			_ = out.resp.Body.Close()
-			continue
+			lastErr = &readerMediaRejectedError{status: status, refreshed: true}
+		} else {
+			lastErr = err
+			if ctx.Err() != nil {
+				return nil, err
+			}
+			if errors.Is(err, errReaderMediaStaleTicket) {
+				return nil, err
+			}
 		}
-		lastErr = err
-		if ctx.Err() != nil {
-			return nil, err
+		var rejected *readerMediaRejectedError
+		if errors.As(lastErr, &rejected) {
+			// 没有换票空间的拒绝：原样重试同一张票没有意义。
+			if !rejected.refreshed {
+				return nil, lastErr
+			}
+			// 换过票还是同一个状态码：上游这几分钟就是不放行。
+			if lastRejected == rejected.status {
+				return nil, lastErr
+			}
+			lastRejected = rejected.status
 		}
 	}
 	return nil, lastErr
