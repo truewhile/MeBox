@@ -8,12 +8,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/truewhile/MeBox/internal/middleware"
 	"github.com/truewhile/MeBox/internal/model"
@@ -878,6 +882,22 @@ func readerMediaProxyHandler(svc *service.Container) gin.HandlerFunc {
 		// 图片地址可自带 ",{headers:{...}}" 选项段：拆分后 headers 逐图应用，
 		// 代理地址里只保留不带选项的地址（见 ProxyURL）。
 		rawURL, mediaOptions, _ := readerrule.ParseMediaOptions(rawURL)
+
+		// 远端音轨：整段落盘缓存，命中后不再回源。
+		//
+		// 听书源的音频直链签在腾讯音乐 CDN 上，跨境链路会间歇性返回空 401
+		// 或直接 RST 连接。旧实现每次都把抖动原样交给播放器：要么是 502 的
+		// JSON，要么是截断的 206，浏览器一律判成 MEDIA_ERR_SRC_NOT_SUPPORTED
+		// （前端据此提示「格式不支持，请检查 ffmpeg」——其实完全无关）。
+		// 缓存后只要首播成功一次，后续拖动进度、续播、重试都走本地文件。
+		// 缓存目录不可用时退回旧的流式透传，不让配置问题直接变成「播不了」。
+		if c.Request.Method == http.MethodGet &&
+			reader.IsAudioMediaURL(rawURL, book.Type) &&
+			svc.Reader.RemoteAudioCachePath(bookID, rawURL) != "" {
+			handleCachedReaderAudio(c, svc, book, bookID, rawURL, mediaOptions.Headers)
+			return
+		}
+
 		// 只有 200 的 GET 需要嗅探响应体（判播放列表 / 判错误页）；
 		// 206 的体是二进制分片、HEAD 没有体，读了反而要额外拼回去。
 		probeBody := c.Request.Method == http.MethodGet
@@ -969,6 +989,209 @@ func streamReaderMediaBody(w io.Writer, body io.Reader) {
 	}
 }
 
+// ─── 远端音轨落盘缓存 ──────────────────────────────────────────────────────
+
+const (
+	// readerAudioCacheAttempts 首次落盘的最多尝试次数（每次内部都会走「失败换票」）。
+	readerAudioCacheAttempts = 4
+	// readerAudioCacheRetryDelay 重试退避基数，实际等待为 (attempt-1) 倍。
+	readerAudioCacheRetryDelay = 500 * time.Millisecond
+	// readerAudioCacheMaxBytes 单个音频的落盘上限。有声书一章约 3–5MB，
+	// 给到 64MB 足够容纳长章节，也能挡住误当成音频的超大对象。
+	readerAudioCacheMaxBytes = 64 << 20
+	// readerMediaReissueAttempts 换票重试次数：跨境 CDN 的「空 401」是概率性的，
+	// 一张票不行往往换一张就好；旧实现只换一次，第二次失败就把 502 交给播放器。
+	readerMediaReissueAttempts = 3
+	readerMediaReissueDelay    = 300 * time.Millisecond
+)
+
+// readerAudioFetchGroup 同一音轨并发请求（播放器 + 预取 + 预热）只下载一次。
+var readerAudioFetchGroup singleflight.Group
+
+// handleCachedReaderAudio 音频直链的统一入口：先查本地缓存，未命中则整段拉取落盘，
+// 最后交给 http.ServeContent 处理 Range（拖动进度、续播都读本地文件）。
+func handleCachedReaderAudio(
+	c *gin.Context,
+	svc *service.Container,
+	book *model.ReaderBook,
+	bookID, rawURL string,
+	headers map[string]string,
+) {
+	if f, info, ok := svc.Reader.OpenCachedRemoteAudio(bookID, rawURL); ok {
+		defer f.Close()
+		serveCachedReaderAudio(c, f, info, rawURL)
+		return
+	}
+	cachePath, err := ensureCachedRemoteAudio(c.Request.Context(), svc, book, bookID, rawURL, headers)
+	if err != nil {
+		if svc.Log != nil {
+			svc.Log.Warn("reader 音频拉取失败", zap.String("book", bookID), zap.Error(err))
+		}
+		c.String(http.StatusBadGateway, "音频拉取失败: %s", err.Error())
+		return
+	}
+	f, err := os.Open(cachePath) // #nosec G304 -- 路径由服务端哈希生成
+	if err != nil {
+		c.String(http.StatusBadGateway, "音频缓存不可用: %s", err.Error())
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		c.String(http.StatusBadGateway, "音频缓存不可用: %s", err.Error())
+		return
+	}
+	serveCachedReaderAudio(c, f, info, rawURL)
+}
+
+// serveCachedReaderAudio 用 http.ServeContent 下发本地音轨（自带 Range / 206 语义）。
+func serveCachedReaderAudio(c *gin.Context, f *os.File, info os.FileInfo, rawURL string) {
+	c.Header("Content-Type", readerAudioContentType(rawURL))
+	c.Header("Cache-Control", "private, max-age=604800")
+	http.ServeContent(c.Writer, c.Request, "audio"+readerAudioExt(rawURL), info.ModTime(), f)
+}
+
+// ensureCachedRemoteAudio 单飞下载：并发命中同一章时只回源一次。
+func ensureCachedRemoteAudio(
+	ctx context.Context,
+	svc *service.Container,
+	book *model.ReaderBook,
+	bookID, rawURL string,
+	headers map[string]string,
+) (string, error) {
+	key := svc.Reader.RemoteAudioCachePath(bookID, rawURL)
+	if key == "" {
+		return "", fmt.Errorf("音频缓存目录不可用")
+	}
+	v, err, _ := readerAudioFetchGroup.Do(key, func() (any, error) {
+		if svc.Reader.HasCachedRemoteAudio(bookID, rawURL) {
+			return key, nil
+		}
+		if err := downloadReaderAudioToCache(ctx, svc, book, bookID, rawURL, headers); err != nil {
+			return nil, err
+		}
+		return key, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	path, _ := v.(string)
+	if path == "" {
+		return "", fmt.Errorf("音频缓存不可用")
+	}
+	return path, nil
+}
+
+// downloadReaderAudioToCache 整段拉取并落盘：上游断流/换票失败时重试，
+// 落盘后按 Content-Length 校验长度，防止把截断的音频缓存下来。
+func downloadReaderAudioToCache(
+	ctx context.Context,
+	svc *service.Container,
+	book *model.ReaderBook,
+	bookID, rawURL string,
+	headers map[string]string,
+) error {
+	var lastErr error
+	for attempt := 1; attempt <= readerAudioCacheAttempts; attempt++ {
+		if attempt > 1 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(readerAudioCacheRetryDelay * time.Duration(attempt-1)):
+			}
+		}
+		out, err := fetchReaderMediaResilient(ctx, svc, book, rawURL, "", headers, true)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if out == nil || out.resp == nil {
+			lastErr = fmt.Errorf("音源响应为空")
+			continue
+		}
+		resp := out.resp
+		status := resp.StatusCode
+		if status != http.StatusOK && status != http.StatusPartialContent {
+			_ = resp.Body.Close()
+			lastErr = fmt.Errorf("音源返回 %d", status)
+			continue
+		}
+		expected := resp.ContentLength
+		path, storeErr := svc.Reader.StoreCachedRemoteAudio(bookID, rawURL, func(w io.Writer) error {
+			if len(out.head) > 0 {
+				if _, err := w.Write(out.head); err != nil {
+					return err
+				}
+			}
+			return copyLimited(w, resp.Body, readerAudioCacheMaxBytes)
+		})
+		_ = resp.Body.Close()
+		if storeErr != nil {
+			lastErr = storeErr
+			continue
+		}
+		if expected > 0 {
+			info, statErr := os.Stat(path)
+			if statErr != nil {
+				_ = os.Remove(path)
+				lastErr = fmt.Errorf("音频缓存写入后不可读: %w", statErr)
+				continue
+			}
+			if info.Size() != expected {
+				_ = os.Remove(path)
+				lastErr = fmt.Errorf("音频写入不完整（%d/%d 字节）", info.Size(), expected)
+				continue
+			}
+		}
+		return nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("音源拉取失败")
+	}
+	return fmt.Errorf("已重试 %d 次: %w", readerAudioCacheAttempts, lastErr)
+}
+
+// copyLimited 复制响应体，超过上限时报错（避免把超大对象写进缓存）。
+func copyLimited(w io.Writer, r io.Reader, limit int64) error {
+	n, err := io.Copy(w, io.LimitReader(r, limit+1))
+	if err != nil {
+		return err
+	}
+	if n > limit {
+		return fmt.Errorf("音源超过 %d 字节上限", limit)
+	}
+	return nil
+}
+
+// readerAudioExt 取音频地址的后缀（用于推断 Content-Type）。
+func readerAudioExt(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(path.Ext(u.Path))
+}
+
+// readerAudioContentType 按后缀给出 Content-Type：缓存文件统一存成 .audio，
+// 不能依赖 http.ServeContent 的嗅探，直接在响应头里写死。
+func readerAudioContentType(rawURL string) string {
+	switch readerAudioExt(rawURL) {
+	case ".mp3":
+		return "audio/mpeg"
+	case ".aac":
+		return "audio/aac"
+	case ".flac":
+		return "audio/flac"
+	case ".wav":
+		return "audio/wav"
+	case ".ogg", ".oga", ".opus":
+		return "audio/ogg"
+	default:
+		// .m4a / .m4b / .wma / .ape 以及无后缀地址：腾讯的听书直链都是 m4a。
+		return "audio/mp4"
+	}
+}
+
 // readerImageDecodeMaxBytes 需要服务端解密的单张图片上限。
 const readerImageDecodeMaxBytes = 32 << 20
 
@@ -1034,7 +1257,7 @@ func fetchReaderMedia(
 		case out.resp.StatusCode == http.StatusUnauthorized:
 			_, _ = io.Copy(io.Discard, io.LimitReader(out.resp.Body, 1<<16))
 			_ = out.resp.Body.Close()
-			return nil, fmt.Errorf("音源鉴权被拒（上游 401），请稍后重试或换源")
+			return nil, fmt.Errorf("音源签名失效（上游 401 拒绝），请稍后重试或换源")
 		}
 		return out, nil
 	}
@@ -1056,6 +1279,50 @@ func fetchReaderMedia(
 		return nil, fmt.Errorf("音源换票后仍被拒绝（上游 %d），请稍后重试或换源", retried.resp.StatusCode)
 	}
 	return retried, nil
+}
+
+// fetchReaderMediaResilient 在 fetchReaderMedia（已含一次换票）之上再包一层。
+//
+// 跨境 CDN 判掉签名票是概率性的：换一张票往往就能取到，而旧实现只换一次，
+// 第二次失败直接把 502 交给播放器。这里最多再重来 readerMediaReissueAttempts 轮，
+// 每轮都会作废章节缓存、重新回源签票。不可恢复的 4xx（如 404）原样返回，
+// 不做无意义的等待。
+func fetchReaderMediaResilient(
+	ctx context.Context,
+	svc *service.Container,
+	book *model.ReaderBook,
+	rawURL, rangeHeader string,
+	options map[string]string,
+	probeBody bool,
+) (*readerMediaResult, error) {
+	var lastErr error
+	for attempt := 1; attempt <= readerMediaReissueAttempts; attempt++ {
+		if attempt > 1 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(readerMediaReissueDelay * time.Duration(attempt-1)):
+			}
+		}
+		out, err := fetchReaderMedia(ctx, svc, book, rawURL, rangeHeader, options, probeBody)
+		if err == nil {
+			if out == nil || out.resp == nil {
+				lastErr = fmt.Errorf("音源响应为空")
+				continue
+			}
+			if !out.rejected && !reader.MediaNeedsRefresh(out.resp.StatusCode) {
+				return out, nil
+			}
+			lastErr = fmt.Errorf("音源换票后仍不可用（上游 %d）", out.resp.StatusCode)
+			_ = out.resp.Body.Close()
+			continue
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return nil, err
+		}
+	}
+	return nil, lastErr
 }
 
 // readerMediaProbeAttempts 探测阶段遇到连接中断（reset/EOF）的最大尝试次数。

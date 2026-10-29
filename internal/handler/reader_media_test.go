@@ -189,11 +189,15 @@ func TestReaderMediaProbeRetriesConnectionReset(t *testing.T) {
 	}
 }
 
-// TestReaderMediaAbortsWhenUpstreamTruncates 上游中途断开且重试都失败时，
-// 代理必须让客户端看到「传输不完整」，不能返回一个长度正确却内容缺失的响应。
+// TestReaderMediaAbortsWhenUpstreamTruncates 非音轨的流式透传路径：上游中途
+// 断开且重试都失败时，必须让客户端看到「传输不完整」，不能返回一个长度正确
+// 却内容缺失的响应。
 //
 // 以前这里是 `_, _ = io.Copy(...)`，错误被丢掉，客户端拿到一个正常结束的
 // 半截文件 —— 播放器只能报「格式不支持」（3003），根因被彻底掩盖。
+//
+// 音轨走的是整段落盘缓存（见 TestReaderAudioCacheRejectsTruncatedUpstream）：
+// 拉不完整就重试，全部失败回 502，绝不会把半截音频交给播放器。
 func TestReaderMediaAbortsWhenUpstreamTruncates(t *testing.T) {
 	const declared = 400 << 10
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -217,7 +221,8 @@ func TestReaderMediaAbortsWhenUpstreamTruncates(t *testing.T) {
 
 	svc, _, book := prepareMediaTicketBookWithUpstream(t, srv.URL)
 	router := mediaRouterForTest(svc)
-	signed := svc.Reader.ProxyURL(book.ID, srv.URL+"/media")
+	// .mp4 不是音频后缀：走流式透传分支（音轨会被整段落盘缓存）。
+	signed := svc.Reader.ProxyURL(book.ID, srv.URL+"/media.mp4")
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, signed, nil)
@@ -236,6 +241,71 @@ func TestReaderMediaAbortsWhenUpstreamTruncates(t *testing.T) {
 	router.ServeHTTP(w, req)
 	if w.Body.Len() >= declared {
 		t.Fatalf("不应交付完整长度的响应体（上游只写了 128KB）")
+	}
+}
+
+// TestReaderAudioCacheServesFromDisk 音轨首次拉取后落盘；后续请求即使带着一张
+// 新签的票（query 全变了）也不再回源——这是让播放不受跨境链路抖动影响的关键。
+func TestReaderAudioCacheServesFromDisk(t *testing.T) {
+	svc, srv, book := prepareMediaTicketBook(t)
+	router := mediaRouterForTest(svc)
+	signed := primeTicketBook(t, svc, book.ID)
+
+	code, body := getReaderMedia(t, router, signed)
+	if code != http.StatusOK || !strings.Contains(body, "fake-audio-bytes") {
+		t.Fatalf("首次拉取失败 status=%d body=%q", code, body)
+	}
+	if got := srv.mediaRequests(); got != 1 {
+		t.Fatalf("首次拉取应对上游请求 1 次，实际 %d", got)
+	}
+
+	// 同一段音频的另一张票：URL 的 query 不同，缓存键必须一致。
+	rotated := svc.Reader.ProxyURL(book.ID, srv.URL+"/media?t=ticket-rotated")
+	code, body = getReaderMedia(t, router, rotated)
+	if code != http.StatusOK || !strings.Contains(body, "fake-audio-bytes") {
+		t.Fatalf("命中缓存失败 status=%d body=%q", code, body)
+	}
+	if got := srv.mediaRequests(); got != 1 {
+		t.Fatalf("命中缓存后不该再回源，实际上游请求 %d 次", got)
+	}
+}
+
+// TestReaderAudioCacheRejectsTruncatedUpstream 音轨拉不完整时重试；全部失败回 502，
+// 且不能留下半截缓存文件（否则后续会把截断的音频当完整文件下发）。
+func TestReaderAudioCacheRejectsTruncatedUpstream(t *testing.T) {
+	const declared = 400 << 10
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/mp4")
+		w.Header().Set("Content-Length", strconv.Itoa(declared))
+		payload := make([]byte, 8<<10)
+		for written := 0; written < 128<<10; written += len(payload) {
+			if _, err := w.Write(payload); err != nil {
+				return
+			}
+		}
+		w.(http.Flusher).Flush()
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				_ = conn.Close()
+			}
+		}
+	}))
+	defer srv.Close()
+
+	svc, _, book := prepareMediaTicketBookWithUpstream(t, srv.URL)
+	router := mediaRouterForTest(svc)
+	// 无后缀地址 + 音频书籍 → 走音轨落盘缓存。
+	signed := svc.Reader.ProxyURL(book.ID, srv.URL+"/media")
+
+	code, body := getReaderMedia(t, router, signed)
+	if code != http.StatusBadGateway {
+		t.Fatalf("上游持续截断应当返回 502，实际 %d body=%.120s", code, body)
+	}
+	if strings.Contains(body, "ftyp") {
+		t.Fatalf("不能把半截音频交给客户端: %q", body)
+	}
+	if _, _, ok := svc.Reader.OpenCachedRemoteAudio(book.ID, srv.URL+"/media"); ok {
+		t.Fatalf("失败的下载不应留下缓存文件")
 	}
 }
 
@@ -280,6 +350,7 @@ type mediaTicketServer struct {
 	mu        sync.Mutex
 	issued    []string
 	hits      int
+	mediaHits int
 	noToken   bool
 	errorPage bool
 }
@@ -306,6 +377,9 @@ func newMediaTicketServer(t *testing.T) *mediaTicketServer {
 			token := s.newTokenLocked(fmt.Sprintf("ticket-%d", n))
 			_, _ = w.Write([]byte(fmt.Sprintf(`{"data":{"url":"%s/media?t=%s"}}`, s.URL, token)))
 		case r.URL.Path == "/media":
+			s.mu.Lock()
+			s.mediaHits++
+			s.mu.Unlock()
 			if s.errorPageNow() {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				_, _ = w.Write([]byte(`<html><body>ticket expired</body></html>`))
@@ -371,6 +445,12 @@ func (s *mediaTicketServer) contentHits() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.hits
+}
+
+func (s *mediaTicketServer) mediaRequests() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mediaHits
 }
 
 // prepareMediaTicketBookWithUpstream 用指定的上游地址建一本书（上游由调用方提供）。

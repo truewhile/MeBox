@@ -22,6 +22,8 @@ import { readerCoverSrc } from '../../utils/readerCover'
 const PROGRESS_SAVE_INTERVAL_MS = 5_000
 /** -15s / +15s 步长（对齐面板与 legado SEEK_STEP）。 */
 const SEEK_STEP = 15
+/** 音源加载失败后自动重试（重新换取签名地址）的次数上限。 */
+const AUDIO_RETRY_LIMIT = 2
 
 export interface LoadChapterInput {
   bookId: string
@@ -78,6 +80,10 @@ class ReaderAudioEngine {
   private warmer: HTMLAudioElement | null = null
   /** warmer 当前装载的音轨，避免重复赋值。 */
   private warmedTrack = ''
+  /** 当前章已自动重试的次数（换章/加载成功时清零）。 */
+  private retryCount = 0
+  /** 自动重试的定时器句柄。 */
+  private retryTimer: number | null = null
 
   constructor() {
     const audio = new Audio()
@@ -107,6 +113,8 @@ class ReaderAudioEngine {
     }
     // 换章前把上一章的最后位置补报掉（此时 store 里还是上一章的上下文）
     this.commitProgress()
+    // 换章是一次全新的加载：清掉上一章遗留的自动重试计数/定时器
+    this.resetRetry()
     // 换书：预取的音轨属于上一本，全部作废
     if (s.bookId !== input.bookId) this.clearPrefetch()
     this.applyChapter(input)
@@ -244,6 +252,7 @@ class ReaderAudioEngine {
   /** 完全停止并清空状态（迷你播放器的关闭按钮）。 */
   stop(): void {
     this.commitProgress()
+    this.resetRetry()
     this.detachSource()
     this.clearPrefetch()
     this.timerDeadline = 0
@@ -457,8 +466,68 @@ class ReaderAudioEngine {
   }
 
   private fail(message: string): void {
+    this.resetRetry()
     useReaderAudioStore.setState({ status: 'error', error: message })
     this.setSessionPlaybackState('paused')
+  }
+
+  // ─── 失败自动重试 ─────────────────────────────────────────────────────
+
+  /** 清掉自动重试计数与待执行的定时器（换章、停止、最终失败时调用）。 */
+  private resetRetry(): void {
+    this.retryCount = 0
+    if (this.retryTimer !== null) {
+      window.clearTimeout(this.retryTimer)
+      this.retryTimer = null
+    }
+  }
+
+  /** 退避后再重新解析本章音轨；期间保持 loading 态，不给用户闪错误。 */
+  private scheduleRetry(): void {
+    if (this.retryTimer !== null) window.clearTimeout(this.retryTimer)
+    useReaderAudioStore.setState({ status: 'loading', error: '' })
+    const delay = 800 * this.retryCount
+    this.retryTimer = window.setTimeout(() => {
+      this.retryTimer = null
+      void this.reloadCurrentChapter()
+    }, delay)
+  }
+
+  /**
+   * 重新取一次章节内容再装源。服务端媒体代理会在签名票失效/上游抖动时
+   * 重新回源签票；重新取内容能拿到新的签名地址，比原样重试同一个 URL 有效。
+   */
+  private async reloadCurrentChapter(): Promise<void> {
+    const s = useReaderAudioStore.getState()
+    if (!s.bookId) {
+      this.fail('音频加载失败，请稍后重试')
+      return
+    }
+    const token = this.loadToken
+    const resumeAt = this.lastTime > 0 ? this.lastTime : s.cur
+    try {
+      const ct = await readerAPI.bookContent(s.bookId, s.chapterIndex)
+      if (token !== this.loadToken) return
+      const track = ct.tracks?.[0]
+      if (ct.type !== 'audio' || !track) {
+        this.fail('本章没有可播放的音频')
+        return
+      }
+      this.applyChapter({
+        bookId: s.bookId,
+        bookName: s.bookName,
+        cover: s.cover,
+        chapters: s.chapters,
+        chapterIndex: s.chapterIndex,
+        track,
+        transcoding: ct.transcoding ?? false,
+        openCredits: s.openCredits,
+        closeCredits: s.closeCredits,
+        initialPos: resumeAt,
+      })
+    } catch {
+      this.fail('音频加载失败，请稍后重试')
+    }
   }
 
   // ─── <audio> 事件 ─────────────────────────────────────────────────────
@@ -546,11 +615,21 @@ class ReaderAudioEngine {
 
     audio.addEventListener('error', () => {
       const code = audio.error?.code
+      // 服务端代理拉的是腾讯 CDN 的直链，跨境链路会偶发 502 / 中途断流。
+      // 浏览器对这两种情况都报 SRC_NOT_SUPPORTED（看起来像「格式不支持」），
+      // 实际上重新取一次章节（换一张签名票）通常就能播，所以先自动重试。
+      const retryable =
+        code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED || code === MediaError.MEDIA_ERR_NETWORK
+      if (retryable && this.retryCount < AUDIO_RETRY_LIMIT) {
+        this.retryCount++
+        this.scheduleRetry()
+        return
+      }
       this.fail(
         code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
-          ? '浏览器无法播放该音频格式，且服务端转码不可用（请检查 ffmpeg 是否已安装）'
+          ? '音频加载失败：服务端多次重试后仍取不到音源，请稍后再试'
           : code === MediaError.MEDIA_ERR_NETWORK
-            ? '音频加载失败，请检查网络或源文件是否还在'
+            ? '音频加载失败，请检查网络后重试'
             : '音频无法播放',
       )
     })
