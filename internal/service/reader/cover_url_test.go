@@ -6,32 +6,48 @@ import "testing"
 // normalizeCoverURL 必须拦住这类非图片地址，避免前端 <img> 显示破图。
 func TestNormalizeCoverURL(t *testing.T) {
 	cases := []struct {
-		name string
-		in   string
-		want string
+		name    string
+		in      string
+		baseURL string
+		want    string
 	}{
-		{"empty", "", ""},
-		{"blank", "   ", ""},
-		{"https", "https://img.example.com/a.jpg", "https://img.example.com/a.jpg"},
-		{"http", "http://img.example.com/a.jpg", "http://img.example.com/a.jpg"},
-		{"uppercase scheme", "HTTPS://img.example.com/a.jpg", "HTTPS://img.example.com/a.jpg"},
-		{"trimmed", "  https://img.example.com/a.jpg  ", "https://img.example.com/a.jpg"},
-		{"inline image data uri", "data:image/png;base64,iVBORw0KGgo=", "data:image/png;base64,iVBORw0KGgo="},
-		{"local asset url", "/api/reader/local/asset?b=1&p=2&s=3", "/api/reader/local/asset?b=1&p=2&s=3"},
+		{"empty", "", "", ""},
+		{"blank", "   ", "", ""},
+		{"https", "https://img.example.com/a.jpg", "", "https://img.example.com/a.jpg"},
+		{"http", "http://img.example.com/a.jpg", "", "http://img.example.com/a.jpg"},
+		{"uppercase scheme", "HTTPS://img.example.com/a.jpg", "", "HTTPS://img.example.com/a.jpg"},
+		{"trimmed", "  https://img.example.com/a.jpg  ", "", "https://img.example.com/a.jpg"},
+		{"inline image data uri", "data:image/png;base64,iVBORw0KGgo=", "", "data:image/png;base64,iVBORw0KGgo="},
+		{"local asset url", "/api/reader/local/asset?b=1&p=2&s=3", "", "/api/reader/local/asset?b=1&p=2&s=3"},
 		{
 			"search params envelope",
 			"data:;base64,eyJrZXkiOiLlhajnkIPpq5jmraYiLCJ0YWIiOiLlsI/or7QiLCJzb3VyY2VzS2V5Ijoi5YWo6YOoIiwicGFnZSI6MSwiZGlzYWJsZWRfc291cmNlcyI6IjAifQ==",
 			"",
+			"",
 		},
-		{"text data uri", "data:text/plain;base64,aGk=", ""},
-		{"source name", "光遇聚合", ""},
-		{"javascript url", "javascript:alert(1)", ""},
+		{"text data uri", "data:text/plain;base64,aGk=", "", ""},
+		{"source name", "光遇聚合", "", ""},
+		{"javascript url", "javascript:alert(1)", "", ""},
+		{
+			// 详情规则取不到 $.meta.cover 时按 legado 语义回退成页面地址，
+			// 这个接口地址不是图片，必须丢掉。
+			"fallback to page url",
+			"https://api.example.com/book?bookId=1",
+			"https://api.example.com/book?bookId=1",
+			"",
+		},
+		{
+			"real cover with page url base",
+			"https://img.example.com/a.jpg",
+			"https://api.example.com/book?bookId=1",
+			"https://img.example.com/a.jpg",
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := normalizeCoverURL(tc.in); got != tc.want {
-				t.Fatalf("normalizeCoverURL(%q) = %q, want %q", tc.in, got, tc.want)
+			if got := normalizeCoverURL(tc.in, tc.baseURL); got != tc.want {
+				t.Fatalf("normalizeCoverURL(%q, %q) = %q, want %q", tc.in, tc.baseURL, got, tc.want)
 			}
 		})
 	}

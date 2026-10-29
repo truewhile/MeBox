@@ -408,6 +408,10 @@ func readerBookInfoHandler(svc *service.Container) gin.HandlerFunc {
 		}
 		// 声明了封面解密的书源：详情封面也要走解密代理（尚未入库，按书源 URL 签）。
 		if info != nil {
+			// 顺手修复书架里被上游限流写坏的封面（存成接口地址的那种），先按原始
+			// 地址写回，再做下发时的解密代理改写。
+			userID := c.GetString(middleware.CtxUserID)
+			svc.Reader.RepairShelfCover(c.Request.Context(), userID, c.Query("source_url"), c.Query("book_url"), info.CoverURL)
 			info.CoverURL = svc.Reader.RewriteBookCover(c.Request.Context(), "", c.Query("source_url"), info.CoverURL)
 		}
 		c.JSON(http.StatusOK, info)

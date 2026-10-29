@@ -23,6 +23,9 @@ export default function ReaderBookPage() {
   const [info, setInfo] = useState<ReaderBookInfo | null>(null)
   const [infoError, setInfoError] = useState('')
   const [chapters, setChapters] = useState<ReaderTocChapter[] | null>(null)
+  // 目录拉取失败的原因（书源限流/失联）。有它时不再把空列表显示成「0 章」，
+  // 否则用户以为这本书真的没有目录。
+  const [tocError, setTocError] = useState('')
   const [shelfBook, setShelfBook] = useState<ReaderBook | null>(null)
   const [busy, setBusy] = useState(false)
   // 当前书源声明的类型（1 音频 / 2 图片），加入书架时写进来源记录
@@ -46,19 +49,48 @@ export default function ReaderBookPage() {
   useEffect(loadInfo, [bookURL])
 
   // 书架状态 + 目录
+  //
+  // 两个请求都依赖书源上游，而聚合源的免费后端经常限流（HTTP 429）。目录失败时
+  // 不再静默显示「0 章」：先退回书架里的目录缓存（至少能看章节、点开阅读），
+  // 没有缓存才把失败原因交给目录区展示，用户点「重试」即可。
   useEffect(() => {
     if (!bookURL) return
-    readerAPI
-      .listBooks()
-      .then((books) => {
-        const hit = books.find((b) => b.book_url === bookURL && b.origin === sourceURL) ?? null
-        setShelfBook(hit)
-      })
-      .catch(() => undefined)
-    readerAPI
-      .toc({ source_url: sourceURL, book_url: bookURL, toc_url: bookURL })
-      .then(setChapters)
-      .catch(() => setChapters([]))
+    let alive = true
+    setChapters(null)
+    setTocError('')
+    ;(async () => {
+      let shelf: ReaderBook | null = null
+      try {
+        const books = await readerAPI.listBooks()
+        shelf = books.find((b) => b.book_url === bookURL && b.origin === sourceURL) ?? null
+      } catch {
+        // 书架读取失败不影响详情页展示
+      }
+      if (!alive) return
+      setShelfBook(shelf)
+      try {
+        const list = await readerAPI.toc({ source_url: sourceURL, book_url: bookURL, toc_url: bookURL })
+        if (!alive) return
+        setChapters(list)
+      } catch (e) {
+        if (!alive) return
+        const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '目录加载失败'
+        if (shelf) {
+          const cached = await readerAPI.listChapters(shelf.id).catch(() => [])
+          if (!alive) return
+          if (cached.length > 0) {
+            setChapters(cached.map((c) => ({ ...c, update_time: '' })))
+            setTocError(`${msg}（已显示书架缓存）`)
+            return
+          }
+        }
+        setChapters([])
+        setTocError(msg)
+      }
+    })()
+    return () => {
+      alive = false
+    }
   }, [bookURL, sourceURL])
 
   // 书源声明的类型（1 音频 / 2 图片）。加入书架时要带上它：写死成 0（文本）会让
@@ -77,7 +109,10 @@ export default function ReaderBookPage() {
     if (!tocURL || tocURL === bookURL) return
     readerAPI
       .toc({ source_url: sourceURL, book_url: bookURL, toc_url: tocURL })
-      .then(setChapters)
+      .then((list) => {
+        setChapters(list)
+        setTocError('')
+      })
       .catch(() => undefined)
   }, [info?.toc_url, sourceURL, bookURL])
 
@@ -142,9 +177,12 @@ export default function ReaderBookPage() {
     try {
       const list = await readerAPI.toc({ source_url: sourceURL, book_url: bookURL, toc_url: info?.toc_url || bookURL })
       setChapters(list)
+      setTocError('')
       toast.success(`目录已刷新，共 ${list.length} 章`)
-    } catch {
-      toast.error('目录刷新失败')
+    } catch (e) {
+      const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? '目录刷新失败'
+      setTocError(msg)
+      toast.error(msg)
     } finally {
       setBusy(false)
     }
@@ -256,7 +294,7 @@ export default function ReaderBookPage() {
             </p>
           )}
           <p className="mt-1 truncate text-xs text-[var(--app-muted)]">
-            最新：<span className="text-[var(--app-text)]">{info?.latest_chapter || '加载中…'}</span>
+            最新：<span className="text-[var(--app-text)]">{info?.latest_chapter || (info ? '—' : '加载中…')}</span>
           </p>
           <p className="mt-0.5 text-2xs text-[var(--app-muted)]">书源：{originName || sourceURL}</p>
           {(info?.intro || infoError) && (
@@ -264,7 +302,15 @@ export default function ReaderBookPage() {
               <p className={`text-xs leading-5 text-[var(--app-subtle)] ${introExpanded ? '' : 'line-clamp-3'}`}>
                 {infoError || info?.intro}
               </p>
-              {!infoError && (
+              {infoError ? (
+                <button
+                  type="button"
+                  onClick={loadInfo}
+                  className="mt-1 inline-flex items-center text-2xs font-bold text-brand-600"
+                >
+                  重试
+                </button>
+              ) : (
                 <button
                   type="button"
                   onClick={() => setIntroExpanded((v) => !v)}
@@ -308,7 +354,10 @@ export default function ReaderBookPage() {
       <div className="mt-8">
         <div className="flex items-center justify-between border-b border-[var(--app-border)] pb-2">
           <p className="text-sm font-bold text-[var(--app-text)]">
-            目录 {chapters !== null && <span className="text-xs font-normal text-[var(--app-muted)]">（{chapters.length} 章）</span>}
+            目录{' '}
+            {chapters !== null && (chapters.length > 0 || !tocError) && (
+              <span className="text-xs font-normal text-[var(--app-muted)]">（{chapters.length} 章）</span>
+            )}
           </p>
           {chapters !== null && chapters.length > 20 && (
             <button
@@ -320,6 +369,19 @@ export default function ReaderBookPage() {
             </button>
           )}
         </div>
+        {tocError && (
+          <div className="mt-2 flex items-center gap-2 rounded-lg bg-[var(--app-panel-soft)] px-3 py-2 text-2xs text-[var(--app-muted)]">
+            <span className="min-w-0 flex-1">{tocError}</span>
+            <button
+              type="button"
+              onClick={refreshToc}
+              disabled={busy}
+              className="shrink-0 font-bold text-brand-600 disabled:opacity-50"
+            >
+              重试
+            </button>
+          </div>
+        )}
         {chapters === null ? (
           <div className="flex justify-center py-10 text-[var(--app-muted)]">
             <Loader2 className="animate-spin" size={20} />

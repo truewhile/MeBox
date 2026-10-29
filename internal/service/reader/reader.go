@@ -425,11 +425,24 @@ func (s *ReaderService) executeWithState(ctx context.Context, req *rule.Request,
 	// retry：URL 选项声明的重试次数（对应 legado AnalyzeUrl 的同名字段）。
 	// 只重试可恢复的失败：网络错误、5xx、403/429（防盗链/限流）。确定性 4xx 不重试。
 	attempts := 1
-	if req.Retry != nil && *req.Retry > 0 {
+	declaredRetry := req.Retry != nil && *req.Retry > 0
+	if declaredRetry {
 		attempts += *req.Retry
 		if attempts > maxRequestAttempts {
 			attempts = maxRequestAttempts
 		}
+	}
+	// 书源没声明 retry 时，GET 也对上游瞬时失败（429/5xx）自动补一次。
+	// 很多聚合源跑在免费/低配后端上，限流是常态（懒人听书源实测约四成请求返回
+	// HTTP 429），而 429 的响应体根本不是书源数据，交给规则只会解析出空目录、
+	// 空详情。POST 可能有副作用，仍然只按书源声明重试。
+	if !declaredRetry && (req.Method == "" || req.Method == http.MethodGet) {
+		attempts = implicitRetryAttempts
+	}
+	// 自动补的一次只认「上游临时顶不住」的状态码，见 implicitRetryableStatus。
+	retryAllowed := retryableStatus
+	if !declaredRetry {
+		retryAllowed = implicitRetryableStatus
 	}
 	var (
 		resp *http.Response
@@ -464,7 +477,7 @@ func (s *ReaderService) executeWithState(ctx context.Context, req *rule.Request,
 			}
 			return "", "", resp.StatusCode, err
 		}
-		if attempt < attempts && retryableStatus(resp.StatusCode) {
+		if attempt < attempts && retryAllowed(resp.StatusCode) {
 			if !sleepWithContext(ctx, requestRetryDelay*time.Duration(attempt)) {
 				return "", "", resp.StatusCode, nil
 			}
@@ -534,6 +547,25 @@ func charsetFromContentType(ct string) string {
 		cs = cs[:i]
 	}
 	return strings.Trim(cs, "\"")
+}
+
+// upstreamStatusError 把书源接口的失败状态码翻译成可读错误。
+//
+// 上游限流/过载时返回的响应体不是书源数据：交给规则解析只会得到空目录、空详情，
+// 页面就表现成「目录 0 章」而没有任何报错。这里让调用方拿到明确错误，
+// 前端才能提示重试，而不是把「抓不到」当成「这本书没有章节」。
+func upstreamStatusError(code int) error {
+	if code < 400 {
+		return nil
+	}
+	switch code {
+	case http.StatusTooManyRequests:
+		return fmt.Errorf("书源接口限流（HTTP 429），请稍后重试")
+	case http.StatusForbidden:
+		return fmt.Errorf("书源接口拒绝访问（HTTP 403），可能触发了风控")
+	default:
+		return fmt.Errorf("书源接口返回 HTTP %d", code)
+	}
 }
 
 // ─── 规则执行辅助 ───────────────────────────────────────────────────────────
@@ -1131,8 +1163,11 @@ func (s *ReaderService) searchInSource(ctx context.Context, src *model.ReaderBoo
 		return nil, req.Unsupported
 	}
 	sess.applyHeaders(req, runner)
-	body, finalURL, _, err := sess.fetch(req)
+	body, finalURL, code, err := sess.fetch(req)
 	if err != nil {
+		return nil, err
+	}
+	if err := upstreamStatusError(code); err != nil {
 		return nil, err
 	}
 	ar := sess.newAnalyzer(key, page, body, finalURL)
@@ -1164,7 +1199,7 @@ func (s *ReaderService) searchInSource(ctx context.Context, src *model.ReaderBoo
 			WordCount:     wordCount,
 			LatestChapter: lastChapter,
 			Intro:         intro,
-			CoverURL:      normalizeCoverURL(cover),
+			CoverURL:      normalizeCoverURL(cover, finalURL),
 			BookURL:       bookURL,
 			Origins: []SearchOrigin{{
 				SourceID:      src.ID,
@@ -1221,9 +1256,18 @@ func firstNonEmpty(vals ...string) string {
 // 于是封面上会落一串 data: 文本，<img> 按 text/plain 处理必然破图。
 // 允许的相对地址以 "/" 开头，用于应用自身生成的本地书封面
 // （/api/reader/local/asset?...）。
-func normalizeCoverURL(raw string) string {
+//
+// baseURL 是规则解析时的页面地址（详情页就是书本地址）。取值为空时规则会原样
+// 回退成它，回退结果同样不是图片：比如懒人听书源被上游限流（HTTP 429）时，
+// 详情 JSON 里没有 meta.cover，封面就会变成 .../lrts-book?bookId=xxx 这个接口地址。
+// 这类值必须一并丢掉，否则会被存进书架，之后一直显示破图。
+func normalizeCoverURL(raw, baseURL string) string {
 	u := strings.TrimSpace(raw)
 	if u == "" {
+		return ""
+	}
+	// 规则取空后回退成页面地址的产物：不是图片，也不是用户要的封面。
+	if base := strings.TrimSpace(baseURL); base != "" && u == base {
 		return ""
 	}
 	lower := strings.ToLower(u)
@@ -1282,8 +1326,11 @@ func (s *ReaderService) getBookInfoFrom(ctx context.Context, src *model.ReaderBo
 		return nil, req.Unsupported
 	}
 	sess.applyHeaders(req, runner)
-	body, finalURL, _, err := sess.fetch(req)
+	body, finalURL, code, err := sess.fetch(req)
 	if err != nil {
+		return nil, err
+	}
+	if err := upstreamStatusError(code); err != nil {
 		return nil, err
 	}
 	ar := sess.newAnalyzer("", 0, body, finalURL)
@@ -1319,7 +1366,7 @@ func (s *ReaderService) getBookInfoFrom(ctx context.Context, src *model.ReaderBo
 		info.Intro = v
 	}
 	if v, err := ar.GetString(SPtr(bir.CoverURL), nil, true); err == nil && v != "" {
-		info.CoverURL = normalizeCoverURL(v)
+		info.CoverURL = normalizeCoverURL(v, finalURL)
 	}
 	if v, err := ar.GetString(SPtr(bir.TocURL), nil, true); err == nil && v != "" {
 		info.TocURL = v
@@ -1569,6 +1616,37 @@ func (s *ReaderService) persistBookTocURL(ctx context.Context, userID, origin, b
 	}
 }
 
+// RepairShelfCover 用详情页刚解析出的封面修复书架记录。
+//
+// 只修「明显坏掉」的旧记录：封面为空，或等于书本地址/书源地址（规则取空后回退
+// baseUrl 的产物）。上游限流（HTTP 429）时详情里没有封面，旧版本会把接口地址
+// 存进书架，之后一直显示破图；打开一次详情页就能自愈。已有有效封面的记录不动，
+// 避免覆盖换源或用户数据。
+func (s *ReaderService) RepairShelfCover(ctx context.Context, userID, origin, bookURL, cover string) {
+	if s.repo == nil || userID == "" || origin == "" || bookURL == "" {
+		return
+	}
+	// 书架记录里的 BookURL 与调用方传入的一致（可能带 ",{...}" 选项段），
+	// 查找用原值；只在校验封面是否为「回退地址」时用去掉选项段的形态。
+	pageURL := tocBookTarget(bookURL)
+	cover = normalizeCoverURL(cover, pageURL)
+	if cover == "" {
+		return
+	}
+	book, err := s.repo.FindBookByURL(ctx, userID, origin, bookURL)
+	if err != nil || book == nil {
+		return
+	}
+	current := strings.TrimSpace(book.CoverURL)
+	if current != "" && current != pageURL && current != strings.TrimSpace(origin) {
+		return
+	}
+	book.CoverURL = cover
+	if err := s.repo.UpdateBook(ctx, book); err != nil && s.log != nil {
+		s.log.Warn("reader: 修复书架封面失败", zap.String("book", book.ID), zap.Error(err))
+	}
+}
+
 // applyTocMeta 把目录阶段得到的信息写回书架记录：
 //   - 书源在规则 JS 里声明的书籍类型（declared >= 0 时）；
 //   - 末章标题，以及末章变化时刷新的「最近更新」时间（对应 legado Book.latestChapterTime）。
@@ -1695,8 +1773,11 @@ func (s *ReaderService) fetchTocPage(ctx context.Context, sess *sourceSession, b
 		return nil, nil, -1, req.Unsupported
 	}
 	sess.applyHeaders(req, runner)
-	body, finalURL, _, err := sess.fetch(req)
+	body, finalURL, code, err := sess.fetch(req)
 	if err != nil {
+		return nil, nil, -1, err
+	}
+	if err := upstreamStatusError(code); err != nil {
 		return nil, nil, -1, err
 	}
 	ar := sess.newAnalyzer("", 0, body, finalURL)
@@ -1821,7 +1902,7 @@ func (s *ReaderService) ProxyCoverURL(id, rawURL string) string {
 //
 // id 为空时按书源 URL 签（搜索结果）；传入书籍 ID 时按书签。
 func (s *ReaderService) RewriteBookCover(ctx context.Context, id, origin, coverURL string) string {
-	cover := normalizeCoverURL(coverURL)
+	cover := normalizeCoverURL(coverURL, "")
 	if cover == "" || !strings.HasPrefix(cover, "http") {
 		return cover
 	}
@@ -2082,8 +2163,11 @@ func (s *ReaderService) getContentFrom(ctx context.Context, src *model.ReaderBoo
 			return nil, req.Unsupported
 		}
 		sess.applyHeaders(req, runner)
-		body, finalURL, _, err := sess.fetch(req)
+		body, finalURL, code, err := sess.fetch(req)
 		if err != nil {
+			return nil, err
+		}
+		if err := upstreamStatusError(code); err != nil {
 			return nil, err
 		}
 		lastFinalURL = finalURL
@@ -2550,7 +2634,7 @@ func (s *ReaderService) AddBook(ctx context.Context, userID string, origin Searc
 		BookURL:    origin.BookURL,
 		Name:       name,
 		Author:     author,
-		CoverURL:   normalizeCoverURL(coverURL),
+		CoverURL:   normalizeCoverURL(coverURL, origin.BookURL),
 		Type:       origin.OriginType,
 	}
 	if err := s.repo.CreateBook(ctx, book); err != nil {
@@ -2611,7 +2695,7 @@ func (s *ReaderService) SwitchOrigin(ctx context.Context, userID, bookID string,
 	if info != nil {
 		book.TocURL = strings.TrimSpace(info.TocURL)
 		if book.CoverURL == "" {
-			book.CoverURL = normalizeCoverURL(info.CoverURL)
+			book.CoverURL = normalizeCoverURL(info.CoverURL, target)
 		}
 		if info.LatestChapter != "" {
 			book.LatestChapterTitle = info.LatestChapter

@@ -80,6 +80,10 @@ func parseConcurrentRate(rate string) time.Duration {
 const (
 	// maxRequestAttempts 单次请求最大尝试次数（含首次），兜住书源里写很大的 retry。
 	maxRequestAttempts = 5
+	// implicitRetryAttempts 书源没声明 retry 时，GET 请求在可重试状态码上的默认尝试次数。
+	// 实测这类聚合源的单次 429 概率接近一半，两次尝试仍有约两成失败，三次降到一成左右；
+	// 再往上加只会让被限流的接口更难恢复。退避总共不到 1 秒，详情/目录请求扛得住。
+	implicitRetryAttempts = 3
 	// requestRetryDelay 请求重试退避基数，实际等待为 attempt 倍。
 	requestRetryDelay = 300 * time.Millisecond
 )
@@ -92,6 +96,20 @@ const (
 func retryableStatus(code int) bool {
 	switch code {
 	case 403, 408, 425, 429, 500, 502, 503, 504:
+		return true
+	default:
+		return false
+	}
+}
+
+// implicitRetryableStatus 书源没声明 retry 时，值得自动补一次的失败。
+//
+// 只覆盖「上游临时顶不住」的情形：429 是限流/并发上限，502/503/504 是网关或
+// 实例暂时不可用，歇一轮基本会恢复。403（风控）重试同一份请求多半还是 403，
+// 500 可能是源站自身 bug（确定性失败），都不在这里浪费一次往返。
+func implicitRetryableStatus(code int) bool {
+	switch code {
+	case 429, 502, 503, 504:
 		return true
 	default:
 		return false
