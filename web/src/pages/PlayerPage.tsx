@@ -177,6 +177,11 @@ export function PlayerPage() {
   const [mode, setMode] = useState<PlayerMode>('direct')
   const diagnosticModeRef = useRef(mode)
   useEffect(() => { diagnosticModeRef.current = mode }, [mode])
+  // modeRef / mediaRef 会被声明点之上的回调读到（handleDirectSeekStalled、
+  // fallbackDirectPlay、toggleVr360 等），所以先在这里声明，赋值仍由下方各自的
+  // 同步 effect 负责；否则以后有人在渲染期调用这些回调就会踩 TDZ。
+  const modeRef = useRef(mode)
+  const mediaRef = useRef(media)
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false)
   const [diagnosticEvents, setDiagnosticEvents] = useState<PlayerDiagnosticEvent[]>([])
   const [subs, setSubs] = useState<SubtitleTrack[]>([])
@@ -202,6 +207,12 @@ export function PlayerPage() {
   const subtitlePreferenceTouchedRef = useRef(false)
   const subtitlePreferenceSaveQueueRef = useRef<Promise<void>>(Promise.resolve())
   const [hlsUnavailable, setHlsUnavailable] = useState(false)
+  // 播放接线 effect 里只有一条提示需要读它，用 ref 读即可保持最新；如果放进依赖，
+  // 这个 effect 会因为自己写出来的状态而整体重建（teardownHls + DELETE 转码任务）。
+  const hlsUnavailableRef = useRef(false)
+  useEffect(() => {
+    hlsUnavailableRef.current = hlsUnavailable
+  }, [hlsUnavailable])
   const [playerError, setPlayerError] = useState('')
   // 媒体元数据加载失败（404 / 无权限等）：舞台区直接展示错误而不是永远「加载中」
   const [loadError, setLoadError] = useState('')
@@ -542,6 +553,12 @@ export function PlayerPage() {
     setPlaybackInfo(null)
     setHlsSource('local')
     setSelectedQuality('')
+    // HLS 可用性与字幕列表都是「上一条媒体」得出的结论，必须跟着媒体一起清掉：
+    // 否则某一集 HLS 失败一次，之后每集直连失败就再也不会回退转码（只弹「HLS 不可用」）；
+    // 字幕列表留着旧条目还会用新 media.id 拼旧 path 去请求一次。
+    setHlsUnavailable(false)
+    setSubs([])
+    setSubtitleIndex(-1)
     setCloudWaiting(false)
     setCloudWaitMessage('')
     setCloudWaitStartedAt(0)
@@ -1258,7 +1275,6 @@ export function PlayerPage() {
   // 作为播放 effect 的依赖，会在 STRM 的 302 直链仍在建立时重复设置 src，
   // Chromium 会把被中断的首次加载报告成播放错误并误触发 HLS 回退。
   const activeBurnedSubtitleStream = mode === 'hls' ? burnedSubtitleStream : undefined
-  const mediaRef = useRef(media)
   useEffect(() => {
     mediaRef.current = media
     directOnlyRef.current = directOnly
@@ -1526,7 +1542,7 @@ export function PlayerPage() {
         // 起播兜底：上游不回 error 时会一直停在 readyState=0，见 armDirectStallWatchdog。
         armDirectStallWatchdog()
       }
-      if (hlsUnavailable && needsTranscodeForBrowser(currentMedia)) {
+      if (hlsUnavailableRef.current && needsTranscodeForBrowser(currentMedia)) {
         setPlayerError('当前正在直连播放原始文件；此封装或音轨浏览器兼容性有限，可能只有画面没有声音。请配置本机 ffmpeg 后切回 HLS 转码播放。')
       }
     }
@@ -1555,7 +1571,6 @@ export function PlayerPage() {
     cloudReloadNonce,
     cloudWaiting,
     hlsSource,
-    hlsUnavailable,
     hlsStartSec,
     mediaId,
     mode,
@@ -1590,22 +1605,39 @@ export function PlayerPage() {
 
   useEffect(() => {
     if (!resumePosition || initialSeekDone) return
+    let cancelled = false
     if (mode === 'hls' && hlsSource === 'local') {
       // Restart transcode near the resume point instead of seeking a short partial playlist.
       if (Math.abs(hlsStartSec - resumePosition) > 2) {
         setHlsStartSec(resumePosition)
       }
-      setInitialSeekDone(true)
-      const m = Math.floor(resumePosition / 60)
-      const s = Math.floor(resumePosition % 60)
-      const timeStr = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
-      toast.success(`已恢复上次播放进度至 ${timeStr}`, { duration: 2500 })
-      return
+      // 本地 HLS 的播放列表 t=0 就是 resumePosition，位置由转码起点决定；但清单还没
+      // 回来、转码也可能直接失败，此刻同步弹「已恢复」就是一句空承诺。等画面真的出
+      // 数据（loadeddata）再报，和下面直连分支的行为保持一致。
+      const hlsVideo = ref.current
+      if (!hlsVideo) return
+      const confirmResume = () => {
+        if (cancelled) return
+        const el = ref.current
+        if (!el || el.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return
+        setInitialSeekDone(true)
+        const m = Math.floor(resumePosition / 60)
+        const s = Math.floor(resumePosition % 60)
+        toast.success(`已恢复上次播放进度至 ${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`, { duration: 2500 })
+      }
+      if (hlsVideo.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        confirmResume()
+        return
+      }
+      hlsVideo.addEventListener('loadeddata', confirmResume, { once: true })
+      return () => {
+        cancelled = true
+        hlsVideo.removeEventListener('loadeddata', confirmResume)
+      }
     }
     const video = ref.current
     if (!video) return
 
-    let cancelled = false
     let seekStarted = false
     let onPlaying: (() => void) | undefined
     let onCanPlay: (() => void) | undefined
@@ -1696,7 +1728,6 @@ export function PlayerPage() {
 
   // 使用 ref 实时同步进度计算所需的状态，避免每次 hlsStartSec 改变都触发 cleanup 并误上报旧进度
   const hlsStartSecRef = useRef(hlsStartSec)
-  const modeRef = useRef(mode)
   useEffect(() => {
     hlsStartSecRef.current = hlsStartSec
     hlsSourceRef.current = hlsSource
