@@ -123,7 +123,7 @@ func TestContentCacheHitAndPersist(t *testing.T) {
 	svc, srv, book := prepareCacheTestBook(t)
 	ctx := t.Context()
 
-	first, err := svc.GetContentForBook(ctx, "u1", book.ID, 0)
+	first, err := svc.GetContentForBook(ctx, "u1", book.ID, 0, ContentOptions{})
 	if err != nil {
 		t.Fatalf("首次读取失败: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestContentCacheHitAndPersist(t *testing.T) {
 		t.Fatalf("首次读取应访问书源 1 次，实际 %d", got)
 	}
 
-	second, err := svc.GetContentForBook(ctx, "u1", book.ID, 0)
+	second, err := svc.GetContentForBook(ctx, "u1", book.ID, 0, ContentOptions{})
 	if err != nil {
 		t.Fatalf("二次读取失败: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestContentCacheSurvivesTocRefresh(t *testing.T) {
 	svc, srv, book := prepareCacheTestBook(t)
 	ctx := t.Context()
 
-	if _, err := svc.GetContentForBook(ctx, "u1", book.ID, 1); err != nil {
+	if _, err := svc.GetContentForBook(ctx, "u1", book.ID, 1, ContentOptions{}); err != nil {
 		t.Fatalf("读取第 2 章失败: %v", err)
 	}
 
@@ -190,7 +190,7 @@ func TestContentCacheSurvivesTocRefresh(t *testing.T) {
 	newChapters, _ := svc.repo.ListChapters(ctx, book.ID)
 	svc.RemapContentCacheOnTocChange(ctx, book, oldChapters, newChapters)
 
-	if _, err := svc.GetContentForBook(ctx, "u1", book.ID, 1); err != nil {
+	if _, err := svc.GetContentForBook(ctx, "u1", book.ID, 1, ContentOptions{}); err != nil {
 		t.Fatalf("刷新后读取失败: %v", err)
 	}
 	if got := srv.count(2); got != 1 {
@@ -209,7 +209,7 @@ func TestContentCacheSingleFlight(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i] = svc.GetContentForBook(ctx, "u1", book.ID, 0)
+			_, errs[i] = svc.GetContentForBook(ctx, "u1", book.ID, 0, ContentOptions{})
 		}(i)
 	}
 	wg.Wait()
@@ -229,14 +229,14 @@ func TestContentBatchStatsAndFailureIsolation(t *testing.T) {
 	ctx := t.Context()
 
 	// 预热第 1 章（进缓存），第 2 章按失败处理。
-	if _, err := svc.GetContentForBook(ctx, "u1", book.ID, 0); err != nil {
+	if _, err := svc.GetContentForBook(ctx, "u1", book.ID, 0, ContentOptions{}); err != nil {
 		t.Fatalf("预热失败: %v", err)
 	}
 	srv.mu.Lock()
 	srv.failOn[2] = true
 	srv.mu.Unlock()
 
-	result, err := svc.GetContentBatch(ctx, "u1", book.ID, []int{0, 1, 2}, false)
+	result, err := svc.GetContentBatch(ctx, "u1", book.ID, []int{0, 1, 2}, false, ContentOptions{})
 	if err != nil {
 		t.Fatalf("批量读取失败: %v", err)
 	}
@@ -262,14 +262,14 @@ func TestContentBatchStatsAndFailureIsolation(t *testing.T) {
 	srv.mu.Lock()
 	srv.failOn[2] = false
 	srv.mu.Unlock()
-	if _, err := svc.GetContentForBook(ctx, "u1", book.ID, 1); err != nil {
+	if _, err := svc.GetContentForBook(ctx, "u1", book.ID, 1, ContentOptions{}); err != nil {
 		t.Fatalf("恢复后读取第 2 章失败: %v", err)
 	}
 	if got := srv.count(2); got != 2 {
 		t.Fatalf("失败章不应进缓存，恢复后应重抓（2 次），实际 %d", got)
 	}
 	// 越界/卷章节被忽略。
-	if got, err := svc.GetContentBatch(ctx, "u1", book.ID, []int{-1, 99}, false); err != nil || len(got.Items) != 0 {
+	if got, err := svc.GetContentBatch(ctx, "u1", book.ID, []int{-1, 99}, false, ContentOptions{}); err != nil || len(got.Items) != 0 {
 		t.Fatalf("越界索引应被忽略: items=%d err=%v", len(got.Items), err)
 	}
 }
@@ -279,7 +279,7 @@ func TestContentCacheInvalidatedOnSourceUpdate(t *testing.T) {
 	svc, srv, book := prepareCacheTestBook(t)
 	ctx := t.Context()
 
-	if _, err := svc.GetContentForBook(ctx, "u1", book.ID, 0); err != nil {
+	if _, err := svc.GetContentForBook(ctx, "u1", book.ID, 0, ContentOptions{}); err != nil {
 		t.Fatalf("首次读取失败: %v", err)
 	}
 	// 重新导入同一书源（RawJSON 变化）→ 指纹变化。
@@ -287,7 +287,7 @@ func TestContentCacheInvalidatedOnSourceUpdate(t *testing.T) {
 	if _, err := svc.ImportSources(ctx, "u1", updated); err != nil {
 		t.Fatalf("更新书源失败: %v", err)
 	}
-	if _, err := svc.GetContentForBook(ctx, "u1", book.ID, 0); err != nil {
+	if _, err := svc.GetContentForBook(ctx, "u1", book.ID, 0, ContentOptions{}); err != nil {
 		t.Fatalf("更新后读取失败: %v", err)
 	}
 	if got := srv.count(1); got != 2 {
@@ -299,7 +299,7 @@ func TestContentCacheInvalidatedOnSourceUpdate(t *testing.T) {
 func TestContentCacheClearedOnRemoveBook(t *testing.T) {
 	svc, _, book := prepareCacheTestBook(t)
 	ctx := t.Context()
-	if _, err := svc.GetContentForBook(ctx, "u1", book.ID, 0); err != nil {
+	if _, err := svc.GetContentForBook(ctx, "u1", book.ID, 0, ContentOptions{}); err != nil {
 		t.Fatalf("读取失败: %v", err)
 	}
 	sourceID := svc.contentSourceID(ctx, nil, book)
@@ -395,7 +395,7 @@ func TestContentCacheWithoutCacheDir(t *testing.T) {
 	if err := svc.SaveChapters(ctx, book.ID, []ChapterInput{{Index: 0, Title: "第 1 章", URL: srv.URL + "/book/1/c1.html"}}); err != nil {
 		t.Fatal(err)
 	}
-	out, err := svc.GetContentForBook(ctx, "u1", book.ID, 0)
+	out, err := svc.GetContentForBook(ctx, "u1", book.ID, 0, ContentOptions{})
 	if err != nil {
 		t.Fatalf("无缓存目录时读取失败: %v", err)
 	}

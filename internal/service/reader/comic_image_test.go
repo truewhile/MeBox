@@ -75,7 +75,7 @@ func TestGetContentForBookExtractsImageSrc(t *testing.T) {
 	}
 	_ = sourceID
 
-	out, err := svc.GetContentForBook(ctx, "u1", book.ID, 0)
+	out, err := svc.GetContentForBook(ctx, "u1", book.ID, 0, ContentOptions{})
 	if err != nil {
 		t.Fatalf("取正文失败: %v", err)
 	}

@@ -220,7 +220,7 @@ func TestEndToEndSourceChain(t *testing.T) {
 func TestGetContentForBookEmptyContentFails(t *testing.T) {
 	svc, bookID := setupTextChapterBook(t, "")
 
-	_, err := svc.GetContentForBook(t.Context(), "u1", bookID, 0)
+	_, err := svc.GetContentForBook(t.Context(), "u1", bookID, 0, ContentOptions{})
 	if err == nil {
 		t.Fatal("空正文应当报错，实际当成功下发了")
 	}

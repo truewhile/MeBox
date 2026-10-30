@@ -386,7 +386,8 @@ type cacheEvictionEntry struct {
 
 // cacheEvictionPoolOrder 是全局容量清理的固定优先级。
 // 顺序即“先清谁”：超限时前面的池会被整池清空，才会轮到后面的池。
-// reader-audio 不在其中：它由自身 1GB 配额在写入时独立淘汰。
+// reader-audio 不在其中：它由自身固定配额（当前 1GiB，见 reader 包的
+// audioMediaMaxBytes）在写入时独立淘汰。
 var cacheEvictionPoolOrder = []string{
 	"hls",
 	"images",
@@ -496,9 +497,10 @@ func removeEmptyDirsUnder(root string) {
 // PruneCache 按全局容量池清理磁盘缓存。
 //
 // 总量口径是 hls、images、library-covers 三个池之和；reader-audio 及正文缓存、
-// 书源文件缓存都不参与这里的总量计算——reader-audio 由自身 1GB 配额在写入时
-// 淘汰，正文缓存和书源文件缓存另有自己的 TTL / 配额。超过 totalBytes 时严格
-// 按 hls → images → library-covers 的顺序淘汰最旧文件，直到回落到上限的 80%。
+// 书源文件缓存都不参与这里的总量计算——reader-audio 由自身固定配额（当前
+// 1GiB）在写入时淘汰，正文缓存和书源文件缓存另有自己的 TTL / 配额。
+// 超过 totalBytes 时严格按 hls → images → library-covers 的顺序淘汰最旧文件，
+// 直到回落到上限的 80%。
 // originalsMaxBytes 是 images 原图池的独立子配额，在总量淘汰之后单独执行
 // （即使总量没超也会把原图压回配额）。
 func PruneCache(cacheDir string, totalBytes, originalsMaxBytes int64) (CacheCleanupResult, error) {

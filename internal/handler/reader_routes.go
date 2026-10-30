@@ -13,6 +13,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -131,16 +132,27 @@ func readerImportSourcesHandler(svc *service.Container) gin.HandlerFunc {
 func readerUpdateSourceHandler(svc *service.Container) gin.HandlerFunc {
 	var body struct {
 		Enabled *bool `json:"enabled"`
+		// MediaDirect 媒体直连开关：允许客户端自行下载音频/漫画图片字节。
+		// 可单独提交，也可与其他字段一起提交（只更新出现的字段）。
+		MediaDirect *bool `json:"media_direct"`
 	}
 	return func(c *gin.Context) {
-		if err := c.ShouldBindJSON(&body); err != nil || body.Enabled == nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "enabled 字段必填"})
+		if err := c.ShouldBindJSON(&body); err != nil || (body.Enabled == nil && body.MediaDirect == nil) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "enabled 或 media_direct 字段必填"})
 			return
 		}
 		userID := c.GetString(middleware.CtxUserID)
-		if err := svc.Reader.UpdateSourceEnabled(c.Request.Context(), userID, c.Param("id"), *body.Enabled); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
+		if body.Enabled != nil {
+			if err := svc.Reader.UpdateSourceEnabled(c.Request.Context(), userID, c.Param("id"), *body.Enabled); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+		}
+		if body.MediaDirect != nil {
+			if err := svc.Reader.SetSourceMediaDirect(c.Request.Context(), userID, c.Param("id"), *body.MediaDirect); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
 		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	}
@@ -1004,8 +1016,61 @@ const (
 // readerAudioFetchGroup 同一音轨并发请求（播放器 + 预取 + 预热）只下载一次。
 var readerAudioFetchGroup singleflight.Group
 
-// handleCachedReaderAudio 音频直链的统一入口：先查本地缓存，未命中则整段拉取落盘，
-// 最后交给 http.ServeContent 处理 Range（拖动进度、续播都读本地文件）。
+// readerAudioStreamLocks 首播直通按缓存键串行化。
+//
+// 直通模式下两个并发请求会同时写同一个 .part 文件（播放器 + 预热器各自开一条
+// 连接很常见），交错写入必然把文件写坏。这里让后到者排队等前一个下完，
+// 拿到锁后再查一次缓存直接下发——语义与原来 singleflight 等价，只是领导者
+// 是在流式外发的，追随者不需要重复下载。
+var readerAudioStreamLocks = newKeyedMutex()
+
+// keyedMutex 按字符串键串行化，锁释放后回收条目，避免 map 无限增长。
+type keyedMutex struct {
+	mu    sync.Mutex
+	locks map[string]*keyedMutexEntry
+}
+
+type keyedMutexEntry struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func newKeyedMutex() *keyedMutex {
+	return &keyedMutex{locks: map[string]*keyedMutexEntry{}}
+}
+
+// Lock 取得该键的独占锁，返回解锁函数（必须调用）。
+func (k *keyedMutex) Lock(key string) func() {
+	k.mu.Lock()
+	entry := k.locks[key]
+	if entry == nil {
+		entry = &keyedMutexEntry{}
+		k.locks[key] = entry
+	}
+	entry.refs++
+	k.mu.Unlock()
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		k.mu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(k.locks, key)
+		}
+		k.mu.Unlock()
+	}
+}
+
+// handleCachedReaderAudio 音频直链的统一入口。
+//
+// 三条路径，按代价从低到高：
+//  1. 命中完整缓存 → http.ServeContent 按 Range 下发（拖动、续播都读本地）；
+//  2. 冷启动首播 → 边下边发给客户端，同时落盘（DownloadRemoteAudioStreaming）。
+//     旧实现是「整段下完再下发」，慢链路上用户要对着转圈等整章 3–5MB，
+//     把「偶发失败」换成了「必然慢」；直通后几百毫秒就能出声，落盘照旧；
+//  3. 已有 .part 分片 → 走整段下载：分片意味着上次已经下到一半，同步续传
+//     剩余字节比重新直通更省流量，下完再一次性下发。
 func handleCachedReaderAudio(
 	c *gin.Context,
 	svc *service.Container,
@@ -1018,6 +1083,18 @@ func handleCachedReaderAudio(
 		serveCachedReaderAudio(c, f, info, rawURL)
 		return
 	}
+	// 播放器拖进度时会带 Range。已缓存的文件才谈得上 Range；未缓存时直通
+	// 只能从 0 发，否则客户端拿到的区间与它请求的对不上。
+	rangeHeader := strings.TrimSpace(c.GetHeader("Range"))
+	canStream := c.Request.Method == http.MethodGet &&
+		rangeHeader == "" &&
+		!svc.Reader.HasPartialRemoteAudio(bookID, rawURL)
+
+	if canStream {
+		handleStreamingReaderAudio(c, svc, book, bookID, rawURL, headers)
+		return
+	}
+
 	cachePath, err := ensureCachedRemoteAudio(c.Request.Context(), svc, book, bookID, rawURL, headers)
 	if err != nil {
 		if svc.Log != nil {
@@ -1038,6 +1115,97 @@ func handleCachedReaderAudio(
 		return
 	}
 	serveCachedReaderAudio(c, f, info, rawURL)
+}
+
+// handleStreamingReaderAudio 首播直通：一边落盘一边把字节写给客户端。
+//
+// 直接写 c.Writer 而不是先落盘再 ServeContent，是为了让第一个字节尽早到达。
+// 下载失败时客户端已经收到部分字节，只能中止响应（见下面的 panic），
+// 不能改成 502 —— 状态码早就发出去了。
+func handleStreamingReaderAudio(
+	c *gin.Context,
+	svc *service.Container,
+	book *model.ReaderBook,
+	bookID, rawURL string,
+	headers map[string]string,
+) {
+	key := svc.Reader.RemoteAudioCachePath(bookID, rawURL)
+	if key == "" {
+		c.String(http.StatusBadGateway, "音频缓存不可用")
+		return
+	}
+	unlock := readerAudioStreamLocks.Lock(key)
+	defer unlock()
+
+	// 排队期间前一个请求可能已经把整章下完：直接下发本地文件，不重复回源。
+	if f, info, ok := svc.Reader.OpenCachedRemoteAudio(bookID, rawURL); ok {
+		defer f.Close()
+		serveCachedReaderAudio(c, f, info, rawURL)
+		return
+	}
+
+	writer := c.Writer
+	// started 表示响应头是否已发出。没发出时失败还能改成 502；已经发出就只能
+	// 中止连接——状态码收不回来了。
+	started := false
+	_, err := svc.Reader.DownloadRemoteAudioStreaming(
+		c.Request.Context(), bookID, rawURL, readerAudioCacheAttempts,
+		readerAudioFetchFunc(c.Request.Context(), svc, book, bookID, rawURL, headers),
+		func(total int64, upstreamType string) {
+			contentType := readerAudioContentType(rawURL)
+			// 上游给了明确类型时优先用它（个别源把 m4a 标成 audio/x-m4a）。
+			if strings.HasPrefix(strings.ToLower(upstreamType), "audio/") {
+				contentType = upstreamType
+			}
+			writer.Header().Set("Content-Type", contentType)
+			writer.Header().Set("Cache-Control", "private, max-age=604800")
+			if total > 0 {
+				writer.Header().Set("Content-Length", strconv.FormatInt(total, 10))
+			}
+			writer.WriteHeader(http.StatusOK)
+			started = true
+			// 立刻把已写好的头刷给客户端：gin 的 ResponseWriter 有缓冲，
+			// 不 Flush 的话播放器要等到第一批音频字节才看到响应，白等一轮 RTT。
+			writer.Flush()
+		},
+		writer,
+	)
+	if err == nil {
+		return
+	}
+	if svc.Log != nil {
+		svc.Log.Warn("reader 音频直通失败", zap.String("book", bookID), zap.Error(err))
+	}
+	if !started {
+		// 一个字节都还没发出去（首拉就失败）：保持与旧实现一致的错误语义。
+		c.String(http.StatusBadGateway, "音频拉取失败: %s", err.Error())
+		return
+	}
+	// 响应头已经发出：只能中止连接，让客户端判定「传输不完整」并自己重试。
+	// 保留 .part 分片，下一次请求会走续传路径。
+	panic(http.ErrAbortHandler)
+}
+
+// readerAudioFetchFunc 把「带换票重试的媒体拉取」适配成下载器需要的 fetcher。
+func readerAudioFetchFunc(
+	ctx context.Context,
+	svc *service.Container,
+	book *model.ReaderBook,
+	bookID, rawURL string,
+	headers map[string]string,
+) reader.AudioRangeFetcher {
+	return func(rangeHeader string) (*http.Response, []byte, error) {
+		// 只有整段请求才需要嗅探响应体（判 HLS/错误页）；续传拿到的是 206
+		// 二进制分片，读了还得再补写一次，没必要。
+		out, fetchErr := fetchReaderMediaResilient(ctx, svc, book, rawURL, rangeHeader, headers, rangeHeader == "")
+		if fetchErr != nil {
+			if isReaderMediaNoRetry(fetchErr) {
+				return nil, nil, &reader.NoRetryError{Err: fetchErr}
+			}
+			return nil, nil, fetchErr
+		}
+		return out.resp, out.head, nil
+	}
 }
 
 // serveCachedReaderAudio 用 http.ServeContent 下发本地音轨（自带 Range / 206 语义）。
@@ -1089,18 +1257,7 @@ func downloadReaderAudioToCache(
 	headers map[string]string,
 ) error {
 	_, err := svc.Reader.DownloadRemoteAudio(ctx, bookID, rawURL, readerAudioCacheAttempts,
-		func(rangeHeader string) (*http.Response, []byte, error) {
-			// 只有整段请求才需要嗅探响应体（判 HLS/错误页）；续传拿到的是 206
-			// 二进制分片，读了还得再补写一次，没必要。
-			out, fetchErr := fetchReaderMediaResilient(ctx, svc, book, rawURL, rangeHeader, headers, rangeHeader == "")
-			if fetchErr != nil {
-				if isReaderMediaNoRetry(fetchErr) {
-					return nil, nil, &reader.NoRetryError{Err: fetchErr}
-				}
-				return nil, nil, fetchErr
-			}
-			return out.resp, out.head, nil
-		})
+		readerAudioFetchFunc(ctx, svc, book, bookID, rawURL, headers))
 	return err
 }
 
@@ -1529,7 +1686,28 @@ func readerLocalAudioHandler(svc *service.Container) gin.HandlerFunc {
 	}
 }
 
+// readerContentOptions 从查询参数解析正文下发的可选项。
+//
+// 目前只有 `media` 一个维度：
+//   - 不传（网页端）：媒体全部走服务端签名代理，与历史行为一致；
+//   - `media=direct`：书源开启直连时保留上游地址，由客户端自取；
+//   - `media=proxy`：本次强制代理，给客户端直连失败时的退路。
+func readerContentOptions(c *gin.Context) reader.ContentOptions {
+	switch strings.ToLower(strings.TrimSpace(c.Query("media"))) {
+	case "direct":
+		return reader.ContentOptions{MediaDirect: true}
+	case "proxy":
+		return reader.ContentOptions{ForceProxy: true}
+	default:
+		return reader.ContentOptions{}
+	}
+}
+
 // readerBookContentHandler 书架维度正文（服务端应用替换净化规则）。
+//
+// media=direct 是客户端（Android App）专用的可选能力：媒体地址保留上游原始
+// 地址并由客户端自行下载，服务端只下发所需请求头。不传该参数（网页端）时
+// 行为与历史版本完全一致。
 func readerBookContentHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		chapter, err := strconv.Atoi(c.DefaultQuery("chapter", "0"))
@@ -1538,7 +1716,8 @@ func readerBookContentHandler(svc *service.Container) gin.HandlerFunc {
 			return
 		}
 		userID := c.GetString(middleware.CtxUserID)
-		content, err := svc.Reader.GetContentForBook(c.Request.Context(), userID, c.Param("id"), chapter)
+		opts := readerContentOptions(c)
+		content, err := svc.Reader.GetContentForBook(c.Request.Context(), userID, c.Param("id"), chapter, opts)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -1551,13 +1730,14 @@ func readerBookContentHandler(svc *service.Container) gin.HandlerFunc {
 //
 // 请求 {chapter_indexes:[...], apply_replace:bool}：单章失败不中断整批，
 // 返回每章内容与 hit/miss/failed 统计，供前端窗口预取与后续离线缓存。
+// 媒体通道同样按 media=direct 查询参数选择，默认（网页端）走服务端代理。
 func readerBookContentBatchHandler(svc *service.Container) gin.HandlerFunc {
-	var body struct {
-		ChapterIndexes []int `json:"chapter_indexes" binding:"required"`
-		// ApplyReplace 是否在服务端应用用户替换净化规则（默认 false，与单章接口一致）。
-		ApplyReplace bool `json:"apply_replace"`
-	}
 	return func(c *gin.Context) {
+		var body struct {
+			ChapterIndexes []int `json:"chapter_indexes" binding:"required"`
+			// ApplyReplace 是否在服务端应用用户替换净化规则（默认 false，与单章接口一致）。
+			ApplyReplace bool `json:"apply_replace"`
+		}
 		if err := c.ShouldBindJSON(&body); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "chapter_indexes 不能为空"})
 			return
@@ -1567,7 +1747,7 @@ func readerBookContentBatchHandler(svc *service.Container) gin.HandlerFunc {
 			return
 		}
 		userID := c.GetString(middleware.CtxUserID)
-		result, err := svc.Reader.GetContentBatch(c.Request.Context(), userID, c.Param("id"), body.ChapterIndexes, body.ApplyReplace)
+		result, err := svc.Reader.GetContentBatch(c.Request.Context(), userID, c.Param("id"), body.ChapterIndexes, body.ApplyReplace, readerContentOptions(c))
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return

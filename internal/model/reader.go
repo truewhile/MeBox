@@ -38,6 +38,12 @@ type ReaderBookSource struct {
 	// NeedsBrowser 是否依赖 WebView/无头浏览器（webView 选项或 webjs 规则）。
 	// 服务端没有浏览器，这类源注定不可用，列表接口按需计算让前端能提前提示。
 	NeedsBrowser bool `gorm:"-" json:"needs_browser"`
+	// MediaDirect 允许客户端直连上游取实体媒体（音频/漫画图片），服务端只负责
+	// 解析地址与下发所需请求头。
+	//
+	// 只在客户端显式请求直连时生效（见 ContentOptions）：网页端不声明该能力，
+	// 行为与开启此字段前完全一致。
+	MediaDirect bool `gorm:"default:false" json:"media_direct"`
 }
 
 // ReaderSourceState 书源会话状态：对应 legado 中按书源 key 存储的

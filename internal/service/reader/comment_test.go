@@ -207,7 +207,7 @@ func TestGetContentForBookExtractsComments(t *testing.T) {
 		t.Fatalf("写入章节失败: %v", err)
 	}
 
-	out, err := svc.GetContentForBook(ctx, "u1", book.ID, 0)
+	out, err := svc.GetContentForBook(ctx, "u1", book.ID, 0, ContentOptions{})
 	if err != nil {
 		t.Fatalf("取正文失败: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestGetContentForBookKeepsTextWithStandaloneImage(t *testing.T) {
 		`<img src="https://cdn.example.com/pic.jpg">`
 	svc, bookID := setupTextChapterBook(t, content)
 
-	out, err := svc.GetContentForBook(t.Context(), "u1", bookID, 0)
+	out, err := svc.GetContentForBook(t.Context(), "u1", bookID, 0, ContentOptions{})
 	if err != nil {
 		t.Fatalf("取正文失败: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestGetContentForBookStripsBlockTagsKeepsText(t *testing.T) {
 		`<img src="https://cdn.example.com/pic.jpg">`
 	svc, bookID := setupTextChapterBook(t, content)
 
-	out, err := svc.GetContentForBook(t.Context(), "u1", bookID, 0)
+	out, err := svc.GetContentForBook(t.Context(), "u1", bookID, 0, ContentOptions{})
 	if err != nil {
 		t.Fatalf("取正文失败: %v", err)
 	}

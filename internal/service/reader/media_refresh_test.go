@@ -129,7 +129,7 @@ func TestRefreshMediaURLIssuesNewTicket(t *testing.T) {
 	ctx := t.Context()
 
 	// 首读：拿到第一张票并落缓存
-	out, err := svc.GetContentForBook(ctx, readerTestUserID, book.ID, 0)
+	out, err := svc.GetContentForBook(ctx, readerTestUserID, book.ID, 0, ContentOptions{})
 	if err != nil {
 		t.Fatalf("首次读取失败: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestRefreshMediaURLIssuesNewTicket(t *testing.T) {
 	}
 
 	// 缓存要被刷新成新票：再次读章节不应再回源
-	out2, err := svc.GetContentForBook(ctx, readerTestUserID, book.ID, 0)
+	out2, err := svc.GetContentForBook(ctx, readerTestUserID, book.ID, 0, ContentOptions{})
 	if err != nil {
 		t.Fatalf("换票后读章节失败: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestRefreshMediaURLMemoryReusesTicket(t *testing.T) {
 	svc, srv, book := prepareTicketBook(t)
 	ctx := t.Context()
 
-	out, err := svc.GetContentForBook(ctx, readerTestUserID, book.ID, 0)
+	out, err := svc.GetContentForBook(ctx, readerTestUserID, book.ID, 0, ContentOptions{})
 	if err != nil {
 		t.Fatalf("首次读取失败: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestRefreshMediaURLSkipsNonTrackURL(t *testing.T) {
 	svc, _, book := prepareTicketBook(t)
 	ctx := t.Context()
 
-	if _, err := svc.GetContentForBook(ctx, readerTestUserID, book.ID, 0); err != nil {
+	if _, err := svc.GetContentForBook(ctx, readerTestUserID, book.ID, 0, ContentOptions{}); err != nil {
 		t.Fatalf("首次读取失败: %v", err)
 	}
 	_, refreshable, err := svc.RefreshMediaURL(ctx, book, "https://img.example.com/cover.jpg")
@@ -236,7 +236,7 @@ func TestRefreshMediaURLErrorsWhenSourceRepeatsTicket(t *testing.T) {
 	svc, srv, book := prepareTicketBook(t)
 	ctx := t.Context()
 
-	out, err := svc.GetContentForBook(ctx, readerTestUserID, book.ID, 0)
+	out, err := svc.GetContentForBook(ctx, readerTestUserID, book.ID, 0, ContentOptions{})
 	if err != nil {
 		t.Fatalf("首次读取失败: %v", err)
 	}

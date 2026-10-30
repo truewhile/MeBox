@@ -3,6 +3,7 @@ package handler
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -364,9 +366,16 @@ func TestReaderAudioCacheServesFromDisk(t *testing.T) {
 	}
 }
 
-// TestReaderAudioCacheRejectsTruncatedUpstream 音轨拉不完整时重试；全部失败回 502，
-// 且不能留下半截缓存文件（否则后续会把截断的音频当完整文件下发）。
-func TestReaderAudioCacheRejectsTruncatedUpstream(t *testing.T) {
+// TestReaderAudioCacheAbortsOnTruncatedUpstream 首播直通模式下上游持续截断的契约：
+//
+// 冷启动走边下边发（见 handleStreamingReaderAudio），响应头和前缀字节在探测
+// 通过后就已发出，因此中途截断不可能再改写成 502 —— 必须中止连接让客户端
+// 判定「传输不完整」，同时保留 .part 分片。
+//
+// 关键不变量：**绝不能留下可命中的完整缓存**（否则后续会把截断音频当真完整
+// 文件下发，播放器表现为「时长正确但没有声音」）。下一次请求带着分片走续传
+// 路径，那时才可能给出 502 + 明确文案。
+func TestReaderAudioCacheAbortsOnTruncatedUpstream(t *testing.T) {
 	const declared = 400 << 10
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "audio/mp4")
@@ -391,15 +400,43 @@ func TestReaderAudioCacheRejectsTruncatedUpstream(t *testing.T) {
 	// 无后缀地址 + 音频书籍 → 走音轨落盘缓存。
 	signed := svc.Reader.ProxyURL(book.ID, srv.URL+"/media")
 
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, signed, nil)
+	// panic(http.ErrAbortHandler) 由 net/http 捕获；httptest 下会向上冒泡，
+	// 这里断言它确实发生了（即「没有静默地把半截音频当成功」）。
+	func() {
+		defer func() {
+			recovered := recover()
+			if recovered == nil {
+				t.Fatalf("上游截断时必须中止响应，实际正常返回了 %d 字节", w.Body.Len())
+			}
+			if recovered != http.ErrAbortHandler {
+				t.Fatalf("中止响应时应使用 http.ErrAbortHandler，实际 %v", recovered)
+			}
+		}()
+		router.ServeHTTP(w, req)
+	}()
+
+	if w.Body.Len() >= declared {
+		t.Fatalf("不应交付完整长度的响应体（上游只写了 128KB）")
+	}
+	if _, _, ok := svc.Reader.OpenCachedRemoteAudio(book.ID, srv.URL+"/media"); ok {
+		t.Fatalf("中断的下载不能留下可命中的完整缓存")
+	}
+	if !svc.Reader.HasPartialRemoteAudio(book.ID, srv.URL+"/media") {
+		t.Fatalf("中断后应保留 .part 分片供续传")
+	}
+
+	// 二次请求带分片走续传路径；上游依旧忽略 Range 并截断 → 这时才给 502。
 	code, body := getReaderMedia(t, router, signed)
 	if code != http.StatusBadGateway {
-		t.Fatalf("上游持续截断应当返回 502，实际 %d body=%.120s", code, body)
+		t.Fatalf("续传路径持续失败应返回 502，实际 %d body=%.120s", code, body)
 	}
 	if strings.Contains(body, "ftyp") {
 		t.Fatalf("不能把半截音频交给客户端: %q", body)
 	}
 	if _, _, ok := svc.Reader.OpenCachedRemoteAudio(book.ID, srv.URL+"/media"); ok {
-		t.Fatalf("失败的下载不应留下缓存文件")
+		t.Fatalf("失败的续传仍不应留下完整缓存")
 	}
 }
 
@@ -422,7 +459,7 @@ func getReaderMedia(t *testing.T, router *gin.Engine, signedPath string) (int, s
 // primeTicketBook 先读一次章节（签出第一张票并落缓存），返回该音轨的签名代理路径。
 func primeTicketBook(t *testing.T, svc *service.Container, bookID string) string {
 	t.Helper()
-	out, err := svc.Reader.GetContentForBook(t.Context(), "u1", bookID, 0)
+	out, err := svc.Reader.GetContentForBook(t.Context(), "u1", bookID, 0, reader.ContentOptions{})
 	if err != nil {
 		t.Fatalf("首次取章节失败: %v", err)
 	}
@@ -630,4 +667,98 @@ func prepareMediaTicketBook(t *testing.T) (*service.Container, *mediaTicketServe
 		t.Fatalf("保存目录失败: %v", err)
 	}
 	return svc, srv, book
+}
+
+// TestReaderAudioStreamsFirstByteBeforeDownloadCompletes 首播 TTFB 回归：
+// 冷启动必须边下边发，而不是等整章下完再一次性下发。
+//
+// 上游在第一块之后卡住不放：直通实现此时应已把那块转给客户端，所以读端能
+// 拿到字节；旧实现（整段下载后才 ServeContent）在 release 关闭前一个字节都
+// 不会发出，读端会一直阻塞。
+func TestReaderAudioStreamsFirstByteBeforeDownloadCompletes(t *testing.T) {
+	// 总长必须大于探测窗口（readerMediaProbeBytes=64KB）：首播要先读完这一小段
+	// 才能判断上游给的是错误页还是媒体，这之后才可能外发。卡点在探测结束之后，
+	// 才能证明「整段下完才发」和「边下边发」的区别。
+	const chunks = 16
+	const chunkBytes = 16 << 10
+	const stallAfter = 4 // 写满探测窗口（4×16KB=64KB）后卡住
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/mp4")
+		w.Header().Set("Content-Length", strconv.Itoa(chunks*chunkBytes))
+		w.WriteHeader(http.StatusOK)
+		for i := 0; i < chunks; i++ {
+			if _, err := w.Write(bytes.Repeat([]byte("m4a!"), chunkBytes/4)); err != nil {
+				return
+			}
+			w.(http.Flusher).Flush()
+			if i+1 == stallAfter {
+				// 探测窗口刚写满就卡住，直到测试确认客户端已经收到字节。
+				<-release
+			}
+		}
+	}))
+	defer upstream.Close()
+
+	svc, _, book := prepareMediaTicketBookWithUpstream(t, upstream.URL)
+	signed := svc.Reader.ProxyURL(book.ID, upstream.URL+"/media")
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/api/reader/media", readerMediaProxyHandler(svc))
+	proxy := httptest.NewServer(router)
+	defer proxy.Close()
+
+	resp, err := http.Get(proxy.URL + signed)
+	if err != nil {
+		t.Fatalf("请求媒体代理失败: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("直通应返回 200，实际 %d", resp.StatusCode)
+	}
+
+	// 上游仍卡在 release 上：此时能读到第一批字节，才说明是边下边发。
+	first := make([]byte, 4)
+	readDone := make(chan error, 1)
+	go func() {
+		_, readErr := io.ReadFull(resp.Body, first)
+		readDone <- readErr
+	}()
+	select {
+	case readErr := <-readDone:
+		if readErr != nil {
+			t.Fatalf("读取首批字节失败: %v", readErr)
+		}
+	case <-time.After(5 * time.Second):
+		unblock()
+		t.Fatalf("首播没有边下边发：上游卡在中途（仍有 %d 字节未发）时客户端读不到任何字节",
+			(chunks-stallAfter)*chunkBytes)
+	}
+	if string(first) != "m4a!" {
+		t.Fatalf("首批字节内容不对: %q", first)
+	}
+
+	// 放行上游，把剩余字节读完并确认缓存落盘完整。
+	unblock()
+	rest, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		t.Fatalf("读取剩余字节失败: %v", readErr)
+	}
+	if total := 4 + len(rest); total != chunks*chunkBytes {
+		t.Fatalf("交付字节 = %d，期望 %d", total, chunks*chunkBytes)
+	}
+	// 客户端读完最后一个字节时，服务端可能还在做 truncate + rename：
+	// 落盘完成是 handler 的收尾动作，给一个有限窗口等它。
+	deadline := time.Now().Add(2 * time.Second)
+	for !svc.Reader.HasCachedRemoteAudio(book.ID, upstream.URL+"/media") {
+		if time.Now().After(deadline) {
+			t.Fatalf("直通完成后应命中缓存")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

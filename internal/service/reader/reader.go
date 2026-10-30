@@ -1850,12 +1850,119 @@ type ChapterContent struct {
 	// 前端据此决定走 hls.js 而不是原生 <audio>：代理地址是 base64 编码的
 	// /api/reader/media?...&u=...，前端无法再从 URL 后缀判断格式。
 	IsHLS bool `json:"hls,omitempty"`
+	// MediaDirect 为真表示 Tracks/Images 是上游原始地址，由客户端直接去取，
+	// 服务端不再代理字节。此时 MediaHeaders 给出取这些地址所需的请求头。
+	// 只有客户端显式请求直连（ContentOptions.MediaDirect）且书源开启该开关时才会出现。
+	MediaDirect bool `json:"media_direct,omitempty"`
+	// MediaHeaders 直连模式下取媒体所需的请求头（防盗链 Referer/UA、登录 Cookie 等）。
+	// 代理模式下为空：请求头只在服务端内部使用，不下发给客户端。
+	MediaHeaders map[string]string `json:"media_headers,omitempty"`
 	// declaredType 书源在规则 JS 里声明的书籍类型（-1 表示未声明），
 	// 由 GetContentForBook 写回书架记录（对应 legado Book.type）。
 	declaredType int
 }
 
 // ─── 媒体代理（音频流 / 漫画图片，带防盗链头与 HMAC 签名） ──────────────────
+
+// ContentOptions 正文下发的可选行为，只由请求参数决定，不改变默认链路。
+//
+// 默认零值 = 今天的网页行为：媒体地址全部改写为服务端签名代理，由服务端
+// 拉取字节再转发。MediaDirect 让客户端（Android App）自己去取上游字节，
+// 服务端只负责解析地址与下发请求头。
+type ContentOptions struct {
+	// MediaDirect 请求直连媒体字节。仅对开启了 MediaDirect 的书源生效，
+	// 否则仍返回代理地址，避免把未验证的源推到客户端直连。
+	MediaDirect bool
+	// ForceProxy 本次强制走服务端代理，即使书源开着直连。
+	//
+	// 给客户端留的退路：直连取不到（防盗链、票失效、上游限流等）时可以要求
+	// 服务端先代理一次，而不是让用户去改书源设置。
+	ForceProxy bool
+}
+
+// mediaDirectFor 结合书源开关与本次请求选项，决定这一章是否直连。
+func (s *ReaderService) mediaDirectFor(ctx context.Context, origin string, opts ContentOptions) bool {
+	if !opts.MediaDirect || opts.ForceProxy {
+		return false
+	}
+	return s.sourceAllowsMediaDirect(ctx, origin)
+}
+
+// applyMediaURLs 决定音频/图片地址是代理还是直连，并填好直连所需请求头。
+//
+// 直连时保留上游原始地址，同时把这一章的请求头一次性下发：同一章内的音轨与
+// 图片通常共用书源级 header / 登录态，逐条下发会让响应体成倍变大。
+// 逐图选项段（",{headers:...}"）的差异不在这里展开 —— 客户端会自行拆分。
+func (s *ReaderService) applyMediaURLs(ctx context.Context, book *model.ReaderBook, out *ChapterContent, direct bool) {
+	if out == nil {
+		return
+	}
+	if !direct {
+		for i, t := range out.Tracks {
+			out.Tracks[i] = s.ProxyURL(book.ID, t)
+		}
+		for i, img := range out.Images {
+			out.Images[i] = s.ProxyURL(book.ID, img)
+		}
+		return
+	}
+	out.MediaDirect = true
+	if out.MediaHeaders == nil {
+		out.MediaHeaders = map[string]string{}
+	}
+	// 请求头按章节内第一条媒体地址计算：同一章的音轨（或图片）通常同域名、
+	// 共用书源级 header 与登录态。逐图选项段（",{headers:...}"）的差异留给
+	// 客户端自行拆分，不下发也不参与这里的计算。
+	sample := ""
+	if len(out.Tracks) > 0 {
+		sample = out.Tracks[0]
+	} else if len(out.Images) > 0 {
+		sample = out.Images[0]
+	}
+	if sample != "" {
+		base, options, _ := rule.ParseMediaOptions(sample)
+		for k, v := range s.MediaRequestHeaders(ctx, book, base, options.Headers) {
+			// 传输层头由客户端 HTTP 栈自己算，下发了反而可能冲突。
+			if transportHeader(k) {
+				continue
+			}
+			out.MediaHeaders[k] = v
+		}
+	}
+}
+
+// sourceAllowsMediaDirect 书源是否允许客户端直连取媒体（按书源 URL 查当前用户的副本）。
+//
+// 查不到书源时返回 false：宁可退回代理，也不把未确认归属的源推到客户端直连。
+func (s *ReaderService) sourceAllowsMediaDirect(ctx context.Context, origin string) bool {
+	if s == nil || s.repo == nil || strings.TrimSpace(origin) == "" {
+		return false
+	}
+	src, err := s.repo.GetSourceAnyByURL(ctx, origin)
+	if err != nil || src == nil {
+		return false
+	}
+	return src.MediaDirect
+}
+
+// SetSourceMediaDirect 切换书源的媒体直连开关（限当前用户自己的书源）。
+func (s *ReaderService) SetSourceMediaDirect(ctx context.Context, userID, id string, direct bool) error {
+	src, err := s.repo.GetSourceForUser(ctx, userID, id)
+	if err != nil {
+		return err
+	}
+	src.MediaDirect = direct
+	return s.repo.UpdateSource(ctx, src)
+}
+
+// transportHeader 判断是否是传输层头（由客户端 HTTP 栈负责，不应下发）。
+func transportHeader(name string) bool {
+	switch strings.ToLower(name) {
+	case "accept-encoding", "connection", "host", "content-length", "cookie2":
+		return true
+	}
+	return false
+}
 
 // ProxyURL 将书源返回的媒体地址改写为签名代理地址。
 // 签名 = HMAC-SHA256(jwtSecret, bookID|url)，防止代理被滥用为开放中转。
@@ -1945,6 +2052,80 @@ func BodyIsPlaylist(head []byte, contentType string) bool {
 	return strings.Contains(contentType, "mpegurl") && strings.Contains(string(head), "#EXTM3U")
 }
 
+// MediaRequestHeaders 构造取上游媒体所需的完整请求头。
+//
+// 服务端拉流（FetchMediaWithOptions）与客户端直连（ContentOptions.MediaDirect）
+// 共用这一份逻辑，保证两条链路的防盗链头、登录态与书源头完全一致 —— 直连只是
+// 把「谁发起 HTTP 请求」从服务端换成 App，不应退化成一套更弱的请求。
+//
+// 优先级由低到高：通用预设 < 书源 header < 登录态 < URL 尾部选项。
+func (s *ReaderService) MediaRequestHeaders(ctx context.Context, book *model.ReaderBook, rawURL string, options map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range helper.HTTPHeaderPresets() {
+		out[k] = v
+	}
+	if book == nil || s == nil {
+		return out
+	}
+	// 书源级请求头
+	if s.repo != nil {
+		if found, findErr := s.repo.GetSourceAnyByURL(ctx, book.Origin); findErr == nil && found != nil && found.Header != "" {
+			var headers map[string]any
+			if json.Unmarshal([]byte(found.Header), &headers) == nil {
+				for k, v := range headers {
+					out[k] = fmt.Sprintf("%v", v)
+				}
+			}
+		}
+	}
+	// 登录态：登录类书源的漫画/音频资源同样需要 Cookie 与 loginHeader 才能取到。
+	if s.repo != nil {
+		state := s.newSourceState(ctx, book.Origin)
+		for k, v := range state.LoginHeaderMap() {
+			if strings.EqualFold(k, "cookie") {
+				continue
+			}
+			if out[k] == "" {
+				out[k] = v
+			}
+		}
+		if out["Cookie"] == "" {
+			if ck := state.CookieForRequest(rawURL); ck != "" {
+				out["Cookie"] = ck
+			}
+		}
+	}
+	// URL 尾部选项里的请求头：优先级最高（逐图声明，取图必需）。
+	optionCookie := ""
+	for k, v := range options {
+		if strings.EqualFold(k, "Cookie") {
+			optionCookie = v
+			continue
+		}
+		out[k] = v
+	}
+	if optionCookie != "" {
+		// 与源 Cookie 合并时 options 优先（对应 legado AnalyzeUrl.setCookie 的临时 Cookie）。
+		if base := out["Cookie"]; base != "" {
+			out["Cookie"] = rule.MergeCookie(base, optionCookie)
+		} else {
+			out["Cookie"] = optionCookie
+		}
+	}
+	// 默认 Referer 只能用「真正的 http(s) 书源地址」。
+	// legado 的 origin 对普通书源是 bookSourceUrl，但聚合类书源（如「光遇聚合」）
+	// 的 origin 是个显示名，拼出来的 Referer 非法，会被图床判定为盗链并
+	// 301 到一张「请到本网站阅读」的占位图 —— 表现为漫画每一页都是同一张提示图。
+	// 这种情况下宁可不发 Referer（实测不带 Referer 能拿到原图）；书源 header
+	// 里自己声明的 Referer 优先级更高，不受这里影响。
+	if out["Referer"] == "" {
+		if referer := sourceReferer(book.Origin); referer != "" {
+			out["Referer"] = referer
+		}
+	}
+	return out
+}
+
 // FetchMedia 用书源会话拉取媒体（不应用 URL 尾部选项）。
 func (s *ReaderService) FetchMedia(ctx context.Context, book *model.ReaderBook, rawURL, rangeHeader string) (*http.Response, error) {
 	return s.FetchMediaWithOptions(ctx, book, rawURL, rangeHeader, nil)
@@ -1962,66 +2143,13 @@ func (s *ReaderService) FetchMediaWithOptions(ctx context.Context, book *model.R
 		if err != nil {
 			return nil, err
 		}
-		for k, v := range helper.HTTPHeaderPresets() {
+		for k, v := range s.MediaRequestHeaders(ctx, book, rawURL, options) {
 			httpReq.Header.Set(k, v)
 		}
 		// 媒体流同样交给 net/http 管压缩：否则压缩过的资源会以原始字节透传给
 		// 播放器/图片标签，表现为「打不开」。Range 请求服务端通常不压缩，
 		// 解压后 resp 会去掉 Content-Length/Content-Encoding，透传逻辑不受影响。
 		helper.StripAcceptEncoding(httpReq.Header)
-		// 书源级请求头
-		if s.repo != nil {
-			if found, findErr := s.repo.GetSourceAnyByURL(ctx, book.Origin); findErr == nil && found != nil && found.Header != "" {
-				var headers map[string]any
-				if json.Unmarshal([]byte(found.Header), &headers) == nil {
-					for k, v := range headers {
-						httpReq.Header.Set(k, fmt.Sprintf("%v", v))
-					}
-				}
-			}
-		}
-		// 登录态：登录类书源的漫画/音频资源同样需要 Cookie 与 loginHeader 才能取到。
-		if s.repo != nil {
-			state := s.newSourceState(ctx, book.Origin)
-			for k, v := range state.LoginHeaderMap() {
-				if !strings.EqualFold(k, "cookie") && httpReq.Header.Get(k) == "" {
-					httpReq.Header.Set(k, v)
-				}
-			}
-			if httpReq.Header.Get("Cookie") == "" {
-				if ck := state.CookieForRequest(rawURL); ck != "" {
-					httpReq.Header.Set("Cookie", ck)
-				}
-			}
-		}
-		// URL 尾部选项里的请求头：优先级最高（逐图声明，取图必需）。
-		optionCookie := ""
-		for k, v := range options {
-			if strings.EqualFold(k, "Cookie") {
-				optionCookie = v
-				continue
-			}
-			httpReq.Header.Set(k, v)
-		}
-		if optionCookie != "" {
-			// 与源 Cookie 合并时 options 优先（对应 legado AnalyzeUrl.setCookie 的临时 Cookie）。
-			if base := httpReq.Header.Get("Cookie"); base != "" {
-				httpReq.Header.Set("Cookie", rule.MergeCookie(base, optionCookie))
-			} else {
-				httpReq.Header.Set("Cookie", optionCookie)
-			}
-		}
-		// 默认 Referer 只能用「真正的 http(s) 书源地址」。
-		// legado 的 origin 对普通书源是 bookSourceUrl，但聚合类书源（如「光遇聚合」）
-		// 的 origin 是个显示名，拼出来的 Referer 非法，会被图床判定为盗链并
-		// 301 到一张「请到本网站阅读」的占位图 —— 表现为漫画每一页都是同一张提示图。
-		// 这种情况下宁可不发 Referer（实测不带 Referer 能拿到原图）；书源 header
-		// 里自己声明的 Referer 优先级更高，不受这里影响。
-		if httpReq.Header.Get("Referer") == "" {
-			if referer := sourceReferer(book.Origin); referer != "" {
-				httpReq.Header.Set("Referer", referer)
-			}
-		}
 		if rangeHeader != "" {
 			httpReq.Header.Set("Range", rangeHeader)
 		}
@@ -3108,7 +3236,9 @@ func (s *ReaderService) DeleteReplaceRule(ctx context.Context, userID, id string
 // GetContentForBook 按书架书籍 + 章节序号取正文：
 // 解析书源 → 持久缓存（命中直接返回）→ 抓正文（单飞）→ 写缓存 →
 // 书源 replaceRegex → 用户替换净化规则 → 签名代理改写。
-func (s *ReaderService) GetContentForBook(ctx context.Context, userID, bookID string, chapterIndex int) (*ChapterContent, error) {
+//
+// opts 为零值时行为与历史版本完全一致（媒体全部走服务端代理）。
+func (s *ReaderService) GetContentForBook(ctx context.Context, userID, bookID string, chapterIndex int, opts ContentOptions) (*ChapterContent, error) {
 	book, err := s.repo.GetBook(ctx, bookID)
 	if err != nil {
 		return nil, err
@@ -3152,22 +3282,21 @@ func (s *ReaderService) GetContentForBook(ctx context.Context, userID, bookID st
 	if out.Type == "text" {
 		out.Content = s.applyUserReplaceRules(ctx, userID, book.Name, out.Content)
 	}
-	// 音频/图片地址改写为签名代理（浏览器播放/展示无法带防盗链头）
-	for i, t := range out.Tracks {
-		out.Tracks[i] = s.ProxyURL(book.ID, t)
-	}
-	for i, img := range out.Images {
-		out.Images[i] = s.ProxyURL(book.ID, img)
-	}
-	// 文本型漫画源：正文里的 <img> 标签换成前端认识的 [img] 标记（同样走签名代理，
-	// 这样需要防盗链头的图片也能显示）。见 rewriteContentImageMarkers 的说明。
+	direct := s.mediaDirectFor(ctx, book.Origin, opts)
+	// 文本型漫画源：正文里的 <img> 标签换成前端认识的 [img] 标记。
+	// 默认仍走签名代理，这样需要防盗链头的图片也能显示（见
+	// rewriteContentImageMarkers 的说明）；直连时保留上游原始地址。
 	if out.Type == "text" && strings.Contains(out.Content, "<img") {
 		out.Content = rewriteContentImageMarkers(out.Content, ch.URL, func(u string) string {
+			if direct {
+				return u
+			}
 			return s.ProxyURL(book.ID, u)
 		})
 	}
 	// 整章都是 [img] 标记 → 这就是一章漫画，改成图片类型交给漫画阅读器。
 	// 若还按文本下发，前端会把它当文字按列分页，一屏只有一张图（双页铺开也无从谈起）。
+	// 必须早于 applyMediaURLs：转换出来的图片地址同样要参与代理/直连决策与请求头计算。
 	if out.Type == "text" {
 		if imgs, ok := imageMarkersOnly(out.Content); ok {
 			out.Type = "image"
@@ -3175,6 +3304,9 @@ func (s *ReaderService) GetContentForBook(ctx context.Context, userID, bookID st
 			out.Content = ""
 		}
 	}
+	// 音频/图片地址改写：默认走签名代理（浏览器播放/展示无法带防盗链头）；
+	// 客户端显式请求直连且书源允许时，保留上游地址并下发所需请求头。
+	s.applyMediaURLs(ctx, book, out, direct)
 	return out, nil
 }
 
@@ -3260,6 +3392,9 @@ type ContentBatchItem struct {
 	// Cached 为 true 表示这次由持久缓存直接命中（未访问书源）。
 	Cached bool   `json:"cached"`
 	Error  string `json:"error,omitempty"`
+	// MediaDirect / MediaHeaders 同 ChapterContent：客户端直连时的地址与请求头。
+	MediaDirect  bool              `json:"media_direct,omitempty"`
+	MediaHeaders map[string]string `json:"media_headers,omitempty"`
 }
 
 // ContentBatchResult 批量取正文的汇总结果。
@@ -3278,7 +3413,7 @@ const contentBatchConcurrency = 4
 // GetContentBatch 批量取正文（对应 legado 的 CacheBook 离线缓存协议）。
 //
 // 单章失败不中断整批：失败项带 error，其余照常返回。已缓存的章节不访问书源。
-func (s *ReaderService) GetContentBatch(ctx context.Context, userID, bookID string, indexes []int, applyReplace bool) (*ContentBatchResult, error) {
+func (s *ReaderService) GetContentBatch(ctx context.Context, userID, bookID string, indexes []int, applyReplace bool, opts ContentOptions) (*ContentBatchResult, error) {
 	book, err := s.repo.GetBook(ctx, bookID)
 	if err != nil {
 		return nil, err
@@ -3314,7 +3449,7 @@ func (s *ReaderService) GetContentBatch(ctx context.Context, userID, bookID stri
 				result.Items[pos] = ContentBatchItem{ChapterIndex: idx, Error: ctx.Err().Error()}
 				return
 			}
-			item, cached := s.loadBatchItem(ctx, userID, book, chapters[idx], applyReplace)
+			item, cached := s.loadBatchItem(ctx, userID, book, chapters[idx], applyReplace, opts)
 			result.Items[pos] = item
 			if item.Error != "" {
 				result.Stats.Failed++
@@ -3330,18 +3465,22 @@ func (s *ReaderService) GetContentBatch(ctx context.Context, userID, bookID stri
 }
 
 // loadBatchItem 取单章（批量接口用）：先查缓存（不访问书源），再走完整链路。
-func (s *ReaderService) loadBatchItem(ctx context.Context, userID string, book *model.ReaderBook, ch model.ReaderChapter, applyReplace bool) (ContentBatchItem, bool) {
+func (s *ReaderService) loadBatchItem(ctx context.Context, userID string, book *model.ReaderBook, ch model.ReaderChapter, applyReplace bool, opts ContentOptions) (ContentBatchItem, bool) {
 	item := ContentBatchItem{ChapterIndex: ch.Index}
 	src, bs, loadErr := s.loadSourceFlexible(ctx, "", book.Origin)
 	cached := false
 	if loadErr == nil {
 		if out, ok := s.loadCachedContent(ctx, src, bs, book, ch, ""); ok {
+			// 缓存里存的是书源侧原始地址（改写前），命中后同样要按本次请求
+			// 决定代理/直连，否则缓存命中的章节会绕过媒体通道选择。
+			direct := s.mediaDirectFor(ctx, book.Origin, opts)
+			s.applyMediaURLs(ctx, book, out, direct)
 			item = batchItemFromContent(ch.Index, out, applyReplace, userID, book, s)
 			cached = true
 		}
 	}
 	if !cached {
-		out, err := s.GetContentForBook(ctx, userID, book.ID, ch.Index)
+		out, err := s.GetContentForBook(ctx, userID, book.ID, ch.Index, opts)
 		if err != nil {
 			item.Error = err.Error()
 			return item, false
@@ -3362,6 +3501,8 @@ func batchItemFromContent(index int, out *ChapterContent, applyReplace bool, use
 		ImageStyle:   out.ImageStyle,
 		IsHLS:        out.IsHLS,
 		Comments:     out.Comments,
+		MediaDirect:  out.MediaDirect,
+		MediaHeaders: out.MediaHeaders,
 	}
 	if applyReplace && out.Type == "text" && s != nil && book != nil {
 		item.Content = s.applyUserReplaceRules(context.Background(), userID, book.Name, item.Content)

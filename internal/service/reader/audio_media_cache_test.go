@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -35,8 +36,8 @@ func TestIsAudioMediaURL(t *testing.T) {
 	}
 }
 
-// TestAudioMediaCacheKeyIgnoresQuery 换票会改写 uid/vkey/ct，缓存键必须只看
-// scheme + host + path，否则每次换票都会重新下载一遍。
+// TestAudioMediaCacheKeyIgnoresQuery 换票会改写 uid/vkey/ct，缓存键必须忽略
+// 这些签名/时效参数，否则每次换票都会重新下载一遍。
 func TestAudioMediaCacheKeyIgnoresQuery(t *testing.T) {
 	a := audioMediaCacheKey("book-1", "https://cdn.example.com/long/a.m4a?uid=1&vkey=aaa")
 	b := audioMediaCacheKey("book-1", "https://cdn.example.com/long/a.m4a?uid=2&vkey=bbb&ct=3")
@@ -50,6 +51,30 @@ func TestAudioMediaCacheKeyIgnoresQuery(t *testing.T) {
 		t.Fatalf("不同对象的缓存键不应相同")
 	}
 }
+
+// TestAudioMediaCacheKeyKeepsIdentifyingQuery 只靠 query 区分章节的书源
+// （路径固定、如 /audio?id=12345）不能被合并成同一个缓存对象，否则第二集
+// 会命中第一集的缓存直接播错内容。
+func TestAudioMediaCacheKeyKeepsIdentifyingQuery(t *testing.T) {
+	ep1 := audioMediaCacheKey("book-1", "https://host/audio?id=12345&vkey=aaa")
+	ep2 := audioMediaCacheKey("book-1", "https://host/audio?id=67890&vkey=bbb")
+	if ep1 == "" || ep2 == "" {
+		t.Fatal("缓存键不应为空")
+	}
+	if ep1 == ep2 {
+		t.Fatalf("不同章节（query 不同）的缓存键不应相同，否则会串集")
+	}
+}
+
+// TestAudioMediaCacheKeyIgnoresQueryOrder 非签名参数的顺序不应影响缓存键。
+func TestAudioMediaCacheKeyIgnoresQueryOrder(t *testing.T) {
+	a := audioMediaCacheKey("book-1", "https://host/a.m4a?id=7&chapter=3&vkey=x")
+	b := audioMediaCacheKey("book-1", "https://host/a.m4a?chapter=3&id=7&vkey=y")
+	if a == "" || a != b {
+		t.Fatalf("参数顺序不应影响缓存键: %q vs %q", a, b)
+	}
+}
+
 
 // ─── 断点续传下载器 ──────────────────────────────────────────────────────
 
@@ -267,3 +292,143 @@ func TestDownloadRemoteAudioStopsOnNoRetry(t *testing.T) {
 		t.Fatalf("不可重试的失败只应请求 1 次，实际 %d 次", calls)
 	}
 }
+
+// ─── 首播直通（边下边发） ────────────────────────────────────────────────
+
+// TestDownloadRemoteAudioStreamingForwardsWhileDownloading 直通模式：字节必须
+// 在下载过程中就到达 sink，而不是等整段下完才一次性写出去（首播 TTFB）。
+func TestDownloadRemoteAudioStreamingForwardsWhileDownloading(t *testing.T) {
+	svc := newAudioDownloadTestService(t)
+	const mediaURL = "https://cdn.example.com/long/stream.m4a? vkey=1"
+	payload := bytes.Repeat([]byte("stream!"), 1000)
+
+	var sink bytes.Buffer
+	var startedTotal int64
+	// 用「读到一半时 sink 里已经有数据」来证明确实在边下边发。
+	var midLength int
+	path, err := svc.DownloadRemoteAudioStreaming(t.Context(), "book-s", mediaURL, 1,
+		func(rangeHeader string) (*http.Response, []byte, error) {
+			if rangeHeader != "" {
+				t.Fatalf("首播直通不应带 Range，实际 %q", rangeHeader)
+			}
+			return okResponse(payload), nil, nil
+		},
+		func(total int64, contentType string) {
+			startedTotal = total
+			// 头部回调必须早于任何字节下发。
+			if sink.Len() != 0 {
+				t.Errorf("写响应头时不应已有字节写出")
+			}
+		},
+		writerFunc(func(p []byte) (int, error) {
+			if midLength == 0 && sink.Len() == 0 && len(p) > 0 {
+				midLength = sink.Len()
+			}
+			return sink.Write(p)
+		}),
+	)
+	if err != nil {
+		t.Fatalf("直通下载失败: %v", err)
+	}
+	if startedTotal != int64(len(payload)) {
+		t.Fatalf("头部回调应拿到上游总长 %d，实际 %d", len(payload), startedTotal)
+	}
+	if !bytes.Equal(sink.Bytes(), payload) {
+		t.Fatalf("下发的字节不完整: %d 字节，期望 %d", sink.Len(), len(payload))
+	}
+	// 下载完成后缓存文件必须完整可命中。
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("读缓存文件失败: %v", readErr)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("落盘内容不完整: %d 字节", len(got))
+	}
+	if !svc.HasCachedRemoteAudio("book-s", mediaURL) {
+		t.Fatal("直通下完后应当命中缓存")
+	}
+}
+
+// TestDownloadRemoteAudioStreamingStopsWhenClientGoesAway 客户端中途断开时
+// 停止下载，但保留分片供下次续传（不能把已下的字节白扔掉）。
+func TestDownloadRemoteAudioStreamingStopsWhenClientGoesAway(t *testing.T) {
+	svc := newAudioDownloadTestService(t)
+	const mediaURL = "https://cdn.example.com/long/gone.m4a"
+	payload := bytes.Repeat([]byte("abcdefgh"), 2000)
+	clientGone := errors.New("client closed connection")
+
+	var sink bytes.Buffer
+	_, err := svc.DownloadRemoteAudioStreaming(t.Context(), "book-g", mediaURL, 1,
+		func(rangeHeader string) (*http.Response, []byte, error) {
+			return okResponse(payload), nil, nil
+		},
+		nil,
+		writerFunc(func(p []byte) (int, error) {
+			// 收下前 1000 字节后模拟播放器断开。
+			if sink.Len() >= 1000 {
+				return 0, clientGone
+			}
+			room := 1000 - sink.Len()
+			if len(p) <= room {
+				return sink.Write(p)
+			}
+			n, _ := sink.Write(p[:room])
+			return n, clientGone
+		}),
+	)
+	if err == nil {
+		t.Fatal("客户端断开时应当停止下载")
+	}
+	var sinkErr *audioSinkError
+	if !errors.As(err, &sinkErr) {
+		t.Fatalf("应标记为写客户端失败（便于上层区分），实际 %v", err)
+	}
+	// 分片要留着：这是续传的原料。
+	path := svc.RemoteAudioCachePath("book-g", mediaURL)
+	if path == "" {
+		t.Fatal("缓存路径不应为空")
+	}
+	if info, statErr := os.Stat(path + audioPartialSuffix); statErr != nil || info.Size() == 0 {
+		t.Fatalf("断流后应保留 .part 分片，实际 %v", statErr)
+	}
+	if svc.HasCachedRemoteAudio("book-g", mediaURL) {
+		t.Fatal("中断的下载不能留下完整缓存（否则会下发截断音频）")
+	}
+}
+
+// TestDownloadRemoteAudioStreamingAbortsOnRestart 直通模式下上游忽略 Range 回
+// 200（需要从 0 重来）时必须中止，而不是把重复字节拼进客户端已收到的流里。
+func TestDownloadRemoteAudioStreamingAbortsOnRestart(t *testing.T) {
+	svc := newAudioDownloadTestService(t)
+	const mediaURL = "https://cdn.example.com/long/restart.m4a"
+	payload := bytes.Repeat([]byte("zz"), 100)
+	// 先留一个分片，让第二轮带 Range。
+	partPath := svc.RemoteAudioCachePath("book-r", mediaURL) + audioPartialSuffix
+	if err := os.MkdirAll(filepath.Dir(partPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(partPath, payload[:50], 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	var sink bytes.Buffer
+	_, err := svc.DownloadRemoteAudioStreaming(t.Context(), "book-r", mediaURL, 1,
+		func(rangeHeader string) (*http.Response, []byte, error) {
+			// 无视 Range，整段回 200 → 直通无法重来。
+			return okResponse(payload), nil, nil
+		},
+		nil,
+		&sink,
+	)
+	if !errors.Is(err, errAudioStreamCannotRestart) {
+		t.Fatalf("应返回不可重来错误，实际 %v", err)
+	}
+	if sink.Len() != 0 {
+		t.Fatalf("中止前不应向客户端写出字节，实际 %d", sink.Len())
+	}
+}
+
+// writerFunc 把函数适配成 io.Writer。
+type writerFunc func(p []byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }

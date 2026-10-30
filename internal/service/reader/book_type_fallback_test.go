@@ -58,7 +58,7 @@ func TestAudioBookTypeFallbackBySource(t *testing.T) {
 		t.Fatalf("保存目录失败: %v", err)
 	}
 
-	out, err := svc.GetContentForBook(ctx, readerTestUserID, book.ID, 0)
+	out, err := svc.GetContentForBook(ctx, readerTestUserID, book.ID, 0, ContentOptions{})
 	if err != nil {
 		t.Fatalf("取正文失败: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestDeclaredTextTypeWinsOverAudioSource(t *testing.T) {
 		t.Fatalf("保存目录失败: %v", err)
 	}
 
-	out, err := svc.GetContentForBook(ctx, readerTestUserID, book.ID, 0)
+	out, err := svc.GetContentForBook(ctx, readerTestUserID, book.ID, 0, ContentOptions{})
 	if err != nil {
 		t.Fatalf("取正文失败: %v", err)
 	}
