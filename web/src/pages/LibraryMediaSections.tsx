@@ -8,10 +8,15 @@ import type { Media } from '../types'
 import type { SeriesCard } from '../utils/groupSeries'
 
 // 超过该数量后切换为虚拟滚动：DOM 只挂载视口内的卡片，大库不再线性劣化。
+// 判定必须用“库的总量”而不是“已加载条数”：分页补页会把已加载条数推过阈值，
+// 若此时才切换渲染方式，整块网格的 DOM 子树会被替换、容器高度瞬间塌陷，
+// 浏览器随之把 scrollTop 夹回顶部，滚动记忆恢复得再好也会当场失效。
 const VIRTUALIZE_THRESHOLD = 200
 
 type LibraryMediaSectionsProps = {
   isSeries: boolean
+  /** 当前列表的总条数（媒体库总量），用于稳定地决定是否走虚拟滚动。 */
+  total: number
   items: Media[]
   seriesCards: SeriesCard[]
   selectedSeries: SeriesCard | null
@@ -25,6 +30,7 @@ type LibraryMediaSectionsProps = {
 
 export function LibraryMediaSections({
   isSeries,
+  total,
   items,
   seriesCards,
   selectedSeries,
@@ -35,15 +41,22 @@ export function LibraryMediaSections({
   cardActions,
   onSeriesClick,
 }: LibraryMediaSectionsProps) {
+  // 渲染方式在整次浏览里保持不变：总量超过阈值就一开始就用虚拟列表。
+  const virtualizeByTotal = total > VIRTUALIZE_THRESHOLD
+
   return (
     <>
       {!isSeries && items.length > 0 && (
-        <MediaGrid count={items.length} renderItem={(index) => {
-          const media = items[index]
-          // renderActions 传函数引用：MediaCard 重渲染时才构建操作按钮，
-          // 配合 memo，父级无关状态变化不再级联重渲染全部卡片。
-          return <MediaCard key={media.id} media={media} renderActions={cardActions} />
-        }} />
+        <MediaGrid
+          count={items.length}
+          virtualize={virtualizeByTotal}
+          renderItem={(index) => {
+            const media = items[index]
+            // renderActions 传函数引用：MediaCard 重渲染时才构建操作按钮，
+            // 配合 memo，父级无关状态变化不再级联重渲染全部卡片。
+            return <MediaCard key={media.id} media={media} renderActions={cardActions} />
+          }}
+        />
       )}
 
       {!isSeries && items.length === 0 && (
@@ -51,17 +64,21 @@ export function LibraryMediaSections({
       )}
 
       {isSeries && seriesCards.length > 0 && !selectedSeries && (
-        <MediaGrid count={seriesCards.length} renderItem={(index) => {
-          const series = seriesCards[index]
-          return (
-            <SeriesCardItem
-              key={series.key}
-              series={series}
-              cardActions={cardActions}
-              onSeriesClick={onSeriesClick}
-            />
-          )
-        }} />
+        <MediaGrid
+          count={seriesCards.length}
+          virtualize={virtualizeByTotal}
+          renderItem={(index) => {
+            const series = seriesCards[index]
+            return (
+              <SeriesCardItem
+                key={series.key}
+                series={series}
+                cardActions={cardActions}
+                onSeriesClick={onSeriesClick}
+              />
+            )
+          }}
+        />
       )}
 
       {isSeries && seriesCards.length === 0 && !loading && (
@@ -94,8 +111,16 @@ const SeriesCardItem = memo(function SeriesCardItem({
   )
 })
 
-function MediaGrid({ count, renderItem }: { count: number; renderItem: (index: number) => ReactNode }) {
-  if (count <= VIRTUALIZE_THRESHOLD) {
+function MediaGrid({
+  count,
+  virtualize,
+  renderItem,
+}: {
+  count: number
+  virtualize: boolean
+  renderItem: (index: number) => ReactNode
+}) {
+  if (!virtualize) {
     return <div className={MEDIA_GRID_CLASS}>{Array.from({ length: count }, (_, index) => renderItem(index))}</div>
   }
   return <VirtualMediaGrid totalCount={count} renderItem={renderItem} />

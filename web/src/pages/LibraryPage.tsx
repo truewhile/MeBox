@@ -332,6 +332,7 @@ export function LibraryPage() {
 
       <LibraryMediaSections
         isSeries={isSeries}
+        total={total}
         items={displayedItems}
         seriesCards={displayedSeriesCards}
         selectedSeries={selectedSeries}

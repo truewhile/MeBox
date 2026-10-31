@@ -110,6 +110,35 @@ export function shouldPersistClampedSample(input: {
 }
 
 /**
+ * 恢复完成后的看守时长：列表在这一小段时间里仍可能重排（分页补页让普通网格
+ * 切换成虚拟列表、海报量高……），内容高度瞬间被压塌时浏览器会把 scrollTop
+ * 夹小，表现就是“返回列表后跳到顶部”。这段时间内没有用户滚动意图就把记忆
+ * 位置贴回去。
+ */
+const RESTORE_GUARD_MS = 3000
+
+/**
+ * 看守期里哪些 scrollTop 跌落要贴回记忆位置。
+ *
+ * 只处理“内容还够长、用户没有滚动意图、位置却掉到记忆位置上方”的跌落；
+ * 用户自己滚上去（有滚动意图）不干预，内容还没长回原来的高度也不强行回填。
+ */
+export function shouldReapplyGuardedScroll(input: {
+  current: number
+  target: number
+  maxScroll: number
+  userDriven: boolean
+  now: number
+  guardUntil: number
+}): boolean {
+  const { current, target, maxScroll, userDriven, now, guardUntil } = input
+  if (now > guardUntil) return false
+  if (userDriven) return false
+  if (maxScroll <= 0 || target <= 0) return false
+  return current < target - 1
+}
+
+/**
  * 记住列表页的滚动位置。页面内容会异步长高，因此恢复期间会监听内容高度，
  * 直到目标位置可达；期间用户主动滚动会立即接管，避免和恢复逻辑抢滚动条。
  *
@@ -141,8 +170,15 @@ export function useScrollMemory(routeKey: string, userKey = 'anonymous'): void {
     let restoreTimer: number | null = null
     let restoreFrame = 0
     let restorePumpUntil = 0
+    // 恢复完成后的看守截止时间：见 RESTORE_GUARD_MS。
+    let guardUntil = 0
+    // 看守期里被“用户正在滚动”挡下的那次回填，等滚动意图过期后补做一次。
+    let guardRetryTimer: number | null = null
     let lastSaved = saved
     let lastHeight = el.scrollHeight
+    // 内容容器（`<main>` 里那层宽度约束 div）：分页补页、列表切换渲染方式都会
+    // 改变它的高度，恢复回填与看守都靠它驱动。
+    const content = el.firstElementChild instanceof HTMLElement ? el.firstElementChild : null
     // 最近一次“用户主动滚动”的时间戳与类型（滚轮 / 触摸 / 翻页键 / 拖滚动条）。
     // 只有用户自己滚出来的位置才写回存储：恢复逻辑、虚拟列表挂载量高、浏览器
     // 钳制造成的 scrollTop 变化都不代表用户想要的位置，写进去就会把记忆抹掉。
@@ -183,25 +219,91 @@ export function useScrollMemory(routeKey: string, userKey = 'anonymous'): void {
         window.clearTimeout(restoreTimer)
         restoreTimer = null
       }
+      if (guardRetryTimer != null) {
+        window.clearTimeout(guardRetryTimer)
+        guardRetryTimer = null
+      }
       observer?.disconnect()
       observer = null
+      guardUntil = 0
+    }
+
+    /** 恢复完成后继续看守一小段时间，见 RESTORE_GUARD_MS。 */
+    const startGuard = (target: number) => {
+      if (target <= 0) return
+      guardUntil = performance.now() + RESTORE_GUARD_MS
+      if (restoreFrame) {
+        window.cancelAnimationFrame(restoreFrame)
+        restoreFrame = 0
+      }
+      if (restoreTimer != null) window.clearTimeout(restoreTimer)
+      restoreTimer = window.setTimeout(() => {
+        restoreTimer = null
+        stopRestore()
+      }, RESTORE_GUARD_MS)
+    }
+
+    /**
+     * 看守期里的塌陷回填：列表重排（普通网格换成虚拟列表、海报重新量高）会让
+     * 内容瞬间变矮，浏览器随之把 scrollTop 夹小，表现就是“返回列表后跳到顶部”。
+     * 用户没有滚动意图时把记忆位置贴回去。
+     */
+    const reapplyGuardedScroll = () => {
+      if (restoring) return
+      const max = currentMaxScroll()
+      const target = Math.min(lastSaved, max)
+      if (
+        shouldReapplyGuardedScroll({
+          current: el.scrollTop,
+          target,
+          maxScroll: max,
+          userDriven: userScrolling(),
+          now: performance.now(),
+          guardUntil,
+        })
+      ) {
+        el.scrollTop = target
+        return
+      }
+      // 这次塌陷正好撞上用户还在滚动：等滚动意图过期后再补做一次，别把它漏掉
+      // （否则用户滚完停手，列表就停在被夹出来的顶部不动了）。
+      if (userScrolling() && performance.now() <= guardUntil && guardRetryTimer == null) {
+        guardRetryTimer = window.setTimeout(() => {
+          guardRetryTimer = null
+          reapplyGuardedScroll()
+        }, USER_SCROLL_INTENT_TTL_MS)
+      }
+    }
+
+    const onContentSizeChange = () => {
+      if (restoring) {
+        tryRestore()
+        return
+      }
+      reapplyGuardedScroll()
     }
 
     const finishRestore = () => {
       if (!restoring) return
       restoring = false
-      stopRestore()
       const current = Math.round(el.scrollTop)
-      if (!sampleIsTrustworthy(current)) {
-        // 目标一直不可达（内容仍比记忆位置矮 / 还在加载）：保留原记忆值，
-        // 不要把钳制出来的位置写回去。
+      // 恢复了半天位置却掉到记忆位置上方很远，而且不是用户自己滚上去的：
+      // 这是浏览器把 scrollTop 夹出来的值（内容被压塌、还在加载占位）。
+      // 记忆值必须保留，否则下次进来就真的从顶部开始了。
+      const droppedFar =
+        saved - current > maxSmoothJumpUp(el.clientHeight) && !userScrolling()
+      if (droppedFar || !sampleIsTrustworthy(current)) {
+        stopRestore()
         return
       }
       adoptScrollPosition(current)
+      startGuard(current)
     }
 
     const tryRestore = () => {
       if (!restoring) return
+      // 用户正在滚动：本帧不要回填，把控制权交给他（交给 saveNow 的接管分支）。
+      if (userScrolling()) return
       const max = currentMaxScroll()
       const target = Math.min(saved, max)
       if (target > 0 && Math.abs(el.scrollTop - target) > 1) {
@@ -230,19 +332,20 @@ export function useScrollMemory(routeKey: string, userKey = 'anonymous'): void {
       // 内容还没长回来时读到的 scrollTop 不是用户选的位置，既不能写存储，
       // 也不能当成“用户接管”。
       if (!sampleIsTrustworthy(current)) return
-      // 一瞬间大幅向上跳（恢复回填、虚拟列表挂载量高、浏览器钳制）只有按键翻页 /
-      // 拖滚动条这类意图才可能是用户行为，否则直接丢弃。
-      const upJump = lastSaved > current ? lastSaved - current : 0
-      if (upJump > maxSmoothJumpUp(el.clientHeight) && !(userDriven && userScrollAllowsJump)) {
+      if (restoring) {
+        // 恢复途中用户自己滚了：一律以用户为准（哪怕一次跳得很远，也是他真实的
+        // 滚轮 / 触摸 / 翻页操作）。位置仍要看住：列表随后切换渲染方式时容器
+        // 高度还是会塌，塌了要贴回“用户自己选的位置”。
+        if (!userDriven || Math.abs(current - saved) <= 1) return
+        restoring = false
+        adoptScrollPosition(current)
+        startGuard(current)
         return
       }
-      if (restoring) {
-        if (!userDriven || Math.abs(current - saved) <= 1) return
-        // 恢复途中用户真的滚到了别处：交还控制权并记录这个位置，避免恢复
-        // 逻辑继续和用户抢滚动条。
-        restoring = false
-        stopRestore()
-        adoptScrollPosition(current)
+      // 非恢复状态下，一瞬间大幅向上跳（虚拟列表挂载量高、浏览器钳制）只有按键
+      // 翻页 / 拖滚动条这类意图才可能是用户行为，否则直接丢弃。
+      const upJump = lastSaved > current ? lastSaved - current : 0
+      if (upJump > maxSmoothJumpUp(el.clientHeight) && !(userDriven && userScrollAllowsJump)) {
         return
       }
       // 非用户滚动（恢复逻辑回填、虚拟列表挂载/量高、浏览器钳制）不写存储。
@@ -276,13 +379,12 @@ export function useScrollMemory(routeKey: string, userKey = 'anonymous'): void {
     if (saved <= 0) {
       el.scrollTop = 0
     } else {
+      if (typeof ResizeObserver !== 'undefined' && content) {
+        observer = new ResizeObserver(onContentSizeChange)
+        observer.observe(content)
+      }
       tryRestore()
       if (restoring) {
-        const content = el.firstElementChild
-        if (typeof ResizeObserver !== 'undefined' && content instanceof HTMLElement) {
-          observer = new ResizeObserver(() => tryRestore())
-          observer.observe(content)
-        }
         restorePumpUntil = performance.now() + 1000
         restoreFrame = window.requestAnimationFrame(pumpRestore)
         restoreTimer = window.setTimeout(finishRestore, 10000)

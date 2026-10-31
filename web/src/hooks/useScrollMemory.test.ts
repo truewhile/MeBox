@@ -1,6 +1,7 @@
 import {
   isJumpIntentKey,
   isScrollIntentKey,
+  shouldReapplyGuardedScroll,
   shouldPersistClampedSample,
   shouldPersistScrollSample,
   shouldRememberScroll,
@@ -99,5 +100,63 @@ check('page down allows a long jump', isJumpIntentKey('PageDown'))
 check('home allows a long jump', isJumpIntentKey('Home'))
 check('arrow key keeps smooth-only intent', !isJumpIntentKey('ArrowDown'))
 check('space keeps smooth-only intent', !isJumpIntentKey(' '))
+
+// 恢复完成后的看守期：列表重排（普通网格换成虚拟列表）会把容器高度压塌，
+// scrollTop 被浏览器夹小；没有用户滚动意图时要把记忆位置贴回去。
+check(
+  'collapsed position inside the guard window is re-applied',
+  shouldReapplyGuardedScroll({
+    current: 0,
+    target: 2600,
+    maxScroll: 30000,
+    userDriven: false,
+    now: 1000,
+    guardUntil: 3000,
+  }),
+)
+check(
+  'user scroll during the guard window wins',
+  !shouldReapplyGuardedScroll({
+    current: 0,
+    target: 2600,
+    maxScroll: 30000,
+    userDriven: true,
+    now: 1000,
+    guardUntil: 3000,
+  }),
+)
+check(
+  'no re-apply after the guard window',
+  !shouldReapplyGuardedScroll({
+    current: 0,
+    target: 2600,
+    maxScroll: 30000,
+    userDriven: false,
+    now: 4000,
+    guardUntil: 3000,
+  }),
+)
+check(
+  'no re-apply while the content is still too short',
+  !shouldReapplyGuardedScroll({
+    current: 0,
+    target: 0,
+    maxScroll: 0,
+    userDriven: false,
+    now: 1000,
+    guardUntil: 3000,
+  }),
+)
+check(
+  'position already at the target is left alone',
+  !shouldReapplyGuardedScroll({
+    current: 2600,
+    target: 2600,
+    maxScroll: 30000,
+    userDriven: false,
+    now: 1000,
+    guardUntil: 3000,
+  }),
+)
 
 console.log('useScrollMemory.test.ts ok')
