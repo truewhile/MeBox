@@ -1062,15 +1062,77 @@ func (k *keyedMutex) Lock(key string) func() {
 	}
 }
 
+// keyedMutexPollInterval 等锁的重试间隔。只用于「已有写入者时短暂等待」，
+// 不值得为它引入条件变量。
+const keyedMutexPollInterval = 20 * time.Millisecond
+
+// LockWait 最多等 timeout 就放弃。
+//
+// 音频缓存的写入者可能是「首播直通」，它会一直持锁到客户端读完整章；让后来的
+// 请求排队等它，播放器的重试就会干等几十秒（用户看到的就是「一直转圈」）。
+// 等不到锁的请求改走纯透传，字节照样能出声，只是这次不落盘。
+func (k *keyedMutex) LockWait(key string, timeout time.Duration) (func(), bool) {
+	deadline := time.Now().Add(timeout)
+	for {
+		if unlock, ok := k.acquire(key); ok {
+			return unlock, true
+		}
+		if time.Now().After(deadline) {
+			return nil, false
+		}
+		time.Sleep(keyedMutexPollInterval)
+	}
+}
+
+// acquire 取一次锁，取不到立刻返回。引用计数保证条目在最后一个持有者归还后回收。
+func (k *keyedMutex) acquire(key string) (func(), bool) {
+	k.mu.Lock()
+	entry := k.locks[key]
+	if entry == nil {
+		entry = &keyedMutexEntry{}
+		k.locks[key] = entry
+	}
+	entry.refs++
+	k.mu.Unlock()
+
+	if !entry.mu.TryLock() {
+		k.release(key, entry)
+		return nil, false
+	}
+	return func() {
+		entry.mu.Unlock()
+		k.release(key, entry)
+	}, true
+}
+
+// release 归还一次引用，无人持有时回收条目。
+func (k *keyedMutex) release(key string, entry *keyedMutexEntry) {
+	k.mu.Lock()
+	entry.refs--
+	if entry.refs == 0 {
+		delete(k.locks, key)
+	}
+	k.mu.Unlock()
+}
+
+// readerAudioLockWait 单条音轨的写锁最多等多久；等不到就降级成纯透传。
+const readerAudioLockWait = 500 * time.Millisecond
+
 // handleCachedReaderAudio 音频直链的统一入口。
 //
-// 三条路径，按代价从低到高：
+// 四条路径，按代价从低到高：
 //  1. 命中完整缓存 → http.ServeContent 按 Range 下发（拖动、续播都读本地）；
-//  2. 冷启动首播 → 边下边发给客户端，同时落盘（DownloadRemoteAudioStreaming）。
-//     旧实现是「整段下完再下发」，慢链路上用户要对着转圈等整章 3–5MB，
-//     把「偶发失败」换成了「必然慢」；直通后几百毫秒就能出声，落盘照旧；
-//  3. 已有 .part 分片 → 走整段下载：分片意味着上次已经下到一半，同步续传
-//     剩余字节比重新直通更省流量，下完再一次性下发。
+//  2. 带 Range 的冷缓存 → 区间直通（serveReaderAudioRange）：客户端要哪一段就
+//     从上游边下边发哪一段，同时补全分片。**播放器嗅探完容器一定会带 Range 重开
+//     一次**（media3 的固有行为），所以这条才是真正的起播路径。旧实现要求整章
+//     下完才能按区间下发，每章起播都要等 1–4MB 跨境回源，实测 1.5–35 秒；
+//  3. 冷启动整段请求 → 边下边发给客户端，同时落盘（streamReaderAudioInto）：
+//     播放器嗅探容器的那次 200 请求，几百毫秒就能出声，落盘照旧；
+//  4. 已有 .part 分片的整段请求 → 走整段下载：分片意味着上次已经下到一半，
+//     同步续传剩余字节比重新直通更省流量，下完再一次性下发。
+//
+// 同一条音轨同时只允许一个写入者。等不到写锁的请求降级成纯透传（不排队、不
+// 落盘）：首播直通会一直持锁到客户端读完整章，让它排队等于让播放器的重试干等。
 func handleCachedReaderAudio(
 	c *gin.Context,
 	svc *service.Container,
@@ -1083,15 +1145,36 @@ func handleCachedReaderAudio(
 		serveCachedReaderAudio(c, f, info, rawURL)
 		return
 	}
+	cacheKey := svc.Reader.RemoteAudioCachePath(bookID, rawURL)
+	if cacheKey == "" {
+		c.String(http.StatusBadGateway, "音频缓存不可用")
+		return
+	}
+	rangeHeader := strings.TrimSpace(c.GetHeader("Range"))
+	unlock, locked := readerAudioStreamLocks.LockWait(cacheKey, readerAudioLockWait)
+	if locked {
+		defer unlock()
+		// 排队期间前一个请求可能已经把整章下完：直接下发本地文件，不重复回源。
+		if f, info, ok := svc.Reader.OpenCachedRemoteAudio(bookID, rawURL); ok {
+			defer f.Close()
+			serveCachedReaderAudio(c, f, info, rawURL)
+			return
+		}
+	}
+	if rangeHeader != "" && serveReaderAudioRange(c, svc, book, bookID, rawURL, headers, rangeHeader, locked) {
+		return
+	}
+	if !locked {
+		proxyReaderAudio(c, svc, book, bookID, rawURL, headers, rangeHeader)
+		return
+	}
 	// 播放器拖进度时会带 Range。已缓存的文件才谈得上 Range；未缓存时直通
 	// 只能从 0 发，否则客户端拿到的区间与它请求的对不上。
-	rangeHeader := strings.TrimSpace(c.GetHeader("Range"))
 	canStream := c.Request.Method == http.MethodGet &&
 		rangeHeader == "" &&
 		!svc.Reader.HasPartialRemoteAudio(bookID, rawURL)
-
 	if canStream {
-		handleStreamingReaderAudio(c, svc, book, bookID, rawURL, headers)
+		streamReaderAudioInto(c, svc, book, bookID, rawURL, headers)
 		return
 	}
 
@@ -1117,33 +1200,285 @@ func handleCachedReaderAudio(
 	serveCachedReaderAudio(c, f, info, rawURL)
 }
 
-// handleStreamingReaderAudio 首播直通：一边落盘一边把字节写给客户端。
+// serveReaderAudioRange 区间直通：把客户端请求的那一段从上游边下边发。
+//
+// persist 表示调用方已拿到写锁，可以顺手把字节补进分片（落盘后下次拖动/重播
+// 直接读本地）。返回 false 表示这次没法按区间处理（多区间、后缀区间、上游不认
+// Range 且总长未知等），调用方应退回整段路径。
+func serveReaderAudioRange(
+	c *gin.Context,
+	svc *service.Container,
+	book *model.ReaderBook,
+	bookID, rawURL string,
+	headers map[string]string,
+	rangeHeader string,
+	persist bool,
+) bool {
+	start, end, ok := parseReaderAudioRange(rangeHeader)
+	if !ok {
+		return false
+	}
+
+	// 分片里已经躺着 [0, partLen) 的字节：起点在分片内就先把这段发出去，再从
+	// partLen 处回源续下。起点比分片还靠后说明中间有空洞，拼不上，只能从起点
+	// 重新取，并且不落盘（否则分片会被写成带洞的文件）。
+	var partFile *os.File
+	partLen := int64(0)
+	upstreamStart := start
+	if f, size, okPart := svc.Reader.PartialRemoteAudio(bookID, rawURL); okPart {
+		partFile = f
+		partLen = size
+		if partLen > start {
+			upstreamStart = partLen
+		}
+	}
+	// 收尾时关掉分片句柄：Windows 下「文件还开着就 rename」会被共享冲突挡住，
+	// 提升分片为正式缓存之前必须先关。
+	defer func() {
+		if partFile != nil {
+			_ = partFile.Close()
+		}
+	}()
+
+	out, err := fetchReaderMediaResilient(c.Request.Context(), svc, book, rawURL,
+		fmt.Sprintf("bytes=%d-", upstreamStart), headers, false)
+	if err != nil || out == nil || out.resp == nil {
+		if svc.Log != nil && err != nil {
+			svc.Log.Warn("reader 音频区间直通失败", zap.String("book", bookID), zap.Error(err))
+		}
+		return false
+	}
+	resp := out.resp
+
+	total := int64(-1)
+	switch resp.StatusCode {
+	case http.StatusPartialContent:
+		crStart, crTotal, crOK := reader.ParseContentRange(resp.Header.Get("Content-Range"))
+		if !crOK || crTotal <= 0 || crStart != upstreamStart {
+			drainReaderMediaBody(resp)
+			return false
+		}
+		total = crTotal
+	case http.StatusOK:
+		// 上游忽略了 Range，整段从头给：把前缀读掉丢弃，后面的字节与分片仍然
+		// 对得上（前缀正好也是 [0, upstreamStart)），所以落盘可以照旧。
+		if resp.ContentLength <= 0 {
+			drainReaderMediaBody(resp)
+			return false
+		}
+		if upstreamStart > 0 {
+			if _, copyErr := io.CopyN(io.Discard, resp.Body, upstreamStart); copyErr != nil {
+				drainReaderMediaBody(resp)
+				return false
+			}
+		}
+		total = resp.ContentLength
+	case http.StatusRequestedRangeNotSatisfiable:
+		// 分片比对象还长（对象换过）：丢掉分片走整段路径重来。
+		drainReaderMediaBody(resp)
+		return false
+	default:
+		drainReaderMediaBody(resp)
+		return false
+	}
+	if total <= 0 || start >= total {
+		drainReaderMediaBody(resp)
+		if total > 0 {
+			c.Header("Content-Range", fmt.Sprintf("bytes */%d", total))
+			c.Status(http.StatusRequestedRangeNotSatisfiable)
+			return true
+		}
+		return false
+	}
+
+	serveEnd := end
+	if serveEnd < 0 || serveEnd >= total {
+		serveEnd = total - 1
+	}
+	wantLen := serveEnd - start + 1
+	prefixLen := int64(0)
+	if partFile != nil && partLen > start {
+		prefixLen = partLen - start
+		if prefixLen > wantLen {
+			prefixLen = wantLen
+		}
+	}
+
+	// 响应头必须一次写全：播放器据此决定后面要不要等更多字节。
+	contentType := readerAudioContentType(rawURL)
+	if upstreamType := strings.TrimSpace(resp.Header.Get("Content-Type")); strings.HasPrefix(strings.ToLower(upstreamType), "audio/") {
+		contentType = upstreamType
+	}
+	writer := c.Writer
+	writer.Header().Set("Content-Type", contentType)
+	writer.Header().Set("Accept-Ranges", "bytes")
+	writer.Header().Set("Cache-Control", "private, max-age=604800")
+	writer.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, serveEnd, total))
+	writer.Header().Set("Content-Length", strconv.FormatInt(wantLen, 10))
+	writer.WriteHeader(http.StatusPartialContent)
+	writer.Flush()
+
+	written := int64(0)
+	if prefixLen > 0 {
+		n, copyErr := io.CopyN(writer, io.NewSectionReader(partFile, start, prefixLen), prefixLen)
+		written += n
+		if copyErr != nil {
+			drainReaderMediaBody(resp)
+			if svc.Log != nil {
+				svc.Log.Warn("reader 音频区间下发失败", zap.String("book", bookID), zap.Error(copyErr))
+			}
+			panic(http.ErrAbortHandler)
+		}
+	}
+	// 前缀发完就不需要读句柄了。必须先关掉：Windows 下文件还开着时 rename
+	// 会被共享冲突挡住，下面的「提升分片为正式缓存」就会静默失败。
+	_ = partFile.Close()
+	partFile = nil
+	if written >= wantLen {
+		// 客户端要的区间完全落在本地分片里：这一轮不必再回源。
+		drainReaderMediaBody(resp)
+		return true
+	}
+
+	// 剩余字节边下边发；拿得到写锁时同时补进分片，落满后转成完整缓存。
+	var partWriter *os.File
+	if persist && partLen >= start {
+		if f, size, appendErr := svc.Reader.AppendRemoteAudioPartial(bookID, rawURL); appendErr == nil {
+			if size == partLen {
+				partWriter = f
+			} else {
+				_ = f.Close()
+			}
+		}
+	}
+	sink := io.Writer(writer)
+	if partWriter != nil {
+		sink = io.MultiWriter(writer, partWriter)
+	}
+	copied, copyErr := io.CopyBuffer(sink, io.LimitReader(resp.Body, wantLen-written), make([]byte, 32<<10))
+	written += copied
+	_ = resp.Body.Close()
+	if partWriter != nil {
+		_ = partWriter.Close()
+		if copyErr == nil {
+			// 分片正好落满整章时提升为正式缓存（长度对不上时内部会拒绝）。
+			svc.Reader.PromoteRemoteAudioPartial(bookID, rawURL, total)
+		}
+	}
+	if copyErr == nil && written >= wantLen {
+		return true
+	}
+	if svc.Log != nil {
+		svc.Log.Warn("reader 音频区间中断",
+			zap.String("book", bookID),
+			zap.Int64("written", written),
+			zap.Int64("want", wantLen),
+			zap.Error(copyErr))
+	}
+	// 已经发出去的字节收不回来：只能中止响应让播放器判「不完整」，分片留给下次续传。
+	panic(http.ErrAbortHandler)
+}
+
+// proxyReaderAudio 纯透传：不落盘、不排队，把上游字节原样转给播放器。
+//
+// 用在「同一条音轨已经有别的请求在写分片」时：旧实现让第二个请求排队等前一个
+// 下载结束，而首播直通会一直持锁到客户端读完整章，播放器重试因此可能干等几十秒。
+func proxyReaderAudio(
+	c *gin.Context,
+	svc *service.Container,
+	book *model.ReaderBook,
+	bookID, rawURL string,
+	headers map[string]string,
+	rangeHeader string,
+) {
+	out, err := fetchReaderMediaResilient(c.Request.Context(), svc, book, rawURL,
+		rangeHeader, headers, rangeHeader == "")
+	if err != nil || out == nil || out.resp == nil {
+		if svc.Log != nil && err != nil {
+			svc.Log.Warn("reader 音频透传失败", zap.String("book", bookID), zap.Error(err))
+		}
+		c.String(http.StatusBadGateway, "音频拉取失败")
+		return
+	}
+	resp := out.resp
+	defer func() { _ = resp.Body.Close() }()
+	contentType := readerAudioContentType(rawURL)
+	if upstreamType := strings.TrimSpace(resp.Header.Get("Content-Type")); strings.HasPrefix(strings.ToLower(upstreamType), "audio/") {
+		contentType = upstreamType
+	}
+	writer := c.Writer
+	writer.Header().Set("Content-Type", contentType)
+	writer.Header().Set("Accept-Ranges", "bytes")
+	writer.Header().Set("Cache-Control", "private, max-age=604800")
+	if v := resp.Header.Get("Content-Range"); v != "" {
+		writer.Header().Set("Content-Range", v)
+	}
+	if resp.ContentLength > 0 {
+		writer.Header().Set("Content-Length", strconv.FormatInt(resp.ContentLength, 10))
+	}
+	writer.WriteHeader(resp.StatusCode)
+	if len(out.head) > 0 {
+		if _, writeErr := writer.Write(out.head); writeErr != nil {
+			panic(http.ErrAbortHandler)
+		}
+	}
+	streamReaderMediaBody(writer, resp.Body)
+}
+
+// drainReaderMediaBody 丢掉剩余响应体并关闭连接（让上游把连接收回去）。
+func drainReaderMediaBody(resp *http.Response) {
+	if resp == nil || resp.Body == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	_ = resp.Body.Close()
+}
+
+// parseReaderAudioRange 解析客户端的单区间 Range 头（"bytes=0-" / "bytes=100-199"）。
+//
+// 多区间与后缀区间（"bytes=-500" 要总长才能换算）不在这里处理：播放器不会这么
+// 发，真遇到就退回磁盘路径，由 http.ServeContent 负责。
+func parseReaderAudioRange(header string) (start, end int64, ok bool) {
+	header = strings.TrimSpace(header)
+	const prefix = "bytes="
+	if len(header) <= len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
+		return 0, 0, false
+	}
+	spec := strings.TrimSpace(header[len(prefix):])
+	if spec == "" || strings.Contains(spec, ",") {
+		return 0, 0, false
+	}
+	dash := strings.IndexByte(spec, '-')
+	if dash <= 0 {
+		return 0, 0, false
+	}
+	start, err := strconv.ParseInt(strings.TrimSpace(spec[:dash]), 10, 64)
+	if err != nil || start < 0 {
+		return 0, 0, false
+	}
+	endPart := strings.TrimSpace(spec[dash+1:])
+	if endPart == "" {
+		return start, -1, true
+	}
+	end, err = strconv.ParseInt(endPart, 10, 64)
+	if err != nil || end < start {
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
+// streamReaderAudioInto 首播直通：一边落盘一边把字节写给客户端（调用方已持写锁）。
 //
 // 直接写 c.Writer 而不是先落盘再 ServeContent，是为了让第一个字节尽早到达。
 // 下载失败时客户端已经收到部分字节，只能中止响应（见下面的 panic），
 // 不能改成 502 —— 状态码早就发出去了。
-func handleStreamingReaderAudio(
+func streamReaderAudioInto(
 	c *gin.Context,
 	svc *service.Container,
 	book *model.ReaderBook,
 	bookID, rawURL string,
 	headers map[string]string,
 ) {
-	key := svc.Reader.RemoteAudioCachePath(bookID, rawURL)
-	if key == "" {
-		c.String(http.StatusBadGateway, "音频缓存不可用")
-		return
-	}
-	unlock := readerAudioStreamLocks.Lock(key)
-	defer unlock()
-
-	// 排队期间前一个请求可能已经把整章下完：直接下发本地文件，不重复回源。
-	if f, info, ok := svc.Reader.OpenCachedRemoteAudio(bookID, rawURL); ok {
-		defer f.Close()
-		serveCachedReaderAudio(c, f, info, rawURL)
-		return
-	}
-
 	writer := c.Writer
 	// started 表示响应头是否已发出。没发出时失败还能改成 502；已经发出就只能
 	// 中止连接——状态码收不回来了。

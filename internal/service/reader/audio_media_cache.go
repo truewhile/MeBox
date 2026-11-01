@@ -647,3 +647,84 @@ func (s *ReaderService) pruneAudioMediaCache() {
 		}
 	}
 }
+
+// ─── 区间直通：首播不必等整章下完 ───────────────────────────────────────────
+//
+// 播放器（media3）取一条 m4a 时会开两次请求：先整段打开嗅探容器，再带
+// Range 从目标位置重开。过去「带 Range 的冷缓存请求」只能整章下完再按区间
+// 下发，于是每一章的起播都要等 1–4MB 的跨境回源（实测 1.5–35 秒）。下面这
+// 三个方法让 handler 能把客户端要的那一段边下边发，同时把字节补进分片。
+
+// PartialRemoteAudio 打开未完成分片（只读），返回文件句柄与当前长度。
+//
+// 播放器重开同一条音轨时，分片里已经躺着 [0, size) 的字节：区间直通先把这段
+// 发出去，再从 size 处回源续下，不必为了一个字节重下整章。
+func (s *ReaderService) PartialRemoteAudio(bookID, mediaURL string) (*os.File, int64, bool) {
+	path := s.RemoteAudioCachePath(bookID, mediaURL)
+	if path == "" {
+		return nil, 0, false
+	}
+	f, err := os.Open(path + audioPartialSuffix)
+	if err != nil {
+		return nil, 0, false
+	}
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > audioMediaObjectMaxBytes {
+		_ = f.Close()
+		return nil, 0, false
+	}
+	return f, info.Size(), true
+}
+
+// AppendRemoteAudioPartial 以追加方式打开分片，返回打开那一刻的长度。
+//
+// 调用方必须核对「返回长度 == 它算出的断点」：对不上说明分片已被别的写入者
+// 推进过，此时继续写会把字节落到错误位置，宁可放弃落盘只做纯透传。
+func (s *ReaderService) AppendRemoteAudioPartial(bookID, mediaURL string) (*os.File, int64, error) {
+	path := s.RemoteAudioCachePath(bookID, mediaURL)
+	if path == "" {
+		return nil, 0, errors.New("音频缓存目录未配置")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return nil, 0, fmt.Errorf("创建音频缓存目录失败: %w", err)
+	}
+	f, err := os.OpenFile(path+audioPartialSuffix, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
+	if err != nil {
+		return nil, 0, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, 0, err
+	}
+	return f, info.Size(), nil
+}
+
+// PromoteRemoteAudioPartial 把已经写满的分片转成正式缓存文件。
+//
+// 只认「分片长度 == 上游声明的总长」。区间直通是按播放器节奏下发的，中途断开
+// 时字节数必然不足；把这种分片当完整缓存下发，播放器会表现为「时长正确但后
+// 半段没声音」。
+func (s *ReaderService) PromoteRemoteAudioPartial(bookID, mediaURL string, total int64) bool {
+	path := s.RemoteAudioCachePath(bookID, mediaURL)
+	if path == "" || total <= 0 {
+		return false
+	}
+	partPath := path + audioPartialSuffix
+	info, err := os.Stat(partPath)
+	if err != nil || !info.Mode().IsRegular() || info.Size() != total {
+		return false
+	}
+	if err := os.Rename(partPath, path); err != nil {
+		return false
+	}
+	s.pruneAudioMediaCache()
+	return true
+}
+
+// ParseContentRange 解析 "bytes 100-199/1234" 的起点与总长度。
+//
+// 导出给 handler 用：区间直通要按上游声明的总长自己组装 206 响应头。
+func ParseContentRange(v string) (start, total int64, ok bool) {
+	return parseContentRange(v)
+}
