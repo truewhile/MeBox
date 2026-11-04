@@ -175,3 +175,77 @@ func TestHistoryListCanOmitEmbeddedMedia(t *testing.T) {
 		t.Fatalf("include_media=0 must not embed media: %s", lean.Body.String())
 	}
 }
+
+// TestHistoryListIncludeMediaFalseSkipsHydration 保证 include_media=0 时服务端
+// 真的不 hydrate media：响应里只有历史行（客户端按 media_id 匹配续播目标）。
+func TestHistoryListIncludeMediaFalseSkipsHydration(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.PlaybackHistory{}, &model.Media{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.Media{
+		Base:  model.Base{ID: "media-1"},
+		Title: "影片",
+		Path:  "/media/1.mkv",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for i, mediaID := range []string{"media-1", "media-deleted"} {
+		if err := db.Create(&model.PlaybackHistory{
+			Base:       model.Base{ID: "history-" + mediaID},
+			UserID:     "user-1",
+			MediaID:    mediaID,
+			PositionMs: 30_000,
+			DurationMs: 120_000,
+			WatchedAt:  now.Add(-time.Duration(i) * time.Minute),
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	repos := repository.New(db)
+	svc := &service.Container{
+		Log:      zap.NewNop(),
+		Repo:     repos,
+		Playback: service.NewPlaybackService(zap.NewNop(), repos),
+	}
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set(middleware.CtxUserID, "user-1")
+		c.Next()
+	})
+	router.GET("/watch-history", historyListHandler(svc))
+
+	for _, path := range []string{
+		"/watch-history?limit=10&include_media=0",
+		"/watch-history?limit=10&include_media=false",
+	} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, body = %s", path, rec.Code, rec.Body.String())
+		}
+		var rows []map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+			t.Fatalf("%s decode: %v", path, err)
+		}
+		// 媒体已删除的历史也保留：客户端只按 media_id 判断有没有记录。
+		if len(rows) != 2 {
+			t.Fatalf("%s rows = %d, want 2 (%s)", path, len(rows), rec.Body.String())
+		}
+		for _, row := range rows {
+			if _, ok := row["media"]; ok {
+				t.Fatalf("%s should not embed media: %v", path, row)
+			}
+			if row["media_id"] == "" || row["media_id"] == nil {
+				t.Fatalf("%s missing media_id: %v", path, row)
+			}
+		}
+	}
+}

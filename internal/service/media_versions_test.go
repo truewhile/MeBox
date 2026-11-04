@@ -787,3 +787,76 @@ func TestMediaVersionGroupKeyDistinguishesHalfEpisode(t *testing.T) {
 		t.Fatalf("plain episode key = %q, want suffix 1:11", plainKey)
 	}
 }
+
+// TestGetMediaItemCachesVersionSiblings 覆盖详情页最贵的一次查询：
+// 条目没有外部 ID 时会整库读最多 5000 行来找同片版本，而结果只随扫描/刮削
+// 变化。这里断言第二次打开详情走缓存（删掉候选行后仍能拿到同一组版本），
+// 并且调用方修改返回切片不会污染缓存。
+func TestGetMediaItemCachesVersionSiblings(t *testing.T) {
+	db := newServiceTestDB(t, &model.Library{}, &model.Media{})
+	repos := repository.New(db)
+	lib := model.Library{Name: "电影", Path: "/movies", Type: "movie"}
+	if err := db.Create(&lib).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	rows := []model.Media{
+		{
+			Base:      model.Base{ID: "v-1080", CreatedAt: now, UpdatedAt: now},
+			LibraryID: lib.ID,
+			Title:     "影片 2024 1080p",
+			Path:      "/movies/影片.2024.1080p.mkv",
+			Width:     1920,
+			Height:    1080,
+			Year:      2024,
+		},
+		{
+			Base:      model.Base{ID: "v-2160", CreatedAt: now.Add(time.Hour), UpdatedAt: now.Add(time.Hour)},
+			LibraryID: lib.ID,
+			Title:     "影片 2024 2160p",
+			Path:      "/movies/影片.2024.2160p.mkv",
+			Width:     3840,
+			Height:    2160,
+			Year:      2024,
+		},
+	}
+	if err := db.Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	svc := NewMediaService(&config.Config{}, zap.NewNop(), repos).
+		SetRuntimeCache(NewRuntimeCacheService(&config.Config{}, zap.NewNop()))
+	t.Cleanup(func() { _ = svc.cache.Close() })
+
+	item, err := svc.GetMediaItem(t.Context(), "v-1080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(item.Versions) != 2 {
+		t.Fatalf("versions = %d, want 2: %#v", len(item.Versions), item.Versions)
+	}
+
+	// 把数据删掉：如果第二次还去查库，就只会剩下代表条目自己。
+	if err := db.Where("id = ?", "v-2160").Delete(&model.Media{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.GetMediaItem(t.Context(), "v-1080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Versions) != 2 {
+		t.Fatalf("cached versions = %d, want 2", len(second.Versions))
+	}
+
+	// 调用方乱改返回的切片不能影响缓存内容。
+	second.Versions[0] = model.Media{Base: model.Base{ID: "hacked"}}
+	third, err := svc.GetMediaItem(t.Context(), "v-1080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range third.Versions {
+		if v.ID == "hacked" {
+			t.Fatal("caller mutation leaked into the cached version list")
+		}
+	}
+}

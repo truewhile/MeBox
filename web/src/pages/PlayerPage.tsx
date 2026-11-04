@@ -64,6 +64,7 @@ import {
 //
 //   ?mode=hls       force HLS even when direct play would work
 //   ?mode=direct    force direct play (default for browser-friendly codecs)
+//   ?restart=1      忽略服务端续播进度，从 0 开始播（详情页的「从头播放」入口）
 //
 // ?mode= 只在进入某个媒体时读取一次（媒体详情页的「HLS 兼容转码播放」入口依赖它）；
 // 播放模式不再写回 URL——写 URL 会让 search 变化触发依赖 setSearchParams 的 effect
@@ -101,6 +102,17 @@ function formatMarkTime(totalSec: number): string {
 // 115 云 HLS 中途断流后，允许在窗口内重建几次会话再退回本地转码。
 const CLOUD_HLS_RELOAD_MAX = 3
 const CLOUD_HLS_RELOAD_WINDOW_MS = 10 * 60 * 1000
+
+/**
+ * 逐集切换时保留 ?mode=（HLS/直连是整段会话的选择），但丢掉 ?restart=1：
+ * 「从头播放」只对用户点的那一集生效，下一集仍按自己的续播进度起播。
+ */
+function searchWithoutRestart(search: string): string {
+  const params = new URLSearchParams(search)
+  params.delete('restart')
+  const next = params.toString()
+  return next ? `?${next}` : ''
+}
 
 function normalizePlayerVolume(value: unknown): number {
   const parsed = Number(value)
@@ -1590,6 +1602,8 @@ export function PlayerPage() {
     if (!id) return
     setResumePosition(0)
     setInitialSeekDone(false)
+    // 详情页的「从头播放」显式要求忽略续播：不再去读 /resume，直接从 0 起播。
+    if (new URLSearchParams(window.location.search).get('restart') === '1') return
     const controller = new AbortController()
     playbackAPI
       .getResume(id, controller.signal)
@@ -1855,7 +1869,7 @@ export function PlayerPage() {
     const target = autoPlayEpisodeFor(media, id, playlistEpisodes)
     if (!target) return
     navigate(
-      { pathname: `/play/${target.id}`, search: location.search },
+      { pathname: `/play/${target.id}`, search: searchWithoutRestart(location.search) },
       { replace: true, state: location.state },
     )
   }, [media, id, playlistEpisodes, navigate, location.search, location.state])
@@ -1937,7 +1951,9 @@ export function PlayerPage() {
       navigate(
         {
           pathname: `/play/${target.id}`,
-          search: location.search,
+          // 逐集切换保留 ?mode=，但丢掉 ?restart=1：「从头播放」只对用户点的那一集
+          // 生效，下一集仍按各自的续播进度起播。
+          search: searchWithoutRestart(location.search),
         },
         { state: location.state },
       )

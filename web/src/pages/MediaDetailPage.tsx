@@ -33,6 +33,7 @@ export function MediaDetailPage() {
         isAdmin={role === 'admin'}
         favourite={detail.favourite}
         playTargetId={media.id || detail.firstPlayableEpisode?.id}
+        resume={detail.resume}
         scrapeEpisodeArtwork={detail.scrapeEpisodeArtwork}
         onToggleFavourite={detail.toggleFavourite}
         onScrapeEpisodeArtworkChange={detail.setScrapeEpisodeArtwork}
@@ -53,6 +54,7 @@ export function MediaDetailPage() {
             selectedEpisodes={detail.seasonGroups}
             selectedSeason={detail.selectedSeason}
             visibleEpisodes={detail.visibleEpisodes}
+            progressById={detail.episodeProgress}
             playbackFrom={`/media/${media.id}`}
             onSeasonChange={detail.setSelectedSeason}
           />

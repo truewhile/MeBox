@@ -193,6 +193,79 @@ func (p *PlaybackService) RecentHistory(ctx context.Context, userID string, limi
 	return items, nil
 }
 
+// RecentHistoryWithoutMedia 返回最近观看记录，但完全不 join media。
+//
+// 详情页解析「继续播放」只需要 media_id/position_ms，带整条 media 会让 300 条
+// 响应大一个数量级。旧实现是先用 RecentHistory 把 media 全部查出来（挂载条目
+// 还会逐条串行请求上游 Emby），最后才在 handler 里把 media 置空 —— 也就是
+// 响应变小了，服务端一点没省。这里直接跳过 hydrate：
+//
+//   - 本地条目：用 (id, library_id, nsfw) 窄列查询判断可见性，不读 overview /
+//     path / 海报这些大字段；
+//   - 挂载条目：按挂载媒体库的 ACL 判断，不再发上游请求（上游慢或挂了时，
+//     详情页的续播解析不会被它拖住）；
+//   - 记录还在但 media 已删除：保留。与旧行为一致 —— 旧实现 hydrate 失败时
+//     同样保留这条历史，客户端只拿 media_id 判断续播目标。
+func (p *PlaybackService) RecentHistoryWithoutMedia(ctx context.Context, userID string, limit int, visibility MediaVisibility) ([]HistoryItem, error) {
+	rows, err := p.repo.History.ListByUser(ctx, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return []HistoryItem{}, nil
+	}
+
+	mediaIDs := make([]string, 0, len(rows))
+	for i := range rows {
+		if rows[i].MediaID != "" {
+			mediaIDs = append(mediaIDs, rows[i].MediaID)
+		}
+	}
+	// 只取可见性判定真正需要的三列。Select 到 model.Media 上是本仓库既有写法
+	// （见 database/backfillLibraryRootMedia），未选中的字段保持零值。
+	visibleByID := make(map[string]bool, len(mediaIDs))
+	if len(mediaIDs) > 0 {
+		var lean []model.Media
+		if err := p.repo.DB.WithContext(ctx).Model(&model.Media{}).
+			Select("id", "library_id", "nsfw").
+			Where("id IN ?", mediaIDs).
+			Find(&lean).Error; err != nil {
+			return nil, err
+		}
+		for i := range lean {
+			visibleByID[lean[i].ID] = visibility.Allows(&lean[i])
+		}
+	}
+
+	// 挂载库 ACL 每个挂载只解析一次：ResolveMount 只读本地表，不发网络请求。
+	mountAllowed := make(map[string]bool, 2)
+	items := make([]HistoryItem, 0, len(rows))
+	for i := range rows {
+		mediaID := rows[i].MediaID
+		if allowed, known := visibleByID[mediaID]; known {
+			if allowed {
+				items = append(items, HistoryItem{PlaybackHistory: rows[i]})
+			}
+			continue
+		}
+		if p.remote != nil && IsEmbyRemoteID(mediaID) {
+			mountID, _, _ := DecodeEmbyRemoteID(mediaID)
+			allowed, resolved := mountAllowed[mountID]
+			if !resolved {
+				mount, _, resolveErr := p.remote.ResolveMount(ctx, mountID)
+				// 挂载解析不出来时无法判定，沿用旧行为保留这条历史。
+				allowed = resolveErr != nil || mount == nil || EmbyMountLibraryAllowed(visibility, mount)
+				mountAllowed[mountID] = allowed
+			}
+			if !allowed {
+				continue
+			}
+		}
+		items = append(items, HistoryItem{PlaybackHistory: rows[i]})
+	}
+	return items, nil
+}
+
 // ─── Favourites ─────────────────────────────────────────────────────────────
 
 // ToggleFavourite flips the favourite flag and reports the new state.

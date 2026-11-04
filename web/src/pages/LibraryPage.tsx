@@ -29,6 +29,7 @@ import { LibrarySeriesDetailSection } from './LibrarySeriesDetailSection'
 import { useLibraryData } from './useLibraryData'
 import { useLibraryScanStatus } from './useLibraryScanStatus'
 import { useLibrarySeriesSelection } from './useLibrarySeriesSelection'
+import { useSeriesEpisodeResume } from './useSeriesEpisodeResume'
 import { useLibraryAdminActions } from './useLibraryAdminActions'
 import { usePermission } from '../hooks/usePermission'
 import { useFavourites } from '../hooks/useFavourites'
@@ -214,6 +215,13 @@ export function LibraryPage() {
     setSelectedSeason,
     onClearSeriesState: () => setSeriesMetadataEditOpen(false),
   })
+  // 抽屉里的「继续播放」：在整剧所有集里挑最近看过的一条（代表条目可能是 OVA）。
+  const { resume: seriesResume, progressById: seriesEpisodeProgress } = useSeriesEpisodeResume(
+    selectedSeries?.key ?? '',
+    selectedSeries?.rep ?? null,
+    selectedSeriesAllEpisodes,
+  )
+
   const selectedSeriesScrapeMedia = selectedSeriesEpisodes.find((media) => !isTheatricalFeature(media))
     ?? selectedSeries?.rep
     ?? null
@@ -350,6 +358,8 @@ export function LibraryPage() {
         selectedSeason={selectedSeason}
         visibleEpisodes={visibleEpisodes}
         allEpisodes={selectedSeriesEpisodes}
+        resume={seriesResume}
+        episodeProgress={seriesEpisodeProgress}
         loadingEpisodes={loadingSeriesEpisodes}
         playbackFrom={`${location.pathname}${location.search}`}
         isAdmin={role === 'admin'}

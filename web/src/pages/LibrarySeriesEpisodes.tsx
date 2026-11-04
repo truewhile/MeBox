@@ -12,6 +12,11 @@ import {
 } from '../utils/groupSeries'
 import { formatSize } from './libraryPageModel'
 import { formatEpisodeLabel, formatEpisodeNumber } from '../utils/episodeNumber'
+import {
+  formatResumeClock,
+  progressPercent,
+  type EpisodeProgress,
+} from './mediaDetailResumeModel'
 
 type SeasonGroup = {
   season: number
@@ -24,6 +29,8 @@ type LibrarySeriesEpisodesProps = {
   selectedSeason: number | null
   visibleEpisodes: Media[]
   playbackFrom: string
+  /** 每集（按条目 id）的续播进度，用于卡片上的进度条。 */
+  progressById?: Map<string, EpisodeProgress>
   isAdmin?: boolean
   onSeasonChange: (season: number) => void
   onManualScrape?: (media: Media) => void
@@ -35,6 +42,7 @@ export function LibrarySeriesEpisodes({
   selectedSeason,
   visibleEpisodes,
   playbackFrom,
+  progressById,
   isAdmin = false,
   onSeasonChange,
   onManualScrape,
@@ -76,6 +84,7 @@ export function LibrarySeriesEpisodes({
           {visibleEpisodes.map((ep) => {
             const displayTitle = episodeDisplayTitle(ep, visibleEpisodes)
             const versionCount = ep.versions?.length ?? 1
+            const progress = progressById?.get(ep.id)
             return (
               <div
                 key={ep.id}
@@ -117,6 +126,21 @@ export function LibrarySeriesEpisodes({
                         : formatSize(ep.size_bytes)}
                       {versionCount > 1 ? ` · ${versionCount} 版本` : ''}
                     </p>
+                    {progress && (
+                      <div className="mt-1 flex items-center gap-1.5" title={progressTitle(progress)}>
+                        <div className="h-1 w-14 overflow-hidden rounded-full bg-sand-200">
+                          <div
+                            className="h-full rounded-full bg-brand-500"
+                            style={{ width: `${progressPercent(progress)}%` }}
+                          />
+                        </div>
+                        <span className="text-[10px] font-medium text-brand-600 whitespace-nowrap">
+                          {progress.completed
+                            ? '已看完'
+                            : `看到 ${formatResumeClock(progress.positionMs)}`}
+                        </span>
+                      </div>
+                    )}
                   </div>
                 </Link>
                 <div className="flex shrink-0 items-center gap-1">
@@ -140,6 +164,13 @@ export function LibrarySeriesEpisodes({
       </div>
     </>
   )
+}
+
+function progressTitle(progress: EpisodeProgress): string {
+  if (progress.completed) return '已看完'
+  const position = formatResumeClock(progress.positionMs)
+  const duration = formatResumeClock(progress.durationMs)
+  return duration ? `看到 ${position} / ${duration}` : `看到 ${position}`
 }
 
 function episodeDisplayTitle(ep: Media, siblings: Media[]): string {

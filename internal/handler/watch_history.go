@@ -30,10 +30,12 @@ import (
 //
 // include_media=0 只返回历史行本身。客户端判断「继续播放」指向哪一集时只
 // 需要 media_id/position_ms；带上整条 media 会让 300 条的响应从 ~40KB 涨到
-// ~420KB，手机链路上光传输就要十几秒，详情页的续播解析会被它拖住。
+// ~420KB。更重要的是服务端不再 hydrate：不查整条 media、也不为挂载条目
+// 逐条请求上游 Emby（见 PlaybackService.RecentHistoryWithoutMedia）。
 func historyListHandler(svc *service.Container) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		uid, _ := c.Get(middleware.CtxUserID)
+		userID := toString(uid)
 		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
 		if limit <= 0 || limit > 500 {
 			limit = 50
@@ -44,19 +46,27 @@ func historyListHandler(svc *service.Container) gin.HandlerFunc {
 				includeMedia = parsed
 			}
 		}
-		items, err := svc.Playback.RecentHistory(c.Request.Context(), toString(uid), limit)
+		ctx := c.Request.Context()
+		visibility := mediaVisibilityForRequest(c, svc)
+		if !includeMedia {
+			// 可见性由服务层用窄列查询判定，handler 不再需要 media。
+			items, err := svc.Playback.RecentHistoryWithoutMedia(ctx, userID, limit, visibility)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, items)
+			return
+		}
+		items, err := svc.Playback.RecentHistory(ctx, userID, limit)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		visibility := mediaVisibilityForRequest(c, svc)
 		filtered := make([]service.HistoryItem, 0, len(items))
 		for _, item := range items {
-			// 可见性仍然按 media 判断，只是决定要不要把它写进响应。
+			// 可见性按 media 判断：媒体已删除/远端取不到时仍然保留这条历史。
 			if item.Media == nil || visibility.Allows(item.Media) {
-				if !includeMedia {
-					item.Media = nil
-				}
 				filtered = append(filtered, item)
 			}
 		}

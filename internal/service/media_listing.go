@@ -255,6 +255,35 @@ func (s *MediaService) listVersionSiblings(ctx context.Context, media *model.Med
 	if len(libraryIDs) == 0 {
 		libraryIDs = []string{media.LibraryID}
 	}
+	// 同一个版本组的结果对组内任一成员都成立，而且只随扫描/刮削变化：缓存它
+	// 才能让「逐部点开详情」的浏览不再每次都重扫该库最多 5000 行。
+	cacheKey := s.versionSiblingsCacheKey(libraryIDs, key)
+	if s.cache != nil {
+		if obj, ok := s.cache.GetObject(cacheKey); ok {
+			if cached, ok := obj.([]model.Media); ok {
+				// GetObject 返回的对象此后视为不可变，调用方（详情页）可能重排/追加
+				// 切片，所以拷贝一份再交出去。
+				out := make([]model.Media, len(cached))
+				copy(out, cached)
+				return out, nil
+			}
+		}
+	}
+	matched, err := s.loadVersionSiblings(ctx, media, libraryIDs, key)
+	if err != nil {
+		return nil, err
+	}
+	if s.cache != nil {
+		s.cache.SetObject(cacheKey, matched, s.derivedReadCacheTTL())
+	}
+	out := make([]model.Media, len(matched))
+	copy(out, matched)
+	return out, nil
+}
+
+// loadVersionSiblings 是版本分组的慢路径（可能读全库），结果由
+// listVersionSiblings 缓存。
+func (s *MediaService) loadVersionSiblings(ctx context.Context, media *model.Media, libraryIDs []string, key string) ([]model.Media, error) {
 	filter := repository.MediaQueryFilter{IncludeNSFW: true}
 	// 成人条目按番号分组，而番号常常只存在于路径/标题里：本地 NFO 来源的分片
 	// 没有 douban_id/thetvdb_id（MetaTube 刮削出来的那几个才有）。若仍按外部
@@ -263,6 +292,7 @@ func (s *MediaService) listVersionSiblings(ctx context.Context, media *model.Med
 	// 直接在该库范围内比对版本键。未刮削但文件名带番号的分片同理：同一部片的
 	// 各分片元数据来源不一致（刮削 vs pending），收窄后标题也对不上。
 	var candidates []model.Media
+	var err error
 	narrowed := false
 	hasAdultCode := mediaAdultGroupCode(*media) != "" ||
 		canonicalAdultGroupCode(AdultCodeFromMediaPath(media.Path)) != ""

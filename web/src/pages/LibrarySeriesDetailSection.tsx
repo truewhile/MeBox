@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 
 import type { Media } from '../types'
 import type { SeriesCard } from '../utils/groupSeries'
+import type { EpisodeProgress, MediaDetailResume } from './mediaDetailResumeModel'
 import { LibrarySeriesDetailHeader } from './LibrarySeriesDetailHeader'
 import { LibrarySeriesEpisodes } from './LibrarySeriesEpisodes'
 
@@ -16,6 +17,8 @@ type LibrarySeriesDetailSectionProps = {
   selectedSeason: number | null
   visibleEpisodes: Media[]
   allEpisodes: Media[]
+  resume: MediaDetailResume | null
+  episodeProgress: Map<string, EpisodeProgress>
   loadingEpisodes: boolean
   playbackFrom: string
   isAdmin: boolean
@@ -42,6 +45,8 @@ export function LibrarySeriesDetailSection({
   selectedSeason,
   visibleEpisodes,
   allEpisodes,
+  resume,
+  episodeProgress,
   loadingEpisodes,
   playbackFrom,
   isAdmin,
@@ -73,6 +78,7 @@ export function LibrarySeriesDetailSection({
           <LibrarySeriesDetailHeader
             series={selectedSeries}
             allEpisodes={allEpisodes}
+            resume={resume}
             playbackFrom={playbackFrom}
             isAdmin={isAdmin}
             canFavorite={canFavorite}
@@ -95,6 +101,7 @@ export function LibrarySeriesDetailSection({
             selectedEpisodes={selectedEpisodes}
             selectedSeason={selectedSeason}
             visibleEpisodes={visibleEpisodes}
+            progressById={episodeProgress}
             playbackFrom={playbackFrom}
             isAdmin={isAdmin}
             onSeasonChange={onSeasonChange}
@@ -111,6 +118,7 @@ type LibrarySeriesEpisodesPanelProps = {
   selectedEpisodes: SeasonEpisodes[]
   selectedSeason: number | null
   visibleEpisodes: Media[]
+  progressById: Map<string, EpisodeProgress>
   playbackFrom: string
   isAdmin: boolean
   onSeasonChange: (season: number) => void
@@ -122,6 +130,7 @@ function LibrarySeriesEpisodesPanel({
   selectedEpisodes,
   selectedSeason,
   visibleEpisodes,
+  progressById,
   playbackFrom,
   isAdmin,
   onSeasonChange,
@@ -134,6 +143,7 @@ function LibrarySeriesEpisodesPanel({
         selectedEpisodes={selectedEpisodes}
         selectedSeason={selectedSeason}
         visibleEpisodes={visibleEpisodes}
+        progressById={progressById}
         playbackFrom={playbackFrom}
         isAdmin={isAdmin}
         onSeasonChange={onSeasonChange}

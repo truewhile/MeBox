@@ -113,3 +113,65 @@ func TestPlaybackProgressCompletedThreshold(t *testing.T) {
 		})
 	}
 }
+
+// TestRecentHistoryWithoutMediaSkipsHydration 覆盖详情页用的轻量历史路径：
+// 不返回 media，但可见性过滤必须与带 media 的版本一致。
+func TestRecentHistoryWithoutMediaSkipsHydration(t *testing.T) {
+	db := newServiceTestDB(t, &model.PlaybackHistory{}, &model.Media{}, &model.Library{})
+	repos := repository.New(db)
+	svc := NewPlaybackService(zap.NewNop(), repos)
+
+	seed := func(id, libraryID string, nsfw bool) {
+		t.Helper()
+		m := model.Media{
+			Base:      model.Base{ID: id},
+			LibraryID: libraryID,
+			Title:     "标题 " + id,
+			Path:      "/media/" + id + ".mkv",
+			NSFW:      nsfw,
+		}
+		if err := db.Create(&m).Error; err != nil {
+			t.Fatalf("seed media %s: %v", id, err)
+		}
+	}
+	seed("visible", "lib-ok", false)
+	seed("adult", "lib-ok", true)
+	seed("hidden-lib", "lib-hidden", false)
+
+	now := time.Now()
+	for i, mediaID := range []string{"visible", "adult", "hidden-lib", "gone"} {
+		if err := db.Create(&model.PlaybackHistory{
+			Base:       model.Base{ID: "hist-" + mediaID},
+			UserID:     "user-1",
+			MediaID:    mediaID,
+			PositionMs: 10_000,
+			DurationMs: 60_000,
+			WatchedAt:  now.Add(-time.Duration(i) * time.Minute),
+		}).Error; err != nil {
+			t.Fatalf("seed history %s: %v", mediaID, err)
+		}
+	}
+
+	items, err := svc.RecentHistoryWithoutMedia(context.Background(), "user-1", 50, MediaVisibility{
+		HiddenLibraryIDs: []string{"lib-hidden"},
+	})
+	if err != nil {
+		t.Fatalf("RecentHistoryWithoutMedia: %v", err)
+	}
+	got := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Media != nil {
+			t.Fatalf("expected no media hydration, got %#v", item.Media)
+		}
+		got = append(got, item.MediaID)
+	}
+	want := []string{"visible", "gone"}
+	if len(got) != len(want) {
+		t.Fatalf("media ids = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("media ids = %v, want %v", got, want)
+		}
+	}
+}

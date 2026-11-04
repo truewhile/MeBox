@@ -10,6 +10,7 @@ import { MetadataEditDialog } from '../components/MetadataEditDialog'
 import { OrganizeMediaDialog } from '../components/OrganizeMediaDialog'
 import type { Media } from '../types'
 import { isDirectStreamMedia } from './playerPageModel'
+import { canContinuePlaying, continueButtonLabel, type MediaDetailResume } from './mediaDetailResumeModel'
 import { MediaDetailAdminPanel } from './MediaDetailAdminPanel'
 import { MediaDetailPoster } from './MediaDetailArtwork'
 import { MediaDetailMetadata } from './MediaDetailMetadata'
@@ -20,6 +21,7 @@ interface MediaDetailPlaybackActionsProps {
   favourite: boolean
   onToggleFavourite: () => void
   playTargetId?: string
+  resume?: MediaDetailResume | null
 }
 
 interface MediaDetailMainContentProps extends MediaDetailPlaybackActionsProps {
@@ -96,8 +98,12 @@ export function MediaDetailPlaybackActions({
   favourite,
   onToggleFavourite,
   playTargetId,
+  resume,
 }: MediaDetailPlaybackActionsProps) {
-  const targetId = media.id || playTargetId || ''
+  // 代表条目可能是 OVA/特别篇：有续播记录时优先打开历史命中的那一集（或那集的
+  // 其它版本），并直接把「看到第几秒」写在按钮上。播放器仍会自己读 /resume。
+  const resumeTarget = resume && canContinuePlaying(resume) ? resume : null
+  const targetId = resumeTarget?.mediaId || media.id || playTargetId || ''
   return (
     <div className="flex flex-wrap items-center gap-2.5">
       <Link
@@ -106,8 +112,19 @@ export function MediaDetailPlaybackActions({
         className="btn-primary h-11 px-6 shadow-sm"
       >
         <Play size={16} fill="currentColor" />
-        <span>立即播放</span>
+        <span>{resumeTarget ? continueButtonLabel(resumeTarget) : '立即播放'}</span>
       </Link>
+
+      {resumeTarget && (
+        <Link
+          to={`/play/${resumeTarget.mediaId}?restart=1`}
+          state={{ from: `/media/${media.id}` }}
+          className="btn-ghost h-11 px-4 text-sm"
+          title="忽略续播进度，从 0 开始播放"
+        >
+          <span>从头播放</span>
+        </Link>
+      )}
 
       {!isDirectStreamMedia(media) && (
         <Link
@@ -143,6 +160,7 @@ export function MediaDetailMainContent({
   isAdmin,
   favourite,
   playTargetId,
+  resume,
   scrapeEpisodeArtwork,
   onToggleFavourite,
   onScrapeEpisodeArtworkChange,
@@ -167,6 +185,7 @@ export function MediaDetailMainContent({
             favourite={favourite}
             onToggleFavourite={onToggleFavourite}
             playTargetId={playTargetId}
+            resume={resume}
           />
           <MediaVersionSwitcher media={media} />
         </div>

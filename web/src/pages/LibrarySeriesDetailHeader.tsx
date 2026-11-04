@@ -8,10 +8,12 @@ import { MediaFavouriteButton } from '../components/MediaFavouriteButton'
 import type { Media } from '../types'
 import { isTheatricalFeature, seriesTitle, type SeriesCard } from '../utils/groupSeries'
 import { episodeNumberValue } from '../utils/episodeNumber'
+import { canContinuePlaying, continueButtonLabel, type MediaDetailResume } from './mediaDetailResumeModel'
 
 type LibrarySeriesDetailHeaderProps = {
   series: SeriesCard
   allEpisodes: Media[]
+  resume: MediaDetailResume | null
   playbackFrom: string
   isAdmin: boolean
   canFavorite: boolean
@@ -32,6 +34,7 @@ type LibrarySeriesDetailHeaderProps = {
 export function LibrarySeriesDetailHeader({
   series,
   allEpisodes,
+  resume,
   playbackFrom,
   isAdmin,
   canFavorite,
@@ -51,6 +54,9 @@ export function LibrarySeriesDetailHeader({
   const tvEpisodes = allEpisodes.filter((media) => !isTheatricalFeature(media))
   const theatricalCount = allEpisodes.length - tvEpisodes.length
   const firstEpisode = firstPlayableEpisode(tvEpisodes)
+  // 看过的剧先给「继续播放 · 第N集 · mm:ss」，指向真正看的那一集；
+  // 没有可用进度时保持原来的「从第一集开始播放」。
+  const resumeTarget = resume && canContinuePlaying(resume) ? resume : null
 
   return (
     <>
@@ -90,14 +96,32 @@ export function LibrarySeriesDetailHeader({
           </p>
 
           <div className="flex flex-wrap gap-2">
-            {firstEpisode && (
+            {resumeTarget ? (
               <>
-                <Link to={`/play/${firstEpisode.id}`} state={{ from: playbackFrom }} className="btn-primary inline-flex">
+                <Link to={`/play/${resumeTarget.mediaId}`} state={{ from: playbackFrom }} className="btn-primary inline-flex">
                   <Play size={16} fill="currentColor" />
-                  从第一集开始播放
+                  {continueButtonLabel(resumeTarget)}
                 </Link>
-                <ExternalPlayerButton mediaId={firstEpisode.id} label="外部播放器播放" />
+                <Link
+                  to={`/play/${resumeTarget.mediaId}?restart=1`}
+                  state={{ from: playbackFrom }}
+                  className="btn-outline inline-flex"
+                  title="忽略续播进度，从 0 开始播放"
+                >
+                  从头播放
+                </Link>
+                <ExternalPlayerButton mediaId={resumeTarget.mediaId} label="外部播放器播放" />
               </>
+            ) : (
+              firstEpisode && (
+                <>
+                  <Link to={`/play/${firstEpisode.id}`} state={{ from: playbackFrom }} className="btn-primary inline-flex">
+                    <Play size={16} fill="currentColor" />
+                    从第一集开始播放
+                  </Link>
+                  <ExternalPlayerButton mediaId={firstEpisode.id} label="外部播放器播放" />
+                </>
+              )
             )}
             {canFavorite && (
               <MediaFavouriteButton

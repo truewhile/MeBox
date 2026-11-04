@@ -179,6 +179,22 @@ func (s *MediaService) libraryCardsObjectKey(libraryID string, visibility MediaV
 	return s.seriesCardsCacheKey(libraryID, visibility) + ":obj"
 }
 
+// 版本分组对象的缓存 key。
+//
+// 详情页的「同片多版本」以前每次都现算：条目没有 series_id / tmdb / douban /
+// thetvdb 时走不到收窄分支，会直接把这个库最多 5000 行整行读出来再逐条算版本
+// 键（实测 5000 行的库单次 ~180ms，且没有缓存）。同一个版本组的结果只随扫描/
+// 刮削变化，所以按「合并库集合 + 版本组键」缓存，配合 media: 前缀一起被
+// invalidateMediaCache 清掉。
+func (s *MediaService) versionSiblingsCacheKey(libraryIDs []string, groupKey string) string {
+	libs := append([]string(nil), libraryIDs...)
+	sort.Strings(libs)
+	return "media:obj:version-siblings:" + hashObjectCacheKey([]string{
+		strings.Join(libs, ","),
+		groupKey,
+	})
+}
+
 func (s *MediaService) invalidateMediaCache(ctx context.Context) {
 	if s != nil && s.cache != nil {
 		s.cache.DeletePrefix(ctx, "media:")

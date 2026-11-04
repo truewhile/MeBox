@@ -3,13 +3,19 @@ import { useLocation, type NavigateFunction } from 'react-router-dom'
 import toast from 'react-hot-toast'
 
 import { api } from '../api/client'
+import { historyAPI } from '../api/history'
 import { mediaAPI } from '../api/library'
 import { playbackAPI } from '../api/playback'
 import { confirmActionResult } from '../components/confirmAction'
 import { useEpisodeArtworkPreference } from '../hooks/useEpisodeArtworkPreference'
-import type { Media } from '../types'
+import type { HistoryItem, Media } from '../types'
 import { seasonSortOrder } from '../utils/groupSeries'
 import { episodeNumberValue } from '../utils/episodeNumber'
+import {
+  episodeProgressById,
+  resolveMediaDetailResume,
+  RESUME_SCAN_LIMIT,
+} from './mediaDetailResumeModel'
 import { mediaLibraryBackTarget } from './MediaDetailPageModel'
 
 type MediaDetailLocationState = { from?: string } | null
@@ -26,6 +32,7 @@ interface MediaDetailRefreshParams {
   setLoading: Dispatch<SetStateAction<boolean>>
   setEpisodes: Dispatch<SetStateAction<Media[]>>
   setLoadingEpisodes: Dispatch<SetStateAction<boolean>>
+  setHistory: Dispatch<SetStateAction<HistoryItem[]>>
 }
 
 interface MediaDetailActionsParams {
@@ -43,6 +50,7 @@ export function useMediaDetailPageState({ id, navigate }: MediaDetailPageStatePa
   const [loading, setLoading] = useState(true)
   const [episodes, setEpisodes] = useState<Media[]>([])
   const [loadingEpisodes, setLoadingEpisodes] = useState(false)
+  const [history, setHistory] = useState<HistoryItem[]>([])
   const [selectedSeason, setSelectedSeason] = useState<number | null>(null)
 
   const [manualScrapeOpen, setManualScrapeOpen] = useState(false)
@@ -57,6 +65,7 @@ export function useMediaDetailPageState({ id, navigate }: MediaDetailPageStatePa
     setLoading,
     setEpisodes,
     setLoadingEpisodes,
+    setHistory,
   })
   const location = useLocation()
   const backFrom = (location.state as MediaDetailLocationState)?.from
@@ -108,6 +117,17 @@ export function useMediaDetailPageState({ id, navigate }: MediaDetailPageStatePa
     return (visibleEpisodes.length > 0 ? visibleEpisodes[0] : episodes[0]) || null
   }, [episodes, visibleEpisodes])
 
+  // 「继续播放」：在「本条目 + 全部剧集（含版本）」里找最近看过的一条。
+  // 详情页的代表条目可能是 OVA/特别篇，所以不能只看它自己的进度。
+  const resume = useMemo(
+    () => resolveMediaDetailResume(media, episodes, history),
+    [episodes, history, media],
+  )
+  const episodeProgress = useMemo(
+    () => episodeProgressById(episodes, history),
+    [episodes, history],
+  )
+
   const handleMetadataSaved = useCallback(async (next: Media) => {
     setMedia(next)
     await refresh()
@@ -124,6 +144,8 @@ export function useMediaDetailPageState({ id, navigate }: MediaDetailPageStatePa
     visibleEpisodes,
     hasEpisodes,
     firstPlayableEpisode,
+    resume,
+    episodeProgress,
     setSelectedSeason,
     manualScrapeOpen,
     metadataEditOpen,
@@ -146,20 +168,26 @@ function useMediaDetailRefresh({
   setLoading,
   setEpisodes,
   setLoadingEpisodes,
+  setHistory,
 }: MediaDetailRefreshParams): () => Promise<void> {
   return useCallback(async () => {
     if (!id) return
     setLoading(true)
     setLoadingEpisodes(true)
     try {
-      // 三个请求并行发出；详情一到就解锁整页渲染，收藏状态与分集列表
-      // 到达后各自补齐（原先完全串行，首屏要排队等满三个往返）。
+      // 四个请求并行发出；详情一到就解锁整页渲染，收藏、分集列表、续播历史
+      // 到达后各自补齐（原先完全串行，首屏要排队等满所有往返）。
       const nextMediaPromise = mediaAPI.get(id)
       const favouritePromise = playbackAPI.favouriteStatus(id).catch(() => false)
       const episodesPromise = mediaAPI
         .getEpisodes(id)
         .then((r) => r.items ?? [])
         .catch(() => [])
+      // 续播扫描只要历史行（include_media=false）：服务端不 join media，
+      // 300 条也只有几十 KB。
+      const historyPromise = historyAPI
+        .listRows(RESUME_SCAN_LIMIT)
+        .catch(() => [] as HistoryItem[])
 
       const nextMedia = await nextMediaPromise
       setMedia(nextMedia)
@@ -169,11 +197,12 @@ function useMediaDetailRefresh({
 
       const episodes = await episodesPromise
       setEpisodes(episodes)
+      setHistory(await historyPromise)
     } finally {
       setLoading(false)
       setLoadingEpisodes(false)
     }
-  }, [id, setFavourite, setLoading, setMedia, setEpisodes, setLoadingEpisodes])
+  }, [id, setFavourite, setHistory, setLoading, setMedia, setEpisodes, setLoadingEpisodes])
 }
 
 function useMediaDetailActions({
