@@ -4,6 +4,7 @@
 // 一样存 reader_chapters，用 ReaderChapter.Tag 记住定位信息：
 //   - TXT：UTF-8 规范化后文件内的字节区间 "start:end"（读章节只读这段，不载整本）
 //   - EPUB：zip 内的 XHTML 条目路径（每次按需解压该条）
+//
 // 网络书籍不受影响：ReaderBook.LocalPath 为空即走书源链路。
 package reader
 
@@ -481,6 +482,13 @@ func (s *ReaderService) BackfillLocalCover(ctx context.Context, book *model.Read
 func (s *ReaderService) LocalChapterContent(
 	ctx context.Context, userID, bookID string, chapterIndex int,
 ) (*ChapterContent, error) {
+	return s.localChapterContentWithOptions(ctx, userID, bookID, chapterIndex, ContentOptions{})
+}
+
+// localChapterContentWithOptions 保留网页默认行为，原生客户端可选择自行解码音轨。
+func (s *ReaderService) localChapterContentWithOptions(
+	ctx context.Context, userID, bookID string, chapterIndex int, opts ContentOptions,
+) (*ChapterContent, error) {
 	book, err := s.repo.GetBook(ctx, bookID)
 	if err != nil {
 		return nil, err
@@ -501,12 +509,20 @@ func (s *ReaderService) LocalChapterContent(
 	ch := chapters[chapterIndex]
 	// 本地有声书：一章 = 一个音频文件或一个 .strm 播放指针
 	if book.Type == 1 {
-		track, transcoding, err := s.localAudioTrack(book, ch)
+		track, transcoding, err := s.localAudioTrackWithOptions(book, ch, opts)
 		if err != nil {
 			return nil, err
 		}
+		// 签名代理路径隐藏了 .m3u8 后缀，客户端必须收到 HLS 类型才能选对解复用器。
+		isHLS := looksLikeHLSURL(track)
+		if parsed, parseErr := url.Parse(track); parseErr == nil && parsed.Path == "/api/reader/media" {
+			q := parsed.Query()
+			if original, verifyErr := s.VerifyProxyURL(book.ID, q.Get("u"), q.Get("s")); verifyErr == nil {
+				isHLS = looksLikeHLSURL(original)
+			}
+		}
 		return &ChapterContent{
-			Type: "audio", Tracks: []string{track}, Transcoding: transcoding, declaredType: -1,
+			Type: "audio", Tracks: []string{track}, Transcoding: transcoding, IsHLS: isHLS, declaredType: -1,
 		}, nil
 	}
 	text, err := s.readLocalChapter(book, ch)
@@ -528,6 +544,11 @@ func (s *ReaderService) LocalChapterContent(
 // .strm 指针解析成远端地址（走媒体代理）或本地文件（走本地音频端点）；
 // 浏览器解不了的格式（WMA 等）改走转码端点。第二个返回值表示该章需要转码。
 func (s *ReaderService) localAudioTrack(book *model.ReaderBook, ch model.ReaderChapter) (string, bool, error) {
+	return s.localAudioTrackWithOptions(book, ch, ContentOptions{})
+}
+
+// localAudioTrackWithOptions 原生解码只跳过浏览器转码选择，仍使用相同的签名端点。
+func (s *ReaderService) localAudioTrackWithOptions(book *model.ReaderBook, ch model.ReaderChapter, opts ContentOptions) (string, bool, error) {
 	target := strings.TrimSpace(ch.Tag)
 	if target == "" {
 		return "", false, fmt.Errorf("章节定位信息损坏，请重新导入该书")
@@ -546,7 +567,7 @@ func (s *ReaderService) localAudioTrack(book *model.ReaderBook, ch model.ReaderC
 			target = filepath.Join(filepath.Dir(ch.Tag), target)
 		}
 	}
-	if needsAudioTranscode(target) {
+	if !opts.NativeAudio && needsAudioTranscode(target) {
 		if s.ffmpegBinary() == "" {
 			return "", false, transcodeMissingFFmpegError(target)
 		}

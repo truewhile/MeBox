@@ -2023,19 +2023,23 @@ func readerLocalAudioHandler(svc *service.Container) gin.HandlerFunc {
 
 // readerContentOptions 从查询参数解析正文下发的可选项。
 //
-// 目前只有 `media` 一个维度：
 //   - 不传（网页端）：媒体全部走服务端签名代理，与历史行为一致；
 //   - `media=direct`：书源开启直连时保留上游地址，由客户端自取；
-//   - `media=proxy`：本次强制代理，给客户端直连失败时的退路。
+//   - `media=proxy`：本次强制代理，给客户端直连失败时的退路；
+//   - `audio=native`：由客户端原生解码音频，不走本地有声书的浏览器转码。
+//
+// audio 与 media 独立，原生解码同样可以走签名代理。
 func readerContentOptions(c *gin.Context) reader.ContentOptions {
+	opts := reader.ContentOptions{
+		NativeAudio: strings.EqualFold(strings.TrimSpace(c.Query("audio")), "native"),
+	}
 	switch strings.ToLower(strings.TrimSpace(c.Query("media"))) {
 	case "direct":
-		return reader.ContentOptions{MediaDirect: true}
+		opts.MediaDirect = true
 	case "proxy":
-		return reader.ContentOptions{ForceProxy: true}
-	default:
-		return reader.ContentOptions{}
+		opts.ForceProxy = true
 	}
+	return opts
 }
 
 // readerBookContentHandler 书架维度正文（服务端应用替换净化规则）。

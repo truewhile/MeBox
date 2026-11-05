@@ -1870,6 +1870,9 @@ type ChapterContent struct {
 // 拉取字节再转发。MediaDirect 让客户端（Android App）自己去取上游字节，
 // 服务端只负责解析地址与下发请求头。
 type ContentOptions struct {
+	// NativeAudio 由客户端原生解码音频，本地有声书返回原始音轨，不检查 ffmpeg。
+	// 与 MediaDirect / ForceProxy 独立：只选择解码方式，不改变媒体签名与访问权限。
+	NativeAudio bool
 	// MediaDirect 请求直连媒体字节。仅对开启了 MediaDirect 的书源生效，
 	// 否则仍返回代理地址，避免把未验证的源推到客户端直连。
 	MediaDirect bool
@@ -3245,7 +3248,7 @@ func (s *ReaderService) GetContentForBook(ctx context.Context, userID, bookID st
 	}
 	// 本地导入书籍：正文直接从本地文件读，不走书源
 	if book.LocalPath != "" {
-		return s.LocalChapterContent(ctx, userID, bookID, chapterIndex)
+		return s.localChapterContentWithOptions(ctx, userID, bookID, chapterIndex, opts)
 	}
 	chapters, err := s.repo.ListChapters(ctx, bookID)
 	if err != nil {
@@ -3388,6 +3391,7 @@ type ContentBatchItem struct {
 	Images       []string         `json:"images,omitempty"`
 	ImageStyle   string           `json:"image_style,omitempty"`
 	IsHLS        bool             `json:"hls,omitempty"`
+	Transcoding  bool             `json:"transcoding,omitempty"`
 	Comments     []ContentComment `json:"comments,omitempty"`
 	// Cached 为 true 表示这次由持久缓存直接命中（未访问书源）。
 	Cached bool   `json:"cached"`
@@ -3500,6 +3504,7 @@ func batchItemFromContent(index int, out *ChapterContent, applyReplace bool, use
 		Images:       out.Images,
 		ImageStyle:   out.ImageStyle,
 		IsHLS:        out.IsHLS,
+		Transcoding:  out.Transcoding,
 		Comments:     out.Comments,
 		MediaDirect:  out.MediaDirect,
 		MediaHeaders: out.MediaHeaders,
