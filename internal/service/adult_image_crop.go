@@ -73,17 +73,17 @@ func CropAdultCoverPosterForCode(data []byte, code string) ([]byte, string, erro
 	}
 	src, format, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
-		return data, format, err
+		return data, imageMIMEForFormat(format), err
 	}
 	bounds := src.Bounds()
 	width := bounds.Dx()
 	height := bounds.Dy()
 	if width <= 0 || height <= 0 {
-		return data, format, nil
+		return data, imageMIMEForFormat(format), nil
 	}
 	// If the image is already portrait or square, keep it as-is.
 	if float64(width) <= float64(height)*1.15 {
-		return data, format, nil
+		return data, imageMIMEForFormat(format), nil
 	}
 
 	position := 1.0
@@ -99,6 +99,26 @@ func CropAdultCoverPosterForCode(data []byte, code string) ([]byte, string, erro
 		return data, format, err
 	}
 	return buf.Bytes(), "image/jpeg", nil
+}
+
+// imageMIMEForFormat maps the format name returned by image.Decode ("jpeg" / "png" / "webp" …) to a MIME
+// type. The sidecar extension is derived from the MIME type, so handing back the bare format name made
+// every already-portrait poster fall through to the legacy ".img" extension.
+func imageMIMEForFormat(format string) string {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "jpeg", "jpg":
+		return "image/jpeg"
+	case "png":
+		return "image/png"
+	case "webp":
+		return "image/webp"
+	case "gif":
+		return "image/gif"
+	case "avif":
+		return "image/avif"
+	default:
+		return ""
+	}
 }
 
 // adultCoverNeedsFaceDetection reports whether the cover composition has to be probed with the face

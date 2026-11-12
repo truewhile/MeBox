@@ -96,7 +96,8 @@ func TestAdultProviderRouting(t *testing.T) {
 	if len(candidates) != 1 {
 		t.Fatalf("expected 1 candidate, got %d", len(candidates))
 	}
-	wantPoster := mtServer.URL + "/v1/images/primary/javdb/999?auto=true&pos=1&quality=90&ratio=-1&url=https%3A%2F%2Fexample.com%2Fposter.jpg"
+	// SSIS-001 是常规番号：MetaTube 代理不得开启人脸定位，固定取最右侧封面面板。
+	wantPoster := mtServer.URL + "/v1/images/primary/javdb/999?auto=false&pos=1&quality=90&ratio=-1&url=https%3A%2F%2Fexample.com%2Fposter.jpg"
 	wantBackdrop := mtServer.URL + "/v1/images/backdrop/javdb/999?quality=90"
 	if candidates[0].PosterURL != wantPoster || candidates[0].BackdropURL != wantBackdrop {
 		t.Fatalf("candidate artwork was not enriched: %#v", candidates[0])
@@ -170,8 +171,8 @@ func TestBuiltinAdultScrapeUsesMetaTubeFaceAwareArtwork(t *testing.T) {
 	if match == nil {
 		t.Fatal("expected built-in match")
 	}
-	wantPoster := metaTubeServer.URL + "/v1/images/primary/AVE/999?auto=true&pos=1&quality=90&ratio=-1&url=https%3A%2F%2Fexample.com%2Fwide-cover.jpg"
+	wantPoster := metaTubeServer.URL + "/v1/images/primary/AVE/999?auto=false&pos=1&quality=90&ratio=-1&url=https%3A%2F%2Fexample.com%2Fwide-cover.jpg"
 	if match.PosterURL != wantPoster {
-		t.Fatalf("built-in poster = %q, want face-aware URL %q", match.PosterURL, wantPoster)
+		t.Fatalf("built-in poster = %q, want MetaTube-processed URL %q", match.PosterURL, wantPoster)
 	}
 }

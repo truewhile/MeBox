@@ -172,6 +172,31 @@ func TestDownloadArtworkMigratesLocalImgToCanonicalCroppedJPEG(t *testing.T) {
 	}
 }
 
+// 已经裁好的竖版海报（例如 MetaTube 服务端裁好的 2:3 图）再次写入时不能再退化成 .img：
+// 早期版本把 image.Decode 的格式名当 MIME 用，落盘扩展名就成了 .img。
+func TestDownloadArtworkKeepsCanonicalExtensionForPortraitSource(t *testing.T) {
+	scraper := &ScraperService{log: zap.NewNop()}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "movie-poster-src.jpg")
+	portrait := createTestImage(400, 600, color.RGBA{R: 255, A: 255}, color.RGBA{B: 255, A: 255})
+	if err := os.WriteFile(src, portrait, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟历史遗留的 .img 退格式文件。
+	legacy := filepath.Join(dir, "movie-poster.img")
+	if err := os.WriteFile(legacy, portrait, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := scraper.downloadArtworkToPathWithOptions(t.Context(), dir, "movie-poster", src, true, "SSNI-677")
+	if filepath.Base(dst) != "movie-poster.jpg" {
+		t.Fatalf("destination = %q, want canonical .jpg (not .img)", dst)
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("legacy .img should be cleaned up, stat err = %v", err)
+	}
+}
+
 // TestWriteMediaArtworkFilesAfterScrapeSkipsCloud verifies that cloud media
 // never has artwork written anywhere.
 func TestWriteMediaArtworkFilesAfterScrapeSkipsCloud(t *testing.T) {

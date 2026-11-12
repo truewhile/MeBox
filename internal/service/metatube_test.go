@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"go.uber.org/zap"
@@ -137,7 +138,8 @@ func TestMetaTubeProviderGetMovie(t *testing.T) {
 	if match.Overview != "超绝美少女相沢みなみ出道作品！" {
 		t.Errorf("unexpected overview: %s", match.Overview)
 	}
-	if want := server.URL + "/v1/images/primary/javdb/123456?auto=true&pos=1&quality=90&ratio=-1&url=https%3A%2F%2Fexample.com%2Fbig_cover.jpg"; match.PosterURL != want {
+	// IPX-235 是常规 DVD 番号：服务端不得开启人脸定位（auto=false），否则主簇会落到封底的剧照拼贴。
+	if want := server.URL + "/v1/images/primary/javdb/123456?auto=false&pos=1&quality=90&ratio=-1&url=https%3A%2F%2Fexample.com%2Fbig_cover.jpg"; match.PosterURL != want {
 		t.Errorf("poster URL = %q, want %q", match.PosterURL, want)
 	}
 	if want := server.URL + "/v1/images/backdrop/javdb/123456?quality=90"; match.BackdropURL != want {
@@ -185,5 +187,32 @@ func TestMetaTubeProviderTestConnection(t *testing.T) {
 	resFail, errFail := provider.TestConnection(context.Background(), server.URL, "wrong-token")
 	if errFail == nil && resFail.Success {
 		t.Fatalf("expected failure for wrong token, got %v", resFail)
+	}
+}
+
+// MetaTube 代理的 auto 参数决定服务端是否用 Pigo 做人脸定位裁切。
+// 常规 DVD 番号的封套封底是剧照拼贴、密布人脸，开启 auto 会裁出「半张封底」；
+// 只有 FC2 / HEYZO / 素人 / 无码这类构图不固定的封面才应该开启。
+func TestMetaTubeArtworkURLsFaceDetectionPolicy(t *testing.T) {
+	cfg := MetaTubeConfig{ServerURL: "https://mt.example", CropCover: true}
+	cases := []struct {
+		code     string
+		wantAuto string
+	}{
+		{"IPX-235", "false"},
+		{"SSNI-677", "false"},
+		{"NGOD-361", "false"},
+		{"FC2-PPV-482896", "true"},
+		{"HEYZO-1234", "true"},
+		{"123456-789", "true"},
+	}
+	for _, c := range cases {
+		poster, _ := metaTubeArtworkURLs(cfg, "javdb", "123456", "https://example.com/pl.jpg", c.code)
+		if !strings.Contains(poster, "auto="+c.wantAuto) {
+			t.Errorf("%s: poster URL = %q, want auto=%s", c.code, poster, c.wantAuto)
+		}
+		if !strings.Contains(poster, "pos=1") {
+			t.Errorf("%s: poster URL = %q, want pos=1", c.code, poster)
+		}
 	}
 }

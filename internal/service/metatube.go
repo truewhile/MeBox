@@ -352,7 +352,7 @@ func (p *MetaTubeProvider) convertSearchResultToMatch(cfg MetaTubeConfig, query 
 	year := parseYearFromDate(res.ReleaseDate)
 
 	posterSource := firstNonEmpty(res.BigCoverURL, res.CoverURL, res.BigThumbURL, res.ThumbURL)
-	posterURL, backdropURL := metaTubeArtworkURLs(cfg, res.Provider, res.ID, posterSource)
+	posterURL, backdropURL := metaTubeArtworkURLs(cfg, res.Provider, res.ID, posterSource, code)
 	if posterURL == "" {
 		posterURL = firstNonEmpty(res.BigThumbURL, res.ThumbURL, res.BigCoverURL, res.CoverURL)
 	}
@@ -396,7 +396,7 @@ func (p *MetaTubeProvider) convertMovieInfoToMatch(cfg MetaTubeConfig, movie *Me
 	year := parseYearFromDate(movie.ReleaseDate)
 
 	posterSource := firstNonEmpty(movie.BigCoverURL, movie.CoverURL, movie.BigThumbURL, movie.ThumbURL)
-	posterURL, backdropURL := metaTubeArtworkURLs(cfg, movie.Provider, movie.ID, posterSource)
+	posterURL, backdropURL := metaTubeArtworkURLs(cfg, movie.Provider, movie.ID, posterSource, code)
 	if posterURL == "" {
 		posterURL = firstNonEmpty(movie.BigThumbURL, movie.ThumbURL, movie.BigCoverURL, movie.CoverURL)
 	}
@@ -440,7 +440,13 @@ func (p *MetaTubeProvider) convertMovieInfoToMatch(cfg MetaTubeConfig, movie *Me
 	}
 }
 
-func metaTubeArtworkURLs(cfg MetaTubeConfig, provider, id, posterSource string) (string, string) {
+// metaTubeArtworkURLs 构造 MetaTube 图片代理地址。
+//
+// auto（服务端人脸定位）只能对特殊番号（FC2 / HEYZO / 素人 / 无码）开启，这与 MetaTube
+// 官方插件的默认行为一致：常规 DVD 番号的封套是 [封底 | 书脊 | 封面] 横图，封底那半张是样本
+// 剧照拼贴、密布人脸，服务端的人脸主簇会落到拼贴/书脊上，裁出来就是「半张封底」。
+// 常规番号固定 pos=1（最右侧封面面板）才能拿到正确封面。
+func metaTubeArtworkURLs(cfg MetaTubeConfig, provider, id, posterSource, code string) (string, string) {
 	serverURL := strings.TrimRight(strings.TrimSpace(cfg.ServerURL), "/")
 	provider = strings.TrimSpace(provider)
 	id = strings.TrimSpace(id)
@@ -459,7 +465,7 @@ func metaTubeArtworkURLs(cfg MetaTubeConfig, provider, id, posterSource string) 
 			}
 			if cfg.CropCover {
 				values.Set("pos", "1")
-				values.Set("auto", "true")
+				values.Set("auto", strconv.FormatBool(adultCoverNeedsFaceDetection(code)))
 			} else {
 				values.Set("pos", "-1")
 				values.Set("auto", "false")

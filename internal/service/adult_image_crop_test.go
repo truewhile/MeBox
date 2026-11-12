@@ -167,9 +167,13 @@ func TestCropAdultCoverPosterKeepsPortrait(t *testing.T) {
 	// Create an already vertical portrait image (500x700)
 	origBytes := createTestImage(500, 700, color.RGBA{R: 255, A: 255}, color.RGBA{B: 255, A: 255})
 
-	croppedBytes, _, err := CropAdultCoverPoster(origBytes)
+	croppedBytes, ctype, err := CropAdultCoverPoster(origBytes)
 	if err != nil {
 		t.Fatalf("CropAdultCoverPoster error: %v", err)
+	}
+	// 未裁剪时必须回传真正的 MIME（image/jpeg），否则侧车文件扩展名会退化成 .img。
+	if ctype != "image/jpeg" {
+		t.Fatalf("portrait ctype = %q, want image/jpeg", ctype)
 	}
 
 	croppedImg, _, err := image.Decode(bytes.NewReader(croppedBytes))

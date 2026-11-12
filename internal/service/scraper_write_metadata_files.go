@@ -140,7 +140,10 @@ func (s *ScraperService) downloadArtworkToPathWithOptions(ctx context.Context, d
 	if cropAdultPoster {
 		if cropped, croppedType, err := CropAdultCoverPosterForCode(data, adultCode); err == nil && len(cropped) > 0 {
 			data = cropped
-			ctype = croppedType
+			// 裁剪函数在“无需裁剪”时会原样返回，类型可能为空：此时保留 sniff 出来的 MIME。
+			if strings.TrimSpace(croppedType) != "" {
+				ctype = croppedType
+			}
 		}
 	}
 	return s.writeArtworkDataToPath(dir, name, ctype, data)
@@ -197,7 +200,23 @@ func (s *ScraperService) writeArtworkDataToPath(dir, name, ctype string, data []
 		return ""
 	}
 	s.log.Debug("scrape artwork written", zap.String("dst", dst))
+	s.removeLegacyArtworkImg(dir, name, dst)
 	return dst
+}
+
+// removeLegacyArtworkImg 清理同名历史 "<name>.img" 文件。
+//
+// 早期版本把 image.Decode 的格式名（"jpeg"/"webp"）当作 MIME 写进扩展名映射，
+// 导致这些海报全部以 .img 落盘。现在写出正确扩展名后，旧 .img 只会是孤立垃圾，
+// 但 local_metadata_artwork 仍会扫到它，所以一并清掉。
+func (s *ScraperService) removeLegacyArtworkImg(dir, name, dst string) {
+	legacy := filepath.Join(dir, name+".img")
+	if strings.EqualFold(legacy, dst) {
+		return
+	}
+	if err := os.Remove(legacy); err == nil {
+		s.log.Debug("scrape artwork removed legacy .img", zap.String("dst", legacy))
+	}
 }
 
 // artworkFileUnchanged 报告 path 是否已经就是 data 这些字节。
