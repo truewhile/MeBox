@@ -155,7 +155,7 @@ func TestDownloadArtworkMigratesLocalImgToCanonicalCroppedJPEG(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dst := scraper.downloadArtworkToPathWithOptions(t.Context(), dir, "movie-poster", legacy, true)
+	dst := scraper.downloadArtworkToPathWithOptions(t.Context(), dir, "movie-poster", legacy, true, "SSNI-677")
 	if filepath.Base(dst) != "movie-poster.jpg" {
 		t.Fatalf("destination = %q, want canonical JPEG sidecar", dst)
 	}

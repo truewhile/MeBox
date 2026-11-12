@@ -8,6 +8,7 @@ import (
 	_ "image/png" // register PNG decoder
 	"strings"
 
+	"github.com/metatube-community/metatube-sdk-go/common/number"
 	"github.com/metatube-community/metatube-sdk-go/detector"
 	_ "golang.org/x/image/webp" // register WebP decoder for AVE covers
 )
@@ -46,11 +47,27 @@ func IsAdultArtworkURL(raw string) bool {
 		strings.Contains(lower, "pics.dmm.co.jp")
 }
 
-// CropAdultCoverPoster checks if the image data is a wide full-jacket DVD cover (width > height * 1.15).
-// If so, it uses MetaTube's Pigo face detector to position a 2:3 poster crop.
-// When no face is detected, it falls back to the conventional right-side front cover.
+// CropAdultCoverPoster checks if the image data is a wide full-jacket DVD cover (width > height * 1.15)
+// and crops the conventional right-side front cover out of it. It is the code-agnostic entry point;
+// prefer CropAdultCoverPosterForCode when the movie number is known.
 // If the image is already portrait or cannot be decoded, it safely returns the original data.
 func CropAdultCoverPoster(data []byte) ([]byte, string, error) {
+	return CropAdultCoverPosterForCode(data, "")
+}
+
+// CropAdultCoverPosterForCode crops a 2:3 poster out of a wide full-jacket DVD cover.
+//
+// Layout matters: a regular DVD jacket is [封底 | 书脊 | 封面] unfolded right-to-left, so the
+// front cover is always the right-most panel — exactly what upstream MetaTube does with its
+// default position 1.0. Face detection is only meaningful for "special" numbers
+// (FC2 / HEYZO / 素人 / 无码) whose cover is a snapshot whose composition varies
+// (see metatube-sdk-go/common/number.RequiresFaceDetection).
+//
+// Running the detector on a regular jacket is actively harmful: the back cover of those jackets is a
+// montage of sample stills that is packed with faces, so the dominant face cluster lands on the montage
+// (or right on the spine), and a crop centred there straddles the seam giving "half back cover + half
+// front cover" posters.
+func CropAdultCoverPosterForCode(data []byte, code string) ([]byte, string, error) {
 	if len(data) == 0 {
 		return data, "", nil
 	}
@@ -70,8 +87,10 @@ func CropAdultCoverPoster(data []byte) ([]byte, string, error) {
 	}
 
 	position := 1.0
-	if detected, ok := findPrimaryFaceAxisRatio(src, adultPosterRatio, true); ok {
-		position = detected
+	if adultCoverNeedsFaceDetection(code) {
+		if detected, ok := findPrimaryFaceAxisRatio(src, adultPosterRatio, true); ok {
+			position = snapAdultCoverPosition(detected)
+		}
 	}
 	cropped := cropImageAtPosition(src, adultPosterRatio, position)
 
@@ -80,6 +99,28 @@ func CropAdultCoverPoster(data []byte) ([]byte, string, error) {
 		return data, format, err
 	}
 	return buf.Bytes(), "image/jpeg", nil
+}
+
+// adultCoverNeedsFaceDetection reports whether the cover composition has to be probed with the face
+// detector, mirroring upstream MetaTube: only "special" numbers (FC2 / HEYZO / 素人 / 无码) qualify,
+// regular DVD numbers are always cropped at the right-most panel.
+func adultCoverNeedsFaceDetection(code string) bool {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return false
+	}
+	return number.RequiresFaceDetection(code)
+}
+
+// snapAdultCoverPosition quantises a detected face axis onto a whole panel. A wide jacket only has two
+// legal framings — the left panel or the right panel — so the crop window must never be centred on the
+// detected axis itself: when that axis sits on/near the spine the result is a poster showing the right
+// half of the back cover plus the left sliver of the front cover.
+func snapAdultCoverPosition(position float64) float64 {
+	if position >= 0.5 {
+		return 1.0 // right panel: flush with the right edge
+	}
+	return 0.0 // left panel: flush with the left edge
 }
 
 func cropImageAtPosition(src image.Image, ratio, position float64) image.Image {

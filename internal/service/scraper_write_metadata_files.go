@@ -46,26 +46,31 @@ func (s *ScraperService) writeMediaArtworkFilesAfterScrape(ctx context.Context, 
 		return
 	}
 	isAdult := shouldCropAdultPoster(refreshed, lib)
+	// 番号决定封套的裁剪方式：常规 DVD 取最右侧封面面板，FC2 / HEYZO / 素人等才做人脸定位。
+	adultCode := ""
+	if isAdult {
+		adultCode = AdultCodeFromMediaPath(refreshed.Path)
+	}
 	artworkUpdates := map[string]any{}
 	shouldPersistLocalArtworkURL := func(raw string) bool {
 		return isAdult || !isHTTPish(raw)
 	}
 	if refreshed.PosterURL != "" {
-		if dst := s.downloadArtworkToPathWithOptions(ctx, dir, base+"-poster", refreshed.PosterURL, isAdult); dst != "" {
+		if dst := s.downloadArtworkToPathWithOptions(ctx, dir, base+"-poster", refreshed.PosterURL, isAdult, adultCode); dst != "" {
 			if shouldPersistLocalArtworkURL(refreshed.PosterURL) {
 				artworkUpdates["poster_url"] = filepath.Join(filepath.Dir(refreshed.Path), filepath.Base(dst))
 			}
 		}
 	}
 	if refreshed.BackdropURL != "" {
-		if dst := s.downloadArtworkToPathWithOptions(ctx, dir, base+"-backdrop", refreshed.BackdropURL, false); dst != "" {
+		if dst := s.downloadArtworkToPathWithOptions(ctx, dir, base+"-backdrop", refreshed.BackdropURL, false, ""); dst != "" {
 			if shouldPersistLocalArtworkURL(refreshed.BackdropURL) {
 				artworkUpdates["backdrop_url"] = filepath.Join(filepath.Dir(refreshed.Path), filepath.Base(dst))
 			}
 		}
 	} else if isAdult && refreshed.PosterURL != "" {
 		// 番号海报原图为完整封套横图，在无独立背景图时直接作为背景图写出
-		if dst := s.downloadArtworkToPathWithOptions(ctx, dir, base+"-backdrop", refreshed.PosterURL, false); dst != "" {
+		if dst := s.downloadArtworkToPathWithOptions(ctx, dir, base+"-backdrop", refreshed.PosterURL, false, ""); dst != "" {
 			artworkUpdates["backdrop_url"] = filepath.Join(filepath.Dir(refreshed.Path), filepath.Base(dst))
 		}
 	}
@@ -78,7 +83,7 @@ func (s *ScraperService) writeMediaArtworkFilesAfterScrape(ctx context.Context, 
 }
 
 func (s *ScraperService) downloadArtworkToPath(ctx context.Context, dir, name, raw string) string {
-	return s.downloadArtworkToPathWithOptions(ctx, dir, name, raw, false)
+	return s.downloadArtworkToPathWithOptions(ctx, dir, name, raw, false, "")
 }
 
 // shouldCropAdultPoster keeps adult-cover handling independent of which
@@ -97,8 +102,9 @@ func shouldCropAdultPoster(media *model.Media, lib *model.Library) bool {
 }
 
 // downloadArtworkToPathWithOptions fetches an artwork URL via the image proxy cache and
-// writes it under dir/<name>.<ext>. For adult posters, it crops the right half of the cover.
-func (s *ScraperService) downloadArtworkToPathWithOptions(ctx context.Context, dir, name, raw string, cropAdultPoster bool) string {
+// writes it under dir/<name>.<ext>. For adult posters it crops the front-cover panel out of the
+// full-jacket cover (adultCode selects between “right-most panel” and face-aware framing).
+func (s *ScraperService) downloadArtworkToPathWithOptions(ctx context.Context, dir, name, raw string, cropAdultPoster bool, adultCode string) string {
 	var (
 		data  []byte
 		ctype string
@@ -132,7 +138,7 @@ func (s *ScraperService) downloadArtworkToPathWithOptions(ctx context.Context, d
 		ctype = detected
 	}
 	if cropAdultPoster {
-		if cropped, croppedType, err := CropAdultCoverPoster(data); err == nil && len(cropped) > 0 {
+		if cropped, croppedType, err := CropAdultCoverPosterForCode(data, adultCode); err == nil && len(cropped) > 0 {
 			data = cropped
 			ctype = croppedType
 		}

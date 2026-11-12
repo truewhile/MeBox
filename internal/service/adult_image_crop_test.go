@@ -80,7 +80,7 @@ func TestCropAdultCoverPosterDecodesWebP(t *testing.T) {
 	}
 }
 
-func TestCropAdultCoverPosterCentersDetectedFace(t *testing.T) {
+func TestCropAdultCoverPosterUsesDetectedPanelForSpecialNumber(t *testing.T) {
 	originalDetector := findPrimaryFaceAxisRatio
 	findPrimaryFaceAxisRatio = func(image.Image, float64, bool) (float64, bool) {
 		return 0.25, true
@@ -90,7 +90,8 @@ func TestCropAdultCoverPosterCentersDetectedFace(t *testing.T) {
 	}()
 
 	origBytes := createTestImage(900, 600, color.RGBA{R: 255, A: 255}, color.RGBA{B: 255, A: 255})
-	croppedBytes, _, err := CropAdultCoverPoster(origBytes)
+	// 素人/FC2 这类番号构图不固定，允许人脸检测决定取哪一侧面板。
+	croppedBytes, _, err := CropAdultCoverPosterForCode(origBytes, "FC2-PPV-123456")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +101,65 @@ func TestCropAdultCoverPosterCentersDetectedFace(t *testing.T) {
 	}
 	r, _, b, _ := croppedImg.At(croppedImg.Bounds().Dx()/2, croppedImg.Bounds().Dy()/2).RGBA()
 	if r <= b {
-		t.Fatalf("face-positioned crop did not follow detected left-side axis: r=%d b=%d", r, b)
+		t.Fatalf("special-number crop did not follow detected left-side axis: r=%d b=%d", r, b)
+	}
+}
+
+// 常规 DVD 番号的封套是 [封底 | 书脊 | 封面] 横图，封底那半张是样本剧照拼贴、充满人脸。
+// 做人脸检测会让主簇落在拼贴或书脊上，裁出「半张封底 + 半张封面」。
+// 这里模拟检测器给出跨缝的 0.42，要求常规番号完全忽略检测结果，只裁最右侧封面面板。
+func TestCropAdultCoverPosterIgnoresFaceDetectionForStandardNumber(t *testing.T) {
+	originalDetector := findPrimaryFaceAxisRatio
+	findPrimaryFaceAxisRatio = func(image.Image, float64, bool) (float64, bool) {
+		return 0.42, true
+	}
+	defer func() {
+		findPrimaryFaceAxisRatio = originalDetector
+	}()
+
+	origBytes := createTestImage(900, 600, color.RGBA{R: 255, A: 255}, color.RGBA{B: 255, A: 255})
+	croppedBytes, _, err := CropAdultCoverPosterForCode(origBytes, "SSNI-677")
+	if err != nil {
+		t.Fatal(err)
+	}
+	croppedImg, _, err := image.Decode(bytes.NewReader(croppedBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _, b, _ := croppedImg.At(croppedImg.Bounds().Dx()/2, croppedImg.Bounds().Dy()/2).RGBA()
+	if b <= r {
+		t.Fatalf("standard-number crop should be the right-most panel (blue), got r=%d b=%d", r, b)
+	}
+}
+
+// 即使需要人脸定位，裁切框也必须吸附到整块面板，绝不能跨在书脊上。
+func TestCropAdultCoverPosterSnapsToPanelForSpecialNumber(t *testing.T) {
+	originalDetector := findPrimaryFaceAxisRatio
+	findPrimaryFaceAxisRatio = func(image.Image, float64, bool) (float64, bool) {
+		return 0.42, true // 介于两个面板之间：落在书脊上
+	}
+	defer func() {
+		findPrimaryFaceAxisRatio = originalDetector
+	}()
+
+	origBytes := createTestImage(900, 600, color.RGBA{R: 255, A: 255}, color.RGBA{B: 255, A: 255})
+	croppedBytes, _, err := CropAdultCoverPosterForCode(origBytes, "HEYZO-1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	croppedImg, _, err := image.Decode(bytes.NewReader(croppedBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bounds := croppedImg.Bounds()
+	// 左侧面板 = 纯红；任何偏蓝像素都意味着裁切框越过了中线。
+	for y := bounds.Min.Y; y < bounds.Max.Y; y += 8 {
+		for x := bounds.Min.X; x < bounds.Max.X; x += 8 {
+			r, _, b, _ := croppedImg.At(x, y).RGBA()
+			if b > r {
+				t.Fatalf("crop straddles the panel seam at (%d,%d): r=%d b=%d", x, y, r, b)
+			}
+		}
 	}
 }
 
