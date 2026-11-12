@@ -22,6 +22,7 @@ func registerAdminRoutes(api *gin.RouterGroup, cfg *config.Config, svc *service.
 	registerAdminAPIConfigRoutes(admin, svc)
 	registerAdminRecognitionWordRoutes(admin, svc)
 	registerAdminStrmRoutes(admin, svc)
+	registerAdminCloudDownloadRoutes(admin, svc)
 	registerAdminScraperRoutes(admin, svc)
 	registerAdminDatabaseRoutes(admin, svc)
 

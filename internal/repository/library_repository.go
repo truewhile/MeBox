@@ -123,6 +123,20 @@ func (r *LibraryRepository) ListRoots(ctx context.Context, libraryID string) ([]
 	return roots, err
 }
 
+// ListEnabledRoots 返回全部已启用媒体库的全部启用路径。
+// 用于「本地目录 → 媒体库」的反查（云下载完成后只扫相关库，而不是全库重扫）。
+func (r *LibraryRepository) ListEnabledRoots(ctx context.Context) ([]model.LibraryRoot, error) {
+	if !r.hasLibraryRootsTable() {
+		return nil, nil
+	}
+	var roots []model.LibraryRoot
+	err := r.db.WithContext(ctx).
+		Where("enabled = ?", true).
+		Order("sort_order asc, created_at asc").
+		Find(&roots).Error
+	return roots, err
+}
+
 func (r *LibraryRepository) FindRootByID(ctx context.Context, libraryID, rootID string) (*model.LibraryRoot, error) {
 	if !r.hasLibraryRootsTable() {
 		return nil, nil

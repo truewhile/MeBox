@@ -1,9 +1,11 @@
 /* eslint-disable react-refresh/only-export-components */
 import { useCallback, useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import {
   Ban,
   Cloud,
+  CloudDownload,
   Download,
   FolderPlus,
   HardDrive,
@@ -206,6 +208,10 @@ export function StrmManagePage() {
             <FolderPlus size={16} />
             添加同步目录
           </button>
+          <Link to="/cloud-downloads" className="neon-button">
+            <CloudDownload size={16} />
+            云下载
+          </Link>
         </div>
       </header>
 

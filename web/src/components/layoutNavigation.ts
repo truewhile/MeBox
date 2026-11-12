@@ -2,6 +2,7 @@ import type { LucideIcon } from 'lucide-react'
 import {
   Clock,
   AlertTriangle,
+  CloudDownload,
   ListChecks as SetupIcon,
   FileOutput,
   FolderOpen,
@@ -49,6 +50,7 @@ export const LAYOUT_NAV_ITEMS: LayoutNavItem[] = [
   { to: '/files', label: '文件管理', icon: FolderOpen, adminOnly: true },
   { to: '/emby-mount', label: 'Emby 挂载', icon: Tv, adminOnly: true },
   { to: '/strm', label: 'STRM 管理', icon: FileOutput, adminOnly: true },
+  { to: '/cloud-downloads', label: '云下载', icon: CloudDownload, adminOnly: true },
   { to: '/settings', label: '系统设置', icon: Settings, adminOnly: true },
 ]
 

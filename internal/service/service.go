@@ -72,6 +72,7 @@ type Container struct {
 	RecognitionWords *RecognitionWordsService
 	Danmaku          *DanmakuService
 	Strm             *StrmService
+	CloudDownload    *CloudDownloadService
 	Cloud115         *Cloud115PlaybackService
 	Reader           *reader.ReaderService
 	Database         *DatabaseAdminService
@@ -128,6 +129,11 @@ func (c *Container) Boot() {
 		c.Strm.Start(c.stopCtx)
 	}
 
+	// 115 云下载：恢复中断的后处理阶段 + 启动后处理推进循环。
+	if c.CloudDownload != nil {
+		c.CloudDownload.Start(c.stopCtx)
+	}
+
 	// 启动刮削队列后台消费者
 	if c.Scraper != nil {
 		c.Scraper.Start(c.stopCtx)
@@ -177,6 +183,9 @@ func (c *Container) Close() {
 	}
 	if c.Strm != nil {
 		c.Strm.Stop()
+	}
+	if c.CloudDownload != nil {
+		c.CloudDownload.Stop()
 	}
 	if c.Watcher != nil {
 		c.Watcher.Stop()

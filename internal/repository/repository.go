@@ -35,6 +35,7 @@ type Container struct {
 	StrmDownload   *StrmDownloadTaskRepository
 	StrmUpload     *StrmUploadTaskRepository
 	StrmDirCache   *StrmDirCacheRepository
+	CloudDownload  *CloudDownloadRepository
 	ScrapeTask     *ScrapeTaskRepository
 	EmbyMount      *EmbyMountRepository
 	Reader         *ReaderRepository
@@ -69,6 +70,7 @@ func New(db *gorm.DB) *Container {
 		StrmDownload:   &StrmDownloadTaskRepository{db: db},
 		StrmUpload:     &StrmUploadTaskRepository{db: db},
 		StrmDirCache:   &StrmDirCacheRepository{db: db},
+		CloudDownload:  &CloudDownloadRepository{db: db},
 		ScrapeTask:     &ScrapeTaskRepository{db: db},
 		EmbyMount:      &EmbyMountRepository{db: db},
 		Reader:         &ReaderRepository{db: db},

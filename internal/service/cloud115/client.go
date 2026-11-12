@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -130,13 +132,23 @@ type RespBase struct {
 
 // doJSON 执行 HTTP 请求并解析为统一响应；带 AccessToken（access=true 时）。
 func (c *OpenClient) doJSON(ctx context.Context, method, rawURL string, form map[string]string, access bool, retries int, uas ...string) (*RespBase, error) {
-	executor := c.executor
-	if executor == nil {
-		executor = GetGlobalExecutor()
-	}
 	ua := ""
 	if len(uas) > 0 {
 		ua = uas[0]
+	}
+	return c.doJSONWithBuilder(ctx, func() (*http.Request, error) {
+		return c.buildRequestWithUA(ctx, method, rawURL, form, access, ua)
+	}, access, retries)
+}
+
+// doJSONWithBuilder 与 doJSON 共用同一套限流、重试、令牌刷新与错误封装逻辑，
+// 差别只在请求构造方式：urlencoded（doJSON）、multipart（doAuthMultipart）。
+// 云下载（offline）系列接口要求 multipart/form-data，若各写一套请求循环，
+// 限流熔断与 token 轮转的处理迟早会漂移。
+func (c *OpenClient) doJSONWithBuilder(ctx context.Context, build func() (*http.Request, error), access bool, retries int) (*RespBase, error) {
+	executor := c.executor
+	if executor == nil {
+		executor = GetGlobalExecutor()
 	}
 
 	var lastErr error
@@ -146,7 +158,7 @@ func (c *OpenClient) doJSON(ctx context.Context, method, rawURL string, form map
 			return nil, err
 		}
 
-		req, err := c.buildRequestWithUA(ctx, method, rawURL, form, access, ua)
+		req, err := build()
 		if err != nil {
 			return nil, err
 		}
@@ -291,6 +303,45 @@ func (c *OpenClient) buildRequestWithUA(ctx context.Context, method, rawURL stri
 		}
 	}
 	return req, nil
+}
+
+// buildMultipartRequest 构造 multipart/form-data 请求。
+// 115 云下载（offline）系列写接口要求 multipart/form-data，与其它接口的
+// urlencoded 表单不同；这里只支持纯文本字段（不含文件），种子文件走上传接口。
+func (c *OpenClient) buildMultipartRequest(ctx context.Context, method, rawURL string, fields map[string]string) (*http.Request, error) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	// 固定字段顺序，便于抓包比对与排障（map 遍历顺序随机）。
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if err := w.WriteField(k, fields[k]); err != nil {
+			return nil, err
+		}
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, strings.ToUpper(method), rawURL, &buf)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", DefaultUA)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	if accessToken := c.currentAccessToken(); accessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+	}
+	return req, nil
+}
+
+// doAuthMultipart 以 multipart/form-data 发起需要 access_token 的请求。
+func (c *OpenClient) doAuthMultipart(ctx context.Context, method, rawURL string, fields map[string]string, retries int) (*RespBase, error) {
+	return c.doJSONWithBuilder(ctx, func() (*http.Request, error) {
+		return c.buildMultipartRequest(ctx, method, rawURL, fields)
+	}, true, retries)
 }
 
 // doAuthJSON 带 AccessToken 的业务请求。

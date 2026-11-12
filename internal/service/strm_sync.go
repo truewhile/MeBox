@@ -345,6 +345,18 @@ func (s *StrmService) finishSync(p *model.StrmSyncPath, rec *model.StrmSyncRecor
 		zap.String("path_id", p.ID), zap.String("sync_type", rec.SyncType), zap.String("status", status),
 		zap.Int64("new_strm", rec.NewStrm), zap.Int64("skipped", rec.Skipped), zap.Int64("new_meta", rec.NewMeta),
 		zap.Int64("uploaded", rec.Uploaded), zap.Int64("pruned", rec.Pruned), zap.String("message", message))
+
+	// 同步结果落库之后再通知下游（云下载后处理：扫描 → 刮削）。
+	// 异步 + recover + 独立超时：下游扫描可能跑几分钟，绝不能拖住同步协程收尾，
+	// 也不能让它 panic 影响后续同步（helper.Go 已内建 recover）。
+	if hook := s.currentSyncFinishHook(); hook != nil {
+		pathID := p.ID
+		helper.Go(s.log, "strm.syncFinishHook", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			hook(ctx, pathID, status)
+		})
+	}
 }
 
 func (st *strmSyncState) run() error {

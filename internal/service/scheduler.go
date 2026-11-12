@@ -55,6 +55,9 @@ type SchedulerService struct {
 	segments *MediaSegmentService
 	backup   *BackupService
 
+	// cloudDownload 用于周期轮询 115 云下载任务状态（nil 表示不启用）。
+	cloudDownload *CloudDownloadService
+
 	mu     sync.Mutex
 	stopCh chan struct{}
 	jobs   []*scheduledJob
@@ -71,6 +74,11 @@ func (s *SchedulerService) SetTaskTracker(tasks *TaskTrackerService) {
 
 func (s *SchedulerService) SetBackupService(backup *BackupService) {
 	s.backup = backup
+}
+
+// SetCloudDownload 注入云下载服务：注入后才注册轮询任务。
+func (s *SchedulerService) SetCloudDownload(cd *CloudDownloadService) {
+	s.cloudDownload = cd
 }
 
 func (s *SchedulerService) SetOrganizePipeline(pipeline *OrganizePipelineService) {
@@ -211,6 +219,15 @@ func (s *SchedulerService) Start(ctx context.Context) {
 			name:     "database_backup",
 			interval: 5 * time.Minute,
 			run:      s.jobDatabaseBackup,
+		})
+	}
+	// 云下载轮询：只有注入了云下载服务才注册，避免旧部署跑空转任务。
+	// 间隔可配（cloud_download.poll_interval_sec），由服务自己读取。
+	if s.cloudDownload != nil {
+		s.jobs = append(s.jobs, &scheduledJob{
+			name:     "cloud_download_poll",
+			interval: s.cloudDownload.pollInterval(),
+			run:      s.jobCloudDownloadPoll,
 		})
 	}
 	for _, j := range s.jobs {

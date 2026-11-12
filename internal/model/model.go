@@ -60,6 +60,7 @@ func AllModels() []interface{} {
 		&StrmDownloadTask{},
 		&StrmUploadTask{},
 		&StrmDirCache{},
+		&CloudDownloadTask{},
 		&ScrapeTask{},
 		&BackgroundTaskRecord{},
 		&EmbyMount{},

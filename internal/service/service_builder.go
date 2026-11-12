@@ -146,6 +146,12 @@ func (b *serviceContainerBuilder) initContentServices() {
 	b.c.Profile = NewProfileService(b.log, b.repos)
 	b.c.Audit = NewAuditService(b.log, b.repos)
 	b.c.Strm = NewStrmService(b.cfg, b.log, b.repos, b.c.Crypto)
+	// 115 云下载：依赖 Strm（复用其 115 客户端与同步入口）、Scan（媒体库扫描）、
+	// Scraper（自动刮削）。必须在三者都构造完成之后创建。
+	b.c.CloudDownload = NewCloudDownloadService(b.log, b.repos, b.c.Strm, b.c.Scan, b.c.Scraper)
+	// 同步完成 → 云下载后处理（扫描/刮削）。回调里会再调 IsSyncRunning/StartSync，
+	// 所以 hook 必须在 Strm 完全就绪后注册。
+	b.c.Strm.SetSyncFinishHook(b.c.CloudDownload.onStrmSyncFinished)
 	b.c.Cloud115 = NewCloud115PlaybackService(b.cfg, b.log, b.repos, b.c.Strm)
 	// 本地 HLS 档位的可用性取决于 ffmpeg 是否可用；未注入时按不可用处理。
 	b.c.Cloud115.SetTranscoder(b.c.Transcoder)
@@ -216,6 +222,7 @@ func (b *serviceContainerBuilder) initAccessAndStorageServices() {
 	b.c.Scheduler.SetTaskTracker(b.c.Tasks)
 	b.c.Scheduler.SetBackupService(b.c.Backup)
 	b.c.Scheduler.SetOrganizePipeline(b.c.OrganizePipeline)
+	b.c.Scheduler.SetCloudDownload(b.c.CloudDownload)
 	b.c.Scheduler.SetSegments(b.c.Segments)
 	b.c.Scheduler.SetCacheCleanupPolicyProvider(func() CacheCleanupPolicy {
 		if b.cfg == nil {

@@ -48,6 +48,9 @@ const StrmDownloadQueuePage = lazy(() =>
 const StrmUploadQueuePage = lazy(() =>
   import('./pages/StrmQueuePage').then((m) => ({ default: m.StrmUploadQueuePage })),
 )
+const CloudDownloadPage = lazy(() =>
+  import('./pages/CloudDownloadPage').then((m) => ({ default: m.CloudDownloadPage })),
+)
 const ScraperQueuePage = lazy(() => import('./pages/ScraperQueuePage').then((m) => ({ default: m.ScraperQueuePage })))
 const TaskQueuePage = lazy(() => import('./pages/TaskQueuePage').then((m) => ({ default: m.TaskQueuePage })))
 const MediaQualityPage = lazy(() => import('./pages/MediaQualityPage').then((m) => ({ default: m.MediaQualityPage })))
@@ -125,6 +128,7 @@ export const appRoutes: AppRoute[] = [
   { path: 'strm', element: <StrmManagePage />, adminOnly: true },
   { path: 'strm/downloads', element: <StrmDownloadQueuePage />, adminOnly: true },
   { path: 'strm/uploads', element: <StrmUploadQueuePage />, adminOnly: true },
+  { path: 'cloud-downloads', element: <CloudDownloadPage />, adminOnly: true },
   { path: 'scraper/queue', element: <ScraperQueuePage />, adminOnly: true },
   { path: 'queue', element: <TaskQueuePage />, adminOnly: true },
   { path: 'quality', element: <MediaQualityPage />, adminOnly: true },

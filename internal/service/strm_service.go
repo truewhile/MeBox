@@ -100,6 +100,12 @@ type StrmService struct {
 	providerMu       sync.Mutex
 	provider115Cache map[string]cloud.Provider // account ID -> shared provider/OpenClient
 
+	// syncFinishHook 在每次同步落库后被异步调用（网盘同步完成 → 扫描/刮削等下游）。
+	// 单独一把锁：不能与 mu（保护 running）耦合，否则 hook 回调里再调
+	// IsSyncRunning/StartSync 会自己把自己堵住。
+	hookMu         sync.RWMutex
+	syncFinishHook func(ctx context.Context, syncPathID, status string)
+
 	downloadSem115  chan struct{} // 115 换直链+下载并发上限（风控兜底）
 	downloadSemDAV  chan struct{} // WebDAV/OpenList/CloudDrive2 元数据下载并发上限
 	downloadSemOnce sync.Once
@@ -501,6 +507,52 @@ func (s *StrmService) TestStrmAccount(ctx context.Context, id string) *model.Str
 // ListAccounts 返回全部网盘账号。
 func (s *StrmService) ListAccounts(ctx context.Context) ([]model.StrmAccount, error) {
 	return s.repo.StrmAccount.List(ctx)
+}
+
+// SetSyncFinishHook 注册同步完成回调。回调在同步记录落库之后异步执行，
+// 用于把「网盘文件已就绪」通知给下游（云下载后处理：扫描 → 刮削）。
+// 回调跑在独立 goroutine 里并自带 recover 与超时，绝不影响同步流程本身。
+func (s *StrmService) SetSyncFinishHook(fn func(ctx context.Context, syncPathID, status string)) {
+	s.hookMu.Lock()
+	s.syncFinishHook = fn
+	s.hookMu.Unlock()
+}
+
+// currentSyncFinishHook 读取当前回调（无回调时返回 nil）。
+func (s *StrmService) currentSyncFinishHook() func(ctx context.Context, syncPathID, status string) {
+	s.hookMu.RLock()
+	defer s.hookMu.RUnlock()
+	return s.syncFinishHook
+}
+
+// Open115Client 返回账号已缓存的 115 开放平台客户端。
+//
+// 必须复用 providerFor 的缓存实例：115 的 refresh_token 是一次性轮转的，
+// 每刷新一次旧的即作废。若调用方自建 OpenClient，两边会交替刷新、互相
+// 作废，最终把账号刷成「授权已失效」（见 newProvider 里的 OnTokenRefreshed）。
+func (s *StrmService) Open115Client(ctx context.Context, accountID string) (*cloud115.OpenClient, error) {
+	acct, err := s.repo.StrmAccount.FindByID(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if acct == nil {
+		return nil, errors.New("网盘账号不存在或已删除")
+	}
+	if !acct.Enabled {
+		return nil, errors.New("网盘账号已禁用")
+	}
+	if acct.Provider != model.StrmProvider115 {
+		return nil, errors.New("该账号不是 115 网盘账号")
+	}
+	provider, err := s.providerFor(ctx, acct)
+	if err != nil {
+		return nil, err
+	}
+	oc, ok := provider.(cloud.OpenAPI115Provider)
+	if !ok {
+		return nil, errors.New("115 驱动未实现开放平台接口")
+	}
+	return oc.OpenClient(), nil
 }
 
 // providerFor 依据账号配置构建网盘驱动。
